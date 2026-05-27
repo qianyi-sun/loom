@@ -1,9 +1,9 @@
-# Default ownership until team-specific owners are defined.
-* @[REDACTED_OWNER]
+# Default ownership until subsystem-specific owners are defined.
+* @carinrc/platform-maintainers
 
 # Governance and CI changes need platform-owner review.
-/.github/ @[REDACTED_OWNER]
-/docs/engineering/ @[REDACTED_OWNER]
-/AGENTS.md @[REDACTED_OWNER]
-/CONTRIBUTING.md @[REDACTED_OWNER]
-/SECURITY.md @[REDACTED_OWNER]
+/.github/ @carinrc/platform-admins
+/docs/engineering/ @carinrc/platform-admins
+/AGENTS.md @carinrc/platform-admins
+/CONTRIBUTING.md @carinrc/platform-admins
+/SECURITY.md @carinrc/platform-admins
