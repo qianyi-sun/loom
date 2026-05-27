@@ -1,0 +1,9 @@
+# Default ownership until team-specific owners are defined.
+* @[REDACTED_OWNER]
+
+# Governance and CI changes need platform-owner review.
+/.github/ @[REDACTED_OWNER]
+/docs/engineering/ @[REDACTED_OWNER]
+/AGENTS.md @[REDACTED_OWNER]
+/CONTRIBUTING.md @[REDACTED_OWNER]
+/SECURITY.md @[REDACTED_OWNER]

@@ -15,4 +15,18 @@ jobs:
         run: |
           test -f README.md
           test -f AGENTS.md
+          test -f CONTRIBUTING.md
+          test -f SECURITY.md
+          test -f VERSION
           test -f docs/project-brief.md
+          test -f docs/engineering/github-setup.md
+          test -f docs/engineering/release-and-environments.md
+      - name: Check version format
+        run: |
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION
+      - name: Block common committed secrets
+        run: |
+          ! grep -RInE '(AKIA[0-9A-Z]{16}|-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|ghp_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,})' \
+            --exclude-dir=.git \
+            --exclude=ci.yml \
+            .
