@@ -1,0 +1,24 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target deployment environment
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+
+jobs:
+  deploy-placeholder:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Deployment not configured yet
+        run: |
+          echo "Deployment target is not configured yet."
+          echo "Add environment-specific deployment steps after the MVP architecture is approved."

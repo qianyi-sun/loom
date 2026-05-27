@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime artifacts
+.runtime/
+data/
+artifacts/
+outputs/
+logs/
+
+# IDE
+.idea/
+.vscode/

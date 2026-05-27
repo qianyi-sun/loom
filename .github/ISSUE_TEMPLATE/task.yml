@@ -1,0 +1,19 @@
+name: Task
+description: Track implementation, operations, or research work
+title: "[Task] "
+labels: ["task"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What should be true when this is complete?
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Relevant context, constraints, or links.
+    validations:
+      required: false
