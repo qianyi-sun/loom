@@ -110,9 +110,9 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 | Area | Status | Notes |
 | --- | --- | --- |
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
-| Infra discovery | In progress | `shared dev` selected for v0; Docker Compose + Postgres + Redis + MinIO recommended |
+| Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Started | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | Started | `Dockerfile.dev` and `docker-compose.dev.yml` provide Python tests plus Postgres, Redis, and MinIO |
+| Docker dev environment | Started | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
@@ -154,6 +154,12 @@ Run the Docker development checks:
 
 ```bash
 docker compose -f docker-compose.dev.yml up --build app
+```
+
+Deploy or smoke-test the shared dev environment from a machine with SSH access:
+
+```bash
+DEPLOY_HOST=shared dev DEPLOY_USER=<ssh-user> ./scripts/deploy-dev.sh
 ```
 
 ## Collaboration Notes

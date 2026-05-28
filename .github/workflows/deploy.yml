@@ -19,13 +19,51 @@ jobs:
     if: github.event_name == 'push' || inputs.environment == 'dev'
     runs-on: ubuntu-latest
     environment: dev
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    env:
+      DEPLOY_TARGET: remote
+      DEPLOY_HOST: ${{ secrets.PLATFORM_DEV_SSH_HOST }}
+      DEPLOY_USER: ${{ secrets.PLATFORM_DEV_SSH_USER }}
+      DEPLOY_PORT: ${{ vars.PLATFORM_DEV_SSH_PORT }}
+      DEPLOY_PATH: ${{ vars.PLATFORM_DEV_DEPLOY_PATH || '/srv/agentic-data-platform/dev/current' }}
+      DEPLOY_PROJECT_NAME: agentic-data-shared dev
+      PLATFORM_DEV_SSH_KEY: ${{ secrets.PLATFORM_DEV_SSH_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Dev deployment placeholder
+      - name: Check deployment configuration
+        id: config
+        shell: bash
         run: |
-          echo "Deploy dev from branch: ${GITHUB_REF_NAME}"
-          echo "Replace this with shared dev Docker Compose deployment after host credentials are configured."
+          if [[ -z "${DEPLOY_HOST}" || -z "${DEPLOY_USER}" || -z "${PLATFORM_DEV_SSH_KEY}" ]]; then
+            echo "::warning::shared dev deployment is not configured. Set PLATFORM_DEV_SSH_HOST, PLATFORM_DEV_SSH_USER, and PLATFORM_DEV_SSH_KEY in the dev environment."
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              exit 1
+            fi
+            exit 0
+          fi
+          echo "configured=true" >> "${GITHUB_OUTPUT}"
+      - name: Install deployment dependencies
+        if: steps.config.outputs.configured == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rsync openssh-client
+      - name: Write SSH key
+        if: steps.config.outputs.configured == 'true'
+        shell: bash
+        run: |
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${PLATFORM_DEV_SSH_KEY}" > "${HOME}/.ssh/shared dev"
+          chmod 600 "${HOME}/.ssh/shared dev"
+      - name: Deploy dev to shared dev
+        if: steps.config.outputs.configured == 'true'
+        run: |
+          SSH_KEY_PATH="${HOME}/.ssh/shared dev" ./scripts/deploy-dev.sh
   deploy-prod:
     if: github.event_name == 'workflow_dispatch' && inputs.environment == 'prod'
     runs-on: ubuntu-latest
