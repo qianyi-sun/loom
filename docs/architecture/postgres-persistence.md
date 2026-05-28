@@ -6,6 +6,7 @@ Related trackers:
 
 - Backend epic: https://github.com/carinrc/agentic-data-platform/issues/49
 - Postgres schema and repositories: https://github.com/carinrc/agentic-data-platform/issues/51
+- Core API resources: https://github.com/carinrc/agentic-data-platform/issues/52
 - Platform architecture: https://github.com/carinrc/agentic-data-platform/issues/4
 
 ## Goal
@@ -66,7 +67,8 @@ read models:
 
 - `IdentityRepository`: teams, users, and memberships
 - `ProjectRepository`: project create/read/list/update
-- `BenchmarkCatalogRepository`: fixture catalog upsert and task-instance listing
+- `BenchmarkCatalogRepository`: fixture catalog upsert, suite-version listing,
+  and task-instance detail/listing
 - `RunRepository`: `RunRecord` save/list/get with terminal turns, artifacts, and
   latest evaluator result hydration
 - `AuditEventRepository`: structured event recording for later PM/operator views
@@ -75,3 +77,18 @@ For v0, `RunRecord` has no public `attempt_id`, so `RunRepository.get_run()`
 hydrates the latest internal attempt back into the existing dataclass shape.
 Evaluator results are stored as many rows, while current callers receive the
 latest result through `RunRecord.evaluator_result`.
+
+## API Resource Boundary
+
+Issue #52 connects these repositories to FastAPI resource endpoints through a
+per-request SQLAlchemy session dependency. The first API routes expose teams,
+projects, benchmark suite versions, task instances, run dashboard projections,
+sanitized artifact references, and latest evaluator summaries.
+
+The API intentionally keeps artifact payloads out of Postgres responses. It
+returns stable metadata such as `artifact_id`, `media_type`, `size_bytes`, and
+`storage_key`, while `RunDashboardProjection` suppresses local host paths and
+signed URL query parameters.
+
+Detailed endpoint notes live in
+`docs/architecture/core-api-resources.md`.

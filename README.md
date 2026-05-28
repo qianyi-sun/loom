@@ -130,6 +130,7 @@ Unified evaluation backend contract:
 Persistence design: [postgres-persistence.md](docs/architecture/postgres-persistence.md).
 Harbor integration roadmap:
 [harbor-integration-roadmap.md](docs/architecture/harbor-integration-roadmap.md).
+API resource design: [core-api-resources.md](docs/architecture/core-api-resources.md).
 Original runner wrapper research:
 [benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
 
@@ -149,6 +150,7 @@ Original runner wrapper research:
 | Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
+| Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
@@ -166,6 +168,7 @@ Original runner wrapper research:
 - Flexible skill object model: [#23](https://github.com/carinrc/agentic-data-platform/issues/23)
 - Backend service epic: [#49](https://github.com/carinrc/agentic-data-platform/issues/49)
 - Postgres persistence foundation: [#51](https://github.com/carinrc/agentic-data-platform/issues/51)
+- Core API resources: [#52](https://github.com/carinrc/agentic-data-platform/issues/52)
 - Harbor-compatible benchmark and agent integration:
   [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
 - Unified evaluation backend contract:
@@ -229,6 +232,14 @@ Start the long-running development API service:
 docker compose -f docker-compose.dev.yml run --rm --build migrate
 docker compose -f docker-compose.dev.yml up --build api
 curl http://localhost:8000/healthz
+```
+
+Core API examples after seeding Postgres:
+
+```bash
+curl http://localhost:8000/projects
+curl 'http://localhost:8000/tasks?benchmark_suite=SkillFlow&benchmark_version=<version>'
+curl 'http://localhost:8000/runs?project_id=latent-skill-pilot'
 ```
 
 Deploy or smoke-test the shared dev environment from a machine with SSH access:

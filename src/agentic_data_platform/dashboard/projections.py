@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
+import re
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -79,7 +81,7 @@ def _artifact_link(ref: ArtifactRef) -> dict[str, Any]:
     if ref.size_bytes is not None:
         payload["size_bytes"] = ref.size_bytes
 
-    storage_key = ref.metadata.get("storage_key")
+    storage_key = _safe_storage_key(ref.metadata.get("storage_key"))
     if storage_key:
         payload["storage_key"] = storage_key
 
@@ -138,6 +140,28 @@ def _safe_external_uri(uri: str) -> str | None:
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
     return uri
+
+
+def _safe_storage_key(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    key = value.strip().replace("\\", "/")
+    if not key:
+        return None
+
+    parsed = urlparse(key)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+
+    if key.startswith("/") or key.startswith("~") or re.match(r"^[A-Za-z]:", key):
+        return None
+
+    parts = PurePosixPath(key).parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+
+    return key
 
 
 def _basename_or_ref(ref: str) -> str:

@@ -136,6 +136,35 @@ class RunDashboardProjectionTest(unittest.TestCase):
         self.assertNotIn("secret", rendered)
         self.assertNotIn("X-Amz-Signature", rendered)
 
+    def test_projection_hides_unsafe_storage_keys(self):
+        run = _minimal_run(status=RunStatus.SUCCEEDED)
+        run.artifacts.extend(
+            [
+                ArtifactRef(
+                    artifact_id="absolute-storage-key",
+                    kind=ArtifactKind.WORKSPACE_SNAPSHOT,
+                    uri="file:///srv/private/workspace/snapshot.json",
+                    media_type="application/json",
+                    metadata={"storage_key": "/srv/private/workspace/snapshot.json"},
+                ),
+                ArtifactRef(
+                    artifact_id="traversal-storage-key",
+                    kind=ArtifactKind.EVALUATOR_REPORT,
+                    uri="minio://runs/run_001/report.json",
+                    media_type="application/json",
+                    metadata={"storage_key": "../private/report.json?token=secret"},
+                ),
+            ]
+        )
+
+        payload = RunDashboardProjection.from_run(run).to_dict()
+        rendered = json.dumps(payload)
+
+        self.assertNotIn("storage_key", payload["artifacts"][0])
+        self.assertNotIn("storage_key", payload["artifacts"][1])
+        self.assertNotIn("/srv/private", rendered)
+        self.assertNotIn("secret", rendered)
+
 
 def _minimal_run(
     *,

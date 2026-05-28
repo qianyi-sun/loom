@@ -6,24 +6,43 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy import Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from agentic_data_platform.persistence import create_database_engine
+from agentic_data_platform.service.benchmark_resources import register_benchmark_routes
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
+from agentic_data_platform.service.dependencies import build_session_dependency
+from agentic_data_platform.service.project_resources import register_project_routes
+from agentic_data_platform.service.run_resources import register_run_routes
 
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
 
-def create_app(settings: ServiceSettings | None = None) -> FastAPI:
+def create_app(
+    settings: ServiceSettings | None = None,
+    *,
+    database_engine: Engine | None = None,
+) -> FastAPI:
     service_settings = settings or load_service_settings()
+    engine = database_engine
+    if engine is None and service_settings.database_url:
+        engine = create_database_engine(service_settings.database_url, pool_pre_ping=True)
+
     app = FastAPI(
         title="Agentic Data Platform API",
         version="0.0.0",
         description="Internal backend API for agentic data generation and evaluation runs.",
     )
     app.state.settings = service_settings
+    app.state.database_engine = engine
+    app.state.session_dependency = build_session_dependency(engine)
     app.add_middleware(RequestIDMiddleware)
+    register_project_routes(app, app.state.session_dependency)
+    register_benchmark_routes(app, app.state.session_dependency)
+    register_run_routes(app, app.state.session_dependency)
 
     @app.get("/healthz", tags=["operations"])
     def healthz(request: Request) -> dict[str, str]:
@@ -37,7 +56,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     @app.get("/readyz", tags=["operations"])
     def readyz(request: Request) -> JSONResponse:
         dependencies = {
-            "database": _configured(service_settings.database_url),
+            "database": _configured(engine),
             "redis": _configured(service_settings.redis_url),
             "object_storage": _configured(
                 service_settings.object_storage_endpoint

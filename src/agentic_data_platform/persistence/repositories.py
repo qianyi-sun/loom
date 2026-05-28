@@ -103,6 +103,9 @@ class IdentityRepository:
     def get_team(self, team_id: str) -> TeamRecord:
         return _team_record(_required(self.session.get(TeamRow, team_id), "team", team_id))
 
+    def list_teams(self) -> list[TeamRecord]:
+        return [_team_record(row) for row in self.session.scalars(select(TeamRow).order_by(TeamRow.team_id))]
+
     def create_user(
         self,
         *,
@@ -272,22 +275,32 @@ class BenchmarkCatalogRepository:
 
     def get_fixture_catalog(self, *, suite_name: str, benchmark_version: str) -> BenchmarkFixtureCatalog:
         version = self._suite_version(suite_name=suite_name, benchmark_version=benchmark_version)
-        families = [
-            BenchmarkFixtureFamily(
-                name=family.name,
-                instances=[_fixture_instance(row) for row in family.task_instances],
-            )
-            for family in version.task_families
-        ]
-        return BenchmarkFixtureCatalog(
-            suite_name=version.suite_name,
-            benchmark_version=version.benchmark_version,
-            source_uri=version.source_uri,
-            source_version=version.source_version,
-            source_version_type=version.source_version_type,
-            task_families=families,
-            metadata=dict(version.metadata_json or {}),
+        return _fixture_catalog(version)
+
+    def list_fixture_catalogs(self) -> list[BenchmarkFixtureCatalog]:
+        query = select(BenchmarkSuiteVersionRow).order_by(
+            BenchmarkSuiteVersionRow.suite_name,
+            BenchmarkSuiteVersionRow.benchmark_version,
         )
+        return [_fixture_catalog(row) for row in self.session.scalars(query)]
+
+    def get_task_instance(
+        self,
+        *,
+        suite_name: str,
+        benchmark_version: str,
+        task_family: str,
+        instance_id: str,
+    ) -> BenchmarkFixtureInstance:
+        version = self._suite_version(suite_name=suite_name, benchmark_version=benchmark_version)
+        for family in version.task_families:
+            if family.name != task_family:
+                continue
+            for instance in family.task_instances:
+                if instance.instance_id == instance_id:
+                    return _fixture_instance(instance)
+
+        raise KeyError(f"Unknown benchmark task: {suite_name}@{benchmark_version}/{task_family}/{instance_id}")
 
     def list_task_instances(self, *, suite_name: str, benchmark_version: str) -> list[BenchmarkFixtureInstance]:
         return self.get_fixture_catalog(
@@ -303,6 +316,25 @@ class BenchmarkCatalogRepository:
             )
         )
         return _required(row, "benchmark suite version", f"{suite_name}@{benchmark_version}")
+
+
+def _fixture_catalog(version: BenchmarkSuiteVersionRow) -> BenchmarkFixtureCatalog:
+    families = [
+        BenchmarkFixtureFamily(
+            name=family.name,
+            instances=[_fixture_instance(row) for row in family.task_instances],
+        )
+        for family in version.task_families
+    ]
+    return BenchmarkFixtureCatalog(
+        suite_name=version.suite_name,
+        benchmark_version=version.benchmark_version,
+        source_uri=version.source_uri,
+        source_version=version.source_version,
+        source_version_type=version.source_version_type,
+        task_families=families,
+        metadata=dict(version.metadata_json or {}),
+    )
 
 
 class RunRepository:
