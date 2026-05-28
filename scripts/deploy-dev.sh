@@ -45,7 +45,7 @@ run_compose_smoke() {
 
   if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
     log "Running database migrations"
-    compose run --rm --build migrate
+    compose run --rm --build -T migrate
   fi
 
   log "Starting API service"
@@ -53,7 +53,7 @@ run_compose_smoke() {
 
   if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
     log "Running application smoke checks"
-    compose run --rm app
+    compose run --rm -T app
   fi
 
   log "Checking API health endpoint"
@@ -147,15 +147,21 @@ cd "$DEPLOY_PATH"
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"
+printf '[deploy-dev] Stopping API service before migrations\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" stop api >/dev/null 2>&1 || true
+printf '[deploy-dev] Starting shared development dependencies\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio
 if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build migrate
+  printf '[deploy-dev] Running database migrations\n'
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T migrate
 fi
+printf '[deploy-dev] Starting API service\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --build api
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm app
+  printf '[deploy-dev] Running application smoke checks\n'
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T app
 fi
+printf '[deploy-dev] Checking API health endpoint\n'
 for attempt in \$(seq 1 30); do
   if docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" exec -T api python - <<'PY' >/dev/null 2>&1
 import json
