@@ -117,6 +117,9 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
 | Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
+| Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
+| Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
+| Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -151,6 +154,15 @@ Run local checks from the repository root:
 ```bash
 python -m pip install -e .
 python -m unittest discover -s tests -v
+```
+
+Focused contract checks:
+
+```bash
+PYTHONPATH=src python -m unittest \
+  tests.evaluation.test_mock_evaluator \
+  tests.dashboard.test_run_projection \
+  -v
 ```
 
 Run the Docker development checks:
