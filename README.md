@@ -104,6 +104,8 @@ Core object model:
 - `SkillObject`: flexible skill artifact; not assumed to be `skill.md`.
 
 Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmark-mvp.md).
+Original runner wrapper research:
+[benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
 
 ## Current Progress
 
@@ -120,7 +122,7 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 | Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
-| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, API-only model command provider, and terminal benchmark run orchestrator are under active development |
+| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -163,6 +165,7 @@ Focused contract checks:
 
 ```bash
 PYTHONPATH=src python -m unittest \
+  tests.benchmarks.test_fixture_catalog \
   tests.evaluation.test_mock_evaluator \
   tests.dashboard.test_run_projection \
   -v

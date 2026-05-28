@@ -1,0 +1,114 @@
+{
+  "suite_name": "SkillFlow",
+  "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@main-2026-05-28-placeholder",
+  "source_uri": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
+  "source_version": "main-2026-05-28-placeholder",
+  "source_version_type": "huggingface-dataset-snapshot",
+  "metadata": {
+    "upstream_runner_uri": "https://github.com/ZhangZi-a/SkillFlow",
+    "upstream_runner_revision": "7b49ff5a7e26cd7706e959bfa0dba4746d18440d",
+    "note": "Small seed catalog for platform integration tests. Replace with a generated manifest pinned to an upstream dataset snapshot before production benchmark runs."
+  },
+  "defaults": {
+    "runner_image": "python:3.12-slim",
+    "runner_entrypoint": [
+      "python",
+      "-m",
+      "agentic_data_platform.benchmark_wrappers.skillflow"
+    ],
+    "runner_contract": "skillflow-original-wrapper-v0",
+    "required_artifacts": [
+      "trajectory",
+      "workspace_snapshot",
+      "evaluator_report"
+    ]
+  },
+  "task_families": [
+    {
+      "name": "OCR-Data-Extraction",
+      "instances": [
+        {
+          "instance_id": "task_family_invoice_images",
+          "instruction_ref": "test_tasks/OCR-Data-Extraction/task_family_invoice_images/instruction.md",
+          "input_files": [
+            "test_tasks/OCR-Data-Extraction/task_family_invoice_images/task.toml",
+            "test_tasks/OCR-Data-Extraction/task_family_invoice_images/environment/",
+            "test_tasks/OCR-Data-Extraction/task_family_invoice_images/tests/"
+          ],
+          "input_artifact_refs": [
+            "hf://datasets/zhang-ziao/SkillFlow-Task/test_tasks/OCR-Data-Extraction/task_family_invoice_images"
+          ],
+          "metadata": {
+            "workflow_family": "OCR-Data-Extraction",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        },
+        {
+          "instance_id": "task_family_travel_claim_merge",
+          "instruction_ref": "test_tasks/OCR-Data-Extraction/task_family_travel_claim_merge/instruction.md",
+          "input_files": [
+            "test_tasks/OCR-Data-Extraction/task_family_travel_claim_merge/task.toml",
+            "test_tasks/OCR-Data-Extraction/task_family_travel_claim_merge/environment/",
+            "test_tasks/OCR-Data-Extraction/task_family_travel_claim_merge/tests/"
+          ],
+          "input_artifact_refs": [
+            "hf://datasets/zhang-ziao/SkillFlow-Task/test_tasks/OCR-Data-Extraction/task_family_travel_claim_merge"
+          ],
+          "metadata": {
+            "workflow_family": "OCR-Data-Extraction",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sales-Pivot-Analysis",
+      "instances": [
+        {
+          "instance_id": "product-sales-pivot",
+          "instruction_ref": "test_tasks/Sales-Pivot-Analysis/product-sales-pivot/instruction.md",
+          "input_files": [
+            "test_tasks/Sales-Pivot-Analysis/product-sales-pivot/task.toml",
+            "test_tasks/Sales-Pivot-Analysis/product-sales-pivot/environment/",
+            "test_tasks/Sales-Pivot-Analysis/product-sales-pivot/tests/"
+          ],
+          "input_artifact_refs": [
+            "hf://datasets/zhang-ziao/SkillFlow-Task/test_tasks/Sales-Pivot-Analysis/product-sales-pivot"
+          ],
+          "metadata": {
+            "workflow_family": "Sales-Pivot-Analysis",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        },
+        {
+          "instance_id": "budget-reconciliation-pivot",
+          "instruction_ref": "test_tasks/Sales-Pivot-Analysis/budget-reconciliation-pivot/instruction.md",
+          "input_files": [
+            "test_tasks/Sales-Pivot-Analysis/budget-reconciliation-pivot/task.toml",
+            "test_tasks/Sales-Pivot-Analysis/budget-reconciliation-pivot/environment/",
+            "test_tasks/Sales-Pivot-Analysis/budget-reconciliation-pivot/tests/"
+          ],
+          "input_artifact_refs": [
+            "hf://datasets/zhang-ziao/SkillFlow-Task/test_tasks/Sales-Pivot-Analysis/budget-reconciliation-pivot"
+          ],
+          "metadata": {
+            "workflow_family": "Sales-Pivot-Analysis",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "suite_name": "SkillLearnBench",
+  "benchmark_version": "git:cxcscmu/SkillLearnBench@638284f5982f6be085a955435d2ec7a5258f5513",
+  "source_uri": "https://github.com/cxcscmu/SkillLearnBench",
+  "source_version": "638284f5982f6be085a955435d2ec7a5258f5513",
+  "source_version_type": "git-commit",
+  "metadata": {
+    "upstream_runner_uri": "https://github.com/cxcscmu/SkillLearnBench",
+    "upstream_runner_revision": "638284f5982f6be085a955435d2ec7a5258f5513",
+    "note": "Small seed catalog for platform integration tests. Replace with a generated manifest from the upstream tasks tree before production benchmark runs."
+  },
+  "defaults": {
+    "runner_image": "python:3.12-slim",
+    "runner_entrypoint": [
+      "python",
+      "-m",
+      "agentic_data_platform.benchmark_wrappers.skilllearnbench"
+    ],
+    "runner_contract": "skilllearnbench-original-wrapper-v0",
+    "required_artifacts": [
+      "trajectory",
+      "workspace_snapshot",
+      "evaluator_report"
+    ]
+  },
+  "task_families": [
+    {
+      "name": "organize-messy-files",
+      "instances": [
+        {
+          "instance_id": "organize-messy-files-1",
+          "instruction_ref": "tasks/organize-messy-files/organize-messy-files-1/instruction.md",
+          "input_files": [
+            "tasks/organize-messy-files/organize-messy-files-1/task.toml",
+            "tasks/organize-messy-files/organize-messy-files-1/environment/",
+            "tasks/organize-messy-files/organize-messy-files-1/tests/"
+          ],
+          "input_artifact_refs": [
+            "git://github.com/cxcscmu/SkillLearnBench/tasks/organize-messy-files/organize-messy-files-1@638284f5982f6be085a955435d2ec7a5258f5513"
+          ],
+          "metadata": {
+            "category": "Utilities & Other",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        },
+        {
+          "instance_id": "organize-messy-files-2",
+          "instruction_ref": "tasks/organize-messy-files/organize-messy-files-2/instruction.md",
+          "input_files": [
+            "tasks/organize-messy-files/organize-messy-files-2/task.toml",
+            "tasks/organize-messy-files/organize-messy-files-2/environment/",
+            "tasks/organize-messy-files/organize-messy-files-2/tests/"
+          ],
+          "input_artifact_refs": [
+            "git://github.com/cxcscmu/SkillLearnBench/tasks/organize-messy-files/organize-messy-files-2@638284f5982f6be085a955435d2ec7a5258f5513"
+          ],
+          "metadata": {
+            "category": "Utilities & Other",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "financial-analysis",
+      "instances": [
+        {
+          "instance_id": "financial-analysis-1",
+          "instruction_ref": "tasks/financial-analysis/financial-analysis-1/instruction.md",
+          "input_files": [
+            "tasks/financial-analysis/financial-analysis-1/task.toml",
+            "tasks/financial-analysis/financial-analysis-1/environment/",
+            "tasks/financial-analysis/financial-analysis-1/tests/"
+          ],
+          "input_artifact_refs": [
+            "git://github.com/cxcscmu/SkillLearnBench/tasks/financial-analysis/financial-analysis-1@638284f5982f6be085a955435d2ec7a5258f5513"
+          ],
+          "metadata": {
+            "category": "Data & Analytics",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        },
+        {
+          "instance_id": "financial-analysis-2",
+          "instruction_ref": "tasks/financial-analysis/financial-analysis-2/instruction.md",
+          "input_files": [
+            "tasks/financial-analysis/financial-analysis-2/task.toml",
+            "tasks/financial-analysis/financial-analysis-2/environment/",
+            "tasks/financial-analysis/financial-analysis-2/tests/"
+          ],
+          "input_artifact_refs": [
+            "git://github.com/cxcscmu/SkillLearnBench/tasks/financial-analysis/financial-analysis-2@638284f5982f6be085a955435d2ec7a5258f5513"
+          ],
+          "metadata": {
+            "category": "Data & Analytics",
+            "expected_workspace_paths": [
+              "solution/",
+              "tests/"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

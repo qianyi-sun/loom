@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
-from agentic_data_platform.benchmarks.adapters import BenchmarkTaskSpec, SkillFlowBenchmarkAdapter
+from agentic_data_platform.benchmarks.adapters import (
+    BenchmarkTaskSpec,
+    SkillFlowBenchmarkAdapter,
+    SkillLearnBenchBenchmarkAdapter,
+)
+from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
 from agentic_data_platform.domain.run_records import JudgeConfig, ModelConfig, ModelMode, RunStatus
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.models.providers import ModelCommand, ScriptedModelProvider
@@ -13,6 +18,65 @@ from agentic_data_platform.sandbox.docker_terminal import SandboxCommandResult, 
 
 
 class TerminalBenchmarkRunnerTest(unittest.TestCase):
+    def test_runner_accepts_fixture_catalog_registration(self):
+        catalog = load_fixture_catalog("SkillLearnBench")
+        registration = SkillLearnBenchBenchmarkAdapter(
+            benchmark_version=catalog.benchmark_version,
+            source_uri=catalog.source_uri,
+        ).register_task(
+            catalog.to_task_spec(
+                task_family="financial-analysis",
+                instance_id="financial-analysis-1",
+            )
+        )
+        sandbox = FakeSandbox()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = TerminalBenchmarkRunner(
+                artifact_persistence=ArtifactPersistence(LocalArtifactStore(Path(temp_dir))),
+                evaluator=MockEvaluatorAdapter(
+                    evaluator_id="mock-judge-v0",
+                    score=0.91,
+                    verbal_feedback="The generated workbook satisfies the financial analysis rubric.",
+                ),
+            )
+
+            result = runner.run(
+                TerminalBenchmarkRunRequest(
+                    run_id="run_fixture_001",
+                    project_id="pilot-project",
+                    owner_team="pilot group",
+                    registration=registration,
+                    model_provider=ScriptedModelProvider(
+                        model=ModelConfig(
+                            provider="mock-api",
+                            model_name="scripted-terminal-agent",
+                            mode=ModelMode.API,
+                            prompt_template_version="terminal-agent-v0",
+                        ),
+                        commands=[ModelCommand(command="python solve.py", cwd="/workspace")],
+                    ),
+                    judge=JudgeConfig(
+                        provider="mock",
+                        model_name="deterministic-judge",
+                        rubric_version="latent-skill-v0",
+                    ),
+                    rubric_id="latent-skill-v0",
+                    sandbox=sandbox,
+                )
+            )
+
+        self.assertEqual(result.run.status, RunStatus.SUCCEEDED)
+        self.assertEqual(result.run.task.instance_id, "financial-analysis-1")
+        self.assertEqual(
+            result.run.task.metadata["instruction_ref"],
+            "tasks/financial-analysis/financial-analysis-1/instruction.md",
+        )
+        self.assertEqual(
+            result.run.runner.metadata["runner_contract"],
+            "skilllearnbench-original-wrapper-v0",
+        )
+
     def test_runner_executes_benchmark_through_sandbox_and_persists_visible_results(self):
         adapter = SkillFlowBenchmarkAdapter(
             benchmark_version="hf:zhang-ziao/SkillFlow-Task@2026-05-28",

@@ -14,3 +14,6 @@ authors = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"agentic_data_platform.benchmarks.catalogs" = ["*.json"]

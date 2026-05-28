@@ -23,6 +23,10 @@ class BenchmarkTaskSpec:
         default_factory=lambda: {"cpu": 2, "memory_gib": 8, "timeout_seconds": 3600}
     )
     internet_access: bool = True
+    runner_contract: str = "original_benchmark_wrapper"
+    required_artifacts: list[str] = field(
+        default_factory=lambda: ["trajectory", "workspace_snapshot", "evaluator_report"]
+    )
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -32,6 +36,8 @@ class BenchmarkTaskSpec:
         _require_strings("input_artifact_refs", self.input_artifact_refs)
         _require_non_empty("runner_image", self.runner_image)
         _require_strings("runner_entrypoint", self.runner_entrypoint)
+        _require_non_empty("runner_contract", self.runner_contract)
+        _require_strings("required_artifacts", self.required_artifacts)
 
 
 @dataclass(frozen=True)
@@ -65,7 +71,7 @@ class _SkillBenchmarkAdapter:
             instance_id=spec.instance_id,
             source_uri=self.source_uri,
             input_artifact_refs=spec.input_artifact_refs,
-            required_artifacts=["trajectory", "workspace_snapshot", "evaluator_report"],
+            required_artifacts=spec.required_artifacts,
             metadata=metadata,
         )
         runner = RunnerConfig(
@@ -77,7 +83,7 @@ class _SkillBenchmarkAdapter:
             resource_limits=spec.resource_limits,
             metadata={
                 "adapter": self.suite_name,
-                "runner_contract": "original_benchmark_wrapper",
+                "runner_contract": spec.runner_contract,
                 "task_family": spec.task_family,
                 "instance_id": spec.instance_id,
             },
