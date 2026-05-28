@@ -18,6 +18,9 @@ storage, and dashboard visibility.
 
 This spike records the upstream runner entrypoints and the minimal wrapper
 contract the platform should implement before production benchmark execution.
+The first concrete dry-run wrappers now live in
+`agentic_data_platform.benchmark_wrappers.skillflow` and
+`agentic_data_platform.benchmark_wrappers.skilllearnbench`.
 
 ## Upstream References
 
@@ -160,7 +163,8 @@ python -m agentic_data_platform.benchmark_wrappers.<suite> \
   --task-manifest /input/task.json \
   --workspace /workspace \
   --output /output/result.json \
-  --artifacts-dir /output/artifacts
+  --artifacts-dir /output/artifacts \
+  --dry-run
 ```
 
 Required output:
@@ -180,6 +184,25 @@ Required output:
 The wrapper should also preserve raw stdout/stderr logs and any upstream report
 files as artifacts. The platform run record remains the source of truth for
 status, model config, source version, task identity, and evaluator visibility.
+
+Implemented dry-run behavior:
+
+- SkillFlow writes a normalized `result.json` and a
+  `artifacts/planned-command.json` file for the upstream
+  `family_job_runner.py --dry-run` command.
+- SkillLearnBench writes the same normalized dry-run output for
+  `evaluate_skills.py <task> --dry-run`; when an instance id ends in a numeric
+  suffix, the wrapper emits `--subtask-range N-N` so the planned command is
+  instance-scoped.
+- Dry-run wrappers validate the suite name in `/input/task.json` and reject
+  non-dry-run execution until real upstream runner execution is implemented.
+
+The generated upstream manifest import path lives in
+`agentic_data_platform.benchmarks.manifests`. It accepts generated repository or
+dataset path lists, groups them into benchmark task families and task
+instances, verifies each instance has `instruction.md` and `task.toml`, and
+returns the same `BenchmarkFixtureCatalog` shape used by checked-in seed
+fixtures.
 
 ## Platform-Control And Sandbox Split
 
@@ -206,9 +229,11 @@ just to run a supported suite.
 
 - Replace the SkillFlow dataset version placeholder with a pinned Hugging Face
   dataset snapshot or generated manifest hash.
-- Implement concrete `benchmark_wrappers.skillflow` and
-  `benchmark_wrappers.skilllearnbench` commands.
-- Add wrapper smoke tests that run in dry-run mode without model API keys.
+- Promote dry-run wrappers to real upstream execution, including upstream repo
+  checkout/download, config synthesis, process execution, and report
+  normalization.
+- Add wrapper smoke tests that run against real upstream dry-run commands when
+  the upstream repos are available locally.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.
 - Decide how task-specific secrets such as `GH_TOKEN` are requested, scoped, and

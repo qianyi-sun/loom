@@ -11,6 +11,7 @@ from agentic_data_platform.benchmarks.fixtures import (
     load_fixture_catalog,
     load_fixture_catalogs,
 )
+from agentic_data_platform.benchmarks.manifests import catalog_from_path_manifest
 
 __all__ = [
     "BenchmarkFixtureCatalog",
@@ -20,6 +21,7 @@ __all__ = [
     "BenchmarkTaskSpec",
     "SkillFlowBenchmarkAdapter",
     "SkillLearnBenchBenchmarkAdapter",
+    "catalog_from_path_manifest",
     "load_fixture_catalog",
     "load_fixture_catalogs",
 ]
