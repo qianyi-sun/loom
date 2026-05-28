@@ -234,6 +234,8 @@ Platform control plane owns:
 
 Sandbox or wrapper owns:
 
+- Materializing pinned upstream benchmark repos or local mirrors into a stable
+  source cache before wrapper execution.
 - Materializing upstream benchmark files into a workspace.
 - Running original benchmark scripts and their Docker child containers.
 - Capturing raw output directories, logs, and upstream report files.
@@ -247,7 +249,9 @@ just to run a supported suite.
 
 - Replace the SkillFlow dataset version placeholder with a pinned Hugging Face
   dataset snapshot or generated manifest hash.
-- Add upstream repo checkout/download management before wrapper execution.
+- Extend upstream checkout/download management beyond the current local-tree and
+  git cache/lock boundary if SkillFlow needs additional Hugging Face dataset or
+  Git LFS handling.
 - Generate benchmark-specific config files from platform model/provider
   settings instead of relying on committed upstream defaults.
 - Normalize upstream report directories and generated files into first-class
