@@ -29,8 +29,12 @@ compose() {
 }
 
 run_compose_smoke() {
+  local compose_config_output
+  compose_config_output="$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)"
+
   log "Validating Compose file"
-  compose config >/tmp/agentic-data-shared dev-compose.yml
+  compose config >"$compose_config_output"
+  rm -f "$compose_config_output"
 
   log "Starting shared development services"
   compose up -d postgres redis minio
@@ -103,7 +107,9 @@ deploy_remote() {
   remote_script=$(cat <<EOF
 set -euo pipefail
 cd "$DEPLOY_PATH"
-docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >/tmp/agentic-data-shared dev-compose.yml
+compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
+trap 'rm -f "\$compose_config_output"' EXIT
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm app

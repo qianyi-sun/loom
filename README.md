@@ -143,6 +143,9 @@ tests/                    Unit tests for package behavior and data contracts.
 
 ## Development
 
+New contributors should start with
+[contributor-onboarding.md](docs/development/contributor-onboarding.md).
+
 Run local checks from the repository root:
 
 ```bash
@@ -161,6 +164,9 @@ Deploy or smoke-test the shared dev environment from a machine with SSH access:
 ```bash
 DEPLOY_HOST=shared dev DEPLOY_USER=<ssh-user> ./scripts/deploy-dev.sh
 ```
+
+pilot group pilot contributors should also read
+[pilot-project-onboarding.md](docs/development/pilot-project-onboarding.md).
 
 ## Collaboration Notes
 
