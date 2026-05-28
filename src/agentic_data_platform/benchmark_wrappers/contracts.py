@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,8 @@ class WrapperPaths:
     workspace: Path
     output: Path
     artifacts_dir: Path
+    upstream_root: Path | None
+    timeout_seconds: int
     dry_run: bool
 
 
@@ -39,6 +43,8 @@ def parse_wrapper_args(argv: list[str] | None) -> WrapperPaths:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--artifacts-dir", required=True)
+    parser.add_argument("--upstream-root")
+    parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     return WrapperPaths(
@@ -46,6 +52,8 @@ def parse_wrapper_args(argv: list[str] | None) -> WrapperPaths:
         workspace=Path(args.workspace),
         output=Path(args.output),
         artifacts_dir=Path(args.artifacts_dir),
+        upstream_root=Path(args.upstream_root) if args.upstream_root else None,
+        timeout_seconds=args.timeout_seconds,
         dry_run=args.dry_run,
     )
 
@@ -75,20 +83,115 @@ def run_dry_wrapper(
     planned_command: list[str],
 ) -> int:
     paths = parse_wrapper_args(argv)
-    if not paths.dry_run:
-        raise ValueError("Only --dry-run wrapper execution is implemented in the MVP")
-
     manifest = load_task_manifest(paths.task_manifest)
+    return run_wrapper(
+        expected_suite=expected_suite,
+        paths=paths,
+        manifest=manifest,
+        planned_command=planned_command,
+    )
+
+
+def run_wrapper(
+    *,
+    expected_suite: str,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+    planned_command: list[str],
+) -> int:
     if manifest.suite_name != expected_suite:
         raise ValueError(f"{expected_suite} wrapper received {manifest.suite_name} manifest")
 
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.output.parent.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _write_planned_command(paths=paths, manifest=manifest, planned_command=planned_command)
 
-    planned_command_path = paths.artifacts_dir / "planned-command.json"
-    planned_command_text = shlex.join(planned_command)
-    planned_command_path.write_text(
+    if paths.dry_run:
+        _write_result(
+            paths=paths,
+            manifest=manifest,
+            planned_command=planned_command,
+            dry_run=True,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            failure_reason=None,
+        )
+        return 0
+
+    if paths.upstream_root is None:
+        raise ValueError("--upstream-root is required for executable wrapper runs")
+    if not paths.upstream_root.exists() or not paths.upstream_root.is_dir():
+        raise ValueError(f"--upstream-root must be an existing directory: {paths.upstream_root}")
+
+    try:
+        completed = subprocess.run(
+            planned_command,
+            cwd=paths.upstream_root,
+            env=_execution_env(paths=paths, manifest=manifest),
+            capture_output=True,
+            text=True,
+            timeout=paths.timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = _process_output(error.stdout)
+        stderr = _process_output(error.stderr)
+        _write_process_logs(paths=paths, stdout=stdout, stderr=stderr)
+        _write_result(
+            paths=paths,
+            manifest=manifest,
+            planned_command=planned_command,
+            dry_run=False,
+            exit_code=124,
+            stdout=stdout,
+            stderr=stderr,
+            failure_reason=f"upstream runner timed out after {paths.timeout_seconds} seconds",
+        )
+        return 124
+
+    stdout = completed.stdout
+    stderr = completed.stderr
+    _write_process_logs(paths=paths, stdout=stdout, stderr=stderr)
+
+    failure_reason = None
+    if completed.returncode != 0:
+        failure_reason = f"upstream runner exited with code {completed.returncode}"
+
+    _write_result(
+        paths=paths,
+        manifest=manifest,
+        planned_command=planned_command,
+        dry_run=False,
+        exit_code=completed.returncode,
+        stdout=stdout,
+        stderr=stderr,
+        failure_reason=failure_reason,
+    )
+    return completed.returncode
+
+
+def _write_process_logs(*, paths: WrapperPaths, stdout: str, stderr: str) -> None:
+    (paths.artifacts_dir / "stdout.log").write_text(stdout, encoding="utf-8")
+    (paths.artifacts_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+
+
+def _process_output(output: bytes | str | None) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output
+
+
+def _write_planned_command(
+    *,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+    planned_command: list[str],
+) -> None:
+    (paths.artifacts_dir / "planned-command.json").write_text(
         json.dumps(
             {
                 "run_id": manifest.run_id,
@@ -104,9 +207,45 @@ def run_dry_wrapper(
         encoding="utf-8",
     )
 
+
+def _write_result(
+    *,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+    planned_command: list[str],
+    dry_run: bool,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    failure_reason: str | None,
+) -> None:
+    artifacts = [
+        {
+            "kind": "log",
+            "path": "artifacts/planned-command.json",
+            "media_type": "application/json",
+        }
+    ]
+    if not dry_run:
+        artifacts.extend(
+            [
+                {
+                    "kind": "log",
+                    "path": "artifacts/stdout.log",
+                    "media_type": "text/plain",
+                },
+                {
+                    "kind": "log",
+                    "path": "artifacts/stderr.log",
+                    "media_type": "text/plain",
+                },
+            ]
+        )
+
     result = {
-        "status": "completed",
-        "dry_run": True,
+        "status": "completed" if exit_code == 0 else "failed",
+        "dry_run": dry_run,
+        "exit_code": exit_code,
         "suite_name": manifest.suite_name,
         "benchmark_version": manifest.benchmark_version,
         "source_uri": manifest.source_uri,
@@ -117,21 +256,32 @@ def run_dry_wrapper(
         "input_files": manifest.input_files,
         "model": manifest.model,
         "metrics": {},
-        "artifacts": [
-            {
-                "kind": "log",
-                "path": "artifacts/planned-command.json",
-                "media_type": "application/json",
-            }
-        ],
-        "planned_command": planned_command_text,
+        "artifacts": artifacts,
+        "planned_command": shlex.join(planned_command),
+        "stdout": stdout,
+        "stderr": stderr,
         "trajectory_ref": None,
         "workspace_ref": None,
         "evaluator_report_ref": None,
-        "failure_reason": None,
+        "failure_reason": failure_reason,
     }
     paths.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return 0
+
+
+def _execution_env(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(
+        {
+            "ADP_RUN_ID": manifest.run_id,
+            "ADP_SUITE_NAME": manifest.suite_name,
+            "ADP_TASK_FAMILY": manifest.task_family,
+            "ADP_INSTANCE_ID": manifest.instance_id,
+            "ADP_WORKSPACE": str(paths.workspace),
+            "ADP_OUTPUT_DIR": manifest.output_dir,
+            "ADP_ARTIFACTS_DIR": str(paths.artifacts_dir),
+        }
+    )
+    return env
 
 
 def _require_string(data: dict[str, Any], key: str) -> str:

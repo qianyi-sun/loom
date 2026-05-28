@@ -18,7 +18,7 @@ storage, and dashboard visibility.
 
 This spike records the upstream runner entrypoints and the minimal wrapper
 contract the platform should implement before production benchmark execution.
-The first concrete dry-run wrappers now live in
+The first concrete wrappers now live in
 `agentic_data_platform.benchmark_wrappers.skillflow` and
 `agentic_data_platform.benchmark_wrappers.skilllearnbench`.
 
@@ -164,6 +164,18 @@ python -m agentic_data_platform.benchmark_wrappers.<suite> \
   --workspace /workspace \
   --output /output/result.json \
   --artifacts-dir /output/artifacts \
+  --upstream-root /opt/upstream/<suite> \
+  --timeout-seconds 3600
+```
+
+The same command supports a no-execution smoke mode:
+
+```bash
+python -m agentic_data_platform.benchmark_wrappers.<suite> \
+  --task-manifest /input/task.json \
+  --workspace /workspace \
+  --output /output/result.json \
+  --artifacts-dir /output/artifacts \
   --dry-run
 ```
 
@@ -185,24 +197,30 @@ The wrapper should also preserve raw stdout/stderr logs and any upstream report
 files as artifacts. The platform run record remains the source of truth for
 status, model config, source version, task identity, and evaluator visibility.
 
-Implemented dry-run behavior:
+Implemented wrapper behavior:
 
 - SkillFlow writes a normalized `result.json` and a
   `artifacts/planned-command.json` file for the upstream
-  `family_job_runner.py --dry-run` command.
-- SkillLearnBench writes the same normalized dry-run output for
-  `evaluate_skills.py <task> --dry-run`; when an instance id ends in a numeric
-  suffix, the wrapper emits `--subtask-range N-N` so the planned command is
+  `family_job_runner.py` command. In executable mode it requires
+  `--upstream-root`, invokes the upstream script there, and writes
+  `artifacts/stdout.log` and `artifacts/stderr.log`.
+- SkillLearnBench writes the same normalized output for
+  `evaluate_skills.py <task>`; when an instance id ends in a numeric suffix,
+  the wrapper emits `--subtask-range N-N` so the planned command is
   instance-scoped.
-- Dry-run wrappers validate the suite name in `/input/task.json` and reject
-  non-dry-run execution until real upstream runner execution is implemented.
+- Both wrappers validate the suite name in `/input/task.json`, expose
+  `ADP_*` environment variables to the upstream process, preserve stdout/stderr
+  logs, and map non-zero upstream exits or upstream timeouts to failed wrapper
+  results.
+- `--dry-run` still writes planned-command artifacts without invoking upstream
+  code or requiring model API keys.
 
 The generated upstream manifest import path lives in
 `agentic_data_platform.benchmarks.manifests`. It accepts generated repository or
-dataset path lists, groups them into benchmark task families and task
-instances, verifies each instance has `instruction.md` and `task.toml`, and
-returns the same `BenchmarkFixtureCatalog` shape used by checked-in seed
-fixtures.
+dataset path lists, or scans a local upstream tree, groups paths into benchmark
+task families and task instances, verifies each instance has `instruction.md`
+and `task.toml`, and returns the same `BenchmarkFixtureCatalog` shape used by
+checked-in seed fixtures.
 
 ## Platform-Control And Sandbox Split
 
@@ -229,10 +247,12 @@ just to run a supported suite.
 
 - Replace the SkillFlow dataset version placeholder with a pinned Hugging Face
   dataset snapshot or generated manifest hash.
-- Promote dry-run wrappers to real upstream execution, including upstream repo
-  checkout/download, config synthesis, process execution, and report
-  normalization.
-- Add wrapper smoke tests that run against real upstream dry-run commands when
+- Add upstream repo checkout/download management before wrapper execution.
+- Generate benchmark-specific config files from platform model/provider
+  settings instead of relying on committed upstream defaults.
+- Normalize upstream report directories and generated files into first-class
+  platform artifacts.
+- Add optional smoke tests that run against real upstream dry-run commands when
   the upstream repos are available locally.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+import sys
 
 from agentic_data_platform.benchmark_wrappers.contracts import (
     load_task_manifest,
     parse_wrapper_args,
-    run_dry_wrapper,
+    run_wrapper,
 )
 
 
@@ -13,7 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     paths = parse_wrapper_args(argv)
     manifest = load_task_manifest(paths.task_manifest)
     planned_command = [
-        "python",
+        sys.executable,
         "evaluate_skills.py",
         manifest.task_family,
         "--skill-path",
@@ -26,10 +27,13 @@ def main(argv: list[str] | None = None) -> int:
     if subtask_range is not None:
         planned_command.extend(["--subtask-range", subtask_range])
 
-    planned_command.append("--dry-run")
-    return run_dry_wrapper(
+    if paths.dry_run:
+        planned_command.append("--dry-run")
+
+    return run_wrapper(
         expected_suite="SkillLearnBench",
-        argv=argv,
+        paths=paths,
+        manifest=manifest,
         planned_command=planned_command,
     )
 

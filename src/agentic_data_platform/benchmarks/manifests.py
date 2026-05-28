@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from agentic_data_platform.benchmarks.fixtures import (
     BenchmarkFixtureCatalog,
@@ -48,6 +49,29 @@ def catalog_from_path_manifest(
         return _skilllearnbench_catalog(source_uri=source_uri, source_version=source_version, paths=paths)
 
     raise ValueError(f"Unsupported benchmark suite: {suite_name}")
+
+
+def catalog_from_local_tree(
+    *,
+    suite_name: str,
+    source_uri: str,
+    source_version: str,
+    root: Path,
+) -> BenchmarkFixtureCatalog:
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"root must be an existing directory: {root}")
+
+    paths = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+    ]
+    return catalog_from_path_manifest(
+        suite_name=suite_name,
+        source_uri=source_uri,
+        source_version=source_version,
+        paths=paths,
+    )
 
 
 def _skillflow_catalog(*, source_uri: str, source_version: str, paths: list[str]) -> BenchmarkFixtureCatalog:

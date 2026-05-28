@@ -1,6 +1,8 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from agentic_data_platform.benchmarks.manifests import catalog_from_path_manifest
+from agentic_data_platform.benchmarks.manifests import catalog_from_local_tree, catalog_from_path_manifest
 
 
 class BenchmarkManifestImportTest(unittest.TestCase):
@@ -99,3 +101,31 @@ class BenchmarkManifestImportTest(unittest.TestCase):
                     "tasks/financial-analysis/financial-analysis-2/instruction.md",
                 ],
             )
+
+    def test_imports_from_local_upstream_tree(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write(root / "tasks/financial-analysis/financial-analysis-1/instruction.md")
+            _write(root / "tasks/financial-analysis/financial-analysis-1/task.toml")
+            _write(root / "tasks/financial-analysis/financial-analysis-1/environment/input.xlsx")
+            _write(root / "tasks/financial-analysis/financial-analysis-1/tests/test_outputs.py")
+            _write(root / "tasks/financial-analysis/financial-analysis-1/.DS_Store")
+
+            catalog = catalog_from_local_tree(
+                suite_name="SkillLearnBench",
+                source_uri="https://github.com/cxcscmu/SkillLearnBench",
+                source_version="638284f5982f6be085a955435d2ec7a5258f5513",
+                root=root,
+            )
+
+        spec = catalog.to_task_spec(
+            task_family="financial-analysis",
+            instance_id="financial-analysis-1",
+        )
+        self.assertEqual(spec.metadata["instruction_ref"], "tasks/financial-analysis/financial-analysis-1/instruction.md")
+        self.assertNotIn(".DS_Store", "\n".join(spec.metadata["input_files"]))
+
+
+def _write(path: Path, text: str = "fixture\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
