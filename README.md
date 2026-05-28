@@ -114,6 +114,7 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
+| Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -133,7 +134,18 @@ docs/architecture/       Platform architecture and MVP design specs.
 docs/engineering/        GitHub, org, release, and environment setup notes.
 docs/infra/              Deployment and infrastructure planning.
 docs/requirements/       Research-team intake template and requirements matrix.
+src/                      Platform Python package and domain contracts.
+tests/                    Unit tests for package behavior and data contracts.
 MEMORY.md                Durable project context for future sessions.
+```
+
+## Development
+
+Run local checks from the repository root:
+
+```bash
+python -m pip install -e .
+python -m unittest discover -s tests -v
 ```
 
 ## Collaboration Notes
