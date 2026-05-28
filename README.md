@@ -34,6 +34,8 @@ flowchart LR
 
 - Runs agentic data generation and evaluation workflows.
 - Executes terminal-agent benchmarks inside Docker sandboxes for the MVP.
+- Supports native benchmark adapters and should support Harbor-compatible
+  benchmarks and agents as a first-class evaluation path.
 - Records full trajectories, stdout/stderr, final workspace snapshots, artifacts,
   evaluator feedback, metrics, and failure reasons.
 - Keeps model access API-based for v0.
@@ -47,6 +49,16 @@ flowchart LR
 The first high-priority pilot comes from **pilot group**.
 It targets full adaptation of SkillFlow and SkillLearnBench as terminal-agent
 skill-learning benchmarks.
+
+The broader platform direction is evaluation-first: SkillFlow and SkillLearnBench
+are the first native pilot, while official Harbor-compatible benchmarks, agents,
+tasks, verifier rewards, and job outputs should be integrated through provider
+and runner boundaries rather than treated as one-off scripts.
+
+Both paths share one evaluation backend. Native pilot-project benchmarks and
+Harbor-compatible benchmarks may differ by provider, runner, and result
+ingestor, but they must share the same API lifecycle, Postgres persistence,
+worker queue, artifact model, evaluator result model, and dashboard projection.
 
 ```mermaid
 flowchart TB
@@ -78,14 +90,19 @@ MVP constraints:
 ```mermaid
 flowchart LR
     UI["Web / API"] --> API["Control plane API"]
-    API --> DB[("Postgres metadata")]
-    API --> Queue["Redis queue"]
-    API --> Worker["Worker"]
-    Worker --> Benchmark["BenchmarkAdapter"]
-    Worker --> Sandbox["DockerTerminalSandbox"]
+    API --> Core["Evaluation backend core"]
+    Core --> DB[("Postgres metadata")]
+    Core --> Queue["Redis queue"]
+    Queue --> Worker["Worker"]
+    Worker --> Benchmark["BenchmarkProvider"]
+    Worker --> Agent["AgentProvider"]
+    Worker --> Runner["RunnerBackend"]
     Worker --> Model["ModelProvider API"]
     Worker --> Eval["EvaluatorAdapter"]
+    Runner --> Sandbox["DockerTerminalRunnerBackend"]
+    Runner --> Harbor["HarborRunnerBackend"]
     Sandbox --> Store[("MinIO artifacts")]
+    Harbor --> Store
     Eval --> Store
     Worker --> DB
     Store --> Dashboard["Dashboard views"]
@@ -94,6 +111,10 @@ flowchart LR
 
 Core object model:
 
+- `EvaluationJob`: a submitted evaluation batch across benchmark tasks, agents,
+  and models.
+- `EvaluationTrial`: one attempt for one task, agent, model, runner backend,
+  and evaluator configuration.
 - `BenchmarkSuite`: SkillFlow, SkillLearnBench, or future benchmark families.
 - `TaskInstance`: one concrete benchmark instance and its source metadata.
 - `Run`: a platform-tracked execution attempt with lifecycle state.
@@ -104,7 +125,11 @@ Core object model:
 - `SkillObject`: flexible skill artifact; not assumed to be `skill.md`.
 
 Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmark-mvp.md).
+Unified evaluation backend contract:
+[unified-evaluation-backend-contract.md](docs/architecture/unified-evaluation-backend-contract.md).
 Persistence design: [postgres-persistence.md](docs/architecture/postgres-persistence.md).
+Harbor integration roadmap:
+[harbor-integration-roadmap.md](docs/architecture/harbor-integration-roadmap.md).
 Original runner wrapper research:
 [benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
 
@@ -119,12 +144,14 @@ Original runner wrapper research:
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
+| Unified evaluation backend | Planning | Contract keeps latent native adapters and Harbor integration on one backend surface |
 | Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
 | Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
+| Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -139,6 +166,12 @@ Original runner wrapper research:
 - Flexible skill object model: [#23](https://github.com/carinrc/agentic-data-platform/issues/23)
 - Backend service epic: [#49](https://github.com/carinrc/agentic-data-platform/issues/49)
 - Postgres persistence foundation: [#51](https://github.com/carinrc/agentic-data-platform/issues/51)
+- Harbor-compatible benchmark and agent integration:
+  [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
+- Unified evaluation backend contract:
+  [#72](https://github.com/carinrc/agentic-data-platform/issues/72)
+- Harbor integration roadmap:
+  [docs/architecture/harbor-integration-roadmap.md](docs/architecture/harbor-integration-roadmap.md)
 
 ## Repository Layout
 
