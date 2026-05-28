@@ -37,15 +37,40 @@ run_compose_smoke() {
   rm -f "$compose_config_output"
 
   log "Starting shared development services"
-  compose up -d postgres redis minio
+  compose up -d postgres redis minio api
 
   if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
     log "Running application smoke checks"
     compose run --rm app
   fi
 
+  log "Checking API health endpoint"
+  check_api_health
+
   log "Current service status"
   compose ps
+}
+
+check_api_health() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if compose exec -T api python - <<'PY' >/dev/null 2>&1
+import json
+import urllib.request
+
+with urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+if payload.get("status") != "ok":
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+
+  printf 'API health check failed after waiting for service startup.\n' >&2
+  return 1
 }
 
 deploy_local() {
@@ -110,10 +135,29 @@ cd "$DEPLOY_PATH"
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"
-docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio api
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm app
 fi
+for attempt in \$(seq 1 30); do
+  if docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" exec -T api python - <<'PY' >/dev/null 2>&1
+import json
+import urllib.request
+
+with urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+if payload.get("status") != "ok":
+    raise SystemExit(1)
+PY
+  then
+    break
+  fi
+  if [[ "\$attempt" == "30" ]]; then
+    printf 'API health check failed after waiting for service startup.\n' >&2
+    exit 1
+  fi
+  sleep 2
+done
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" ps
 EOF
 )

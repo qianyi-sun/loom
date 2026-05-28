@@ -180,6 +180,13 @@ Run the Docker development checks:
 docker compose -f docker-compose.dev.yml up --build app
 ```
 
+Start the long-running development API service:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build api
+curl http://localhost:8000/healthz
+```
+
 Deploy or smoke-test the shared dev environment from a machine with SSH access:
 
 ```bash

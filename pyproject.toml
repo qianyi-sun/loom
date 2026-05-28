@@ -11,6 +11,11 @@ requires-python = ">=3.11"
 authors = [
   { name = "CARIN Research Center" }
 ]
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "httpx>=0.27,<1.0",
+  "uvicorn[standard]>=0.32,<1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
