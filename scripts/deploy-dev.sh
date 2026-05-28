@@ -37,7 +37,7 @@ run_compose_smoke() {
   rm -f "$compose_config_output"
 
   log "Starting shared development services"
-  compose up -d postgres redis minio api
+  compose up -d --build postgres redis minio api
 
   if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
     log "Running application smoke checks"
@@ -135,7 +135,7 @@ cd "$DEPLOY_PATH"
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"
-docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio api
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --build postgres redis minio api
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm app
 fi
