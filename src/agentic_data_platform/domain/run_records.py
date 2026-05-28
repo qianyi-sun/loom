@@ -186,6 +186,20 @@ class JudgeConfig:
 
 
 @dataclass(frozen=True)
+class EvaluatorConfig:
+    evaluator_id: str
+    mode: str
+    judge: JudgeConfig | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("evaluator_id", self.evaluator_id)
+        _require_non_empty("mode", self.mode)
+        if self.mode == "llm_judge" and self.judge is None:
+            raise ValueError("llm_judge evaluator config requires a judge")
+
+
+@dataclass(frozen=True)
 class EvaluatorResult:
     evaluator_id: str
     status: str
@@ -247,8 +261,10 @@ class RunRecord:
     updated_at: datetime
     trajectory: list[TerminalTurn] = field(default_factory=list)
     artifacts: list[ArtifactRef] = field(default_factory=list)
+    evaluator_configs: list[EvaluatorConfig] = field(default_factory=list)
     evaluator_result: EvaluatorResult | None = None
     failure_reason: str | None = None
+    created_by_user_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -261,6 +277,8 @@ class RunRecord:
         task: BenchmarkTaskInstance,
         model: ModelConfig,
         runner: RunnerConfig,
+        evaluator_configs: list[EvaluatorConfig] | None = None,
+        created_by_user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RunRecord:
         now = datetime.now(timezone.utc)
@@ -274,6 +292,8 @@ class RunRecord:
             status=RunStatus.QUEUED,
             created_at=now,
             updated_at=now,
+            created_by_user_id=created_by_user_id,
+            evaluator_configs=evaluator_configs or [],
             metadata=metadata or {},
         )
 
@@ -286,6 +306,12 @@ class RunRecord:
 
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("created_at and updated_at must be timezone-aware")
+
+        if self.created_by_user_id is not None:
+            _require_non_empty("created_by_user_id", self.created_by_user_id)
+        for evaluator_config in self.evaluator_configs:
+            if not isinstance(evaluator_config, EvaluatorConfig):
+                raise ValueError("evaluator_configs must contain EvaluatorConfig values")
 
     def transition_to(self, next_status: RunStatus | str) -> None:
         next_status = _coerce_enum(RunStatus, next_status, "next_status")
@@ -322,6 +348,41 @@ class RunRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class RunStatusEvent:
+    event_id: str
+    run_id: str
+    attempt_id: str | None
+    event_type: str
+    from_status: RunStatus | str | None
+    to_status: RunStatus | str
+    created_at: datetime
+    reason: str | None = None
+    actor_user_id: str | None = None
+    request_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("event_id", self.event_id)
+        _require_non_empty("run_id", self.run_id)
+        _require_non_empty("event_type", self.event_type)
+
+        if self.attempt_id is not None:
+            _require_non_empty("attempt_id", self.attempt_id)
+        if self.actor_user_id is not None:
+            _require_non_empty("actor_user_id", self.actor_user_id)
+        if self.request_id is not None:
+            _require_non_empty("request_id", self.request_id)
+        if self.reason is not None:
+            _require_non_empty("reason", self.reason)
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+
+        if self.from_status is not None:
+            object.__setattr__(self, "from_status", _coerce_enum(RunStatus, self.from_status, "from_status"))
+        object.__setattr__(self, "to_status", _coerce_enum(RunStatus, self.to_status, "to_status"))
 
 
 _VALID_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {

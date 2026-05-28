@@ -147,10 +147,11 @@ Original runner wrapper research:
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
 | Unified evaluation backend | Planning | Contract keeps latent native adapters and Harbor integration on one backend surface |
 | Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
-| Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, artifacts, evaluator results, and audit events |
+| Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
+| Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
@@ -169,6 +170,7 @@ Original runner wrapper research:
 - Backend service epic: [#49](https://github.com/carinrc/agentic-data-platform/issues/49)
 - Postgres persistence foundation: [#51](https://github.com/carinrc/agentic-data-platform/issues/51)
 - Core API resources: [#52](https://github.com/carinrc/agentic-data-platform/issues/52)
+- Run lifecycle API: [#53](https://github.com/carinrc/agentic-data-platform/issues/53)
 - Harbor-compatible benchmark and agent integration:
   [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
 - Unified evaluation backend contract:
@@ -183,6 +185,7 @@ Original runner wrapper research:
 docs/architecture/       Platform architecture and MVP design specs.
 docs/development/        Local developer setup and Docker development environment.
 docs/engineering/        GitHub, org, release, and environment setup notes.
+docs/examples/           API request examples for local and shared dev testing.
 docs/infra/              Deployment and infrastructure planning.
 docs/requirements/       Versioned research-team project and workflow requirements.
 src/                      Platform Python package and domain contracts.
@@ -240,6 +243,10 @@ Core API examples after seeding Postgres:
 curl http://localhost:8000/projects
 curl 'http://localhost:8000/tasks?benchmark_suite=SkillFlow&benchmark_version=<version>'
 curl 'http://localhost:8000/runs?project_id=latent-skill-pilot'
+curl 'http://localhost:8000/runs?benchmark_suite=SkillLearnBench&task_family=spreadsheet-from-documents'
+curl -X POST http://localhost:8000/runs \
+  -H 'Content-Type: application/json' \
+  -d @docs/examples/run-create-request.json
 ```
 
 Deploy or smoke-test the shared dev environment from a machine with SSH access:

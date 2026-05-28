@@ -6,14 +6,16 @@ Related trackers:
 
 - Backend epic: https://github.com/carinrc/agentic-data-platform/issues/49
 - Core API resources: https://github.com/carinrc/agentic-data-platform/issues/52
+- Run lifecycle API: https://github.com/carinrc/agentic-data-platform/issues/53
 - Postgres persistence foundation: https://github.com/carinrc/agentic-data-platform/issues/51
 
 ## Goal
 
-Issue #52 exposes the first Postgres-backed resource reads for PM dashboards,
-researcher inspection, and future frontend development. The API is still an
-internal control-plane surface, but it now has stable routes for projects,
-benchmark tasks, run summaries, artifacts, and evaluator feedback.
+Issues #52 and #53 expose the first Postgres-backed resource and run lifecycle
+surface for PM dashboards, researcher inspection, and future frontend
+development. The API is still an internal control-plane surface, but it now has
+stable routes for projects, benchmark tasks, queued run submission, lifecycle
+events, run summaries, artifacts, evaluator feedback, cancel, and retry.
 
 The implementation deliberately reuses existing domain and dashboard projection
 contracts rather than introducing a second API-only data model.
@@ -44,14 +46,27 @@ operations.
 | `GET /task-families/{task_family}` | Inspect one task family and its tasks | `BenchmarkFixtureCatalog.task_families` |
 | `GET /tasks` | List task instances for one suite/version | `BenchmarkCatalogRepository.get_fixture_catalog()` |
 | `GET /tasks/{task_family}/{instance_id}` | Inspect one task instance | `BenchmarkCatalogRepository.get_task_instance()` |
-| `GET /runs` | List dashboard-ready run summaries | `RunRepository.list_runs()` + `RunDashboardProjection` |
-| `GET /runs/{run_id}` | Inspect one dashboard-ready run | `RunRepository.get_run()` + `RunDashboardProjection` |
+| `POST /runs` | Create a durable queued run without executing it yet | `RunRepository.create_run()` + `RunDashboardProjection` |
+| `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
+| `GET /runs/{run_id}` | Inspect one dashboard-ready run plus lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
+| `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
+| `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary for a run | `RunDashboardProjection.evaluator` |
 
 `benchmark_version` is a query parameter for benchmark detail, task-family, and
 task routes because current versions can contain slashes, such as
 `hf:zhang-ziao/SkillFlow-Task@...`.
+
+`GET /runs` supports the first dashboard filters: `project_id`, `status`,
+`benchmark_suite`, `task_family`, `task_instance_id`, `created_by_user_id`,
+`created_after`, and `created_before`.
+
+`POST /runs` accepts the durable submission envelope the worker will later
+consume: `project_id`, `owner_team`, a benchmark `task`, API-only `model`
+configuration, Docker-terminal `runner` configuration, one or more
+`evaluators`, optional `created_by_user_id`, and caller metadata. The checked-in
+example payload is `docs/examples/run-create-request.json`.
 
 ## Response Shape Principles
 
@@ -62,6 +77,17 @@ task routes because current versions can contain slashes, such as
   `BenchmarkFixtureInstance`.
 - Run responses reuse `RunDashboardProjection.to_dict()` so dashboards and API
   consumers share the same visible status/progress/evaluator payload.
+- Run projections include `created_by_user_id`, `failure_reason`, and submitted
+  evaluator configurations so dashboard clients can display ownership and
+  planned evaluator mode before worker execution produces evaluator results.
+- Run detail and lifecycle-mutating responses include `lifecycle_events` with
+  `event_type`, `from_status`, `to_status`, `attempt_id`, `reason`,
+  `actor_user_id`, `request_id`, and `created_at`.
+- Invalid cancel/retry transitions return structured `409 conflict` errors
+  through the shared service error boundary.
+- Invalid nested create payloads and blank cancel/retry reasons return
+  structured `422 validation_error` responses before persistence mutates run
+  state.
 - Artifact responses do not expose local `file://` URIs or absolute host paths.
   The projection keeps stable artifact ids, media types, sizes, and
   object-store-safe `storage_key` values, and strips query strings from external
@@ -73,10 +99,15 @@ task routes because current versions can contain slashes, such as
 
 ## Current Limits
 
-- The API is read-heavy. Run submission, cancellation, retries, queueing, and
-  worker orchestration are tracked separately under backend follow-up issues.
-- `RunRepository` still hydrates the latest snapshot into one `RunRecord`; the
-  public API does not expose multi-attempt history yet.
+- `POST /runs` only creates a queued record. It does not enqueue or execute
+  sandbox work yet; queue and worker orchestration remain tracked under #54.
+- Model and evaluator configs are stored as metadata only in this slice.
+  Provider registration, secret indirection, and API-key boundaries remain
+  tracked under #56.
+- Retry creates a new internal `run_attempts` row for the same `run_id`, while
+  the public run projection shows the latest attempt. Full attempt-detail APIs
+  should be added when worker-managed retries preserve per-attempt artifacts and
+  trajectories.
 - Artifact and evaluator routes are projection-backed. Dedicated artifact and
   evaluation repositories should be added when upload/download, pagination,
   retention, and detailed evaluator history are implemented.

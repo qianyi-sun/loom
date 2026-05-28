@@ -7,7 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-from agentic_data_platform.domain.run_records import ArtifactRef, EvaluatorResult, RunRecord, RunStatus
+from agentic_data_platform.domain.run_records import ArtifactRef, EvaluatorConfig, EvaluatorResult, RunRecord, RunStatus
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,9 @@ class RunDashboardProjection:
                 "project_id": run.project_id,
                 "owner_team": run.owner_team,
             },
+            "created_by_user_id": run.created_by_user_id,
             "status": run.status.value,
+            "failure_reason": run.failure_reason,
             "progress": _progress(run),
             "task": {
                 "benchmark_suite": run.task.benchmark_suite,
@@ -47,13 +49,11 @@ class RunDashboardProjection:
                 "image": run.runner.image,
                 "internet_access": run.runner.internet_access,
             },
+            "evaluators": [_evaluator_config(config) for config in run.evaluator_configs],
             "artifacts": [_artifact_link(ref) for ref in run.artifacts],
             "created_at": _datetime(run.created_at),
             "updated_at": _datetime(run.updated_at),
         }
-
-        if run.failure_reason:
-            payload["failure_reason"] = run.failure_reason
 
         if run.evaluator_result is not None:
             payload["evaluator"] = _evaluator_summary(run.evaluator_result)
@@ -113,6 +113,22 @@ def _evaluator_summary(result: EvaluatorResult) -> dict[str, Any]:
     if result.failure_reason:
         payload["failure_reason"] = result.failure_reason
 
+    return payload
+
+
+def _evaluator_config(config: EvaluatorConfig) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "evaluator_id": config.evaluator_id,
+        "mode": config.mode,
+        "metadata": dict(config.metadata),
+    }
+    if config.judge is not None:
+        payload["judge"] = {
+            "provider": config.judge.provider,
+            "model_name": config.judge.model_name,
+            "model_version": config.judge.model_version,
+            "rubric_version": config.judge.rubric_version,
+        }
     return payload
 
 

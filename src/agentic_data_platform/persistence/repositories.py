@@ -16,11 +16,14 @@ from agentic_data_platform.benchmarks.fixtures import (
 from agentic_data_platform.domain.run_records import (
     ArtifactRef,
     BenchmarkTaskInstance,
+    EvaluatorConfig,
     EvaluatorResult,
     JudgeConfig,
     ModelConfig,
     RunnerConfig,
     RunRecord,
+    RunStatus,
+    RunStatusEvent,
     TerminalTurn,
 )
 from agentic_data_platform.persistence.models import (
@@ -31,6 +34,7 @@ from agentic_data_platform.persistence.models import (
     ProjectRow,
     RunAttemptRow,
     RunRow,
+    RunStatusEventRow,
     RunTerminalTurnRow,
     TaskFamilyRow,
     TaskInstanceRow,
@@ -341,23 +345,154 @@ class RunRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def create_run(
+        self,
+        run: RunRecord,
+        *,
+        created_by_user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        if self.session.get(RunRow, run.run_id) is not None:
+            raise ValueError(f"Run already exists: {run.run_id}")
+        if run.status is not RunStatus.QUEUED:
+            raise ValueError("new runs must be queued")
+
+        run.created_by_user_id = created_by_user_id
+        self.save_run(run)
+        self._append_status_event(
+            run_id=run.run_id,
+            attempt_id=_attempt_id(run.run_id, 1),
+            event_type="run.created",
+            from_status=None,
+            to_status=RunStatus.QUEUED,
+            actor_user_id=created_by_user_id,
+            request_id=request_id,
+        )
+        self.session.flush()
+        return self.get_run(run.run_id)
+
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        return self.transition_run(
+            run_id,
+            RunStatus.CANCELED,
+            event_type="run.canceled",
+            reason=reason,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+        )
+
+    def transition_run(
+        self,
+        run_id: str,
+        next_status: RunStatus | str,
+        *,
+        event_type: str = "run.status_changed",
+        reason: str | None = None,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        row = self._run_row_for_update(run_id)
+        previous_status = RunStatus(row.status)
+        run = self._run_record(row)
+        run.transition_to(next_status)
+        if run.status in {RunStatus.FAILED, RunStatus.CANCELED}:
+            run.failure_reason = reason
+
+        row.status = run.status.value
+        row.failure_reason = run.failure_reason
+        row.updated_at = run.updated_at
+
+        attempt = self._latest_attempt_row(run_id)
+        attempt.status = run.status.value
+        attempt.failure_reason = run.failure_reason
+        if run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
+            attempt.completed_at = run.updated_at
+        attempt.updated_at = utc_now()
+
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt.attempt_id,
+            event_type=event_type,
+            from_status=previous_status,
+            to_status=run.status,
+            reason=reason,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+        )
+        self.session.flush()
+        return self.get_run(run_id)
+
+    def retry_run(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        row = self._run_row_for_update(run_id)
+        previous_status = RunStatus(row.status)
+        if previous_status not in {RunStatus.FAILED, RunStatus.CANCELED}:
+            raise ValueError("can only retry failed or canceled runs")
+
+        next_attempt_number = self._latest_attempt_row(run_id).attempt_number + 1
+        attempt_id = _attempt_id(run_id, next_attempt_number)
+        now = utc_now()
+        self.session.add(
+            RunAttemptRow(
+                attempt_id=attempt_id,
+                run_id=run_id,
+                attempt_number=next_attempt_number,
+                status=RunStatus.QUEUED.value,
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        row.status = RunStatus.QUEUED.value
+        row.failure_reason = None
+        row.updated_at = now
+
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            event_type="run.retried",
+            from_status=previous_status,
+            to_status=RunStatus.QUEUED,
+            reason=reason,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+        )
+        self.session.flush()
+        return self.get_run(run_id)
+
     def save_run(self, run: RunRecord) -> None:
         existing = self.session.get(RunRow, run.run_id)
         owner_team_id = self._team_id_for_name(run.owner_team)
         if existing is not None:
-            self._delete_run_snapshot_children(run.run_id)
-            self.session.flush()
             run_row = existing
+            attempt_number = self._latest_attempt_row(run.run_id).attempt_number
+            attempt_id = _attempt_id(run.run_id, attempt_number)
+            self._delete_run_snapshot_children(run.run_id, attempt_id=attempt_id)
+            self.session.flush()
         else:
             run_row = RunRow(run_id=run.run_id)
             self.session.add(run_row)
-
-        attempt_id = _attempt_id(run.run_id, 1)
+            attempt_number = 1
+            attempt_id = _attempt_id(run.run_id, attempt_number)
         self._apply_run_fields(run_row, run, owner_team_id=owner_team_id)
 
         attempt = self.session.get(RunAttemptRow, attempt_id)
         if attempt is None:
-            attempt = RunAttemptRow(attempt_id=attempt_id, run_id=run.run_id, attempt_number=1)
+            attempt = RunAttemptRow(attempt_id=attempt_id, run_id=run.run_id, attempt_number=attempt_number)
             self.session.add(attempt)
         self._apply_attempt_fields(attempt, run)
 
@@ -372,13 +507,29 @@ class RunRepository:
 
         self.session.flush()
 
-    def _delete_run_snapshot_children(self, run_id: str) -> None:
-        self.session.execute(delete(EvaluatorResultRow).where(EvaluatorResultRow.run_id == run_id))
-        self.session.execute(delete(ArtifactRow).where(ArtifactRow.run_id == run_id))
-        self.session.execute(delete(RunTerminalTurnRow).where(RunTerminalTurnRow.run_id == run_id))
+    def _delete_run_snapshot_children(self, run_id: str, *, attempt_id: str) -> None:
+        self.session.execute(
+            delete(EvaluatorResultRow).where(
+                EvaluatorResultRow.run_id == run_id,
+                EvaluatorResultRow.attempt_id == attempt_id,
+            )
+        )
+        self.session.execute(
+            delete(ArtifactRow).where(
+                ArtifactRow.run_id == run_id,
+                ArtifactRow.attempt_id == attempt_id,
+            )
+        )
+        self.session.execute(
+            delete(RunTerminalTurnRow).where(
+                RunTerminalTurnRow.run_id == run_id,
+                RunTerminalTurnRow.attempt_id == attempt_id,
+            )
+        )
 
     def _apply_run_fields(self, row: RunRow, run: RunRecord, *, owner_team_id: str | None) -> None:
         row.project_id = run.project_id
+        row.created_by_user_id = run.created_by_user_id
         row.owner_team_id = owner_team_id
         row.owner_team_name_snapshot = run.owner_team
         row.benchmark_suite = run.task.benchmark_suite
@@ -402,6 +553,7 @@ class RunRepository:
         row.runner_internet_access = run.runner.internet_access
         row.runner_resource_limits = dict(run.runner.resource_limits)
         row.runner_metadata = dict(run.runner.metadata)
+        row.evaluator_configs = [_evaluator_config_payload(config) for config in run.evaluator_configs]
         row.status = run.status.value
         row.failure_reason = run.failure_reason
         row.metadata_json = dict(run.metadata)
@@ -425,20 +577,49 @@ class RunRepository:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        benchmark_suite: str | None = None,
+        task_family: str | None = None,
+        task_instance_id: str | None = None,
+        created_by_user_id: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[RunRecord]:
         query = select(RunRow).order_by(RunRow.created_at, RunRow.run_id)
         if project_id is not None:
             query = query.where(RunRow.project_id == project_id)
         if status is not None:
             query = query.where(RunRow.status == status)
+        if benchmark_suite is not None:
+            query = query.where(RunRow.benchmark_suite == benchmark_suite)
+        if task_family is not None:
+            query = query.where(RunRow.task_family == task_family)
+        if task_instance_id is not None:
+            query = query.where(RunRow.task_instance_id == task_instance_id)
+        if created_by_user_id is not None:
+            query = query.where(RunRow.created_by_user_id == created_by_user_id)
+        if created_after is not None:
+            query = query.where(RunRow.created_at >= created_after)
+        if created_before is not None:
+            query = query.where(RunRow.created_at <= created_before)
         return [self._run_record(row) for row in self.session.scalars(query)]
 
+    def list_status_events(self, run_id: str) -> list[RunStatusEvent]:
+        _required(self.session.get(RunRow, run_id), "run", run_id)
+        query = (
+            select(RunStatusEventRow)
+            .where(RunStatusEventRow.run_id == run_id)
+            .order_by(RunStatusEventRow.id)
+        )
+        return [_status_event_record(row) for row in self.session.scalars(query)]
+
     def _run_record(self, row: RunRow) -> RunRecord:
+        latest_attempt = self._latest_attempt_row(row.run_id)
         turns = [
             _terminal_turn(turn)
             for turn in self.session.scalars(
                 select(RunTerminalTurnRow)
                 .where(RunTerminalTurnRow.run_id == row.run_id)
+                .where(RunTerminalTurnRow.attempt_id == latest_attempt.attempt_id)
                 .order_by(RunTerminalTurnRow.turn_index)
             )
         ]
@@ -447,12 +628,14 @@ class RunRepository:
             for artifact in self.session.scalars(
                 select(ArtifactRow)
                 .where(ArtifactRow.run_id == row.run_id)
+                .where(ArtifactRow.attempt_id == latest_attempt.attempt_id)
                 .order_by(ArtifactRow.artifact_index)
             )
         ]
         evaluator_row = self.session.scalar(
             select(EvaluatorResultRow)
             .where(EvaluatorResultRow.run_id == row.run_id)
+            .where(EvaluatorResultRow.attempt_id == latest_attempt.attempt_id)
             .order_by(EvaluatorResultRow.id.desc())
             .limit(1)
         )
@@ -492,14 +675,58 @@ class RunRepository:
             updated_at=_aware(row.updated_at),
             trajectory=turns,
             artifacts=artifacts,
+            evaluator_configs=[_evaluator_config(config) for config in row.evaluator_configs or []],
             evaluator_result=_evaluator_result(evaluator_row) if evaluator_row is not None else None,
             failure_reason=row.failure_reason,
+            created_by_user_id=row.created_by_user_id,
             metadata=dict(row.metadata_json or {}),
         )
 
     def _team_id_for_name(self, team_name: str) -> str | None:
         row = self.session.scalar(select(TeamRow).where(TeamRow.name == team_name))
         return row.team_id if row is not None else None
+
+    def _latest_attempt_row(self, run_id: str) -> RunAttemptRow:
+        row = self.session.scalar(
+            select(RunAttemptRow)
+            .where(RunAttemptRow.run_id == run_id)
+            .order_by(RunAttemptRow.attempt_number.desc())
+            .limit(1)
+        )
+        return _required(row, "run attempt", run_id)
+
+    def _run_row_for_update(self, run_id: str) -> RunRow:
+        row = self.session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+        return _required(row, "run", run_id)
+
+    def _append_status_event(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        event_type: str,
+        from_status: RunStatus | None,
+        to_status: RunStatus,
+        reason: str | None = None,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.session.add(
+            RunStatusEventRow(
+                event_id=uuid4().hex,
+                run_id=run_id,
+                attempt_id=attempt_id,
+                event_type=event_type,
+                from_status=from_status.value if from_status is not None else None,
+                to_status=to_status.value,
+                reason=reason,
+                actor_user_id=actor_user_id,
+                request_id=request_id,
+                metadata_json=dict(metadata or {}),
+                created_at=utc_now(),
+            )
+        )
 
 
 class AuditEventRepository:
@@ -695,6 +922,34 @@ def _evaluator_result(row: EvaluatorResultRow) -> EvaluatorResult:
     )
 
 
+def _evaluator_config_payload(config: EvaluatorConfig) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "evaluator_id": config.evaluator_id,
+        "mode": config.mode,
+        "metadata": dict(config.metadata),
+    }
+    if config.judge is not None:
+        payload["judge"] = {
+            "provider": config.judge.provider,
+            "model_name": config.judge.model_name,
+            "model_version": config.judge.model_version,
+            "rubric_version": config.judge.rubric_version,
+            "metadata": dict(config.judge.metadata),
+        }
+    return payload
+
+
+def _evaluator_config(payload: dict[str, Any]) -> EvaluatorConfig:
+    judge_payload = payload.get("judge")
+    judge = JudgeConfig(**judge_payload) if isinstance(judge_payload, dict) else None
+    return EvaluatorConfig(
+        evaluator_id=payload["evaluator_id"],
+        mode=payload["mode"],
+        judge=judge,
+        metadata=dict(payload.get("metadata") or {}),
+    )
+
+
 def _audit_event_record(row: AuditEventRow) -> AuditEventRecord:
     return AuditEventRecord(
         event_id=row.event_id,
@@ -709,6 +964,22 @@ def _audit_event_record(row: AuditEventRow) -> AuditEventRecord:
         subject_id=row.subject_id,
         metadata=dict(row.metadata_json or {}),
         request_id=row.request_id,
+    )
+
+
+def _status_event_record(row: RunStatusEventRow) -> RunStatusEvent:
+    return RunStatusEvent(
+        event_id=row.event_id,
+        run_id=row.run_id,
+        attempt_id=row.attempt_id,
+        event_type=row.event_type,
+        from_status=row.from_status,
+        to_status=row.to_status,
+        created_at=_aware(row.created_at),
+        reason=row.reason,
+        actor_user_id=row.actor_user_id,
+        request_id=row.request_id,
+        metadata=dict(row.metadata_json or {}),
     )
 
 

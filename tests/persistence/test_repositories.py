@@ -9,6 +9,7 @@ from agentic_data_platform.domain.run_records import (
     ArtifactRef,
     BenchmarkTaskInstance,
     EvaluatorResult,
+    EvaluatorConfig,
     JudgeConfig,
     ModelConfig,
     ModelMode,
@@ -51,6 +52,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "task_instances",
                 "runs",
                 "run_attempts",
+                "run_status_events",
                 "artifacts",
                 "evaluator_results",
                 "audit_events",
@@ -199,6 +201,142 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(len(loaded.artifacts), len(run.artifacts))
         self.assertEqual(events[0].event_type, "run.created")
 
+    def test_run_repository_records_create_cancel_and_retry_lifecycle(self):
+        run = _queued_run(run_id="run_lifecycle_001")
+
+        with session_scope(self.engine) as session:
+            identities = IdentityRepository(session)
+            identities.create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            identities.create_user(
+                user_id="[REDACTED_OWNER]",
+                email="[REDACTED_OWNER]@example.com",
+                display_name="[REDACTED_OWNER]",
+                team_id="pilot-project",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+                created_by_user_id="[REDACTED_OWNER]",
+            )
+            runs = RunRepository(session)
+
+            runs.create_run(run, created_by_user_id="[REDACTED_OWNER]", request_id="req-create-001")
+            canceled = runs.cancel_run(
+                run.run_id,
+                reason="user requested cancellation",
+                actor_user_id="[REDACTED_OWNER]",
+                request_id="req-cancel-001",
+            )
+            retried = runs.retry_run(
+                run.run_id,
+                reason="retry after cancelled dry run",
+                actor_user_id="[REDACTED_OWNER]",
+                request_id="req-retry-001",
+            )
+            retried.transition_to(RunStatus.PROVISIONING)
+            retried.transition_to(RunStatus.RUNNING)
+            retried.add_turn(
+                TerminalTurn(
+                    turn_index=0,
+                    command="python retry_solve.py",
+                    cwd="/workspace",
+                    started_at=datetime(2026, 5, 28, 13, 0, 0, tzinfo=timezone.utc),
+                    completed_at=datetime(2026, 5, 28, 13, 0, 2, tzinfo=timezone.utc),
+                    exit_code=0,
+                    stdout="created retry.xlsx\n",
+                    stderr="",
+                    changed_paths=["retry.xlsx"],
+                )
+            )
+            retried.transition_to(RunStatus.EVALUATING)
+            retried.attach_artifact(
+                ArtifactRef(
+                    artifact_id="run_lifecycle_001-retry-trajectory",
+                    kind=ArtifactKind.TRAJECTORY,
+                    uri="minio://runs/run_lifecycle_001/retry/trajectory.jsonl",
+                    media_type="application/x-ndjson",
+                    sha256="5" * 64,
+                    size_bytes=512,
+                    metadata={"storage_key": "runs/run_lifecycle_001/retry/trajectory.jsonl"},
+                )
+            )
+            retried.attach_evaluator_result(
+                EvaluatorResult(
+                    evaluator_id="llm-judge-v0",
+                    status="completed",
+                    score=0.88,
+                    metrics={"task_success": True},
+                    verbal_feedback="Retry output is correct.",
+                    judge=JudgeConfig(
+                        provider="openai",
+                        model_name="gpt-5",
+                        rubric_version="latent-skill-benchmark-2026-05-28",
+                    ),
+                    artifact_refs=["minio://runs/run_lifecycle_001/retry/evaluation/report.json"],
+                )
+            )
+            retried.transition_to(RunStatus.SUCCEEDED)
+            runs.save_run(retried)
+
+            loaded = runs.get_run(run.run_id)
+            listed = runs.list_runs(
+                project_id="pilot-project",
+                benchmark_suite="SkillLearnBench",
+                task_family="spreadsheet-from-documents",
+                task_instance_id="conference-expense-03",
+                created_by_user_id="[REDACTED_OWNER]",
+                created_after=datetime(2000, 1, 1, tzinfo=timezone.utc),
+                created_before=datetime(2100, 1, 1, tzinfo=timezone.utc),
+            )
+            events = runs.list_status_events(run.run_id)
+
+        self.assertEqual(canceled.status, RunStatus.CANCELED)
+        self.assertEqual(retried.status, RunStatus.SUCCEEDED)
+        self.assertEqual(loaded.status, RunStatus.SUCCEEDED)
+        self.assertEqual(loaded.created_by_user_id, "[REDACTED_OWNER]")
+        self.assertEqual(loaded.evaluator_configs[0].evaluator_id, "llm-judge-v0")
+        self.assertEqual(loaded.trajectory[0].command, "python retry_solve.py")
+        self.assertEqual(loaded.evaluator_result.score, 0.88)
+        self.assertEqual([item.run_id for item in listed], [run.run_id])
+        self.assertEqual([event.event_type for event in events], ["run.created", "run.canceled", "run.retried"])
+        self.assertEqual(events[0].from_status, None)
+        self.assertEqual(events[0].to_status, RunStatus.QUEUED)
+        self.assertEqual(events[1].from_status, RunStatus.QUEUED)
+        self.assertEqual(events[1].to_status, RunStatus.CANCELED)
+        self.assertEqual(events[1].reason, "user requested cancellation")
+        self.assertEqual(events[1].actor_user_id, "[REDACTED_OWNER]")
+        self.assertEqual(events[1].request_id, "req-cancel-001")
+        self.assertEqual(events[2].from_status, RunStatus.CANCELED)
+        self.assertEqual(events[2].to_status, RunStatus.QUEUED)
+        self.assertEqual(events[2].attempt_id, "run_lifecycle_001:attempt:2")
+
+    def test_run_repository_rejects_invalid_lifecycle_transitions(self):
+        run = _completed_run()
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            runs = RunRepository(session)
+
+            runs.save_run(run)
+
+            with self.assertRaisesRegex(ValueError, "Invalid run status transition"):
+                runs.cancel_run(run.run_id, reason="too late")
+
+            with self.assertRaisesRegex(ValueError, "can only retry failed or canceled runs"):
+                runs.retry_run(run.run_id, reason="retry succeeded run")
+
 
 def _completed_run() -> RunRecord:
     run = RunRecord.create(
@@ -232,6 +370,17 @@ def _completed_run() -> RunRecord:
             metadata={"runner_contract": "skillflow-original-wrapper-v0"},
         ),
         metadata={"benchmark_adapter": "SkillFlow"},
+        evaluator_configs=[
+            EvaluatorConfig(
+                evaluator_id="llm-judge-v0",
+                mode="llm_judge",
+                judge=JudgeConfig(
+                    provider="openai",
+                    model_name="gpt-5",
+                    rubric_version="latent-skill-benchmark-2026-05-28",
+                ),
+            )
+        ],
     )
     run.transition_to(RunStatus.PROVISIONING)
     run.transition_to(RunStatus.RUNNING)
@@ -300,3 +449,45 @@ def _completed_run() -> RunRecord:
     )
     run.transition_to(RunStatus.SUCCEEDED)
     return run
+
+
+def _queued_run(*, run_id: str) -> RunRecord:
+    return RunRecord.create(
+        run_id=run_id,
+        project_id="pilot-project",
+        owner_team="pilot group",
+        task=BenchmarkTaskInstance(
+            benchmark_suite="SkillLearnBench",
+            benchmark_version="git:cxcscmu/SkillLearnBench@abc123",
+            task_family="spreadsheet-from-documents",
+            instance_id="conference-expense-03",
+            source_uri="https://github.com/cxcscmu/SkillLearnBench",
+            input_artifact_refs=["minio://benchmarks/skilllearnbench/conference/input.tar.zst"],
+            required_artifacts=["trajectory", "workspace_snapshot", "evaluator_report"],
+        ),
+        model=ModelConfig(
+            provider="openai",
+            model_name="gpt-5",
+            mode=ModelMode.API,
+            prompt_template_version="terminal-agent-v0",
+        ),
+        runner=RunnerConfig(
+            kind=RunnerKind.ORIGINAL_BENCHMARK,
+            sandbox_backend=SandboxBackend.DOCKER_TERMINAL,
+            image="python:3.12-slim",
+            entrypoint=["python", "-m", "skilllearnbench.runner"],
+            internet_access=True,
+            resource_limits={"cpu": 2, "memory_gib": 8, "timeout_seconds": 3600},
+        ),
+        evaluator_configs=[
+            EvaluatorConfig(
+                evaluator_id="llm-judge-v0",
+                mode="llm_judge",
+                judge=JudgeConfig(
+                    provider="openai",
+                    model_name="gpt-5",
+                    rubric_version="latent-skill-benchmark-2026-05-28",
+                ),
+            )
+        ],
+    )

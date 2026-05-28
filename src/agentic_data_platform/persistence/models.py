@@ -159,6 +159,7 @@ class RunRow(Base):
 
     run_id = mapped_column(String(128), primary_key=True)
     project_id = mapped_column(String(128), ForeignKey("projects.project_id"), nullable=False)
+    created_by_user_id = mapped_column(String(128), ForeignKey("users.user_id"), nullable=True)
     owner_team_id = mapped_column(String(128), ForeignKey("teams.team_id"), nullable=True)
     owner_team_name_snapshot = mapped_column(String(255), nullable=False)
     benchmark_suite = mapped_column(String(128), nullable=False)
@@ -182,6 +183,7 @@ class RunRow(Base):
     runner_internet_access = mapped_column(Boolean, nullable=False, default=True)
     runner_resource_limits = mapped_column(JSON, nullable=False, default=dict)
     runner_metadata = mapped_column(JSON, nullable=False, default=dict)
+    evaluator_configs = mapped_column(JSON, nullable=True, default=list)
     status = mapped_column(String(64), nullable=False)
     failure_reason = mapped_column(Text, nullable=True)
     metadata_json = mapped_column("metadata", JSON, nullable=False, default=dict)
@@ -192,6 +194,7 @@ class RunRow(Base):
     turns = relationship("RunTerminalTurnRow", back_populates="run", cascade="all, delete-orphan")
     artifacts = relationship("ArtifactRow", back_populates="run", cascade="all, delete-orphan")
     evaluator_results = relationship("EvaluatorResultRow", back_populates="run", cascade="all, delete-orphan")
+    status_events = relationship("RunStatusEventRow", back_populates="run", cascade="all, delete-orphan")
 
 
 class RunAttemptRow(Base):
@@ -213,6 +216,27 @@ class RunAttemptRow(Base):
     turns = relationship("RunTerminalTurnRow", back_populates="attempt", cascade="all, delete-orphan")
     artifacts = relationship("ArtifactRow", back_populates="attempt")
     evaluator_results = relationship("EvaluatorResultRow", back_populates="attempt")
+    status_events = relationship("RunStatusEventRow", back_populates="attempt")
+
+
+class RunStatusEventRow(Base):
+    __tablename__ = "run_status_events"
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id = mapped_column(String(128), nullable=False, unique=True)
+    run_id = mapped_column(String(128), ForeignKey("runs.run_id"), nullable=False)
+    attempt_id = mapped_column(String(160), ForeignKey("run_attempts.attempt_id"), nullable=True)
+    event_type = mapped_column(String(128), nullable=False)
+    from_status = mapped_column(String(64), nullable=True)
+    to_status = mapped_column(String(64), nullable=False)
+    reason = mapped_column(Text, nullable=True)
+    actor_user_id = mapped_column(String(128), ForeignKey("users.user_id"), nullable=True)
+    request_id = mapped_column(String(128), nullable=True)
+    metadata_json = mapped_column("metadata", JSON, nullable=False, default=dict)
+    created_at = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run = relationship("RunRow", back_populates="status_events")
+    attempt = relationship("RunAttemptRow", back_populates="status_events")
 
 
 class RunTerminalTurnRow(Base):

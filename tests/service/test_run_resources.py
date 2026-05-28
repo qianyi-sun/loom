@@ -2,7 +2,6 @@ import json
 import unittest
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
@@ -25,7 +24,8 @@ from agentic_data_platform.domain.run_records import (
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
-from agentic_data_platform.service.run_resources import register_run_routes
+from agentic_data_platform.service.app import create_app
+from agentic_data_platform.service.config import ServiceSettings
 
 
 class RunResourcesTest(unittest.TestCase):
@@ -42,6 +42,12 @@ class RunResourcesTest(unittest.TestCase):
             IdentityRepository(session).create_team(
                 team_id="pilot-project",
                 name="pilot group",
+            )
+            IdentityRepository(session).create_user(
+                user_id="[REDACTED_OWNER]",
+                email="[REDACTED_OWNER]@example.com",
+                display_name="[REDACTED_OWNER]",
+                team_id="pilot-project",
             )
             projects = ProjectRepository(session)
             projects.create_project(
@@ -100,6 +106,7 @@ class RunResourcesTest(unittest.TestCase):
             response.json(),
             {
                 "run": RunDashboardProjection.from_run(self.completed_run).to_dict(),
+                "lifecycle_events": [],
                 "request_id": "req-run-001",
             },
         )
@@ -146,21 +153,194 @@ class RunResourcesTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_create_run_queues_record_and_survives_new_app_instance(self):
+        response = self.client.post(
+            "/runs",
+            json=_run_create_payload(run_id="run_create_001"),
+            headers={"X-Request-ID": "req-create-001"},
+        )
 
-def _app(engine) -> FastAPI:
-    app = FastAPI()
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-create-001")
+        self.assertEqual(payload["run"]["run_id"], "run_create_001")
+        self.assertEqual(payload["run"]["status"], "queued")
+        self.assertEqual(payload["run"]["created_by_user_id"], "[REDACTED_OWNER]")
+        self.assertEqual(payload["run"]["task"]["benchmark_suite"], "SkillLearnBench")
+        self.assertEqual(payload["run"]["evaluators"][0]["evaluator_id"], "llm-judge-v0")
+        self.assertEqual(payload["run"]["evaluators"][0]["mode"], "llm_judge")
+        self.assertEqual(payload["run"]["evaluators"][0]["judge"]["rubric_version"], "latent-skill-benchmark-2026-05-28")
+        self.assertEqual(payload["lifecycle_events"][0]["event_type"], "run.created")
+        self.assertEqual(payload["lifecycle_events"][0]["from_status"], None)
+        self.assertEqual(payload["lifecycle_events"][0]["to_status"], "queued")
 
-    @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next):
-        request.state.request_id = request.headers.get("X-Request-ID", "")
-        return await call_next(request)
+        restarted_client = TestClient(_app(self.engine))
+        detail = restarted_client.get("/runs/run_create_001", headers={"X-Request-ID": "req-detail-001"})
 
-    def session_dependency():
-        with session_scope(engine) as session:
-            yield session
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["request_id"], "req-detail-001")
+        self.assertEqual(detail.json()["run"]["run_id"], "run_create_001")
+        self.assertEqual(detail.json()["run"]["status"], "queued")
+        self.assertEqual(detail.json()["run"]["evaluators"][0]["evaluator_id"], "llm-judge-v0")
+        self.assertEqual(detail.json()["lifecycle_events"][0]["event_type"], "run.created")
 
-    register_run_routes(app, session_dependency)
-    return app
+    def test_create_run_rejects_invalid_nested_request_with_422(self):
+        payload = _run_create_payload(run_id="run_bad_payload_001")
+        del payload["task"]["source_uri"]
+
+        response = self.client.post(
+            "/runs",
+            json=payload,
+            headers={"X-Request-ID": "req-bad-payload-001"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "validation_error")
+        self.assertEqual(response.json()["error"]["request_id"], "req-bad-payload-001")
+
+    def test_create_run_rejects_unknown_user_with_404(self):
+        payload = _run_create_payload(run_id="run_unknown_user_001")
+        payload["created_by_user_id"] = "missing-user"
+
+        response = self.client.post(
+            "/runs",
+            json=payload,
+            headers={"X-Request-ID": "req-unknown-user-001"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+        self.assertIn("User not found", response.json()["error"]["message"])
+
+    def test_list_runs_filters_by_benchmark_task_creator_and_time_range(self):
+        create_response = self.client.post("/runs", json=_run_create_payload(run_id="run_filter_001"))
+        self.assertEqual(create_response.status_code, 201)
+
+        response = self.client.get(
+            "/runs"
+            "?benchmark_suite=SkillLearnBench"
+            "&task_family=spreadsheet-from-documents"
+            "&task_instance_id=conference-expense-03"
+            "&created_by_user_id=[REDACTED_OWNER]"
+            "&created_after=2000-01-01T00:00:00Z"
+            "&created_before=2100-01-01T00:00:00Z",
+            headers={"X-Request-ID": "req-filter-run-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-filter-run-001")
+        self.assertEqual([item["run_id"] for item in payload["runs"]], ["run_filter_001"])
+
+    def test_cancel_run_records_lifecycle_event_and_rejects_terminal_transition(self):
+        create_response = self.client.post("/runs", json=_run_create_payload(run_id="run_cancel_001"))
+        self.assertEqual(create_response.status_code, 201)
+
+        response = self.client.post(
+            "/runs/run_cancel_001/cancel",
+            json={"reason": "user requested cancellation", "actor_user_id": "[REDACTED_OWNER]"},
+            headers={"X-Request-ID": "req-cancel-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "canceled")
+        self.assertEqual(payload["run"]["failure_reason"], "user requested cancellation")
+        self.assertEqual(payload["lifecycle_events"][-1]["event_type"], "run.canceled")
+        self.assertEqual(payload["lifecycle_events"][-1]["from_status"], "queued")
+        self.assertEqual(payload["lifecycle_events"][-1]["to_status"], "canceled")
+
+        unknown_actor = self.client.post(
+            "/runs/run_cancel_001/cancel",
+            json={"reason": "actor typo", "actor_user_id": "missing-user"},
+            headers={"X-Request-ID": "req-missing-actor-001"},
+        )
+
+        self.assertEqual(unknown_actor.status_code, 404)
+        self.assertEqual(unknown_actor.json()["error"]["code"], "not_found")
+
+        rejected = self.client.post(
+            "/runs/run_cancel_001/cancel",
+            json={"reason": "cancel twice"},
+            headers={"X-Request-ID": "req-cancel-again-001"},
+        )
+
+        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.json()["error"]["code"], "conflict")
+        self.assertEqual(rejected.json()["error"]["request_id"], "req-cancel-again-001")
+        self.assertIn("Invalid run status transition", rejected.json()["error"]["message"])
+
+    def test_retry_canceled_run_requeues_same_run_with_next_attempt(self):
+        self.assertEqual(
+            self.client.post("/runs", json=_run_create_payload(run_id="run_retry_001")).status_code,
+            201,
+        )
+        self.assertEqual(
+            self.client.post("/runs/run_retry_001/cancel", json={"reason": "dry run stopped"}).status_code,
+            200,
+        )
+
+        response = self.client.post(
+            "/runs/run_retry_001/retry",
+            json={"reason": "retry after config fix", "actor_user_id": "[REDACTED_OWNER]"},
+            headers={"X-Request-ID": "req-retry-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "queued")
+        self.assertEqual(payload["run"]["failure_reason"], None)
+        self.assertEqual(payload["lifecycle_events"][-1]["event_type"], "run.retried")
+        self.assertEqual(payload["lifecycle_events"][-1]["from_status"], "canceled")
+        self.assertEqual(payload["lifecycle_events"][-1]["to_status"], "queued")
+        self.assertEqual(payload["lifecycle_events"][-1]["attempt_id"], "run_retry_001:attempt:2")
+
+    def test_retry_rejects_non_terminal_retry_candidate_with_structured_error(self):
+        create_response = self.client.post("/runs", json=_run_create_payload(run_id="run_retry_reject_001"))
+        self.assertEqual(create_response.status_code, 201)
+
+        response = self.client.post(
+            "/runs/run_retry_reject_001/retry",
+            json={"reason": "not terminal yet"},
+            headers={"X-Request-ID": "req-retry-reject-001"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "conflict")
+        self.assertIn("can only retry failed or canceled runs", response.json()["error"]["message"])
+
+    def test_run_action_rejects_blank_reason_with_structured_422(self):
+        create_response = self.client.post("/runs", json=_run_create_payload(run_id="run_blank_reason_001"))
+        self.assertEqual(create_response.status_code, 201)
+
+        response = self.client.post(
+            "/runs/run_blank_reason_001/cancel",
+            json={"reason": "", "actor_user_id": "[REDACTED_OWNER]"},
+            headers={"X-Request-ID": "req-blank-reason-001"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "validation_error")
+        self.assertEqual(response.json()["error"]["request_id"], "req-blank-reason-001")
+
+        detail = self.client.get("/runs/run_blank_reason_001")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["run"]["status"], "queued")
+        self.assertEqual([event["event_type"] for event in detail.json()["lifecycle_events"]], ["run.created"])
+
+
+def _app(engine):
+    return create_app(
+        ServiceSettings(
+            app_name="agentic-data-platform-test",
+            environment="test",
+            database_url="",
+            redis_url="",
+            object_storage_endpoint="",
+            object_storage_bucket="",
+        ),
+        database_engine=engine,
+    )
 
 
 def _completed_run(run_id: str, *, project_id: str) -> RunRecord:
@@ -273,3 +453,52 @@ def _base_run(run_id: str, *, project_id: str) -> RunRecord:
         ),
         metadata={"benchmark_adapter": "SkillFlow"},
     )
+
+
+def _run_create_payload(*, run_id: str) -> dict:
+    return {
+        "run_id": run_id,
+        "project_id": "pilot-project",
+        "created_by_user_id": "[REDACTED_OWNER]",
+        "owner_team": "pilot group",
+        "task": {
+            "benchmark_suite": "SkillLearnBench",
+            "benchmark_version": "git:cxcscmu/SkillLearnBench@abc123",
+            "task_family": "spreadsheet-from-documents",
+            "instance_id": "conference-expense-03",
+            "source_uri": "https://github.com/cxcscmu/SkillLearnBench",
+            "input_artifact_refs": ["minio://benchmarks/skilllearnbench/conference/input.tar.zst"],
+            "required_artifacts": ["trajectory", "workspace_snapshot", "evaluator_report"],
+            "metadata": {"instruction": "Create a spreadsheet from receipts."},
+        },
+        "model": {
+            "provider": "openai",
+            "model_name": "gpt-5",
+            "mode": "api",
+            "prompt_template_version": "terminal-agent-v0",
+            "model_version": "2026-05-28",
+            "metadata": {"temperature": 0},
+        },
+        "runner": {
+            "kind": "original_benchmark",
+            "sandbox_backend": "docker_terminal",
+            "image": "python:3.12-slim",
+            "entrypoint": ["python", "-m", "skilllearnbench.runner"],
+            "internet_access": True,
+            "resource_limits": {"cpu": 2, "memory_gib": 8, "timeout_seconds": 3600},
+            "metadata": {"runner_contract": "skilllearnbench-original-wrapper-v0"},
+        },
+        "evaluators": [
+            {
+                "evaluator_id": "llm-judge-v0",
+                "mode": "llm_judge",
+                "judge": {
+                    "provider": "openai",
+                    "model_name": "gpt-5",
+                    "rubric_version": "latent-skill-benchmark-2026-05-28",
+                },
+                "metadata": {"evaluation_mode": "llm_judge"},
+            }
+        ],
+        "metadata": {"benchmark_adapter": "SkillLearnBench"},
+    }
