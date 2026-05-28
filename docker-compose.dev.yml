@@ -31,6 +31,9 @@ services:
       retries: 20
 
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
     image: agentic-data-shared dev:latest
     working_dir: /workspace
     env_file:
@@ -50,6 +53,25 @@ services:
       minio:
         condition: service_started
     command: python -m unittest discover -s tests -v
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: postgresql://agentic:[REDACTED_DB_PASSWORD]@postgres:5432/agentic_data_platform
+    volumes:
+      - .:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.persistence.migrations
 
   postgres:
     image: postgres:16-alpine

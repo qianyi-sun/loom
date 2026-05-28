@@ -104,6 +104,7 @@ Core object model:
 - `SkillObject`: flexible skill artifact; not assumed to be `skill.md`.
 
 Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmark-mvp.md).
+Persistence design: [postgres-persistence.md](docs/architecture/postgres-persistence.md).
 Original runner wrapper research:
 [benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
 
@@ -114,11 +115,12 @@ Original runner wrapper research:
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Started | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | Started | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation |
+| Docker dev environment | Started | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration smoke checks |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
 | Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
+| Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
@@ -135,6 +137,8 @@ Original runner wrapper research:
 - User runner/pipeline contract: [#21](https://github.com/carinrc/agentic-data-platform/issues/21)
 - SkillFlow / SkillLearnBench adapters: [#22](https://github.com/carinrc/agentic-data-platform/issues/22)
 - Flexible skill object model: [#23](https://github.com/carinrc/agentic-data-platform/issues/23)
+- Backend service epic: [#49](https://github.com/carinrc/agentic-data-platform/issues/49)
+- Postgres persistence foundation: [#51](https://github.com/carinrc/agentic-data-platform/issues/51)
 
 ## Repository Layout
 
@@ -180,9 +184,16 @@ Run the Docker development checks:
 docker compose -f docker-compose.dev.yml up --build app
 ```
 
+Run database migrations against the local Compose Postgres service:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm --build migrate
+```
+
 Start the long-running development API service:
 
 ```bash
+docker compose -f docker-compose.dev.yml run --rm --build migrate
 docker compose -f docker-compose.dev.yml up --build api
 curl http://localhost:8000/healthz
 ```
