@@ -2,8 +2,9 @@ name: CI
 
 on:
   pull_request:
+    branches: [dev, main]
   push:
-    branches: [main]
+    branches: [dev, main]
 
 jobs:
   repository-checks:
@@ -18,11 +19,12 @@ jobs:
       - name: Check required files
         run: |
           test -f README.md
-          test -f AGENTS.md
           test -f CONTRIBUTING.md
           test -f SECURITY.md
           test -f VERSION
           test -f docs/project-brief.md
+          test -f docs/engineering/branching-and-releases.md
+          test -f docs/development/docker-dev-environment.md
           test -f docs/engineering/github-setup.md
           test -f docs/engineering/release-and-environments.md
       - name: Check version format

@@ -1,0 +1,49 @@
+name: Bug
+description: Report broken behavior, failed checks, or incorrect platform results
+title: "[Bug] "
+labels: ["bug", "type:bug"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Backend / API
+        - Data contract
+        - Benchmark adapter
+        - Sandbox / runner
+        - Evaluator
+        - Storage / artifacts
+        - Dashboard / UI
+        - CI / deployment
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed Behavior
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include commands, run ids, benchmark/task ids, logs, or screenshots when available.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is blocked and how severe is it?
+    validations:
+      required: true

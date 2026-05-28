@@ -111,6 +111,8 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 | --- | --- | --- |
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Compose + Postgres + Redis + MinIO recommended |
+| Development workflow | Started | `dev` is the default integration branch; `main` is reserved for production releases |
+| Docker dev environment | Started | `Dockerfile.dev` and `docker-compose.dev.yml` provide Python tests plus Postgres, Redis, and MinIO |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
@@ -131,12 +133,12 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 ```text
 .github/                 Issue templates, PR template, CI, and deploy workflows.
 docs/architecture/       Platform architecture and MVP design specs.
+docs/development/        Local developer setup and Docker development environment.
 docs/engineering/        GitHub, org, release, and environment setup notes.
 docs/infra/              Deployment and infrastructure planning.
 docs/requirements/       Research-team intake template and requirements matrix.
 src/                      Platform Python package and domain contracts.
 tests/                    Unit tests for package behavior and data contracts.
-MEMORY.md                Durable project context for future sessions.
 ```
 
 ## Development
@@ -148,10 +150,18 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
+Run the Docker development checks:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build app
+```
+
 ## Collaboration Notes
 
-- Work through pull requests.
+- Branch from `dev` and open normal pull requests into `dev`.
+- Use `main` only for production release promotion from `dev`.
 - Keep related GitHub issues and project items updated.
-- Keep `MEMORY.md` synchronized when project state changes.
+- Update project documentation in the same pull request as code, workflow,
+  deployment, or contract changes.
 - Do not commit credentials, private endpoints, dataset dumps, or large
   generated artifacts.

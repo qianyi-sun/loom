@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project context and architecture
+    url: https://github.com/carinrc/agentic-data-platform/tree/dev/docs
+    about: Read the current project docs before opening broad scope or architecture issues.

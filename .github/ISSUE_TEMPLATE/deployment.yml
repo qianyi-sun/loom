@@ -1,0 +1,45 @@
+name: Deployment / Operations
+description: Track dev, staging, production, CI/CD, or runtime environment work
+title: "[Deploy] "
+labels: ["workstream:infra", "type:deployment"]
+body:
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local developer Docker
+        - Shared dev
+        - Staging
+        - Production
+        - CI/CD
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What deployment or operations outcome should be true when this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: Proposed Change
+      description: Infrastructure, workflow, config, secrets, monitoring, rollback, or runbook changes.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation Plan
+      description: How will this be tested without risking production workloads or credentials?
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation Updates
+      description: Which docs/runbooks need to change with this deployment work?
+    validations:
+      required: true

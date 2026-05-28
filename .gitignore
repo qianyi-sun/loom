@@ -23,6 +23,10 @@ build/
 !.env.example
 *.local
 
+# Owner-local Codex context
+AGENTS.md
+MEMORY.md
+
 # Runtime artifacts
 .runtime/
 data/

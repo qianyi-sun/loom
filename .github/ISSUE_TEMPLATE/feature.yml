@@ -1,8 +1,32 @@
 name: Feature
 description: Track a product, platform, or workflow feature
 title: "[Feature] "
-labels: ["feature"]
+labels: ["enhancement", "type:feature"]
 body:
+  - type: dropdown
+    id: workstream
+    attributes:
+      label: Workstream
+      options:
+        - Stakeholders / scope
+        - Infra / deployment
+        - Requirements
+        - Product / architecture
+        - Engineering system
+        - Operations / governance
+        - MVP pilot
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0 - urgent blocker
+        - P1 - high priority
+        - P2 - normal priority
+    validations:
+      required: true
   - type: textarea
     id: problem
     attributes:
@@ -22,5 +46,12 @@ body:
     attributes:
       label: Acceptance Criteria
       description: How do we know this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation Updates
+      description: Which architecture, development, deployment, or user docs must change with this feature?
     validations:
       required: true

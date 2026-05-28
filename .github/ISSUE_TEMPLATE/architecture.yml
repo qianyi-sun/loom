@@ -1,0 +1,49 @@
+name: Architecture Decision
+description: Propose or record a platform architecture decision
+title: "[Architecture] "
+labels: ["workstream:product-design", "type:decision"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What problem, constraint, or tradeoff requires an architecture decision?
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Run lifecycle
+        - Data contract
+        - Benchmark adapter
+        - Model provider
+        - Sandbox backend
+        - Evaluator
+        - Storage / artifacts
+        - Dashboard / reporting
+        - Deployment / operations
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What decision or design are you proposing?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: List viable alternatives and why they are weaker for this project.
+    validations:
+      required: true
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Consequences
+      description: What does this enable, block, simplify, or make harder?
+    validations:
+      required: true

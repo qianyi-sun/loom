@@ -1,0 +1,47 @@
+name: Release
+description: Track a production release from dev to main
+title: "[Release] v"
+labels: ["type:release", "workstream:engineering"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Semantic version planned for this production release.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: included
+    attributes:
+      label: Included Changes
+      description: Link PRs and issues already validated on dev.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Dev Validation Evidence
+      description: CI runs, smoke tests, deployment links, benchmark runs, or dashboard checks.
+    validations:
+      required: true
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback Plan
+      description: How to revert or mitigate this release if production validation fails.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Release Checklist
+      options:
+        - label: "Release PR targets `main` and uses `dev` as the source branch."
+          required: true
+        - label: "`VERSION` and `CHANGELOG.md` are updated."
+          required: true
+        - label: "Documentation is current for all included code changes."
+          required: true
+        - label: "No production credentials or sensitive data are committed."
+          required: true

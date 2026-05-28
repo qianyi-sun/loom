@@ -1,6 +1,8 @@
 name: Deploy
 
 on:
+  push:
+    branches: [dev]
   workflow_dispatch:
     inputs:
       environment:
@@ -10,15 +12,30 @@ on:
         type: choice
         options:
           - dev
+          - prod
 
 jobs:
-  deploy-placeholder:
+  deploy-dev:
+    if: github.event_name == 'push' || inputs.environment == 'dev'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: dev
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Deployment not configured yet
+      - name: Dev deployment placeholder
         run: |
-          echo "Deployment target is not configured yet."
-          echo "Add environment-specific deployment steps after the MVP architecture is approved."
+          echo "Deploy dev from branch: ${GITHUB_REF_NAME}"
+          echo "Replace this with shared dev Docker Compose deployment after host credentials are configured."
+  deploy-prod:
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Production deployment placeholder
+        run: |
+          echo "Production deploys must come from main after a release PR from dev."
+          echo "Replace this with the approved production deployment path."

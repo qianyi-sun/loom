@@ -1,8 +1,22 @@
 name: Task
 description: Track implementation, operations, or research work
 title: "[Task] "
-labels: ["task"]
+labels: ["type:task"]
 body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Code implementation
+        - Documentation
+        - CI/CD
+        - Dev environment
+        - GitHub/project management
+        - Research intake
+        - Operations
+    validations:
+      required: true
   - type: textarea
     id: objective
     attributes:
@@ -17,3 +31,10 @@ body:
       description: Relevant context, constraints, or links.
     validations:
       required: false
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: What command, review, deployment, or manual check proves completion?
+    validations:
+      required: true
