@@ -45,7 +45,7 @@ run_compose_smoke() {
 
   if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
     log "Running database migrations"
-    compose run --rm --build -T migrate
+    compose run --rm --build -T migrate </dev/null
   fi
 
   log "Starting API service"
@@ -53,7 +53,7 @@ run_compose_smoke() {
 
   if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
     log "Running application smoke checks"
-    compose run --rm -T app
+    compose run --rm -T app </dev/null
   fi
 
   log "Checking API health endpoint"
@@ -153,13 +153,13 @@ printf '[deploy-dev] Starting shared development dependencies\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio
 if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
   printf '[deploy-dev] Running database migrations\n'
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T migrate
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T migrate </dev/null
 fi
 printf '[deploy-dev] Starting API service\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --build api
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
   printf '[deploy-dev] Running application smoke checks\n'
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T app
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T app </dev/null
 fi
 printf '[deploy-dev] Checking API health endpoint\n'
 for attempt in \$(seq 1 30); do
