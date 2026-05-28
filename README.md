@@ -120,6 +120,7 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 | Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
+| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
