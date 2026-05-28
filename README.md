@@ -1,29 +1,145 @@
 # Agentic Data Platform
 
-Private platform workspace for agentic data generation and evaluation.
+Internal platform for shared agentic data generation, terminal-agent benchmark
+execution, evaluation, artifact tracking, and research progress visibility.
 
-This project is being built as an independent system inspired by the local
-`coder-harbor-cloud` reference repository, but it should not copy that codebase
-or inherit its cloud/runtime assumptions. Storage, sandbox execution,
-evaluation runners, and deployment targets will be replaced behind explicit
-interfaces.
+This repository is a new implementation. The local `coder-harbor-cloud`
+repository is useful as a reference for run tracking, task directories, and
+control-plane ideas, but this project should not copy its code or inherit its
+cloud/runtime assumptions.
 
-## Initial Scope
+## Motivation
 
-- Agentic data generation workflows.
-- Evaluation workflows for generated trajectories, artifacts, and task results.
-- Pluggable storage backend abstraction.
-- Pluggable sandbox/execution backend abstraction.
-- Project management, CI, and deployment scaffolding through GitHub.
+Multiple agent research subteams need to generate data, run evaluations, track
+artifacts, and report progress. If each team builds its own Docker sandboxes,
+benchmark runners, storage layout, evaluator scripts, dashboards, and deployment
+path, the organization pays the same engineering cost several times.
+
+The platform provides shared infrastructure for the repeated parts while keeping
+research workflows flexible.
+
+```mermaid
+flowchart LR
+    Teams["stakeholder groups"] --> Platform["Shared platform"]
+    Platform --> Runs["Generation and evaluation runs"]
+    Platform --> Artifacts["Artifacts, trajectories, logs"]
+    Platform --> Metrics["Metrics and evaluator feedback"]
+    Platform --> PM["PM and research dashboards"]
+
+    Teams -. bring .-> Workflows["Custom workflows, benchmark runners, model APIs"]
+    Workflows --> Platform
+```
+
+## What The Platform Does
+
+- Runs agentic data generation and evaluation workflows.
+- Executes terminal-agent benchmarks inside Docker sandboxes for the MVP.
+- Records full trajectories, stdout/stderr, final workspace snapshots, artifacts,
+  evaluator feedback, metrics, and failure reasons.
+- Keeps model access API-based for v0.
+- Stores metadata in Postgres and artifacts in a local MinIO-compatible object
+  store for the first deployment.
+- Gives stakeholder groups and PMs a shared view of progress, quality, failures, and
+  reusable data.
+
+## Current MVP Direction
+
+The first high-priority pilot comes from **pilot group**.
+It targets full adaptation of SkillFlow and SkillLearnBench as terminal-agent
+skill-learning benchmarks.
+
+```mermaid
+flowchart TB
+    Suite["SkillFlow / SkillLearnBench"] --> Adapter["Benchmark adapter"]
+    Adapter --> Run["Platform run"]
+    Run --> Sandbox["Docker terminal sandbox"]
+    Sandbox --> Trajectory["Full command/action trajectory"]
+    Sandbox --> Workspace["Final workspace snapshot"]
+    Trajectory --> Evaluator["LLM-as-judge evaluator"]
+    Workspace --> Evaluator
+    Evaluator --> Result["Metrics + verbal feedback"]
+    Result --> Dashboard["Research dashboard"]
+    Trajectory --> Store["MinIO artifacts"]
+    Workspace --> Store
+```
+
+MVP constraints:
+
+- API model access only.
+- Docker terminal sandbox only.
+- Internet access allowed inside the pilot sandbox for now.
+- No direct model-weight inference in v0.
+- Original benchmark runners are wrapped first.
+- A user-friendly runner/pipeline contract is still required so future teams can
+  bring their own workflows.
+
+## Architecture Sketch
+
+```mermaid
+flowchart LR
+    UI["Web / API"] --> API["Control plane API"]
+    API --> DB[("Postgres metadata")]
+    API --> Queue["Redis queue"]
+    API --> Worker["Worker"]
+    Worker --> Benchmark["BenchmarkAdapter"]
+    Worker --> Sandbox["DockerTerminalSandbox"]
+    Worker --> Model["ModelProvider API"]
+    Worker --> Eval["EvaluatorAdapter"]
+    Sandbox --> Store[("MinIO artifacts")]
+    Eval --> Store
+    Worker --> DB
+    Store --> Dashboard["Dashboard views"]
+    DB --> Dashboard
+```
+
+Core object model:
+
+- `BenchmarkSuite`: SkillFlow, SkillLearnBench, or future benchmark families.
+- `TaskInstance`: one concrete benchmark instance and its source metadata.
+- `Run`: a platform-tracked execution attempt with lifecycle state.
+- `InteractionTurn`: command/action, stdout, stderr, exit code, and timing.
+- `WorkspaceSnapshot`: final file tree and generated files.
+- `Artifact`: durable object-store reference with metadata and lineage.
+- `EvaluatorResult`: metrics, verbal feedback, judge model, and rubric version.
+- `SkillObject`: flexible skill artifact; not assumed to be `skill.md`.
+
+Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmark-mvp.md).
+
+## Current Progress
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
+| Infra discovery | In progress | `shared dev` selected for v0; Docker Compose + Postgres + Redis + MinIO recommended |
+| Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
+| Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
+| MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
+| pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
+
+## Tracking
+
+- Project board: [Agentic Data Platform MVP](https://github.com/orgs/carinrc/projects/1)
+- Requirements discovery: [#3](https://github.com/carinrc/agentic-data-platform/issues/3)
+- Architecture design: [#4](https://github.com/carinrc/agentic-data-platform/issues/4)
+- User runner/pipeline contract: [#21](https://github.com/carinrc/agentic-data-platform/issues/21)
+- SkillFlow / SkillLearnBench adapters: [#22](https://github.com/carinrc/agentic-data-platform/issues/22)
+- Flexible skill object model: [#23](https://github.com/carinrc/agentic-data-platform/issues/23)
 
 ## Repository Layout
 
 ```text
-docs/                    Product, architecture, and operations notes.
 .github/                 Issue templates, PR template, CI, and deploy workflows.
+docs/architecture/       Platform architecture and MVP design specs.
+docs/engineering/        GitHub, org, release, and environment setup notes.
+docs/infra/              Deployment and infrastructure planning.
+docs/requirements/       Research-team intake template and requirements matrix.
+MEMORY.md                Durable project context for future sessions.
 ```
 
-## Current Status
+## Collaboration Notes
 
-This repository is initialized for planning and deployment setup. Application
-code will be added after the architecture and MVP boundaries are written down.
+- Work through pull requests.
+- Keep related GitHub issues and project items updated.
+- Keep `MEMORY.md` synchronized when project state changes.
+- Do not commit credentials, private endpoints, dataset dumps, or large
+  generated artifacts.
