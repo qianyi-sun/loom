@@ -91,14 +91,14 @@ deploy_remote() {
     --exclude '.pytest_cache' \
     --exclude '.ruff_cache' \
     --exclude '.mypy_cache' \
-    --exclude 'node_modules' \
-    --exclude 'dist' \
-    --exclude 'build' \
-    --exclude '.runtime' \
-    --exclude 'data' \
-    --exclude 'artifacts' \
-    --exclude 'outputs' \
-    --exclude 'logs' \
+    --exclude '/node_modules' \
+    --exclude '/dist' \
+    --exclude '/build' \
+    --exclude '/.runtime' \
+    --exclude '/data' \
+    --exclude '/artifacts' \
+    --exclude '/outputs' \
+    --exclude '/logs' \
     -e "ssh ${ssh_args[*]}" \
     "${ROOT_DIR}/" "${remote}:${DEPLOY_PATH}/"
 
