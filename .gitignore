@@ -30,7 +30,7 @@ MEMORY.md
 # Runtime artifacts
 .runtime/
 data/
-artifacts/
+/artifacts/
 outputs/
 logs/
 
