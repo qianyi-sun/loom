@@ -125,6 +125,8 @@ Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmar
 ## Tracking
 
 - Project board: [Agentic Data Platform MVP](https://github.com/orgs/carinrc/projects/1)
+- Requirements process: [docs/requirements/README.md](docs/requirements/README.md)
+- pilot group requirements: [docs/requirements/projects/pilot-project/README.md](docs/requirements/projects/pilot-project/README.md)
 - Requirements discovery: [#3](https://github.com/carinrc/agentic-data-platform/issues/3)
 - Architecture design: [#4](https://github.com/carinrc/agentic-data-platform/issues/4)
 - User runner/pipeline contract: [#21](https://github.com/carinrc/agentic-data-platform/issues/21)
@@ -139,7 +141,7 @@ docs/architecture/       Platform architecture and MVP design specs.
 docs/development/        Local developer setup and Docker development environment.
 docs/engineering/        GitHub, org, release, and environment setup notes.
 docs/infra/              Deployment and infrastructure planning.
-docs/requirements/       Research-team intake template and requirements matrix.
+docs/requirements/       Versioned research-team project and workflow requirements.
 src/                      Platform Python package and domain contracts.
 tests/                    Unit tests for package behavior and data contracts.
 ```
