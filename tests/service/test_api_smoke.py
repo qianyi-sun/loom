@@ -67,10 +67,43 @@ class ApiSmokeTest(unittest.TestCase):
                 sleep=lambda _: None,
             )
 
+    def test_api_smoke_retries_run_detail_404_after_create(self):
+        client = FakeApiClient(
+            run_details=[
+                {"error": {"code": "not_found", "message": "Unknown run: api_smoke_test_003"}},
+                _run_detail(status="succeeded", artifact_count=3, turn_count=1, run_id="api_smoke_test_003"),
+            ],
+            run_detail_statuses=[404, 200],
+            dashboard=_dashboard_progress(total_runs=1, succeeded_runs=1),
+        )
+
+        result = run_api_smoke(
+            ApiSmokeConfig(
+                base_url="http://api:8000",
+                auth_token="[REDACTED_TOKEN]",
+                run_id="api_smoke_test_003",
+                timeout_seconds=30,
+                poll_interval_seconds=0,
+            ),
+            client=client,
+            sleep=lambda _: None,
+        )
+
+        run_detail_requests = [request for request in client.requests if request["path"].startswith("/runs/")]
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(len(run_detail_requests), 2)
+
 
 class FakeApiClient:
-    def __init__(self, *, run_details: list[dict], dashboard: dict) -> None:
+    def __init__(
+        self,
+        *,
+        run_details: list[dict],
+        dashboard: dict,
+        run_detail_statuses: list[int] | None = None,
+    ) -> None:
         self.run_details = list(run_details)
+        self.run_detail_statuses = list(run_detail_statuses or [200 for _ in run_details])
         self.dashboard = dashboard
         self.requests: list[dict] = []
 
@@ -82,7 +115,12 @@ class FakeApiClient:
         self.requests.append({"method": "GET", "path": path, "params": params or {}, "headers": headers})
         if path.startswith("/runs/"):
             payload = self.run_details.pop(0) if len(self.run_details) > 1 else self.run_details[0]
-            return FakeResponse(200, payload)
+            status_code = (
+                self.run_detail_statuses.pop(0)
+                if len(self.run_detail_statuses) > 1
+                else self.run_detail_statuses[0]
+            )
+            return FakeResponse(status_code, payload)
         if path == "/dashboard/progress":
             return FakeResponse(200, self.dashboard)
         return FakeResponse(404, {"detail": "not found"})
@@ -103,12 +141,13 @@ def _run_detail(
     status: str,
     artifact_count: int,
     turn_count: int,
+    run_id: str = "api_smoke_test_001",
     leaked_uri: str | None = None,
 ) -> dict:
-    artifact_uri = leaked_uri or "minio://runs/api_smoke_test_001/workspace/workspace.tar.zst"
+    artifact_uri = leaked_uri or f"minio://runs/{run_id}/workspace/workspace.tar.zst"
     return {
         "run": {
-            "run_id": "api_smoke_test_001",
+            "run_id": run_id,
             "status": status,
             "progress": {
                 "status": status,
@@ -117,9 +156,9 @@ def _run_detail(
                 "turn_count": turn_count,
             },
             "artifacts": [
-                {"kind": "trajectory", "uri": "minio://runs/api_smoke_test_001/trajectory.jsonl"},
+                {"kind": "trajectory", "uri": f"minio://runs/{run_id}/trajectory.jsonl"},
                 {"kind": "workspace_snapshot", "uri": artifact_uri},
-                {"kind": "evaluator_report", "uri": "minio://runs/api_smoke_test_001/evaluator.json"},
+                {"kind": "evaluator_report", "uri": f"minio://runs/{run_id}/evaluator.json"},
             ][:artifact_count],
             "evaluator": (
                 {

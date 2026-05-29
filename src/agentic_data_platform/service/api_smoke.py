@@ -150,13 +150,15 @@ def _wait_for_terminal_run(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + config.timeout_seconds
     detail: dict[str, Any] | None = None
+    last_not_found: str | None = None
 
     while time.monotonic() <= deadline:
-        detail = _response_json(
-            client.get(f"/runs/{config.run_id}", headers=headers),
-            expected_status=200,
-            context="read smoke run detail",
-        )
+        response = client.get(f"/runs/{config.run_id}", headers=headers)
+        if int(getattr(response, "status_code", 0)) == 404:
+            last_not_found = getattr(response, "text", "")
+            sleep(config.poll_interval_seconds)
+            continue
+        detail = _response_json(response, expected_status=200, context="read smoke run detail")
         run = _dict_at(detail, "run")
         status = str(run.get("status"))
         if status in _TERMINAL_STATUSES:
@@ -164,6 +166,8 @@ def _wait_for_terminal_run(
         sleep(config.poll_interval_seconds)
 
     last_status = _dict_at(detail or {}, "run").get("status") if detail else "unknown"
+    if detail is None and last_not_found is not None:
+        last_status = f"not_found: {last_not_found}"
     raise ApiSmokeError(
         f"smoke run {config.run_id} did not reach a terminal state within "
         f"{config.timeout_seconds:g}s; last_status={last_status}"
