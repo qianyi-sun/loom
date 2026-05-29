@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - Added a fixture-backed Harbor `jobs/` result ingestor that maps trajectories,
   verifier rewards, collected artifact manifests, and raw jobs archives into
   shared platform records.
+- Added the first Harbor local Docker runner backend slice, including injectable
+  `harbor run` execution, runner report artifacts, and worker attachment of
+  ingested Harbor verifier results.
 
 ## 0.0.0 - 2026-05-27
 

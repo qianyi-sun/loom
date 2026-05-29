@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -266,12 +267,14 @@ def _collected_artifact_refs(*, job_name: str, trial_name: str, trial_dir: Path)
         destination = _safe_relative_path(str(item.get("destination") or f"artifact-{index}"))
         artifact_path = trial_dir / destination
         size_bytes = artifact_path.stat().st_size if artifact_path.is_file() else None
+        sha256 = _sha256(artifact_path) if artifact_path.is_file() else None
         artifacts.append(
             ArtifactRef(
                 artifact_id=f"{_safe_component(job_name)}-{_safe_component(trial_name)}-artifact-{index}",
                 kind=ArtifactKind.GENERATED_FILE,
                 uri=f"harbor-artifact://{_safe_component(job_name)}/{_safe_component(trial_name)}/{destination}",
                 media_type="application/octet-stream",
+                sha256=sha256,
                 size_bytes=size_bytes,
                 metadata={
                     "job_name": job_name,
@@ -326,6 +329,14 @@ def _safe_component(value: str) -> str:
     if not safe:
         raise ValueError("path component must contain at least one safe character")
     return quote(safe, safe="A-Za-z0-9_.-")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _turn_payload(turn: TerminalTurn) -> dict[str, Any]:

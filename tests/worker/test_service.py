@@ -263,6 +263,97 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.failed"],
         )
 
+    def test_worker_executes_harbor_run_and_ingests_verifier_result(self):
+        payload = _run_create_payload("run_worker_harbor_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench/terminal-bench-2",
+                "agent": "default",
+                "trial_name": "trial-hello",
+                "extra_args": ["--max-tasks", "1"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        harbor_args = command_runner.calls[0]["args"]
+        self.assertEqual(harbor_args[:4], ["harbor", "run", "-d", "terminal-bench/terminal-bench-2"])
+        self.assertIn("--jobs-dir", harbor_args)
+        self.assertIn("--max-tasks", harbor_args)
+
+        detail = self.client.get("/runs/run_worker_harbor_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "succeeded")
+        self.assertEqual(payload["run"]["evaluator"]["mode"], "harbor_verifier")
+        self.assertEqual(payload["run"]["evaluator"]["score"], 1.0)
+        self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
+        artifact_kinds = {artifact["kind"] for artifact in payload["run"]["artifacts"]}
+        self.assertIn("log", artifact_kinds)
+        self.assertIn("trajectory", artifact_kinds)
+        self.assertIn("workspace_snapshot", artifact_kinds)
+        self.assertIn("evaluator_report", artifact_kinds)
+        self.assertIn("generated_file", artifact_kinds)
+        self.assertEqual(
+            [event["event_type"] for event in payload["lifecycle_events"]],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+        )
+
+    def test_worker_normalizes_harbor_runner_failure(self):
+        payload = _run_create_payload("run_worker_harbor_failed_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench/terminal-bench-2",
+                "agent": "default",
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=FakeHarborCommandRunner(returncode=17, stderr="harbor failed\n"),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-fail-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        detail = self.client.get("/runs/run_worker_harbor_failed_001")
+        payload = detail.json()
+        self.assertIn("exit code 17", payload["run"]["failure_reason"])
+        self.assertEqual(payload["run"]["progress"]["artifact_count"], 1)
+        self.assertEqual(
+            [event["event_type"] for event in payload["lifecycle_events"]],
+            ["run.created", "run.claimed", "run.started", "run.failed"],
+        )
+
 
 def _app(engine):
     return create_app(
@@ -361,3 +452,63 @@ class FakeDockerCommandRunner:
 def _workspace_from_docker_args(args: list[str]) -> Path:
     volume_index = args.index("-v")
     return Path(args[volume_index + 1].split(":", maxsplit=1)[0])
+
+
+class FakeHarborCommandRunner:
+    def __init__(self, *, returncode: int = 0, stdout: str = "harbor complete\n", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout})
+        jobs_dir = Path(args[args.index("--jobs-dir") + 1])
+        _write_harbor_job_fixture(jobs_dir)
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=self.returncode,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+
+def _write_harbor_job_fixture(root: Path) -> None:
+    job_dir = root / "job-001"
+    trial_dir = job_dir / "trial-hello"
+    (trial_dir / "agent").mkdir(parents=True)
+    (trial_dir / "verifier").mkdir()
+    (trial_dir / "artifacts").mkdir()
+    (job_dir / "config.json").write_text(
+        json.dumps({"dataset": "terminal-bench/terminal-bench-2", "agent": "default"}),
+        encoding="utf-8",
+    )
+    (job_dir / "result.json").write_text(json.dumps({"status": "completed", "accuracy": 1.0}), encoding="utf-8")
+    (trial_dir / "config.json").write_text(
+        json.dumps({"task": "hello-world", "verifier_version": "harbor-test-v1"}),
+        encoding="utf-8",
+    )
+    (trial_dir / "result.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    (trial_dir / "agent" / "trajectory.json").write_text(
+        json.dumps(
+            [
+                {
+                    "command": "python solve.py",
+                    "cwd": "/workspace",
+                    "started_at": "2026-05-29T12:00:00Z",
+                    "completed_at": "2026-05-29T12:00:01Z",
+                    "exit_code": 0,
+                    "stdout": "42\n",
+                    "stderr": "",
+                    "changed_paths": ["artifacts/answer.txt"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (trial_dir / "verifier" / "reward.txt").write_text("1.0\n", encoding="utf-8")
+    (trial_dir / "artifacts" / "answer.txt").write_text("42\n", encoding="utf-8")
+    (trial_dir / "artifacts" / "manifest.json").write_text(
+        json.dumps([{"destination": "artifacts/answer.txt", "type": "file", "status": "ok"}]),
+        encoding="utf-8",
+    )

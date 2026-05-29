@@ -202,6 +202,9 @@ class ArtifactKeyFactory:
     def harbor_jobs_archive_key(self, run_id: str, task_instance_id: str, job_name: str) -> str:
         return self._key(run_id, task_instance_id, "raw", "harbor-jobs", f"{_safe_component(job_name)}.tar.gz")
 
+    def harbor_runner_report_key(self, run_id: str, task_instance_id: str) -> str:
+        return self._key(run_id, task_instance_id, "logs", "harbor-runner.json")
+
     def _key(self, run_id: str, task_instance_id: str, *parts: str) -> str:
         return "/".join(
             [
@@ -340,6 +343,33 @@ class ArtifactPersistence:
         return _artifact_ref(
             stored,
             artifact_id=f"{_safe_component(run_id)}-{_safe_component(job_name)}-harbor-jobs",
+            kind=ArtifactKind.LOG,
+        )
+
+    def persist_harbor_runner_report(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        report: dict[str, Any],
+    ) -> ArtifactRef:
+        key = self.key_factory.harbor_runner_report_key(run_id, task_instance_id)
+        stored = self.store.put_bytes(
+            key,
+            _json_bytes(report),
+            media_type="application/json",
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": "harbor_runner_report",
+                "exit_code": report.get("exit_code"),
+                "timed_out": report.get("timed_out", False),
+            },
+        )
+
+        return _artifact_ref(
+            stored,
+            artifact_id=f"{_safe_component(run_id)}-harbor-runner-report",
             kind=ArtifactKind.LOG,
         )
 

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence
 from agentic_data_platform.benchmarks.adapters import BenchmarkRegistration
-from agentic_data_platform.domain.run_records import JudgeConfig, RunRecord
+from agentic_data_platform.domain.run_records import ArtifactKind, ArtifactRef, JudgeConfig, RunRecord, RunStatus
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
+from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
+from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
 from agentic_data_platform.models.providers import ModelCommand, ScriptedModelProvider
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.runs.terminal_benchmark import TerminalBenchmarkRunner, TerminalBenchmarkRunRequest
@@ -36,9 +38,14 @@ class DockerTerminalWorkerExecutor:
     evaluator_feedback: str = "Mock evaluator feedback: Docker terminal trajectory and workspace were reviewed."
     provider_registry: DevProviderConfigRegistry | None = None
     command_runner: CommandRunner | None = None
+    harbor_command_runner: CommandRunner | None = None
 
     def execute(self, run: RunRecord) -> RunRecord:
         self._resolve_provider_refs(run)
+        harbor_spec = _harbor_run_spec_for_run(run, workspace_root=self.workspace_root)
+        if harbor_spec is not None:
+            return self._execute_harbor_run(run, harbor_spec)
+
         judge = _judge_for_run(run)
         evaluator_id = _evaluator_id_for_run(run)
         runner = TerminalBenchmarkRunner(
@@ -74,6 +81,55 @@ class DockerTerminalWorkerExecutor:
             ),
         )
         return result.run
+
+    def _execute_harbor_run(self, run: RunRecord, spec: HarborRunSpec) -> RunRecord:
+        if run.status is not RunStatus.PROVISIONING:
+            run.transition_to(RunStatus.PROVISIONING)
+        run.transition_to(RunStatus.RUNNING)
+
+        result = HarborRunnerBackend(command_runner=self.harbor_command_runner).run(spec)
+        run.attach_artifact(
+            self.artifact_persistence.persist_harbor_runner_report(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                report=result.to_report(),
+            )
+        )
+        if result.exit_code != 0:
+            run.failure_reason = _harbor_failure_reason(result)
+            run.transition_to(RunStatus.FAILED)
+            return run
+
+        ingested = HarborResultIngestor(artifact_persistence=self.artifact_persistence).ingest(
+            run_id=run.run_id,
+            task_instance_id=run.task.instance_id,
+            jobs_dir=result.jobs_dir,
+            trial_name=spec.trial_name,
+        )
+        _attach_harbor_ingestion(run, ingested)
+        run.attach_artifact(
+            self.artifact_persistence.persist_workspace_snapshot(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                snapshot=_workspace_snapshot_from_harbor(run, ingested),
+            )
+        )
+        run.metadata["harbor_runner"] = {
+            "jobs_dir": result.jobs_dir.name,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "duration_seconds": result.duration_seconds,
+        }
+        run.transition_to(RunStatus.EVALUATING)
+        for evaluator_result in ingested.evaluator_results:
+            run.attach_evaluator_result(evaluator_result)
+
+        if all(result.status == "completed" for result in ingested.evaluator_results):
+            run.transition_to(RunStatus.SUCCEEDED)
+        else:
+            run.failure_reason = "Harbor verifier did not complete"
+            run.transition_to(RunStatus.FAILED)
+        return run
 
     def _resolve_provider_refs(self, run: RunRecord) -> None:
         if self.provider_registry is None:
@@ -200,6 +256,81 @@ def _resolve_metadata_ref(registry: DevProviderConfigRegistry, metadata: dict[st
     secret_ref = metadata.get("secret_ref")
     if isinstance(secret_ref, str):
         registry.resolve_secret(secret_ref)
+
+
+def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborRunSpec | None:
+    configured = run.metadata.get("harbor_run")
+    if not isinstance(configured, dict):
+        return None
+
+    dataset_ref = _optional_str(configured.get("dataset_ref"))
+    task_path_value = _optional_str(configured.get("task_path"))
+    task_path = Path(task_path_value) if task_path_value is not None else None
+    agent_import_path_value = _optional_str(configured.get("agent_import_path"))
+    agent_import_path = Path(agent_import_path_value) if agent_import_path_value is not None else None
+    timeout_seconds = _int_or_default(
+        configured.get("timeout_seconds") or run.runner.resource_limits.get("timeout_seconds"),
+        3600,
+    )
+    jobs_dir_value = _optional_str(configured.get("jobs_dir"))
+    jobs_dir = Path(jobs_dir_value) if jobs_dir_value is not None else workspace_root / run.run_id / "harbor-jobs"
+    return HarborRunSpec(
+        run_id=run.run_id,
+        task_instance_id=run.task.instance_id,
+        dataset_ref=dataset_ref,
+        task_path=task_path,
+        agent=_optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "default",
+        agent_import_path=agent_import_path,
+        model_name=run.model.model_name,
+        sandbox=_optional_str(configured.get("sandbox")) or "docker",
+        jobs_dir=jobs_dir,
+        trial_name=_optional_str(configured.get("trial_name")),
+        timeout_seconds=timeout_seconds,
+        extra_args=_string_list(configured.get("extra_args", []), field_name="harbor_run.extra_args"),
+    )
+
+
+def _attach_harbor_ingestion(run: RunRecord, ingested: HarborIngestionResult) -> None:
+    for turn in ingested.turns:
+        run.add_turn(replace(turn, turn_index=len(run.trajectory)))
+    for artifact in ingested.artifacts:
+        run.attach_artifact(artifact)
+
+
+def _workspace_snapshot_from_harbor(run: RunRecord, ingested: HarborIngestionResult) -> WorkspaceSnapshot:
+    files = []
+    for artifact in ingested.artifacts:
+        if artifact.kind is not ArtifactKind.GENERATED_FILE:
+            continue
+        destination = artifact.metadata.get("destination")
+        if not isinstance(destination, str) or artifact.size_bytes is None or artifact.sha256 is None:
+            continue
+        files.append(WorkspaceFile(path=destination, size_bytes=artifact.size_bytes, sha256=artifact.sha256))
+    files.sort(key=lambda item: item.path)
+    return WorkspaceSnapshot(
+        run_id=run.run_id,
+        workspace_path=f"harbor://{ingested.job_name}/{ingested.trial_name}/artifacts",
+        captured_at=datetime.now(timezone.utc),
+        files=files,
+    )
+
+
+def _harbor_failure_reason(result) -> str:
+    if result.timed_out:
+        return f"Harbor run timed out with exit code {result.exit_code}"
+    return f"Harbor run failed with exit code {result.exit_code}"
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _string_list(value: object, *, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(f"{field_name} must be a list of non-empty strings")
+    return value
 
 
 def _sandbox_config_for_run(
