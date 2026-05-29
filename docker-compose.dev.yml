@@ -159,6 +159,33 @@ services:
       - tools
     command: python -m agentic_data_platform.worker.smoke
 
+  api-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      API_SMOKE_BASE_URL: http://api:8000
+      API_SMOKE_AUTH_TOKEN: ${API_SMOKE_AUTH_TOKEN:-[REDACTED_TOKEN]}
+      API_SMOKE_TIMEOUT_SECONDS: ${API_SMOKE_TIMEOUT_SECONDS:-120}
+      API_SMOKE_POLL_INTERVAL_SECONDS: ${API_SMOKE_POLL_INTERVAL_SECONDS:-5}
+      API_SMOKE_PROJECT_ID: pilot-project
+      API_SMOKE_OWNER_TEAM: pilot group
+      API_SMOKE_CREATED_BY_USER_ID: [REDACTED_OWNER]
+    volumes:
+      - .:/workspace
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.service.api_smoke
+
   postgres:
     image: postgres:16-alpine
     environment:

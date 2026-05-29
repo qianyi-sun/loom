@@ -11,6 +11,7 @@ DEPLOY_PATH="${DEPLOY_PATH:-/srv/agentic-data-platform/dev/current}"
 DEPLOY_PROJECT_NAME="${DEPLOY_PROJECT_NAME:-agentic-data-shared dev}"
 DEPLOY_RUN_TESTS="${DEPLOY_RUN_TESTS:-1}"
 DEPLOY_RUN_MIGRATIONS="${DEPLOY_RUN_MIGRATIONS:-1}"
+DEPLOY_RUN_API_SMOKE="${DEPLOY_RUN_API_SMOKE:-1}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SANDBOX_HOST_WORKSPACE_ROOT="${SANDBOX_HOST_WORKSPACE_ROOT:-$ROOT_DIR/.runtime/sandbox-workspaces}"
@@ -66,6 +67,11 @@ run_compose_smoke() {
 
   log "Checking API health endpoint"
   check_api_health
+
+  if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
+    log "Checking authenticated API-created Docker sandbox run"
+    compose run --rm --build -T api-smoke </dev/null
+  fi
 
   log "Current service status"
   compose ps
@@ -194,6 +200,10 @@ PY
   fi
   sleep 2
 done
+if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
+  printf '[deploy-dev] Checking authenticated API-created Docker sandbox run\n'
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T api-smoke </dev/null
+fi
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" ps
 EOF
 )
