@@ -49,8 +49,11 @@ services:
       OBJECT_STORAGE_SECRET_KEY: loomdev
       OBJECT_STORAGE_REGION: us-east-1
       REDIS_URL: redis://redis:6379/0
+      SANDBOX_WORKSPACE_ROOT: /workspace/.runtime/sandbox-workspaces
+      SANDBOX_HOST_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-}
     volumes:
       - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

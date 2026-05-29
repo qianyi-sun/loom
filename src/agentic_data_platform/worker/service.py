@@ -17,7 +17,7 @@ from agentic_data_platform.persistence import create_database_engine, session_sc
 from agentic_data_platform.persistence.repositories import RunRepository
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
-from agentic_data_platform.worker.executors import FixtureTerminalBenchmarkExecutor, WorkerRunExecutor
+from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor, WorkerRunExecutor
 
 
 @dataclass(frozen=True)
@@ -96,8 +96,14 @@ def build_configured_worker(
     return RunWorker(
         engine=engine,
         worker_id=worker_id,
-        executor=FixtureTerminalBenchmarkExecutor(
+        executor=DockerTerminalWorkerExecutor(
             artifact_persistence=ArtifactPersistence(store),
+            workspace_root=Path(service_settings.sandbox_workspace_root),
+            host_workspace_root=(
+                Path(service_settings.sandbox_host_workspace_root)
+                if service_settings.sandbox_host_workspace_root
+                else None
+            ),
             provider_registry=DevProviderConfigRegistry.from_settings(service_settings),
         ),
     )

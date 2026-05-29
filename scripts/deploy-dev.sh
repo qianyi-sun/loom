@@ -13,6 +13,8 @@ DEPLOY_RUN_TESTS="${DEPLOY_RUN_TESTS:-1}"
 DEPLOY_RUN_MIGRATIONS="${DEPLOY_RUN_MIGRATIONS:-1}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
+SANDBOX_HOST_WORKSPACE_ROOT="${SANDBOX_HOST_WORKSPACE_ROOT:-$ROOT_DIR/.runtime/sandbox-workspaces}"
+export SANDBOX_HOST_WORKSPACE_ROOT
 
 log() {
   printf '[deploy-dev] %s\n' "$*"
@@ -150,6 +152,7 @@ deploy_remote() {
   remote_script=$(cat <<EOF
 set -euo pipefail
 cd "$DEPLOY_PATH"
+export SANDBOX_HOST_WORKSPACE_ROOT="\${SANDBOX_HOST_WORKSPACE_ROOT:-$DEPLOY_PATH/.runtime/sandbox-workspaces}"
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"

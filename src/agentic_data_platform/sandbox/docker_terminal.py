@@ -15,6 +15,7 @@ class DockerTerminalSandboxConfig:
     run_id: str
     image: str
     workspace_root: Path
+    host_workspace_root: Path | None = None
     container_workspace: str = "/workspace"
     cpu_limit: int | float | None = None
     memory_mb: int | None = None
@@ -115,6 +116,7 @@ class DockerTerminalSandbox:
         self.config = config
         self.runner = runner or SubprocessCommandRunner()
         self.workspace_path = config.workspace_root / config.run_id
+        self.host_workspace_path = (config.host_workspace_root or config.workspace_root) / config.run_id
         self.workspace_path.mkdir(parents=True, exist_ok=True)
 
     def execute(self, command: str, *, cwd: str | None = None, timeout_seconds: int | None = None) -> SandboxCommandResult:
@@ -191,7 +193,7 @@ class DockerTerminalSandbox:
             "run",
             "--rm",
             "-v",
-            f"{self.workspace_path}:{self.config.container_workspace}",
+            f"{self.host_workspace_path}:{self.config.container_workspace}",
             "-w",
             cwd,
         ]

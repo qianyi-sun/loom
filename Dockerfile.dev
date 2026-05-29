@@ -7,7 +7,7 @@ ENV PIP_NO_CACHE_DIR=1
 WORKDIR /workspace
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && apt-get install -y --no-install-recommends ca-certificates curl docker.io git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md VERSION ./

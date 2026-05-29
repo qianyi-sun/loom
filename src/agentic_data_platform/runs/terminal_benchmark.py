@@ -76,21 +76,18 @@ class TerminalBenchmarkRunner:
         run.transition_to(RunStatus.RUNNING)
 
         timeout_seconds = int(request.registration.runner.resource_limits.get("timeout_seconds", 3600))
-        self._execute_model_commands(run, request, timeout_seconds=timeout_seconds)
+        failure_reason = self._execute_model_commands(run, request, timeout_seconds=timeout_seconds)
+        if failure_reason is not None:
+            self._persist_execution_artifacts(run, request)
+            run.failure_reason = failure_reason
+            run.transition_to(RunStatus.FAILED)
+            return TerminalBenchmarkRunResult(
+                run=run,
+                dashboard=RunDashboardProjection.from_run(run).to_dict(),
+            )
 
         run.transition_to(RunStatus.EVALUATING)
-        trajectory_ref = self.artifact_persistence.persist_trajectory(
-            run_id=run.run_id,
-            task_instance_id=run.task.instance_id,
-            turns=run.trajectory,
-        )
-        workspace_ref = self.artifact_persistence.persist_workspace_snapshot(
-            run_id=run.run_id,
-            task_instance_id=run.task.instance_id,
-            snapshot=request.sandbox.capture_workspace(),
-        )
-        run.attach_artifact(trajectory_ref)
-        run.attach_artifact(workspace_ref)
+        trajectory_ref, workspace_ref = self._persist_execution_artifacts(run, request)
 
         evaluator_result = self.evaluator.evaluate(
             EvaluatorInput.from_run(
@@ -121,13 +118,32 @@ class TerminalBenchmarkRunner:
             dashboard=RunDashboardProjection.from_run(run).to_dict(),
         )
 
+    def _persist_execution_artifacts(
+        self,
+        run: RunRecord,
+        request: TerminalBenchmarkRunRequest,
+    ) -> tuple[ArtifactRef, ArtifactRef]:
+        trajectory_ref = self.artifact_persistence.persist_trajectory(
+            run_id=run.run_id,
+            task_instance_id=run.task.instance_id,
+            turns=run.trajectory,
+        )
+        workspace_ref = self.artifact_persistence.persist_workspace_snapshot(
+            run_id=run.run_id,
+            task_instance_id=run.task.instance_id,
+            snapshot=request.sandbox.capture_workspace(),
+        )
+        run.attach_artifact(trajectory_ref)
+        run.attach_artifact(workspace_ref)
+        return trajectory_ref, workspace_ref
+
     def _execute_model_commands(
         self,
         run: RunRecord,
         request: TerminalBenchmarkRunRequest,
         *,
         timeout_seconds: int,
-    ) -> None:
+    ) -> str | None:
         while True:
             command = request.model_provider.next_command(
                 ModelProviderContext(
@@ -137,7 +153,7 @@ class TerminalBenchmarkRunner:
                 )
             )
             if command is None:
-                return
+                return None
 
             result = request.sandbox.execute(
                 command.command,
@@ -149,3 +165,7 @@ class TerminalBenchmarkRunner:
                 model_call_id=command.model_call_id,
             )
             run.add_turn(turn)
+            if result.timed_out:
+                return f"Terminal command timed out after {timeout_seconds} seconds: {command.command}"
+            if result.exit_code != 0:
+                return f"Terminal command failed with exit code {result.exit_code}: {command.command}"

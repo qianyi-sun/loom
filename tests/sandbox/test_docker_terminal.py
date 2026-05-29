@@ -205,6 +205,31 @@ class DockerTerminalSandboxTest(unittest.TestCase):
         network_index = args.index("--network")
         self.assertEqual(args[network_index + 1], "none")
 
+    def test_docker_volume_can_use_separate_host_workspace_root(self):
+        runner = FakeRunner()
+        runner.add_completed()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sandbox = DockerTerminalSandbox(
+                DockerTerminalSandboxConfig(
+                    run_id="run_007",
+                    image="python:3.12-slim",
+                    workspace_root=Path(temp_dir) / "container-workspaces",
+                    host_workspace_root=Path("/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces"),
+                    timeout_seconds=30,
+                ),
+                runner=runner,
+            )
+
+            sandbox.execute("python --version")
+
+        args = runner.calls[0]["args"]
+        volume_index = args.index("-v")
+        self.assertEqual(
+            args[volume_index + 1],
+            "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces/run_007:/workspace",
+        )
+
 
 def _workspace_from_args(args):
     volume_index = args.index("-v")

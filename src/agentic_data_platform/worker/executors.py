@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence
@@ -11,12 +12,75 @@ from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.models.providers import ModelCommand, ScriptedModelProvider
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.runs.terminal_benchmark import TerminalBenchmarkRunner, TerminalBenchmarkRunRequest
-from agentic_data_platform.sandbox.docker_terminal import SandboxCommandResult, WorkspaceFile, WorkspaceSnapshot
+from agentic_data_platform.sandbox.docker_terminal import (
+    CommandRunner,
+    DockerTerminalSandbox,
+    DockerTerminalSandboxConfig,
+    SandboxCommandResult,
+    WorkspaceFile,
+    WorkspaceSnapshot,
+)
 
 
 class WorkerRunExecutor(Protocol):
     def execute(self, run: RunRecord) -> RunRecord:
         ...
+
+
+@dataclass(frozen=True)
+class DockerTerminalWorkerExecutor:
+    artifact_persistence: ArtifactPersistence
+    workspace_root: Path
+    host_workspace_root: Path | None = None
+    evaluator_score: float = 0.75
+    evaluator_feedback: str = "Mock evaluator feedback: Docker terminal trajectory and workspace were reviewed."
+    provider_registry: DevProviderConfigRegistry | None = None
+    command_runner: CommandRunner | None = None
+
+    def execute(self, run: RunRecord) -> RunRecord:
+        self._resolve_provider_refs(run)
+        judge = _judge_for_run(run)
+        evaluator_id = _evaluator_id_for_run(run)
+        runner = TerminalBenchmarkRunner(
+            artifact_persistence=self.artifact_persistence,
+            evaluator=MockEvaluatorAdapter(
+                evaluator_id=evaluator_id,
+                score=self.evaluator_score,
+                verbal_feedback=self.evaluator_feedback,
+            ),
+        )
+        registration = BenchmarkRegistration(task=run.task, runner=run.runner)
+        result = runner.run_existing(
+            run,
+            TerminalBenchmarkRunRequest(
+                run_id=run.run_id,
+                project_id=run.project_id,
+                owner_team=run.owner_team,
+                registration=registration,
+                model_provider=ScriptedModelProvider(
+                    model=run.model,
+                    commands=_commands_for_run(run, metadata_keys=("worker_commands", "worker_fixture_commands")),
+                ),
+                judge=judge,
+                rubric_id=judge.rubric_version,
+                sandbox=DockerTerminalSandbox(
+                    _sandbox_config_for_run(
+                        run,
+                        workspace_root=self.workspace_root,
+                        host_workspace_root=self.host_workspace_root,
+                    ),
+                    runner=self.command_runner,
+                ),
+            ),
+        )
+        return result.run
+
+    def _resolve_provider_refs(self, run: RunRecord) -> None:
+        if self.provider_registry is None:
+            return
+        _resolve_metadata_ref(self.provider_registry, run.model.metadata)
+        for config in run.evaluator_configs:
+            _resolve_metadata_ref(self.provider_registry, config.metadata)
 
 
 @dataclass(frozen=True)
@@ -48,7 +112,7 @@ class FixtureTerminalBenchmarkExecutor:
                 registration=registration,
                 model_provider=ScriptedModelProvider(
                     model=run.model,
-                    commands=_commands_for_run(run),
+                    commands=_commands_for_run(run, metadata_keys=("worker_fixture_commands",)),
                 ),
                 judge=judge,
                 rubric_id=judge.rubric_version,
@@ -95,10 +159,11 @@ class FixtureTerminalSandbox:
         )
 
 
-def _commands_for_run(run: RunRecord) -> list[ModelCommand]:
-    configured = run.metadata.get("worker_fixture_commands")
-    if isinstance(configured, list) and configured:
-        return [_model_command(item, index=index) for index, item in enumerate(configured, start=1)]
+def _commands_for_run(run: RunRecord, *, metadata_keys: tuple[str, ...]) -> list[ModelCommand]:
+    for key in metadata_keys:
+        configured = run.metadata.get(key)
+        if isinstance(configured, list) and configured:
+            return [_model_command(item, index=index) for index, item in enumerate(configured, start=1)]
 
     return [ModelCommand(command="python solve.py", cwd="/workspace", model_call_id="fixture-call-1")]
 
@@ -135,3 +200,44 @@ def _resolve_metadata_ref(registry: DevProviderConfigRegistry, metadata: dict[st
     secret_ref = metadata.get("secret_ref")
     if isinstance(secret_ref, str):
         registry.resolve_secret(secret_ref)
+
+
+def _sandbox_config_for_run(
+    run: RunRecord,
+    *,
+    workspace_root: Path,
+    host_workspace_root: Path | None,
+) -> DockerTerminalSandboxConfig:
+    limits = run.runner.resource_limits
+    memory_mb = _memory_limit_mb(limits)
+    return DockerTerminalSandboxConfig(
+        run_id=run.run_id,
+        image=run.runner.image,
+        workspace_root=workspace_root,
+        host_workspace_root=host_workspace_root,
+        cpu_limit=limits.get("cpu") or limits.get("cpu_limit"),
+        memory_mb=memory_mb,
+        pids_limit=_int_or_none(limits.get("pids_limit")),
+        timeout_seconds=_int_or_default(limits.get("timeout_seconds"), 3600),
+        internet_access=run.runner.internet_access,
+    )
+
+
+def _memory_limit_mb(limits: dict[str, int | float]) -> int | None:
+    if "memory_mb" in limits:
+        return _int_or_none(limits["memory_mb"])
+    if "memory_gib" in limits:
+        return int(float(limits["memory_gib"]) * 1024)
+    return None
+
+
+def _int_or_default(value: object, default: int) -> int:
+    if value is None:
+        return default
+    return int(value)
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)

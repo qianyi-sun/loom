@@ -21,6 +21,8 @@ class ServiceSettings:
     evaluator_provider_base_url: str = ""
     evaluator_provider_api_key: str = ""
     internal_auth_tokens: str = ""
+    sandbox_workspace_root: str = ".runtime/sandbox-workspaces"
+    sandbox_host_workspace_root: str = ""
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -40,6 +42,8 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         evaluator_provider_base_url=_get(values, "EVALUATOR_PROVIDER_BASE_URL", ""),
         evaluator_provider_api_key=_get(values, "EVALUATOR_PROVIDER_API_KEY", ""),
         internal_auth_tokens=_get(values, "INTERNAL_AUTH_TOKENS", ""),
+        sandbox_workspace_root=_get(values, "SANDBOX_WORKSPACE_ROOT", ".runtime/sandbox-workspaces"),
+        sandbox_host_workspace_root=_get(values, "SANDBOX_HOST_WORKSPACE_ROOT", ""),
     )
 
 

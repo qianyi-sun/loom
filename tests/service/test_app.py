@@ -33,6 +33,8 @@ class ServiceAppTest(unittest.TestCase):
                 "EVALUATOR_PROVIDER_BASE_URL": "https://judge.example/v1",
                 "EVALUATOR_PROVIDER_API_KEY": "sk-judge-secret",
                 "INTERNAL_AUTH_TOKENS": "[REDACTED_OWNER]=[REDACTED_OWNER]-token",
+                "SANDBOX_WORKSPACE_ROOT": "/workspace/.runtime/sandbox-workspaces",
+                "SANDBOX_HOST_WORKSPACE_ROOT": "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
             }
         )
 
@@ -50,6 +52,11 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.evaluator_provider_base_url, "https://judge.example/v1")
         self.assertEqual(settings.evaluator_provider_api_key, "sk-judge-secret")
         self.assertEqual(settings.internal_auth_tokens, "[REDACTED_OWNER]=[REDACTED_OWNER]-token")
+        self.assertEqual(settings.sandbox_workspace_root, "/workspace/.runtime/sandbox-workspaces")
+        self.assertEqual(
+            settings.sandbox_host_workspace_root,
+            "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
+        )
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))

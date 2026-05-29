@@ -137,10 +137,11 @@ serializing dashboard payloads.
   `RunRepository.claim_next_queued_run(...)` lets a worker claim one queued run
   and record lifecycle events. Redis remains available in the dev stack for a
   later queue/cache backend, but it is not the current source of truth.
-- The current worker executor is a fixture terminal benchmark path for service
-  and deployment smoke checks. Real Docker terminal execution and provider-backed
-  model/evaluator calls remain follow-up work before real pilot workloads run
-  through this service.
+- The long-running worker now uses the Docker terminal sandbox executor for
+  API-created runs, while `worker-smoke` keeps a fixture executor for
+  deterministic deployment validation. Provider-backed live model/evaluator
+  calls remain follow-up work before real pilot workloads run through this
+  service.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace

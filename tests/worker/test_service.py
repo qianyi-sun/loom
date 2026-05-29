@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ from agentic_data_platform.persistence.repositories import IdentityRepository, P
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
-from agentic_data_platform.worker.executors import FixtureTerminalBenchmarkExecutor
+from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor, FixtureTerminalBenchmarkExecutor
 from agentic_data_platform.worker.service import RunWorker
 
 
@@ -146,6 +147,122 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertNotIn("sk-model-secret", rendered)
         self.assertNotIn("sk-evaluator-secret", rendered)
 
+    def test_worker_completes_api_created_run_through_docker_terminal_executor(self):
+        payload = _run_create_payload("run_worker_docker_001")
+        payload["metadata"] = {
+            "worker_commands": [
+                {
+                    "command": "python solve.py",
+                    "cwd": "/workspace",
+                    "model_call_id": "call-docker-1",
+                }
+            ]
+        }
+        create_response = self.client.post(
+            "/runs",
+            json=payload,
+            headers={"X-Request-ID": "req-create-docker-worker-001"},
+        )
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                stdout="created receipts workbook\n",
+                write_files={"receipts.xlsx": "spreadsheet bytes\n"},
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-docker-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-docker-once-001")
+
+            trajectory_path = (
+                temp_path
+                / "artifacts/runs/run_worker_docker_001/tasks/conference-expense-03/trajectory/trajectory.jsonl"
+            )
+            workspace_path = (
+                temp_path
+                / "artifacts/runs/run_worker_docker_001/tasks/conference-expense-03/workspace/snapshot.json"
+            )
+
+            self.assertTrue(trajectory_path.exists())
+            self.assertTrue(workspace_path.exists())
+            trajectory_text = trajectory_path.read_text()
+            workspace_text = workspace_path.read_text()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        docker_args = command_runner.calls[0]["args"]
+        self.assertEqual(docker_args[:3], ["docker", "run", "--rm"])
+        self.assertIn("python:3.12-slim", docker_args)
+        self.assertIn("python solve.py", docker_args)
+        self.assertIn("call-docker-1", trajectory_text)
+        self.assertIn("receipts.xlsx", workspace_text)
+
+        detail = self.client.get("/runs/run_worker_docker_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "succeeded")
+        self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
+        self.assertEqual(payload["run"]["progress"]["artifact_count"], 3)
+        self.assertEqual(payload["run"]["evaluator"]["status"], "completed")
+
+    def test_worker_marks_docker_terminal_command_failure_with_diagnostics(self):
+        payload = _run_create_payload("run_worker_docker_failed_001")
+        payload["metadata"] = {"worker_commands": ["python missing.py"]}
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                returncode=9,
+                stderr="missing.py: not found\n",
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-docker-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-docker-fail-001")
+
+            trajectory_path = (
+                temp_path
+                / "artifacts/runs/run_worker_docker_failed_001/tasks/conference-expense-03/trajectory/trajectory.jsonl"
+            )
+            workspace_path = (
+                temp_path
+                / "artifacts/runs/run_worker_docker_failed_001/tasks/conference-expense-03/workspace/snapshot.json"
+            )
+
+            self.assertTrue(trajectory_path.exists())
+            self.assertTrue(workspace_path.exists())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+
+        detail = self.client.get("/runs/run_worker_docker_failed_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "failed")
+        self.assertIn("exit code 9", payload["run"]["failure_reason"])
+        self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
+        self.assertEqual(payload["run"]["progress"]["artifact_count"], 2)
+        self.assertEqual(
+            [event["event_type"] for event in payload["lifecycle_events"]],
+            ["run.created", "run.claimed", "run.started", "run.failed"],
+        )
+
 
 def _app(engine):
     return create_app(
@@ -209,3 +326,38 @@ def _run_create_payload(run_id: str) -> dict:
         ],
         "metadata": {"worker_fixture_commands": ["python solve.py"]},
     }
+
+
+class FakeDockerCommandRunner:
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        write_files: dict[str, str] | None = None,
+    ) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.write_files = write_files or {}
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout})
+        workspace = _workspace_from_docker_args(args)
+        for relative_path, content in self.write_files.items():
+            target = workspace / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=self.returncode,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+
+def _workspace_from_docker_args(args: list[str]) -> Path:
+    volume_index = args.index("-v")
+    return Path(args[volume_index + 1].split(":", maxsplit=1)[0])
