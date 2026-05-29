@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
+import tarfile
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -197,6 +199,9 @@ class ArtifactKeyFactory:
     def evaluator_report_key(self, run_id: str, task_instance_id: str, evaluator_id: str) -> str:
         return self._key(run_id, task_instance_id, "evaluation", _safe_component(evaluator_id), "report.json")
 
+    def harbor_jobs_archive_key(self, run_id: str, task_instance_id: str, job_name: str) -> str:
+        return self._key(run_id, task_instance_id, "raw", "harbor-jobs", f"{_safe_component(job_name)}.tar.gz")
+
     def _key(self, run_id: str, task_instance_id: str, *parts: str) -> str:
         return "/".join(
             [
@@ -306,6 +311,38 @@ class ArtifactPersistence:
             kind=ArtifactKind.EVALUATOR_REPORT,
         )
 
+    def persist_harbor_jobs_archive(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        job_name: str,
+        jobs_dir: Path,
+    ) -> ArtifactRef:
+        if not jobs_dir.is_dir():
+            raise ValueError(f"Harbor jobs directory does not exist: {jobs_dir}")
+
+        payload, file_count = _tar_gz_directory(jobs_dir)
+        key = self.key_factory.harbor_jobs_archive_key(run_id, task_instance_id, job_name)
+        stored = self.store.put_bytes(
+            key,
+            payload,
+            media_type="application/gzip",
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": "harbor_jobs_archive",
+                "job_name": job_name,
+                "file_count": file_count,
+            },
+        )
+
+        return _artifact_ref(
+            stored,
+            artifact_id=f"{_safe_component(run_id)}-{_safe_component(job_name)}-harbor-jobs",
+            kind=ArtifactKind.LOG,
+        )
+
 
 def _artifact_ref(stored: StoredArtifact, *, artifact_id: str, kind: ArtifactKind) -> ArtifactRef:
     return ArtifactRef(
@@ -321,6 +358,20 @@ def _artifact_ref(stored: StoredArtifact, *, artifact_id: str, kind: ArtifactKin
 
 def _json_bytes(value: Any) -> bytes:
     return (json.dumps(_to_jsonable(value), indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _tar_gz_directory(source_dir: Path) -> tuple[bytes, int]:
+    root = source_dir.resolve()
+    file_count = 0
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            relative_path = path.relative_to(root.parent).as_posix()
+            archive.add(path, arcname=relative_path, recursive=False)
+            file_count += 1
+    return buffer.getvalue(), file_count
 
 
 def _to_jsonable(value: Any) -> Any:

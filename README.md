@@ -157,7 +157,7 @@ Original runner wrapper research:
 | Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and scoped `/ops/metrics` are available |
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
-| Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
+| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; first Harbor `jobs/` fixture ingestor maps verifier rewards and artifacts into shared platform records |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking

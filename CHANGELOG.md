@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 - Added multi-evaluator run result semantics for Harbor verifier and platform
   LLM judge outputs while preserving the latest evaluator summary.
+- Added a fixture-backed Harbor `jobs/` result ingestor that maps trajectories,
+  verifier rewards, collected artifact manifests, and raw jobs archives into
+  shared platform records.
 
 ## 0.0.0 - 2026-05-27
 
