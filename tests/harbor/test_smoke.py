@@ -1,13 +1,30 @@
 import json
 import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentic_data_platform.harbor.smoke import HarborCliSmokeConfig, run_harbor_cli_smoke
+from agentic_data_platform.harbor.smoke import (
+    HarborCliSmokeConfig,
+    _write_smoke_task,
+    run_harbor_cli_smoke,
+)
 
 
 class HarborCliSmokeTest(unittest.TestCase):
+    def test_generated_task_metadata_uses_harbor_schema_author_shape(self):
+        with TemporaryDirectory() as temp_dir:
+            task_dir = Path(temp_dir) / "task"
+            _write_smoke_task(task_dir)
+
+            task_config = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
+
+            authors = task_config["task"]["authors"]
+            self.assertTrue(authors)
+            self.assertTrue(all(isinstance(author, dict) for author in authors))
+            self.assertEqual(authors[0]["name"], "CARIN Research Center")
+
     def test_creates_task_runs_harbor_and_ingests_output(self):
         with TemporaryDirectory() as temp_dir:
             workspace_root = Path(temp_dir) / "workspace"

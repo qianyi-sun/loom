@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 - Installed Harbor 0.9.0 in the dev image, aligned runner commands with the
   current `harbor run` CLI, and added a deploy-time real Harbor CLI local
   Docker smoke check.
+- Fixed the generated Harbor CLI smoke task metadata so Harbor 0.9.0 recognizes
+  it as a valid task instead of treating the path as an empty dataset.
 
 ## 0.0.0 - 2026-05-27
 

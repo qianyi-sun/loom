@@ -116,7 +116,7 @@ def _write_smoke_task(task_dir: Path) -> None:
                 "[task]",
                 'name = "carinrc/harbor-cli-smoke"',
                 'description = "Minimal shared dev Harbor CLI smoke task."',
-                'authors = ["CARIN Research Center"]',
+                'authors = [{ name = "CARIN Research Center" }]',
                 'keywords = ["smoke", "shared dev"]',
                 "",
                 "[verifier]",
