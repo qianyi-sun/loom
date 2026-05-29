@@ -148,7 +148,7 @@ Original runner wrapper research:
 | Unified evaluation backend | Planning | Contract keeps latent native adapters and Harbor integration on one backend surface |
 | Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
 | Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
-| Sandbox and artifacts | Started | Docker terminal sandbox contract and local artifact persistence are covered by unit tests |
+| Sandbox and artifacts | Started | Docker terminal sandbox contract, local artifact persistence, and MinIO-compatible object-store upload/download smoke are covered by tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
 | Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
@@ -227,6 +227,12 @@ Run database migrations against the local Compose Postgres service:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build migrate
+```
+
+Verify local MinIO bucket bootstrap and upload/download:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm --build object-storage-smoke
 ```
 
 Start the long-running development API service:

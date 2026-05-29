@@ -9,6 +9,7 @@ from agentic_data_platform.artifacts.store import (
     Artifacpilot groupjectStore,
     ArtifactPersistence,
     LocalArtifactStore,
+    S3ArtifactStore,
 )
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
@@ -69,6 +70,56 @@ class ArtifactStoreTest(unittest.TestCase):
         self.assertEqual(stored.size_bytes, 7)
         self.assertEqual(len(stored.sha256), 64)
         self.assertEqual(stored.metadata["run_id"], "run_001")
+
+    def test_local_store_reads_bytes_and_returns_file_url_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalArtifactStore(Path(temp_dir))
+            store.put_bytes("runs/run_001/output.txt", b"answer\n", media_type="text/plain")
+
+            payload = store.get_bytes("runs/run_001/output.txt")
+            url = store.presigned_get_url("runs/run_001/output.txt")
+
+        self.assertEqual(payload, b"answer\n")
+        self.assertTrue(url.startswith("file://"))
+
+    def test_s3_store_puts_payload_and_returns_storage_metadata(self):
+        client = FakeS3Client()
+        store = S3ArtifactStore(bucket="agentic-data-shared dev", client=client)
+
+        stored = store.put_bytes(
+            "runs/run_001/tasks/task_001/generated/answer.txt",
+            b"answer\n",
+            media_type="text/plain",
+            metadata={"run_id": "run_001", "turn_count": 1},
+        )
+
+        self.assertEqual(stored.key, "runs/run_001/tasks/task_001/generated/answer.txt")
+        self.assertEqual(stored.uri, "s3://agentic-data-shared dev/runs/run_001/tasks/task_001/generated/answer.txt")
+        self.assertEqual(stored.media_type, "text/plain")
+        self.assertEqual(stored.size_bytes, 7)
+        self.assertEqual(len(stored.sha256), 64)
+        self.assertEqual(stored.metadata["storage_key"], "runs/run_001/tasks/task_001/generated/answer.txt")
+        self.assertEqual(stored.metadata["storage_bucket"], "agentic-data-shared dev")
+        self.assertEqual(client.put_object_calls[0]["Bucket"], "agentic-data-shared dev")
+        self.assertEqual(client.put_object_calls[0]["Key"], "runs/run_001/tasks/task_001/generated/answer.txt")
+        self.assertEqual(client.put_object_calls[0]["Body"], b"answer\n")
+        self.assertEqual(client.put_object_calls[0]["ContentType"], "text/plain")
+        self.assertEqual(client.put_object_calls[0]["Metadata"]["run_id"], "run_001")
+        self.assertEqual(client.put_object_calls[0]["Metadata"]["turn_count"], "1")
+
+    def test_s3_store_bootstraps_missing_bucket_and_downloads_payload(self):
+        client = FakeS3Client(missing_bucket=True)
+        store = S3ArtifactStore(bucket="agentic-data-shared dev", client=client)
+
+        store.ensure_bucket()
+        store.put_bytes("runs/run_001/output.txt", b"payload", media_type="text/plain")
+
+        self.assertEqual(client.created_buckets, ["agentic-data-shared dev"])
+        self.assertEqual(store.get_bytes("runs/run_001/output.txt"), b"payload")
+        self.assertEqual(
+            store.presigned_get_url("runs/run_001/output.txt", expires_in_seconds=60),
+            "https://storage.example/agentic-data-shared dev/runs/run_001/output.txt?expires=60",
+        )
 
     def test_persist_trajectory_writes_jsonl_and_returns_artifact_ref(self):
         turn = TerminalTurn(
@@ -168,3 +219,43 @@ class ArtifactStoreTest(unittest.TestCase):
         self.assertEqual(payload["score"], 0.9)
         self.assertEqual(payload["judge"]["rubric_version"], "latent-skill-v0")
         self.assertIn("spreadsheet", payload["verbal_feedback"])
+
+
+class FakeS3Client:
+    def __init__(self, *, missing_bucket: bool = False) -> None:
+        self.missing_bucket = missing_bucket
+        self.created_buckets: list[str] = []
+        self.put_object_calls: list[dict] = []
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def head_bucket(self, *, Bucket: str) -> None:
+        if self.missing_bucket and Bucket not in self.created_buckets:
+            raise FakeS3ClientError({"Error": {"Code": "404", "Message": "Not Found"}})
+
+    def create_bucket(self, *, Bucket: str) -> None:
+        self.created_buckets.append(Bucket)
+
+    def put_object(self, **kwargs) -> None:
+        self.put_object_calls.append(kwargs)
+        self.objects[(kwargs["Bucket"], kwargs["Key"])] = kwargs["Body"]
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict:
+        return {"Body": FakeS3Body(self.objects[(Bucket, Key)])}
+
+    def generate_presigned_url(self, ClientMethod: str, Params: dict, ExpiresIn: int) -> str:
+        self.presign_client_method = ClientMethod
+        return f"https://storage.example/{Params['Bucket']}/{Params['Key']}?expires={ExpiresIn}"
+
+
+class FakeS3Body:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+class FakeS3ClientError(Exception):
+    def __init__(self, response: dict) -> None:
+        super().__init__(response["Error"]["Message"])
+        self.response = response

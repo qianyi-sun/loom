@@ -3,7 +3,9 @@ from agentic_data_platform.artifacts.store import (
     Artifacpilot groupjectStore,
     ArtifactPersistence,
     LocalArtifactStore,
+    S3ArtifactStore,
     StoredArtifact,
+    build_s3_artifact_store,
 )
 
 __all__ = [
@@ -11,5 +13,7 @@ __all__ = [
     "Artifacpilot groupjectStore",
     "ArtifactPersistence",
     "LocalArtifactStore",
+    "S3ArtifactStore",
     "StoredArtifact",
+    "build_s3_artifact_store",
 ]

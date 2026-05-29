@@ -43,6 +43,9 @@ run_compose_smoke() {
   log "Starting shared development dependencies"
   compose up -d postgres redis minio
 
+  log "Checking object storage upload/download"
+  compose run --rm --build -T object-storage-smoke </dev/null
+
   if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
     log "Running database migrations"
     compose run --rm --build -T migrate </dev/null
@@ -151,6 +154,8 @@ printf '[deploy-dev] Stopping API service before migrations\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" stop api >/dev/null 2>&1 || true
 printf '[deploy-dev] Starting shared development dependencies\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio
+printf '[deploy-dev] Checking object storage upload/download\n'
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T object-storage-smoke </dev/null
 if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
   printf '[deploy-dev] Running database migrations\n'
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T migrate </dev/null

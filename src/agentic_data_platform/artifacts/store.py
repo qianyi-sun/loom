@@ -31,6 +31,9 @@ class StoredArtifact:
 
 @runtime_checkable
 class Artifacpilot groupjectStore(Protocol):
+    def ensure_bucket(self) -> None:
+        ...
+
     def put_bytes(
         self,
         key: str,
@@ -41,10 +44,19 @@ class Artifacpilot groupjectStore(Protocol):
     ) -> StoredArtifact:
         ...
 
+    def get_bytes(self, key: str) -> bytes:
+        ...
+
+    def presigned_get_url(self, key: str, *, expires_in_seconds: int = 3600) -> str:
+        ...
+
 
 class LocalArtifactStore:
     def __init__(self, root: Path) -> None:
         self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def ensure_bucket(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def put_bytes(
@@ -74,6 +86,105 @@ class LocalArtifactStore:
             sha256=digest,
             metadata=artifact_metadata,
         )
+
+    def get_bytes(self, key: str) -> bytes:
+        safe_key = _validate_artifact_key(key)
+        return (self.root / safe_key).read_bytes()
+
+    def presigned_get_url(self, key: str, *, expires_in_seconds: int = 3600) -> str:
+        safe_key = _validate_artifact_key(key)
+        _validate_expiry(expires_in_seconds)
+        return (self.root / safe_key).resolve().as_uri()
+
+
+class S3ArtifactStore:
+    def __init__(self, *, bucket: str, client) -> None:
+        _require_non_empty("bucket", bucket)
+        self.bucket = bucket
+        self.client = client
+
+    def ensure_bucket(self) -> None:
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+        except Exception as exc:
+            if not _is_missing_bucket_error(exc):
+                raise
+            self.client.create_bucket(Bucket=self.bucket)
+
+    def put_bytes(
+        self,
+        key: str,
+        payload: bytes,
+        *,
+        media_type: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> StoredArtifact:
+        safe_key = _validate_artifact_key(key)
+        _require_non_empty("media_type", media_type)
+
+        digest = hashlib.sha256(payload).hexdigest()
+        artifact_metadata = dict(metadata or {})
+        artifact_metadata["storage_key"] = safe_key
+        artifact_metadata["storage_bucket"] = self.bucket
+
+        self.client.put_object(
+            Bucket=self.bucket,
+            Key=safe_key,
+            Body=payload,
+            ContentType=media_type,
+            Metadata={key: str(value) for key, value in artifact_metadata.items()},
+        )
+
+        return StoredArtifact(
+            key=safe_key,
+            uri=f"s3://{self.bucket}/{safe_key}",
+            media_type=media_type,
+            size_bytes=len(payload),
+            sha256=digest,
+            metadata=artifact_metadata,
+        )
+
+    def get_bytes(self, key: str) -> bytes:
+        safe_key = _validate_artifact_key(key)
+        response = self.client.get_object(Bucket=self.bucket, Key=safe_key)
+        return response["Body"].read()
+
+    def presigned_get_url(self, key: str, *, expires_in_seconds: int = 3600) -> str:
+        safe_key = _validate_artifact_key(key)
+        _validate_expiry(expires_in_seconds)
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": safe_key},
+            ExpiresIn=expires_in_seconds,
+        )
+
+
+def build_s3_artifact_store(
+    *,
+    endpoint_url: str,
+    bucket: str,
+    access_key: str,
+    secret_key: str,
+    region: str = "us-east-1",
+) -> S3ArtifactStore:
+    _require_non_empty("endpoint_url", endpoint_url)
+    _require_non_empty("bucket", bucket)
+    _require_non_empty("access_key", access_key)
+    _require_non_empty("secret_key", secret_key)
+    _require_non_empty("region", region)
+
+    import boto3
+    from botocore.config import Config
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+    return S3ArtifactStore(bucket=bucket, client=client)
 
 
 class ArtifactKeyFactory:
@@ -246,6 +357,21 @@ def _validate_artifact_key(key: str) -> str:
         raise ValueError("unsafe artifact key: empty, current, or parent path segments are not allowed")
 
     return key
+
+
+def _validate_expiry(expires_in_seconds: int) -> None:
+    if not isinstance(expires_in_seconds, int) or expires_in_seconds <= 0:
+        raise ValueError("expires_in_seconds must be a positive integer")
+
+
+def _is_missing_bucket_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    error = response.get("Error")
+    if not isinstance(error, dict):
+        return False
+    return str(error.get("Code")) in {"404", "NoSuchBucket", "NotFound"}
 
 
 def _safe_component(value: str) -> str:

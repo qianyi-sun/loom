@@ -13,6 +13,9 @@ class ServiceSettings:
     redis_url: str
     object_storage_endpoint: str
     object_storage_bucket: str
+    object_storage_access_key: str
+    object_storage_secret_key: str
+    object_storage_region: str
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -24,6 +27,9 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         redis_url=_get(values, "REDIS_URL", ""),
         object_storage_endpoint=_get(values, "OBJECT_STORAGE_ENDPOINT", ""),
         object_storage_bucket=_get(values, "OBJECT_STORAGE_BUCKET", ""),
+        object_storage_access_key=_get(values, "OBJECT_STORAGE_ACCESS_KEY", ""),
+        object_storage_secret_key=_get(values, "OBJECT_STORAGE_SECRET_KEY", ""),
+        object_storage_region=_get(values, "OBJECT_STORAGE_REGION", "us-east-1"),
     )
 
 

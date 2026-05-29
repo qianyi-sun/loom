@@ -338,6 +338,9 @@ def _app(engine):
             redis_url="",
             object_storage_endpoint="",
             object_storage_bucket="",
+            object_storage_access_key="",
+            object_storage_secret_key="",
+            object_storage_region="us-east-1",
         ),
         database_engine=engine,
     )

@@ -25,6 +25,9 @@ class ServiceAppTest(unittest.TestCase):
                 "REDIS_URL": "redis://redis:6379/0",
                 "OBJECT_STORAGE_ENDPOINT": "http://minio:9000",
                 "OBJECT_STORAGE_BUCKET": "adp-bucket",
+                "OBJECT_STORAGE_ACCESS_KEY": "loomdev",
+                "OBJECT_STORAGE_SECRET_KEY": "miniosecret",
+                "OBJECT_STORAGE_REGION": "us-west-2",
             }
         )
 
@@ -34,6 +37,9 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.redis_url, "redis://redis:6379/0")
         self.assertEqual(settings.object_storage_endpoint, "http://minio:9000")
         self.assertEqual(settings.object_storage_bucket, "adp-bucket")
+        self.assertEqual(settings.object_storage_access_key, "loomdev")
+        self.assertEqual(settings.object_storage_secret_key, "miniosecret")
+        self.assertEqual(settings.object_storage_region, "us-west-2")
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))
@@ -81,6 +87,9 @@ class ServiceAppTest(unittest.TestCase):
                     redis_url="redis://redis:6379/0",
                     object_storage_endpoint="http://minio:9000",
                     object_storage_bucket="",
+                    object_storage_access_key="loomdev",
+                    object_storage_secret_key="loomdev",
+                    object_storage_region="us-east-1",
                 )
             )
         )
@@ -114,6 +123,9 @@ class ServiceAppTest(unittest.TestCase):
                             redis_url="redis://redis:6379/0",
                             object_storage_endpoint="http://minio:9000",
                             object_storage_bucket="adp-bucket",
+                            object_storage_access_key="loomdev",
+                            object_storage_secret_key="loomdev",
+                            object_storage_region="us-east-1",
                         ),
                         database_engine=engine,
                     )
@@ -217,4 +229,7 @@ def _settings() -> ServiceSettings:
         redis_url="redis://redis:6379/0",
         object_storage_endpoint="http://minio:9000",
         object_storage_bucket="adp-bucket",
+        object_storage_access_key="loomdev",
+        object_storage_secret_key="loomdev",
+        object_storage_region="us-east-1",
     )

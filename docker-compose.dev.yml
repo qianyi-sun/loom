@@ -11,6 +11,9 @@ services:
       DATABASE_URL: postgresql://agentic:[REDACTED_DB_PASSWORD]@postgres:5432/agentic_data_platform
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_BUCKET: agentic-data-shared dev
+      OBJECT_STORAGE_ACCESS_KEY: loomdev
+      OBJECT_STORAGE_SECRET_KEY: loomdev
+      OBJECT_STORAGE_REGION: us-east-1
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/workspace
@@ -42,6 +45,9 @@ services:
       DATABASE_URL: postgresql://agentic:[REDACTED_DB_PASSWORD]@postgres:5432/agentic_data_platform
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_BUCKET: agentic-data-shared dev
+      OBJECT_STORAGE_ACCESS_KEY: loomdev
+      OBJECT_STORAGE_SECRET_KEY: loomdev
+      OBJECT_STORAGE_REGION: us-east-1
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/workspace
@@ -72,6 +78,29 @@ services:
     profiles:
       - tools
     command: python -m agentic_data_platform.persistence.migrations
+
+  object-storage-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: agentic-data-shared dev
+      OBJECT_STORAGE_ACCESS_KEY: loomdev
+      OBJECT_STORAGE_SECRET_KEY: loomdev
+      OBJECT_STORAGE_REGION: us-east-1
+    volumes:
+      - .:/workspace
+    depends_on:
+      minio:
+        condition: service_started
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.artifacts.object_storage_smoke
 
   postgres:
     image: postgres:16-alpine

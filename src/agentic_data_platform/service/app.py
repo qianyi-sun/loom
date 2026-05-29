@@ -61,6 +61,8 @@ def create_app(
             "object_storage": _configured(
                 service_settings.object_storage_endpoint
                 and service_settings.object_storage_bucket
+                and service_settings.object_storage_access_key
+                and service_settings.object_storage_secret_key
             ),
         }
         is_ready = all(status == "configured" for status in dependencies.values())
