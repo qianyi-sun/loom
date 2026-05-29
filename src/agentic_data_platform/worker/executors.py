@@ -279,13 +279,21 @@ def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborR
         task_instance_id=run.task.instance_id,
         dataset_ref=dataset_ref,
         task_path=task_path,
-        agent=_optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "default",
+        agent=_optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "oracle",
         agent_import_path=agent_import_path,
         model_name=run.model.model_name,
-        sandbox=_optional_str(configured.get("sandbox")) or "docker",
+        environment=(
+            _optional_str(configured.get("environment"))
+            or _optional_str(configured.get("env"))
+            or _optional_str(configured.get("sandbox"))
+            or "docker"
+        ),
         jobs_dir=jobs_dir,
         trial_name=_optional_str(configured.get("trial_name")),
         timeout_seconds=timeout_seconds,
+        auto_confirm=bool(configured.get("auto_confirm", True)),
+        agent_env=_string_list(configured.get("agent_env", []), field_name="harbor_run.agent_env"),
+        verifier_env=_string_list(configured.get("verifier_env", []), field_name="harbor_run.verifier_env"),
         extra_args=_string_list(configured.get("extra_args", []), field_name="harbor_run.extra_args"),
     )
 

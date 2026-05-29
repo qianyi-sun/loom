@@ -49,10 +49,11 @@ services:
       OBJECT_STORAGE_SECRET_KEY: loomdev
       OBJECT_STORAGE_REGION: us-east-1
       REDIS_URL: redis://redis:6379/0
-      SANDBOX_WORKSPACE_ROOT: /workspace/.runtime/sandbox-workspaces
+      SANDBOX_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}
       SANDBOX_HOST_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-}
     volumes:
       - .:/workspace
+      - ${SANDBOX_HOST_WORKSPACE_ROOT:-./.runtime/sandbox-workspaces}:${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
@@ -158,6 +159,25 @@ services:
     profiles:
       - tools
     command: python -m agentic_data_platform.worker.smoke
+
+  harbor-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      HARBOR_SMOKE_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}/harbor-cli-smoke
+      HARBOR_SMOKE_TIMEOUT_SECONDS: ${HARBOR_SMOKE_TIMEOUT_SECONDS:-600}
+    volumes:
+      - .:/workspace
+      - ${SANDBOX_HOST_WORKSPACE_ROOT:-./.runtime/sandbox-workspaces}:${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}
+      - /var/run/docker.sock:/var/run/docker.sock
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.harbor.smoke
 
   api-smoke:
     build:

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -15,11 +16,11 @@ class HarborRunnerBackendTest(unittest.TestCase):
                 run_id="run_harbor_runner_001",
                 task_instance_id="terminal-bench-hello",
                 dataset_ref="terminal-bench/terminal-bench-2",
-                agent="default",
+                agent="claude-code",
                 model_name="gpt-5-mini",
                 jobs_dir=jobs_dir,
                 timeout_seconds=45,
-                extra_args=["--max-tasks", "1"],
+                extra_args=["--n-tasks", "1"],
             )
 
             result = HarborRunnerBackend(command_runner=command_runner).run(spec)
@@ -33,14 +34,15 @@ class HarborRunnerBackendTest(unittest.TestCase):
                     "-d",
                     "terminal-bench/terminal-bench-2",
                     "--agent",
-                    "default",
-                    "--models",
+                    "claude-code",
+                    "--model",
                     "gpt-5-mini",
-                    "--sandbox",
+                    "--env",
                     "docker",
                     "--jobs-dir",
                     str(jobs_dir),
-                    "--max-tasks",
+                    "--yes",
+                    "--n-tasks",
                     "1",
                 ],
             )
@@ -49,6 +51,70 @@ class HarborRunnerBackendTest(unittest.TestCase):
             self.assertEqual(result.jobs_dir, jobs_dir)
             self.assertGreaterEqual(result.duration_seconds, 0)
             self.assertTrue(jobs_dir.is_dir())
+
+    def test_builds_task_path_command_with_custom_environment_and_env_args(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeCommandRunner(stdout="harbor ok\n")
+            spec = HarborRunSpec(
+                run_id="run_harbor_runner_003",
+                task_instance_id="local-task",
+                task_path=temp_path / "task",
+                agent="codex",
+                model_name="gpt-5",
+                environment="docker",
+                jobs_dir=temp_path / "jobs",
+                agent_env=["OPENAI_BASE_URL=https://models.example/v1"],
+                verifier_env=["EVALUATOR_MODE=smoke"],
+            )
+
+            result = HarborRunnerBackend(command_runner=command_runner).run(spec)
+
+            self.assertEqual(
+                result.command,
+                [
+                    "harbor",
+                    "run",
+                    "-p",
+                    str(temp_path / "task"),
+                    "--agent",
+                    "codex",
+                    "--model",
+                    "gpt-5",
+                    "--env",
+                    "docker",
+                    "--jobs-dir",
+                    str(temp_path / "jobs"),
+                    "--yes",
+                    "--agent-env",
+                    "OPENAI_BASE_URL=https://models.example/v1",
+                    "--verifier-env",
+                    "EVALUATOR_MODE=smoke",
+                ],
+            )
+
+    def test_runner_report_redacts_environment_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = HarborRunnerBackend(command_runner=FakeCommandRunner(stdout="harbor ok\n")).run(
+                HarborRunSpec(
+                    run_id="run_harbor_runner_004",
+                    task_instance_id="local-task",
+                    task_path=Path(temp_dir) / "task",
+                    agent="codex",
+                    model_name="gpt-5",
+                    jobs_dir=Path(temp_dir) / "jobs",
+                    agent_env=["OPENAI_API_KEY=secret-key"],
+                    verifier_env=["EVALUATOR_API_KEY=secret-evaluator-key"],
+                )
+            )
+
+            report = result.to_report()
+
+            self.assertIn("--agent-env", report["command"])
+            self.assertIn("OPENAI_API_KEY=[redacted]", report["command"])
+            self.assertIn("EVALUATOR_API_KEY=[redacted]", report["command"])
+            self.assertNotIn("secret-key", json_string(report))
+            self.assertNotIn("secret-evaluator-key", json_string(report))
 
     def test_requires_exactly_one_dataset_or_task_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,3 +137,7 @@ class FakeCommandRunner:
     def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
         self.calls.append({"args": args, "timeout": timeout})
         return subprocess.CompletedProcess(args=args, returncode=self.returncode, stdout=self.stdout, stderr=self.stderr)
+
+
+def json_string(value) -> str:
+    return json.dumps(value, sort_keys=True)

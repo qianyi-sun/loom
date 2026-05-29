@@ -128,8 +128,9 @@ present, and returns a local scripted dev model when no provider is configured.
 `GET /harnesses` returns the v0 launch harness catalog. `docker-terminal` is
 the platform-native Docker terminal path. `harbor-local-docker` is a
 frontend-visible Harbor-compatible smoke surface that still executes through
-the existing Docker terminal worker; real Harbor CLI execution, jobs ingestion,
-and multi-evaluator shape remain tracked by #64, #65, and #66.
+the existing Docker terminal worker. The backend now has a real Harbor CLI
+runner path and deploy-time CLI smoke, but frontend submission still needs to
+emit real `harbor_run` metadata before #64/#65/#96 can be closed.
 
 `POST /runs` accepts the durable submission envelope the worker will later
 consume: `project_id`, a compatibility `owner_team` display hint, a benchmark
@@ -228,7 +229,8 @@ serializing dashboard payloads.
   launches; production provider discovery needs provider-specific filtering,
   caching policy, and capability detection.
 - The `harbor-local-docker` harness is a frontend compatibility smoke surface,
-  not the final Harbor runner. It deliberately keeps #64/#65/#66 open.
+  not the final frontend-to-Harbor runner. It deliberately keeps #64/#65/#96
+  open until launch requests produce real Harbor CLI jobs from the UI/API path.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

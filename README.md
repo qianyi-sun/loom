@@ -141,7 +141,7 @@ Original runner wrapper research:
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Active | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, API health, and API-created Docker sandbox smoke checks; the dev image verifies the static Docker CLI download by SHA-256 |
+| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, and API-created Docker sandbox smoke checks; the dev image verifies the static Docker CLI download by SHA-256 and installs Harbor 0.9.0 |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
@@ -158,7 +158,7 @@ Original runner wrapper research:
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
-| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend exposes a `harbor-local-docker` harness option for compatibility smoke, multi-evaluator records can preserve Harbor verifier and LLM judge outputs, and the first Harbor runner/`jobs/` ingestion slices map verifier rewards and artifacts into shared platform records |
+| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend exposes a `harbor-local-docker` harness option for compatibility smoke, multi-evaluator records can preserve Harbor verifier and LLM judge outputs, and the Harbor runner/`jobs/` ingestion slices now include a real CLI local-Docker smoke path in shared dev |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -254,6 +254,12 @@ Verify queue claim and fixture worker execution:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build worker-smoke
+```
+
+Verify the real Harbor CLI local Docker path without external model keys:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm --build harbor-smoke
 ```
 
 Start the long-running development API and worker services:

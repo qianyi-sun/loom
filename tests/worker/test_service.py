@@ -270,9 +270,9 @@ class WorkerServiceTest(unittest.TestCase):
         payload["metadata"] = {
             "harbor_run": {
                 "dataset_ref": "terminal-bench/terminal-bench-2",
-                "agent": "default",
+                "agent": "claude-code",
                 "trial_name": "trial-hello",
-                "extra_args": ["--max-tasks", "1"],
+                "extra_args": ["--n-tasks", "1"],
             }
         }
         create_response = self.client.post("/runs", json=payload)
@@ -298,7 +298,9 @@ class WorkerServiceTest(unittest.TestCase):
         harbor_args = command_runner.calls[0]["args"]
         self.assertEqual(harbor_args[:4], ["harbor", "run", "-d", "terminal-bench/terminal-bench-2"])
         self.assertIn("--jobs-dir", harbor_args)
-        self.assertIn("--max-tasks", harbor_args)
+        self.assertIn("--env", harbor_args)
+        self.assertIn("--yes", harbor_args)
+        self.assertIn("--n-tasks", harbor_args)
 
         detail = self.client.get("/runs/run_worker_harbor_001")
         payload = detail.json()
@@ -323,7 +325,7 @@ class WorkerServiceTest(unittest.TestCase):
         payload["metadata"] = {
             "harbor_run": {
                 "dataset_ref": "terminal-bench/terminal-bench-2",
-                "agent": "default",
+                "agent": "claude-code",
             }
         }
         create_response = self.client.post("/runs", json=payload)

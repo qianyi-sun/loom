@@ -3,6 +3,7 @@ FROM python:3.12-slim
 ARG DOCKER_CLI_VERSION=29.1.3
 ARG DOCKER_CLI_SHA256_X86_64=c019c608ba2bb009dd673f3230e4d743f36a78d36166c6c2444c05d0aa9ff0d9
 ARG DOCKER_CLI_SHA256_AARCH64=2219f3ac48727d8c5546b13d5d271a58856188ecb8ff1f71f9e2f9aefde3ea76
+ARG HARBOR_VERSION=0.9.0
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -32,6 +33,9 @@ COPY src ./src
 COPY tests ./tests
 
 RUN python -m pip install --upgrade pip \
+    && python -m pip install "harbor==${HARBOR_VERSION}" \
+    && harbor --version \
+    && harbor run --help >/dev/null \
     && python -m pip install -e .
 
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]

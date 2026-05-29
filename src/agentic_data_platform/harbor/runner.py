@@ -17,11 +17,14 @@ class HarborRunSpec:
     jobs_dir: Path
     dataset_ref: str | None = None
     task_path: Path | None = None
-    agent: str = "default"
+    agent: str = "oracle"
     agent_import_path: Path | None = None
-    sandbox: str = "docker"
+    environment: str = "docker"
     trial_name: str | None = None
     timeout_seconds: int = 3600
+    auto_confirm: bool = True
+    agent_env: list[str] = field(default_factory=list)
+    verifier_env: list[str] = field(default_factory=list)
     extra_args: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -29,7 +32,7 @@ class HarborRunSpec:
         _require_non_empty("task_instance_id", self.task_instance_id)
         _require_non_empty("model_name", self.model_name)
         _require_non_empty("agent", self.agent)
-        _require_non_empty("sandbox", self.sandbox)
+        _require_non_empty("environment", self.environment)
 
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -37,6 +40,8 @@ class HarborRunSpec:
             raise ValueError("exactly one of dataset_ref or task_path must be set")
         if self.dataset_ref is not None:
             _require_non_empty("dataset_ref", self.dataset_ref)
+        _validate_key_value_args(self.agent_env, field_name="agent_env")
+        _validate_key_value_args(self.verifier_env, field_name="verifier_env")
         if self.extra_args and any(not isinstance(arg, str) or not arg.strip() for arg in self.extra_args):
             raise ValueError("extra_args must contain non-empty strings")
 
@@ -60,7 +65,7 @@ class HarborRunnerResult:
     def to_report(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
-            "command": list(self.command),
+            "command": _redacted_command(self.command),
             "jobs_dir": self.jobs_dir.name,
             "started_at": _datetime(self.started_at),
             "completed_at": _datetime(self.completed_at),
@@ -123,16 +128,22 @@ class HarborRunnerBackend:
             [
                 "--agent",
                 spec.agent,
-                "--models",
+                "--model",
                 spec.model_name,
-                "--sandbox",
-                spec.sandbox,
+                "--env",
+                spec.environment,
                 "--jobs-dir",
                 str(spec.jobs_dir),
             ]
         )
+        if spec.auto_confirm:
+            command.append("--yes")
         if spec.agent_import_path is not None:
             command.extend(["--agent-import-path", str(spec.agent_import_path)])
+        for env_value in spec.agent_env:
+            command.extend(["--agent-env", env_value])
+        for env_value in spec.verifier_env:
+            command.extend(["--verifier-env", env_value])
         command.extend(spec.extra_args)
         return command
 
@@ -149,6 +160,47 @@ def _datetime(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _redacted_command(command: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_path_next = False
+    redact_env_next = False
+    for value in command:
+        if redact_path_next:
+            redacted.append(_path_name_or_redacted(value))
+            redact_path_next = False
+            continue
+        if redact_env_next:
+            redacted.append(_redact_key_value(value))
+            redact_env_next = False
+            continue
+
+        redacted.append(value)
+        if value in {"-p", "--path", "--jobs-dir", "--agent-import-path", "--env-file", "-c", "--config"}:
+            redact_path_next = True
+        elif value in {"--agent-env", "--verifier-env", "--ae", "--ve"}:
+            redact_env_next = True
+    return redacted
+
+
+def _path_name_or_redacted(value: str) -> str:
+    name = Path(value).name
+    return name or "[path redacted]"
+
+
+def _redact_key_value(value: str) -> str:
+    key, separator, _ = value.partition("=")
+    if not separator or not key.strip():
+        return "[redacted]"
+    return f"{key}=[redacted]"
+
+
 def _require_non_empty(name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
+
+
+def _validate_key_value_args(values: list[str], *, field_name: str) -> None:
+    if not isinstance(values, list) or any(
+        not isinstance(item, str) or "=" not in item or not item.split("=", 1)[0].strip() for item in values
+    ):
+        raise ValueError(f"{field_name} must contain KEY=VALUE strings")

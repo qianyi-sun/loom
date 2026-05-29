@@ -13,6 +13,7 @@ DEPLOY_RUN_TESTS="${DEPLOY_RUN_TESTS:-1}"
 DEPLOY_RUN_MIGRATIONS="${DEPLOY_RUN_MIGRATIONS:-1}"
 DEPLOY_RUN_API_SMOKE="${DEPLOY_RUN_API_SMOKE:-1}"
 DEPLOY_RUN_FRONTEND_SMOKE="${DEPLOY_RUN_FRONTEND_SMOKE:-1}"
+DEPLOY_RUN_HARBOR_SMOKE="${DEPLOY_RUN_HARBOR_SMOKE:-1}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SANDBOX_HOST_WORKSPACE_ROOT="${SANDBOX_HOST_WORKSPACE_ROOT:-$ROOT_DIR/.runtime/sandbox-workspaces}"
@@ -57,6 +58,11 @@ run_compose_smoke() {
 
   log "Checking worker queue execution"
   compose run --rm --build -T worker-smoke </dev/null
+
+  if [[ "$DEPLOY_RUN_HARBOR_SMOKE" == "1" ]]; then
+    log "Checking real Harbor CLI local Docker smoke"
+    compose run --rm --build -T harbor-smoke </dev/null
+  fi
 
   log "Starting API and worker services"
   compose up -d --build api worker
@@ -180,6 +186,10 @@ if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
 fi
 printf '[deploy-dev] Checking worker queue execution\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T worker-smoke </dev/null
+if [[ "$DEPLOY_RUN_HARBOR_SMOKE" == "1" ]]; then
+  printf '[deploy-dev] Checking real Harbor CLI local Docker smoke\n'
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T harbor-smoke </dev/null
+fi
 printf '[deploy-dev] Starting API and worker services\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --build api worker
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
