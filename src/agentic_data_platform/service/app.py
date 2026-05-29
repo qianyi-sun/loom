@@ -2,24 +2,34 @@ from __future__ import annotations
 
 import logging
 from http import HTTPStatus
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from agentic_data_platform.persistence import create_database_engine
+from agentic_data_platform.service.artifact_bundle_resources import (
+    build_service_artifact_store,
+    register_artifact_bundle_routes,
+)
+from agentic_data_platform.service.auth_resources import register_auth_routes
 from agentic_data_platform.service.benchmark_resources import register_benchmark_routes
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
 from agentic_data_platform.service.dashboard_resources import register_dashboard_routes
 from agentic_data_platform.service.dependencies import build_session_dependency
+from agentic_data_platform.service.harness_resources import register_harness_routes
+from agentic_data_platform.service.model_resources import register_model_routes
 from agentic_data_platform.service.ops_resources import register_ops_routes
 from agentic_data_platform.service.project_resources import register_project_routes
 from agentic_data_platform.service.run_resources import register_run_routes
 from agentic_data_platform.service.security import InternalAuthMiddleware, parse_internal_auth_tokens
+from agentic_data_platform.service.telemetry_resources import register_telemetry_routes
 
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -44,14 +54,29 @@ def create_app(
     app.state.settings = service_settings
     app.state.database_engine = engine
     app.state.session_dependency = build_session_dependency(engine)
+    app.state.artifact_store = build_service_artifact_store(service_settings)
     parse_internal_auth_tokens(service_settings.internal_auth_tokens)
-    app.add_middleware(InternalAuthMiddleware, internal_auth_tokens=service_settings.internal_auth_tokens)
+    app.add_middleware(
+        InternalAuthMiddleware,
+        internal_auth_tokens=service_settings.internal_auth_tokens,
+        web_session_secret=service_settings.web_session_secret,
+    )
     app.add_middleware(RequestIDMiddleware)
+    register_auth_routes(app, app.state.session_dependency)
     register_project_routes(app, app.state.session_dependency)
     register_benchmark_routes(app, app.state.session_dependency)
+    register_model_routes(app, app.state.session_dependency)
+    register_harness_routes(app, app.state.session_dependency)
     register_run_routes(app, app.state.session_dependency)
+    register_artifact_bundle_routes(app, app.state.session_dependency)
+    register_telemetry_routes(app, app.state.session_dependency)
     register_dashboard_routes(app, app.state.session_dependency)
     register_ops_routes(app, app.state.session_dependency)
+    _mount_frontend(app)
+
+    @app.get("/", include_in_schema=False)
+    def frontend_root() -> RedirectResponse:
+        return RedirectResponse(url="/app/")
 
     @app.get("/healthz", tags=["operations"])
     def healthz(request: Request) -> dict[str, str]:
@@ -148,6 +173,11 @@ def _http_error_code(status_code: int) -> str:
     except ValueError:
         return "http_error"
     return phrase
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    static_root = Path(__file__).resolve().parents[1] / "frontend" / "static"
+    app.mount("/app", StaticFiles(directory=static_root, html=True), name="frontend")
 
 
 app = create_app()

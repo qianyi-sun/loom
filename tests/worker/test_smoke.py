@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository
+from agentic_data_platform.persistence.repositories import BenchmarkCatalogRepository, IdentityRepository, ProjectRepository
 from agentic_data_platform.worker.smoke import run_worker_smoke
 
 
@@ -41,6 +41,8 @@ class WorkerSmokeTest(unittest.TestCase):
         with session_scope(self.engine) as session:
             user = IdentityRepository(session).get_user("[REDACTED_OWNER]")
             project = ProjectRepository(session).get_project("pilot-project")
+            catalogs = BenchmarkCatalogRepository(session).list_fixture_catalogs()
 
         self.assertEqual(user.team_id, "pilot-project")
         self.assertEqual(project.created_by_user_id, "[REDACTED_OWNER]")
+        self.assertEqual({catalog.suite_name for catalog in catalogs}, {"SkillFlow", "SkillLearnBench"})

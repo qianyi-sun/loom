@@ -21,6 +21,10 @@ class ServiceSettings:
     evaluator_provider_base_url: str = ""
     evaluator_provider_api_key: str = ""
     internal_auth_tokens: str = ""
+    web_login_credentials: str = ""
+    web_session_secret: str = ""
+    web_session_ttl_seconds: int = 28800
+    model_provider_models: str = ""
     sandbox_workspace_root: str = ".runtime/sandbox-workspaces"
     sandbox_host_workspace_root: str = ""
 
@@ -42,6 +46,10 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         evaluator_provider_base_url=_get(values, "EVALUATOR_PROVIDER_BASE_URL", ""),
         evaluator_provider_api_key=_get(values, "EVALUATOR_PROVIDER_API_KEY", ""),
         internal_auth_tokens=_get(values, "INTERNAL_AUTH_TOKENS", ""),
+        web_login_credentials=_get(values, "WEB_LOGIN_CREDENTIALS", ""),
+        web_session_secret=_get(values, "WEB_SESSION_SECRET", ""),
+        web_session_ttl_seconds=_get_int(values, "WEB_SESSION_TTL_SECONDS", 28800),
+        model_provider_models=_get(values, "MODEL_PROVIDER_MODELS", ""),
         sandbox_workspace_root=_get(values, "SANDBOX_WORKSPACE_ROOT", ".runtime/sandbox-workspaces"),
         sandbox_host_workspace_root=_get(values, "SANDBOX_HOST_WORKSPACE_ROOT", ""),
     )
@@ -50,3 +58,10 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
 def _get(values: Mapping[str, str], key: str, default: str) -> str:
     value = values.get(key, default)
     return value.strip() if isinstance(value, str) else default
+
+
+def _get_int(values: Mapping[str, str], key: str, default: int) -> int:
+    value = _get(values, key, "")
+    if not value:
+        return default
+    return int(value)

@@ -9,10 +9,12 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRecord, ProjectRepository, UserRecord
+from agentic_data_platform.service.web_sessions import SESSION_COOKIE_NAME, SessionCookieError, verify_session_cookie
 
 
 AUTHENTICATED_USER_STATE_KEY = "authenticated_user_id"
-AUTH_EXEMPT_PATHS = {"/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
+AUTH_EXEMPT_PATHS = {"/", "/healthz", "/readyz", "/docs", "/redoc", "/openapi.json", "/auth/login"}
+AUTH_EXEMPT_PREFIXES = ("/docs/", "/app/")
 ROLE_LEVELS = {"viewer": 1, "member": 2, "owner": 3, "admin": 3}
 
 
@@ -22,9 +24,10 @@ class AuthContext:
 
 
 class InternalAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, internal_auth_tokens: str) -> None:
+    def __init__(self, app, *, internal_auth_tokens: str, web_session_secret: str = "") -> None:
         super().__init__(app)
         self._token_to_user_id = parse_internal_auth_tokens(internal_auth_tokens)
+        self._web_session_secret = web_session_secret
 
     async def dispatch(self, request: Request, call_next):
         if _is_exempt_path(request.url.path):
@@ -32,15 +35,27 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
 
         request_id = _request_id(request)
         token = _bearer_token(request.headers.get("Authorization", ""))
-        if token is None:
-            return _auth_error(request_id=request_id, status_code=401, message="Bearer token is required")
+        if token is not None:
+            user_id = self._token_to_user_id.get(token)
+            if user_id is None:
+                return _auth_error(request_id=request_id, status_code=401, message="Bearer token is invalid")
+            request.state.authenticated_user_id = user_id
+            return await call_next(request)
 
-        user_id = self._token_to_user_id.get(token)
-        if user_id is None:
-            return _auth_error(request_id=request_id, status_code=401, message="Bearer token is invalid")
+        cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
+        if cookie_value and self._web_session_secret:
+            try:
+                request.state.authenticated_user_id = verify_session_cookie(
+                    cookie_value,
+                    secret=self._web_session_secret,
+                )
+            except SessionCookieError:
+                return _auth_error(request_id=request_id, status_code=401, message="Web session is invalid")
+            return await call_next(request)
 
-        request.state.authenticated_user_id = user_id
-        return await call_next(request)
+        if cookie_value:
+            return _auth_error(request_id=request_id, status_code=401, message="Web session is not configured")
+        return _auth_error(request_id=request_id, status_code=401, message="Bearer token or web session is required")
 
 
 def parse_internal_auth_tokens(raw_value: str) -> dict[str, str]:
@@ -99,7 +114,7 @@ def _role_level(role: str | None) -> int:
 
 
 def _is_exempt_path(path: str) -> bool:
-    return path in AUTH_EXEMPT_PATHS or path.startswith("/docs/")
+    return path in AUTH_EXEMPT_PATHS or any(path.startswith(prefix) for prefix in AUTH_EXEMPT_PREFIXES)
 
 
 def _bearer_token(header_value: str) -> str | None:

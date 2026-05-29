@@ -110,6 +110,13 @@ class DevProviderConfigRegistry:
         except KeyError as exc:
             raise KeyError(f"Unknown provider config: {config_id}") from exc
 
+    def list_refs(self, *, role: ProviderRole | str | None = None) -> list[ProviderConfigRef]:
+        refs = list(self._refs.values())
+        if role is None:
+            return refs
+        expected = ProviderRole(role)
+        return [ref for ref in refs if ref.role == expected]
+
     def resolve_secret(self, secret_ref: str) -> ProviderSecret:
         validate_secret_ref(secret_ref)
         try:

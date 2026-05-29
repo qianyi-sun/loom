@@ -30,9 +30,13 @@ class ServiceAppTest(unittest.TestCase):
                 "OBJECT_STORAGE_REGION": "us-west-2",
                 "MODEL_PROVIDER_BASE_URL": "https://models.example/v1",
                 "MODEL_PROVIDER_API_KEY": "sk-model-secret",
+                "MODEL_PROVIDER_MODELS": "gpt-5,gpt-5-mini",
                 "EVALUATOR_PROVIDER_BASE_URL": "https://judge.example/v1",
                 "EVALUATOR_PROVIDER_API_KEY": "sk-judge-secret",
                 "INTERNAL_AUTH_TOKENS": "[REDACTED_OWNER]=[REDACTED_OWNER]-token",
+                "WEB_LOGIN_CREDENTIALS": "[REDACTED_OWNER]=[REDACTED_PASSWORD]:[REDACTED_OWNER]",
+                "WEB_SESSION_SECRET": "dev-session-secret",
+                "WEB_SESSION_TTL_SECONDS": "3600",
                 "SANDBOX_WORKSPACE_ROOT": "/workspace/.runtime/sandbox-workspaces",
                 "SANDBOX_HOST_WORKSPACE_ROOT": "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
             }
@@ -49,9 +53,13 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.object_storage_region, "us-west-2")
         self.assertEqual(settings.model_provider_base_url, "https://models.example/v1")
         self.assertEqual(settings.model_provider_api_key, "sk-model-secret")
+        self.assertEqual(settings.model_provider_models, "gpt-5,gpt-5-mini")
         self.assertEqual(settings.evaluator_provider_base_url, "https://judge.example/v1")
         self.assertEqual(settings.evaluator_provider_api_key, "sk-judge-secret")
         self.assertEqual(settings.internal_auth_tokens, "[REDACTED_OWNER]=[REDACTED_OWNER]-token")
+        self.assertEqual(settings.web_login_credentials, "[REDACTED_OWNER]=[REDACTED_PASSWORD]:[REDACTED_OWNER]")
+        self.assertEqual(settings.web_session_secret, "dev-session-secret")
+        self.assertEqual(settings.web_session_ttl_seconds, 3600)
         self.assertEqual(settings.sandbox_workspace_root, "/workspace/.runtime/sandbox-workspaces")
         self.assertEqual(
             settings.sandbox_host_workspace_root,

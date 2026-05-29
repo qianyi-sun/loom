@@ -12,6 +12,7 @@ DEPLOY_PROJECT_NAME="${DEPLOY_PROJECT_NAME:-agentic-data-shared dev}"
 DEPLOY_RUN_TESTS="${DEPLOY_RUN_TESTS:-1}"
 DEPLOY_RUN_MIGRATIONS="${DEPLOY_RUN_MIGRATIONS:-1}"
 DEPLOY_RUN_API_SMOKE="${DEPLOY_RUN_API_SMOKE:-1}"
+DEPLOY_RUN_FRONTEND_SMOKE="${DEPLOY_RUN_FRONTEND_SMOKE:-1}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SANDBOX_HOST_WORKSPACE_ROOT="${SANDBOX_HOST_WORKSPACE_ROOT:-$ROOT_DIR/.runtime/sandbox-workspaces}"
@@ -71,6 +72,11 @@ run_compose_smoke() {
   if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
     log "Checking authenticated API-created Docker sandbox run"
     compose run --rm --build -T api-smoke </dev/null
+  fi
+
+  if [[ "$DEPLOY_RUN_FRONTEND_SMOKE" == "1" ]]; then
+    log "Checking frontend login, launch, telemetry, and artifact download smoke"
+    compose run --rm --build -T frontend-smoke </dev/null
   fi
 
   log "Current service status"
@@ -203,6 +209,10 @@ done
 if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking authenticated API-created Docker sandbox run\n'
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T api-smoke </dev/null
+fi
+if [[ "$DEPLOY_RUN_FRONTEND_SMOKE" == "1" ]]; then
+  printf '[deploy-dev] Checking frontend login, launch, telemetry, and artifact download smoke\n'
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T frontend-smoke </dev/null
 fi
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" ps
 EOF

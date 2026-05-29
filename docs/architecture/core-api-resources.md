@@ -10,6 +10,7 @@ Related trackers:
 - Postgres persistence foundation: https://github.com/carinrc/agentic-data-platform/issues/51
 - Auth/RBAC/ops baseline: https://github.com/carinrc/agentic-data-platform/issues/57
 - Frontend and PM dashboard API contract: https://github.com/carinrc/agentic-data-platform/issues/58
+- Frontend MVP epic: https://github.com/carinrc/agentic-data-platform/issues/88
 
 ## Goal
 
@@ -18,7 +19,8 @@ surface for PM dashboards, researcher inspection, and future frontend
 development. The API is still an internal control-plane surface, but it now has
 stable routes for projects, benchmark tasks, queued run submission, lifecycle
 events, run summaries, run detail trajectories, artifacts, evaluator feedback,
-PM progress summaries, cancel, and retry.
+PM progress summaries, frontend session login, model/harness discovery,
+run-scoped telemetry, artifact bundle download, cancel, and retry.
 
 The implementation deliberately reuses existing domain and dashboard projection
 contracts rather than introducing a second API-only data model.
@@ -35,11 +37,14 @@ dependency boundary. Health and readiness endpoints remain available for service
 operations.
 
 The v0 internal auth boundary is intentionally simple for the shared dev/pilot
-environment. `INTERNAL_AUTH_TOKENS` maps `user_id=token` pairs, and callers send
-`Authorization: Bearer <token>`. Health, readiness, and OpenAPI/docs routes stay
-public; API resource routes require a valid bearer token. Route handlers load the
-authenticated user from Postgres and enforce project membership roles against the
-project owner's team:
+environment. `INTERNAL_AUTH_TOKENS` maps `user_id=token` pairs, and service
+callers can send `Authorization: Bearer <token>`. The frontend uses
+`POST /auth/login` with `WEB_LOGIN_CREDENTIALS` to create an HTTP-only
+`adp_session` cookie, then calls the same resource routes through the session
+boundary. Health, readiness, OpenAPI/docs, and static `/app/` frontend routes
+stay public; API resource routes require either a valid bearer token or a valid
+web session. Route handlers load the authenticated user from Postgres and
+enforce project membership roles against the project owner's team:
 
 - `viewer`: read project, run, artifact, and evaluation resources.
 - `member`: viewer permissions plus create/cancel/retry run operations and
@@ -52,6 +57,9 @@ This is a dev-safe boundary, not the final production SSO design.
 
 | Endpoint | Purpose | Backing repository/projection |
 | --- | --- | --- |
+| `POST /auth/login` | Exchange configured dev credentials for an HTTP-only web session cookie | `IdentityRepository.get_user()` + signed session cookie |
+| `GET /auth/session` | Inspect the current authenticated web/API user | `IdentityRepository.get_user()` |
+| `POST /auth/logout` | Clear the web session cookie | session cookie boundary |
 | `GET /teams` | List project-owning teams | `IdentityRepository.list_teams()` |
 | `GET /teams/{team_id}` | Inspect one team | `IdentityRepository.get_team()` |
 | `GET /projects` | List projects, optionally by `owner_team_id` | `ProjectRepository.list_projects()` |
@@ -63,15 +71,23 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /task-families/{task_family}` | Inspect one task family and its tasks | `BenchmarkFixtureCatalog.task_families` |
 | `GET /tasks` | List task instances for one suite/version | `BenchmarkCatalogRepository.get_fixture_catalog()` |
 | `GET /tasks/{task_family}/{instance_id}` | Inspect one task instance | `BenchmarkCatalogRepository.get_task_instance()` |
+| `GET /models` | List frontend-selectable API models from configured provider discovery or static allowlist | `ServiceSettings` + provider config refs |
+| `GET /harnesses` | List frontend-selectable launch harnesses including Docker terminal and Harbor-compatible local Docker smoke | static launch catalog |
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
 | `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
+| `GET /runs/{run_id}/telemetry` | Inspect scoped run, worker, host, and sandbox health for live monitors | `RunRepository.get_run()` + stdlib host metrics |
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
+| `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunDashboardProjection.evaluator` + `RunDashboardProjection.evaluator_results` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_runs()` + aggregate projection |
 | `GET /ops/metrics` | Return scoped run status counts and queue depth visible to the authenticated user | `RunRepository.list_runs()` |
+
+Static frontend assets are served at `GET /app/` by the same FastAPI service.
+The frontend is intentionally no-build for the first MVP slice so `shared dev`
+does not need Node/npm to serve the owner-testable UI.
 
 `benchmark_version` is a query parameter for benchmark detail, task-family, and
 task routes because current versions can contain slashes, such as
@@ -102,6 +118,19 @@ as run reads, and returns a global `summary` plus per-project rows with status
 counts, queue depth, terminal run count, artifact count, turn count, evaluator
 completion count, average evaluator score, and latest update timestamp.
 
+`GET /models` returns only safe model selection metadata: provider id, provider
+config id, display/model name, API mode, source, disabled/error state, and
+freshness timestamp. It never returns raw API keys or secret refs. It uses
+`MODEL_PROVIDER_MODELS` as a static allowlist when configured, falls back to
+OpenAI-compatible `/models` discovery when a provider base URL and API key are
+present, and returns a local scripted dev model when no provider is configured.
+
+`GET /harnesses` returns the v0 launch harness catalog. `docker-terminal` is
+the platform-native Docker terminal path. `harbor-local-docker` is a
+frontend-visible Harbor-compatible smoke surface that still executes through
+the existing Docker terminal worker; real Harbor CLI execution, jobs ingestion,
+and multi-evaluator shape remain tracked by #64, #65, and #66.
+
 `POST /runs` accepts the durable submission envelope the worker will later
 consume: `project_id`, a compatibility `owner_team` display hint, a benchmark
 `task`, API-only `model` configuration, Docker-terminal `runner` configuration,
@@ -125,7 +154,8 @@ serializing dashboard payloads.
 
 - Success responses include `request_id` when request middleware attaches one.
 - Protected endpoints without a valid bearer token return structured
-  `401 unauthorized`; project membership failures return structured
+  `401 unauthorized`; protected frontend calls can authenticate with the
+  HTTP-only web session cookie; project membership failures return structured
   `403 forbidden`.
 - Missing resources map to `404`; unconfigured database access maps to `503`.
 - Project and team responses mirror small repository read models.
@@ -154,6 +184,15 @@ serializing dashboard payloads.
   object-store-safe `storage_key` values, and strips query strings from external
   URLs. Absolute paths, `file://` values, traversal keys, drive-letter paths,
   and query/fragment-bearing keys are suppressed.
+- Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
+  run metadata, trajectory JSONL, evaluator summary, artifact metadata,
+  lifecycle events, and any artifact payload files available from the configured
+  `Artifacpilot groupjectStore`. Missing object payloads are reported as generic bundle
+  manifest errors without leaking host paths or backend exception strings. Raw
+  Harbor `jobs/` payload preservation remains part of #65.
+- Telemetry responses expose run status, queue/worker state, host CPU/RAM/disk
+  saturation indicators, and sandbox status without command output, env vars,
+  host paths, or secret refs.
 - OpenAPI examples are registered for the core list/detail routes so frontend
   and integration consumers can inspect expected payloads through
   `/openapi.json`.
@@ -180,10 +219,16 @@ serializing dashboard payloads.
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace
   dev env vars before real internal workloads are onboarded.
-- Auth is still dev-scoped. `INTERNAL_AUTH_TOKENS` should be replaced by the
-  selected internal SSO or GitHub-org login flow before production use. Quota
-  and retention policy are documented placeholders; enforcement is not in this
-  slice.
+- Auth is still dev-scoped. `INTERNAL_AUTH_TOKENS` and
+  `WEB_LOGIN_CREDENTIALS` should be replaced by the selected internal SSO or
+  GitHub-org login flow before production use. Quota and retention policy are
+  documented placeholders; enforcement is not in this slice.
+- Frontend model discovery is provider-config driven but minimal. The static
+  `MODEL_PROVIDER_MODELS` allowlist should be used for controlled dev/pilot
+  launches; production provider discovery needs provider-specific filtering,
+  caching policy, and capability detection.
+- The `harbor-local-docker` harness is a frontend compatibility smoke surface,
+  not the final Harbor runner. It deliberately keeps #64/#65/#66 open.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

@@ -186,6 +186,32 @@ services:
       - tools
     command: python -m agentic_data_platform.service.api_smoke
 
+  frontend-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      FRONTEND_SMOKE_BASE_URL: http://api:8000
+      FRONTEND_SMOKE_USERNAME: ${FRONTEND_SMOKE_USERNAME:-[REDACTED_OWNER]}
+      FRONTEND_SMOKE_PASSWORD: ${FRONTEND_SMOKE_PASSWORD:-[REDACTED_PASSWORD]}
+      FRONTEND_SMOKE_TIMEOUT_SECONDS: ${FRONTEND_SMOKE_TIMEOUT_SECONDS:-120}
+      FRONTEND_SMOKE_POLL_INTERVAL_SECONDS: ${FRONTEND_SMOKE_POLL_INTERVAL_SECONDS:-5}
+      FRONTEND_SMOKE_HARNESS_ID: ${FRONTEND_SMOKE_HARNESS_ID:-harbor-local-docker}
+    volumes:
+      - .:/workspace
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.service.frontend_smoke
+
   postgres:
     image: postgres:16-alpine
     environment:

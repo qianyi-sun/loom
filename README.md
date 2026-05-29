@@ -156,8 +156,9 @@ Original runner wrapper research:
 | Provider config and secrets | MVP slice merged | Dev provider config refs, env secret refs, sensitive metadata redaction, and normalized provider errors are available |
 | Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and scoped `/ops/metrics` are available |
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
+| Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
-| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; first Harbor `jobs/` fixture ingestor maps verifier rewards and artifacts into shared platform records |
+| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend exposes a `harbor-local-docker` harness option for compatibility smoke, multi-evaluator records can preserve Harbor verifier and LLM judge outputs, and the first Harbor `jobs/` fixture ingestor maps verifier rewards and artifacts into shared platform records |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -201,7 +202,7 @@ docs/engineering/        GitHub, org, release, and environment setup notes.
 docs/examples/           API request examples for local and shared dev testing.
 docs/infra/              Deployment and infrastructure planning.
 docs/requirements/       Versioned research-team project and workflow requirements.
-src/                      Platform Python package and domain contracts.
+src/                      Platform Python package, API resources, worker, and static frontend.
 tests/                    Unit tests for package behavior and data contracts.
 ```
 
@@ -263,6 +264,10 @@ docker compose -f docker-compose.dev.yml up --build api worker
 curl http://localhost:8000/healthz
 ```
 
+Open the frontend at `http://localhost:8000/app/`. The checked-in development
+login is `[REDACTED_OWNER]` / `[REDACTED_PASSWORD]`; it creates an HTTP-only web session cookie
+and does not expose the internal bearer token in browser code.
+
 Verify the authenticated API-created Docker sandbox run path with API and worker
 running:
 
@@ -270,9 +275,17 @@ running:
 docker compose -f docker-compose.dev.yml run --rm --build api-smoke
 ```
 
+Verify the frontend login, model/harness/benchmark discovery, run launch,
+telemetry polling, and object-store-backed artifact bundle download path with
+API and worker running:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke
+```
+
 The checked-in development token is `[REDACTED_TOKEN]` for user `[REDACTED_OWNER]`.
-Health, readiness, and OpenAPI docs are public; control-plane APIs require a
-bearer token.
+Health, readiness, OpenAPI docs, and static frontend files are public;
+control-plane APIs require either a bearer token or a valid web session cookie.
 
 Core API examples after seeding Postgres:
 

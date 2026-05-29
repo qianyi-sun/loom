@@ -7,6 +7,7 @@ from uuid import uuid4
 from sqlalchemy import Engine
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence
+from agentic_data_platform.benchmarks.fixtures import load_fixture_catalogs
 from agentic_data_platform.domain.run_records import (
     BenchmarkTaskInstance,
     EvaluatorConfig,
@@ -19,7 +20,12 @@ from agentic_data_platform.domain.run_records import (
     SandboxBackend,
 )
 from agentic_data_platform.persistence import create_database_engine, session_scope
-from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
+from agentic_data_platform.persistence.repositories import (
+    BenchmarkCatalogRepository,
+    IdentityRepository,
+    ProjectRepository,
+    RunRepository,
+)
 from agentic_data_platform.service.config import load_service_settings
 from agentic_data_platform.worker.executors import FixtureTerminalBenchmarkExecutor
 from agentic_data_platform.worker.service import RunWorker, build_worker_artifact_store
@@ -103,6 +109,9 @@ def _seed_smoke_run(*, engine: Engine, run_id: str) -> None:
             created_by_user_id="[REDACTED_OWNER]",
             description="Shared development project for authenticated API smoke checks.",
         )
+        catalogs = BenchmarkCatalogRepository(session)
+        for catalog in load_fixture_catalogs():
+            catalogs.upsert_fixture_catalog(catalog)
         RunRepository(session).create_run(
             _smoke_run(run_id),
             created_by_user_id="worker-smoke",
