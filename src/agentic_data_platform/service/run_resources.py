@@ -18,8 +18,14 @@ from agentic_data_platform.domain.run_records import (
     RunRecord,
     RunStatus,
 )
-from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
+from agentic_data_platform.persistence.repositories import AuditEventRepository, RunRepository
 from agentic_data_platform.providers.config import redact_sensitive_metadata, validate_secret_ref
+from agentic_data_platform.service.security import (
+    accessible_project_ids,
+    require_authenticated_user,
+    require_project_role,
+    require_same_actor,
+)
 
 
 class BenchmarkTaskInstanceRequest(BaseModel):
@@ -102,26 +108,32 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         request: Request,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
-        try:
-            ProjectRepository(session).get_project(payload.project_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Project not found") from exc
-        _validate_user_or_404(session, payload.created_by_user_id)
+        auth = require_authenticated_user(request, session)
+        actor_user_id = require_same_actor(auth, payload.created_by_user_id)
+        require_project_role(session, auth, payload.project_id, minimum_role="member")
 
         try:
-            run = _run_from_create_request(payload)
+            run = _run_from_create_request(payload, created_by_user_id=actor_user_id)
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         try:
             created = RunRepository(session).create_run(
                 run,
-                created_by_user_id=payload.created_by_user_id,
+                created_by_user_id=actor_user_id,
                 request_id=_request_id(request),
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+        _audit_run_event(
+            session,
+            event_type="run.created",
+            run=created,
+            actor_user_id=actor_user_id,
+            request_id=_request_id(request),
+            payload={"status": created.status.value},
+        )
         return _run_detail_payload(request, session, created)
 
     @app.get("/runs", tags=["runs"], responses=_example_response(_RUNS_EXAMPLE))
@@ -137,19 +149,28 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         created_before: datetime | None = None,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
         repository = RunRepository(session)
+        if project_id is not None:
+            require_project_role(session, auth, project_id, minimum_role="viewer")
+            allowed_project_ids = {project_id}
+        else:
+            allowed_project_ids = accessible_project_ids(session, auth)
+
+        runs = repository.list_runs(
+            project_id=project_id,
+            status=status,
+            benchmark_suite=benchmark_suite,
+            task_family=task_family,
+            task_instance_id=task_instance_id,
+            created_by_user_id=created_by_user_id,
+            created_after=created_after,
+            created_before=created_before,
+        )
         projections = [
             RunDashboardProjection.from_run(run).to_dict()
-            for run in repository.list_runs(
-                project_id=project_id,
-                status=status,
-                benchmark_suite=benchmark_suite,
-                task_family=task_family,
-                task_instance_id=task_instance_id,
-                created_by_user_id=created_by_user_id,
-                created_after=created_after,
-                created_before=created_before,
-            )
+            for run in runs
+            if run.project_id in allowed_project_ids
         ]
         return _with_request_id(request, {"runs": projections})
 
@@ -159,7 +180,9 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         request: Request,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
         run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
         return _run_detail_payload(request, session, run)
 
     @app.post("/runs/{run_id}/cancel", tags=["runs"], responses=_example_response(_RUN_CANCELED_EXAMPLE))
@@ -169,18 +192,29 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         request: Request,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
-        _validate_user_or_404(session, payload.actor_user_id)
+        auth = require_authenticated_user(request, session)
+        actor_user_id = require_same_actor(auth, payload.actor_user_id)
+        existing = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, existing.project_id, minimum_role="member")
         try:
             run = RunRepository(session).cancel_run(
                 run_id,
                 reason=payload.reason,
-                actor_user_id=payload.actor_user_id,
+                actor_user_id=actor_user_id,
                 request_id=_request_id(request),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _audit_run_event(
+            session,
+            event_type="run.canceled",
+            run=run,
+            actor_user_id=actor_user_id,
+            request_id=_request_id(request),
+            payload={"status": run.status.value, "reason": payload.reason},
+        )
         return _run_detail_payload(request, session, run)
 
     @app.post("/runs/{run_id}/retry", tags=["runs"], responses=_example_response(_RUN_RETRIED_EXAMPLE))
@@ -190,18 +224,29 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         request: Request,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
-        _validate_user_or_404(session, payload.actor_user_id)
+        auth = require_authenticated_user(request, session)
+        actor_user_id = require_same_actor(auth, payload.actor_user_id)
+        existing = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, existing.project_id, minimum_role="member")
         try:
             run = RunRepository(session).retry_run(
                 run_id,
                 reason=payload.reason,
-                actor_user_id=payload.actor_user_id,
+                actor_user_id=actor_user_id,
                 request_id=_request_id(request),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _audit_run_event(
+            session,
+            event_type="run.retried",
+            run=run,
+            actor_user_id=actor_user_id,
+            request_id=_request_id(request),
+            payload={"status": run.status.value, "reason": payload.reason},
+        )
         return _run_detail_payload(request, session, run)
 
     @app.get("/runs/{run_id}/artifacts", tags=["runs"], responses=_example_response(_ARTIFACTS_EXAMPLE))
@@ -210,7 +255,9 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         request: Request,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
         run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
         artifacts = RunDashboardProjection.from_run(run).to_dict()["artifacts"]
         return _with_request_id(request, {"run_id": run_id, "artifacts": artifacts})
 
@@ -220,7 +267,9 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         request: Request,
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
         run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
         projection = RunDashboardProjection.from_run(run).to_dict()
         evaluation = projection.get("evaluator")
         if evaluation is None:
@@ -235,7 +284,7 @@ def _get_run_or_404(session: Session, run_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
 
 
-def _run_from_create_request(payload: RunCreateRequest) -> RunRecord:
+def _run_from_create_request(payload: RunCreateRequest, *, created_by_user_id: str | None = None) -> RunRecord:
     return RunRecord.create(
         run_id=payload.run_id or f"run_{uuid4().hex}",
         project_id=payload.project_id,
@@ -244,7 +293,7 @@ def _run_from_create_request(payload: RunCreateRequest) -> RunRecord:
         model=_model_config(payload.model),
         runner=RunnerConfig(**payload.runner.model_dump()),
         evaluator_configs=[_evaluator_config(config) for config in payload.evaluators],
-        created_by_user_id=payload.created_by_user_id,
+        created_by_user_id=created_by_user_id,
         metadata=redact_sensitive_metadata(payload.metadata),
     )
 
@@ -303,13 +352,25 @@ def _provider_metadata(
     return safe_metadata
 
 
-def _validate_user_or_404(session: Session, user_id: str | None) -> None:
-    if user_id is None:
-        return
-    try:
-        IdentityRepository(session).get_user(user_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"User not found: {user_id}") from exc
+def _audit_run_event(
+    session: Session,
+    *,
+    event_type: str,
+    run: RunRecord,
+    actor_user_id: str,
+    request_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    AuditEventRepository(session).record_event(
+        event_type=event_type,
+        actor_user_id=actor_user_id,
+        project_id=run.project_id,
+        run_id=run.run_id,
+        subject_type="run",
+        subject_id=run.run_id,
+        payload=payload,
+        request_id=request_id,
+    )
 
 
 def _run_detail_payload(request: Request, session: Session, run: RunRecord) -> dict[str, Any]:

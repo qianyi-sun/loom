@@ -152,8 +152,9 @@ Original runner wrapper research:
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
 | Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
-| Queue and worker orchestration | Started | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are under active development |
-| Provider config and secrets | Started | Dev provider config refs, env secret refs, sensitive metadata redaction, and normalized provider errors are under active development |
+| Queue and worker orchestration | MVP slice merged | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are available |
+| Provider config and secrets | MVP slice merged | Dev provider config refs, env secret refs, sensitive metadata redaction, and normalized provider errors are available |
+| Internal auth/RBAC/ops | Started | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and `/ops/metrics` are being added for #57 |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
@@ -175,6 +176,8 @@ Original runner wrapper research:
 - Run lifecycle API: [#53](https://github.com/carinrc/agentic-data-platform/issues/53)
 - Provider config and secret boundary:
   [#56](https://github.com/carinrc/agentic-data-platform/issues/56)
+- Auth, RBAC, audit, and operations baseline:
+  [#57](https://github.com/carinrc/agentic-data-platform/issues/57)
 - Harbor-compatible benchmark and agent integration:
   [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
 - Unified evaluation backend contract:
@@ -253,14 +256,21 @@ docker compose -f docker-compose.dev.yml up --build api worker
 curl http://localhost:8000/healthz
 ```
 
+The checked-in development token is `[REDACTED_TOKEN]` for user `[REDACTED_OWNER]`.
+Health, readiness, and OpenAPI docs are public; control-plane APIs require a
+bearer token.
+
 Core API examples after seeding Postgres:
 
 ```bash
-curl http://localhost:8000/projects
-curl 'http://localhost:8000/tasks?benchmark_suite=SkillFlow&benchmark_version=<version>'
-curl 'http://localhost:8000/runs?project_id=latent-skill-pilot'
-curl 'http://localhost:8000/runs?benchmark_suite=SkillLearnBench&task_family=spreadsheet-from-documents'
+curl -H 'Authorization: Bearer [REDACTED_TOKEN]' http://localhost:8000/projects
+curl -H 'Authorization: Bearer [REDACTED_TOKEN]' \
+  'http://localhost:8000/tasks?benchmark_suite=SkillFlow&benchmark_version=<version>'
+curl -H 'Authorization: Bearer [REDACTED_TOKEN]' \
+  'http://localhost:8000/runs?project_id=latent-skill-pilot'
+curl -H 'Authorization: Bearer [REDACTED_TOKEN]' http://localhost:8000/ops/metrics
 curl -X POST http://localhost:8000/runs \
+  -H 'Authorization: Bearer [REDACTED_TOKEN]' \
   -H 'Content-Type: application/json' \
   -d @docs/examples/run-create-request.json
 ```

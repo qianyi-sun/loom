@@ -20,6 +20,7 @@ class ServiceSettings:
     model_provider_api_key: str = ""
     evaluator_provider_base_url: str = ""
     evaluator_provider_api_key: str = ""
+    internal_auth_tokens: str = ""
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -38,6 +39,7 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         model_provider_api_key=_get(values, "MODEL_PROVIDER_API_KEY", ""),
         evaluator_provider_base_url=_get(values, "EVALUATOR_PROVIDER_BASE_URL", ""),
         evaluator_provider_api_key=_get(values, "EVALUATOR_PROVIDER_API_KEY", ""),
+        internal_auth_tokens=_get(values, "INTERNAL_AUTH_TOKENS", ""),
     )
 
 

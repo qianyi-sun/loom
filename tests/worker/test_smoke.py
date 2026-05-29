@@ -5,8 +5,9 @@ from pathlib import Path
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
-from agentic_data_platform.persistence.database import create_database_engine
+from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
+from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository
 from agentic_data_platform.worker.smoke import run_worker_smoke
 
 
@@ -36,3 +37,10 @@ class WorkerSmokeTest(unittest.TestCase):
         self.assertEqual(result["turn_count"], 1)
         self.assertEqual(result["artifact_count"], 3)
         self.assertEqual(result["evaluator_id"], "mock-judge-v0")
+
+        with session_scope(self.engine) as session:
+            user = IdentityRepository(session).get_user("[REDACTED_OWNER]")
+            project = ProjectRepository(session).get_project("pilot-project")
+
+        self.assertEqual(user.team_id, "pilot-project")
+        self.assertEqual(project.created_by_user_id, "[REDACTED_OWNER]")

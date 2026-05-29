@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository
+from agentic_data_platform.persistence.repositories import AuditEventRepository, IdentityRepository, ProjectRepository
 from agentic_data_platform.service.project_resources import register_project_routes
 
 
@@ -97,7 +97,10 @@ class ProjectResourceTest(unittest.TestCase):
         )
 
     def test_gets_project_by_id(self):
-        response = self.client.get("/projects/platform-api", headers={"X-Request-ID": "req-project-001"})
+        response = self.client.get(
+            "/projects/platform-api",
+            headers={"X-Request-ID": "req-project-001", "X-Test-User-ID": "devon"},
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -147,6 +150,14 @@ class ProjectResourceTest(unittest.TestCase):
         )
         self.assertEqual(body["request_id"], "req-update-project-001")
         self.assertTrue(body["project"]["updated_at"].endswith("Z"))
+
+        with session_scope(self.engine) as session:
+            events = AuditEventRepository(session).list_events(project_id="latent-skill-pilot")
+
+        self.assertEqual([event.event_type for event in events], ["project.updated"])
+        self.assertEqual(events[0].actor_user_id, "[REDACTED_OWNER]")
+        self.assertEqual(events[0].request_id, "req-update-project-001")
+        self.assertEqual(events[0].payload["status"], "paused")
 
     def _seed_records(self):
         self.created_at = {}
@@ -199,6 +210,7 @@ def _app_for_engine(engine):
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):
         request.state.request_id = request.headers.get("X-Request-ID", "")
+        request.state.authenticated_user_id = request.headers.get("X-Test-User-ID", "[REDACTED_OWNER]")
         return await call_next(request)
 
     def session_dependency():

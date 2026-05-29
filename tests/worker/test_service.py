@@ -42,7 +42,7 @@ class WorkerServiceTest(unittest.TestCase):
                 owner_team_id="pilot-project",
                 created_by_user_id="[REDACTED_OWNER]",
             )
-        self.client = TestClient(_app(self.engine))
+        self.client = TestClient(_app(self.engine), headers={"Authorization": "Bearer [REDACTED_OWNER]-token"})
 
     def tearDown(self):
         self.engine.dispose()
@@ -159,6 +159,7 @@ def _app(engine):
             object_storage_access_key="",
             object_storage_secret_key="",
             object_storage_region="us-east-1",
+            internal_auth_tokens="[REDACTED_OWNER]=[REDACTED_OWNER]-token",
         ),
         database_engine=engine,
     )

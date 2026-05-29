@@ -150,6 +150,17 @@ class IdentityRepository:
         else:
             existing.role = role
 
+    def get_membership_role(self, *, team_id: str | None, user_id: str) -> str | None:
+        if team_id is None:
+            return None
+        row = self.session.scalar(
+            select(TeamMembershipRow).where(
+                TeamMembershipRow.team_id == team_id,
+                TeamMembershipRow.user_id == user_id,
+            )
+        )
+        return row.role if row is not None else None
+
 
 class ProjectRepository:
     def __init__(self, session: Session) -> None:
@@ -216,6 +227,15 @@ class ProjectRepository:
         if owner_team_id is not None:
             query = query.where(ProjectRow.owner_team_id == owner_team_id)
         return [_project_record(row) for row in self.session.scalars(query)]
+
+    def list_project_ids_for_user(self, user_id: str) -> list[str]:
+        query = (
+            select(ProjectRow.project_id)
+            .join(TeamMembershipRow, ProjectRow.owner_team_id == TeamMembershipRow.team_id)
+            .where(TeamMembershipRow.user_id == user_id)
+            .order_by(ProjectRow.project_id)
+        )
+        return list(self.session.scalars(query))
 
 
 class BenchmarkCatalogRepository:

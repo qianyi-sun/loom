@@ -32,6 +32,7 @@ class ServiceAppTest(unittest.TestCase):
                 "MODEL_PROVIDER_API_KEY": "sk-model-secret",
                 "EVALUATOR_PROVIDER_BASE_URL": "https://judge.example/v1",
                 "EVALUATOR_PROVIDER_API_KEY": "sk-judge-secret",
+                "INTERNAL_AUTH_TOKENS": "[REDACTED_OWNER]=[REDACTED_OWNER]-token",
             }
         )
 
@@ -48,6 +49,7 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.model_provider_api_key, "sk-model-secret")
         self.assertEqual(settings.evaluator_provider_base_url, "https://judge.example/v1")
         self.assertEqual(settings.evaluator_provider_api_key, "sk-judge-secret")
+        self.assertEqual(settings.internal_auth_tokens, "[REDACTED_OWNER]=[REDACTED_OWNER]-token")
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))
@@ -80,6 +82,7 @@ class ServiceAppTest(unittest.TestCase):
                     "database": "configured",
                     "redis": "configured",
                     "object_storage": "configured",
+                    "auth": "configured",
                 },
                 "request_id": "req-ready-001",
             },
@@ -113,6 +116,7 @@ class ServiceAppTest(unittest.TestCase):
                     "database": "missing",
                     "redis": "configured",
                     "object_storage": "missing",
+                    "auth": "missing",
                 },
                 "request_id": "req-not-ready-001",
             },
@@ -134,6 +138,7 @@ class ServiceAppTest(unittest.TestCase):
                             object_storage_access_key="loomdev",
                             object_storage_secret_key="loomdev",
                             object_storage_region="us-east-1",
+                            internal_auth_tokens="[REDACTED_OWNER]=[REDACTED_OWNER]-token",
                         ),
                         database_engine=engine,
                     )
@@ -150,7 +155,10 @@ class ServiceAppTest(unittest.TestCase):
     def test_structured_http_errors_include_request_id(self):
         client = TestClient(create_app(_settings()))
 
-        response = client.get("/missing", headers={"X-Request-ID": "req-missing-001"})
+        response = client.get(
+            "/missing",
+            headers={"X-Request-ID": "req-missing-001", "Authorization": "Bearer [REDACTED_OWNER]-token"},
+        )
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.headers["X-Request-ID"], "req-missing-001")
@@ -164,6 +172,18 @@ class ServiceAppTest(unittest.TestCase):
                 }
             },
         )
+
+    def test_request_logging_includes_request_id_path_and_status(self):
+        client = TestClient(create_app(_settings()))
+
+        with self.assertLogs("agentic_data_platform.service", level="INFO") as logs:
+            response = client.get("/healthz", headers={"X-Request-ID": "req-log-001"})
+
+        self.assertEqual(response.status_code, 200)
+        rendered = "\n".join(logs.output)
+        self.assertIn("request_id=req-log-001", rendered)
+        self.assertIn("path=/healthz", rendered)
+        self.assertIn("status_code=200", rendered)
 
     def test_openapi_schema_is_available(self):
         client = TestClient(create_app(_settings()))
@@ -207,6 +227,12 @@ class ServiceAppTest(unittest.TestCase):
                         team_id="pilot-project",
                         name="pilot group",
                     )
+                    IdentityRepository(session).create_user(
+                        user_id="[REDACTED_OWNER]",
+                        email="[REDACTED_OWNER]@example.com",
+                        display_name="[REDACTED_OWNER]",
+                        team_id="pilot-project",
+                    )
                     ProjectRepository(session).create_project(
                         project_id="latent-skill-pilot",
                         name="Latent Skill Pilot",
@@ -217,7 +243,7 @@ class ServiceAppTest(unittest.TestCase):
                 client = TestClient(create_app(_settings(), database_engine=engine))
                 response = client.get(
                     "/projects/latent-skill-pilot",
-                    headers={"X-Request-ID": "req-project-001"},
+                    headers={"X-Request-ID": "req-project-001", "Authorization": "Bearer [REDACTED_OWNER]-token"},
                 )
             finally:
                 engine.dispose()
@@ -240,4 +266,5 @@ def _settings() -> ServiceSettings:
         object_storage_access_key="loomdev",
         object_storage_secret_key="loomdev",
         object_storage_region="us-east-1",
+        internal_auth_tokens="[REDACTED_OWNER]=[REDACTED_OWNER]-token",
     )

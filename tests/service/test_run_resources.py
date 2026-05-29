@@ -63,7 +63,7 @@ class RunResourcesTest(unittest.TestCase):
             runs = RunRepository(session)
             runs.save_run(self.completed_run)
             runs.save_run(self.failed_run)
-        self.client = TestClient(_app(self.engine))
+        self.client = TestClient(_app(self.engine), headers={"Authorization": "Bearer [REDACTED_OWNER]-token"})
 
     def tearDown(self):
         self.engine.dispose()
@@ -174,7 +174,7 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(payload["lifecycle_events"][0]["from_status"], None)
         self.assertEqual(payload["lifecycle_events"][0]["to_status"], "queued")
 
-        restarted_client = TestClient(_app(self.engine))
+        restarted_client = TestClient(_app(self.engine), headers={"Authorization": "Bearer [REDACTED_OWNER]-token"})
         detail = restarted_client.get("/runs/run_create_001", headers={"X-Request-ID": "req-detail-001"})
 
         self.assertEqual(detail.status_code, 200)
@@ -198,7 +198,7 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(response.json()["error"]["code"], "validation_error")
         self.assertEqual(response.json()["error"]["request_id"], "req-bad-payload-001")
 
-    def test_create_run_rejects_unknown_user_with_404(self):
+    def test_create_run_rejects_spoofed_user_with_403(self):
         payload = _run_create_payload(run_id="run_unknown_user_001")
         payload["created_by_user_id"] = "missing-user"
 
@@ -208,9 +208,9 @@ class RunResourcesTest(unittest.TestCase):
             headers={"X-Request-ID": "req-unknown-user-001"},
         )
 
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["error"]["code"], "not_found")
-        self.assertIn("User not found", response.json()["error"]["message"])
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "forbidden")
+        self.assertIn("another user", response.json()["error"]["message"])
 
     def test_create_run_redacts_provider_secrets_and_preserves_config_refs(self):
         payload = _run_create_payload(run_id="run_secret_boundary_001")
@@ -300,8 +300,8 @@ class RunResourcesTest(unittest.TestCase):
             headers={"X-Request-ID": "req-missing-actor-001"},
         )
 
-        self.assertEqual(unknown_actor.status_code, 404)
-        self.assertEqual(unknown_actor.json()["error"]["code"], "not_found")
+        self.assertEqual(unknown_actor.status_code, 403)
+        self.assertEqual(unknown_actor.json()["error"]["code"], "forbidden")
 
         rejected = self.client.post(
             "/runs/run_cancel_001/cancel",
@@ -385,6 +385,7 @@ def _app(engine):
             object_storage_access_key="",
             object_storage_secret_key="",
             object_storage_region="us-east-1",
+            internal_auth_tokens="[REDACTED_OWNER]=[REDACTED_OWNER]-token",
         ),
         database_engine=engine,
     )

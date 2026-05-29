@@ -82,12 +82,26 @@ def _seed_smoke_run(*, engine: Engine, run_id: str) -> None:
             display_name="Worker Smoke",
             team_id="pilot-project",
         )
-        ProjectRepository(session).create_project(
+        identities.create_user(
+            user_id="[REDACTED_OWNER]",
+            email="[REDACTED_OWNER]@example.com",
+            display_name="[REDACTED_OWNER]",
+            team_id="pilot-project",
+        )
+        projects = ProjectRepository(session)
+        projects.create_project(
             project_id="worker-smoke",
             name="Worker Smoke",
             owner_team_id="pilot-project",
             created_by_user_id="worker-smoke",
             description="Deployment smoke project for queue and worker orchestration.",
+        )
+        projects.create_project(
+            project_id="pilot-project",
+            name="pilot group",
+            owner_team_id="pilot-project",
+            created_by_user_id="[REDACTED_OWNER]",
+            description="Shared development project for authenticated API smoke checks.",
         )
         RunRepository(session).create_run(
             _smoke_run(run_id),

@@ -1,6 +1,6 @@
 # Core API Resources
 
-Last updated: 2026-05-28
+Last updated: 2026-05-29
 
 Related trackers:
 
@@ -8,6 +8,7 @@ Related trackers:
 - Core API resources: https://github.com/carinrc/agentic-data-platform/issues/52
 - Run lifecycle API: https://github.com/carinrc/agentic-data-platform/issues/53
 - Postgres persistence foundation: https://github.com/carinrc/agentic-data-platform/issues/51
+- Auth/RBAC/ops baseline: https://github.com/carinrc/agentic-data-platform/issues/57
 
 ## Goal
 
@@ -31,6 +32,20 @@ If no database is configured, resource endpoints return `503` through the shared
 dependency boundary. Health and readiness endpoints remain available for service
 operations.
 
+The v0 internal auth boundary is intentionally simple for the shared dev/pilot
+environment. `INTERNAL_AUTH_TOKENS` maps `user_id=token` pairs, and callers send
+`Authorization: Bearer <token>`. Health, readiness, and OpenAPI/docs routes stay
+public; API resource routes require a valid bearer token. Route handlers load the
+authenticated user from Postgres and enforce project membership roles against the
+project owner's team:
+
+- `viewer`: read project, run, artifact, and evaluation resources.
+- `member`: viewer permissions plus create/cancel/retry run operations and
+  project metadata updates.
+- `owner`/`admin`: reserved higher roles with member-or-better access in v0.
+
+This is a dev-safe boundary, not the final production SSO design.
+
 ## Endpoint Surface
 
 | Endpoint | Purpose | Backing repository/projection |
@@ -53,6 +68,7 @@ operations.
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary for a run | `RunDashboardProjection.evaluator` |
+| `GET /ops/metrics` | Return basic run status counts and queue depth | `RunRepository.list_runs()` |
 
 `benchmark_version` is a query parameter for benchmark detail, task-family, and
 task routes because current versions can contain slashes, such as
@@ -61,6 +77,8 @@ task routes because current versions can contain slashes, such as
 `GET /runs` supports the first dashboard filters: `project_id`, `status`,
 `benchmark_suite`, `task_family`, `task_instance_id`, `created_by_user_id`,
 `created_after`, and `created_before`.
+When `project_id` is omitted, the route only returns runs whose projects belong
+to teams where the authenticated user has membership.
 
 `POST /runs` accepts the durable submission envelope the worker will later
 consume: `project_id`, `owner_team`, a benchmark `task`, API-only `model`
@@ -78,6 +96,9 @@ serializing dashboard payloads.
 ## Response Shape Principles
 
 - Success responses include `request_id` when request middleware attaches one.
+- Protected endpoints without a valid bearer token return structured
+  `401 unauthorized`; project membership failures return structured
+  `403 forbidden`.
 - Missing resources map to `404`; unconfigured database access maps to `503`.
 - Project and team responses mirror small repository read models.
 - Benchmark and task responses mirror `BenchmarkFixtureCatalog` and
@@ -103,6 +124,12 @@ serializing dashboard payloads.
 - OpenAPI examples are registered for the core list/detail routes so frontend
   and integration consumers can inspect expected payloads through
   `/openapi.json`.
+- `POST /runs`, cancel, retry, and project update operations write structured
+  `audit_events` with actor user id, project id, run id where applicable,
+  request id, and event payload. The ops metrics endpoint exposes v0 run status
+  counts and queue depth for shared dev debugging.
+- Request middleware emits `request_completed` service logs with request id,
+  method, path, status code, and authenticated user id when present.
 
 ## Current Limits
 
@@ -118,6 +145,10 @@ serializing dashboard payloads.
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace
   dev env vars before real internal workloads are onboarded.
+- Auth is still dev-scoped. `INTERNAL_AUTH_TOKENS` should be replaced by the
+  selected internal SSO or GitHub-org login flow before production use. Quota
+  and retention policy are documented placeholders; enforcement is not in this
+  slice.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and
@@ -125,8 +156,8 @@ serializing dashboard payloads.
 - Artifact and evaluator routes are projection-backed. Dedicated artifact and
   evaluation repositories should be added when upload/download, pagination,
   retention, and detailed evaluator history are implemented.
-- List endpoints do not yet include pagination, auth scoping, or quota-aware
-  filtering. Add these before broad internal rollout.
+- List endpoints do not yet include pagination or quota-aware filtering. Add
+  these before broad internal rollout.
 - `GET /runs` currently hydrates complete `RunRecord` objects before projecting
   summaries. Replace this with a lightweight summary query before storing large
   trajectories or exposing high-volume run lists.
