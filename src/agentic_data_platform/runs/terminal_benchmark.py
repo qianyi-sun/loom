@@ -64,7 +64,15 @@ class TerminalBenchmarkRunner:
             runner=request.registration.runner,
             metadata={"benchmark_adapter": request.registration.task.benchmark_suite},
         )
-        run.transition_to(RunStatus.PROVISIONING)
+        return self.run_existing(run, request)
+
+    def run_existing(
+        self,
+        run: RunRecord,
+        request: TerminalBenchmarkRunRequest,
+    ) -> TerminalBenchmarkRunResult:
+        if run.status is not RunStatus.PROVISIONING:
+            run.transition_to(RunStatus.PROVISIONING)
         run.transition_to(RunStatus.RUNNING)
 
         timeout_seconds = int(request.registration.runner.resource_limits.get("timeout_seconds", 3600))

@@ -37,8 +37,8 @@ run_compose_smoke() {
   compose config >"$compose_config_output"
   rm -f "$compose_config_output"
 
-  log "Stopping API service before migrations"
-  compose stop api >/dev/null 2>&1 || true
+  log "Stopping API and worker services before migrations"
+  compose stop api worker >/dev/null 2>&1 || true
 
   log "Starting shared development dependencies"
   compose up -d postgres redis minio
@@ -51,8 +51,11 @@ run_compose_smoke() {
     compose run --rm --build -T migrate </dev/null
   fi
 
-  log "Starting API service"
-  compose up -d --build api
+  log "Checking worker queue execution"
+  compose run --rm --build -T worker-smoke </dev/null
+
+  log "Starting API and worker services"
+  compose up -d --build api worker
 
   if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
     log "Running application smoke checks"
@@ -150,8 +153,8 @@ cd "$DEPLOY_PATH"
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"
-printf '[deploy-dev] Stopping API service before migrations\n'
-docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" stop api >/dev/null 2>&1 || true
+printf '[deploy-dev] Stopping API and worker services before migrations\n'
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" stop api worker >/dev/null 2>&1 || true
 printf '[deploy-dev] Starting shared development dependencies\n'
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis minio
 printf '[deploy-dev] Checking object storage upload/download\n'
@@ -160,8 +163,10 @@ if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
   printf '[deploy-dev] Running database migrations\n'
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T migrate </dev/null
 fi
-printf '[deploy-dev] Starting API service\n'
-docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --build api
+printf '[deploy-dev] Checking worker queue execution\n'
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T worker-smoke </dev/null
+printf '[deploy-dev] Starting API and worker services\n'
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --build api worker
 if [[ "$DEPLOY_RUN_TESTS" == "1" ]]; then
   printf '[deploy-dev] Running application smoke checks\n'
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T app </dev/null

@@ -33,6 +33,33 @@ services:
       timeout: 3s
       retries: 20
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: postgresql://agentic:[REDACTED_DB_PASSWORD]@postgres:5432/agentic_data_platform
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: agentic-data-shared dev
+      OBJECT_STORAGE_ACCESS_KEY: loomdev
+      OBJECT_STORAGE_SECRET_KEY: loomdev
+      OBJECT_STORAGE_REGION: us-east-1
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    command: python -m agentic_data_platform.worker.service --worker-id worker-dev-1 --poll-interval-seconds 5
+
   app:
     build:
       context: .
@@ -101,6 +128,33 @@ services:
     profiles:
       - tools
     command: python -m agentic_data_platform.artifacts.object_storage_smoke
+
+  worker-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: postgresql://agentic:[REDACTED_DB_PASSWORD]@postgres:5432/agentic_data_platform
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: agentic-data-shared dev
+      OBJECT_STORAGE_ACCESS_KEY: loomdev
+      OBJECT_STORAGE_SECRET_KEY: loomdev
+      OBJECT_STORAGE_REGION: us-east-1
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.worker.smoke
 
   postgres:
     image: postgres:16-alpine

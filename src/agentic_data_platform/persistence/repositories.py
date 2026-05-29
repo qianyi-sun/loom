@@ -474,6 +474,75 @@ class RunRepository:
         self.session.flush()
         return self.get_run(run_id)
 
+    def claim_next_queued_run(
+        self,
+        *,
+        worker_id: str,
+        request_id: str | None = None,
+    ) -> RunRecord | None:
+        _require_non_empty("worker_id", worker_id)
+        row = self.session.scalar(
+            select(RunRow)
+            .where(RunRow.status == RunStatus.QUEUED.value)
+            .order_by(RunRow.created_at, RunRow.run_id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if row is None:
+            return None
+
+        previous_status = RunStatus(row.status)
+        run = self._run_record(row)
+        run.transition_to(RunStatus.PROVISIONING)
+
+        row.status = run.status.value
+        row.updated_at = run.updated_at
+
+        attempt = self._latest_attempt_row(run.run_id)
+        attempt.status = run.status.value
+        attempt.updated_at = utc_now()
+
+        self._append_status_event(
+            run_id=run.run_id,
+            attempt_id=attempt.attempt_id,
+            event_type="run.claimed",
+            from_status=previous_status,
+            to_status=RunStatus.PROVISIONING,
+            request_id=request_id,
+            metadata={"worker_id": worker_id},
+        )
+        self.session.flush()
+        return self.get_run(run.run_id)
+
+    def save_worker_result(
+        self,
+        run: RunRecord,
+        *,
+        worker_id: str,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        _require_non_empty("worker_id", worker_id)
+        row = self._run_row_for_update(run.run_id)
+        previous_status = RunStatus(row.status)
+        if previous_status is RunStatus.CANCELED:
+            return self.get_run(run.run_id)
+        if previous_status not in {RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.EVALUATING}:
+            raise ValueError("worker results can only be saved for a claimed active run")
+        if run.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
+            raise ValueError("worker result must be terminal")
+
+        attempt = self._latest_attempt_row(run.run_id)
+        self.save_run(run)
+        self._append_worker_lifecycle_events(
+            run=run,
+            attempt_id=attempt.attempt_id,
+            from_status=previous_status,
+            worker_id=worker_id,
+            request_id=request_id,
+        )
+        self.session.flush()
+        return self.get_run(run.run_id)
+
     def save_run(self, run: RunRecord) -> None:
         existing = self.session.get(RunRow, run.run_id)
         owner_team_id = self._team_id_for_name(run.owner_team)
@@ -727,6 +796,42 @@ class RunRepository:
                 created_at=utc_now(),
             )
         )
+
+    def _append_worker_lifecycle_events(
+        self,
+        *,
+        run: RunRecord,
+        attempt_id: str,
+        from_status: RunStatus,
+        worker_id: str,
+        request_id: str | None,
+    ) -> None:
+        transitions: list[tuple[str, RunStatus, RunStatus, str | None]] = []
+        if from_status is RunStatus.PROVISIONING:
+            transitions.append(("run.started", RunStatus.PROVISIONING, RunStatus.RUNNING, None))
+            from_status = RunStatus.RUNNING
+        if from_status is RunStatus.RUNNING and run.evaluator_result is not None:
+            transitions.append(("run.evaluating", RunStatus.RUNNING, RunStatus.EVALUATING, None))
+            from_status = RunStatus.EVALUATING
+
+        terminal_event = {
+            RunStatus.SUCCEEDED: "run.succeeded",
+            RunStatus.FAILED: "run.failed",
+            RunStatus.CANCELED: "run.canceled",
+        }[run.status]
+        transitions.append((terminal_event, from_status, run.status, run.failure_reason))
+
+        for event_type, previous_status, next_status, reason in transitions:
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt_id,
+                event_type=event_type,
+                from_status=previous_status,
+                to_status=next_status,
+                reason=reason,
+                request_id=request_id,
+                metadata={"worker_id": worker_id},
+            )
 
 
 class AuditEventRepository:
@@ -985,6 +1090,11 @@ def _status_event_record(row: RunStatusEventRow) -> RunStatusEvent:
 
 def _attempt_id(run_id: str, attempt_number: int) -> str:
     return f"{run_id}:attempt:{attempt_number}"
+
+
+def _require_non_empty(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
 
 
 def _aware(value: datetime) -> datetime:

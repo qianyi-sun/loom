@@ -46,7 +46,7 @@ operations.
 | `GET /task-families/{task_family}` | Inspect one task family and its tasks | `BenchmarkFixtureCatalog.task_families` |
 | `GET /tasks` | List task instances for one suite/version | `BenchmarkCatalogRepository.get_fixture_catalog()` |
 | `GET /tasks/{task_family}/{instance_id}` | Inspect one task instance | `BenchmarkCatalogRepository.get_task_instance()` |
-| `POST /runs` | Create a durable queued run without executing it yet | `RunRepository.create_run()` + `RunDashboardProjection` |
+| `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
 | `GET /runs/{run_id}` | Inspect one dashboard-ready run plus lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
@@ -99,8 +99,14 @@ example payload is `docs/examples/run-create-request.json`.
 
 ## Current Limits
 
-- `POST /runs` only creates a queued record. It does not enqueue or execute
-  sandbox work yet; queue and worker orchestration remain tracked under #54.
+- Queue execution uses the Postgres `runs` table as the documented v0 queue.
+  `RunRepository.claim_next_queued_run(...)` lets a worker claim one queued run
+  and record lifecycle events. Redis remains available in the dev stack for a
+  later queue/cache backend, but it is not the current source of truth.
+- The current worker executor is a fixture terminal benchmark path for service
+  and deployment smoke checks. Real Docker terminal execution and provider-backed
+  model/evaluator calls remain follow-up work before real pilot workloads run
+  through this service.
 - Model and evaluator configs are stored as metadata only in this slice.
   Provider registration, secret indirection, and API-key boundaries remain
   tracked under #56.

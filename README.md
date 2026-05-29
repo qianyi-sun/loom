@@ -92,7 +92,7 @@ flowchart LR
     UI["Web / API"] --> API["Control plane API"]
     API --> Core["Evaluation backend core"]
     Core --> DB[("Postgres metadata")]
-    Core --> Queue["Redis queue"]
+    Core --> Queue["DB-backed v0 queue"]
     Queue --> Worker["Worker"]
     Worker --> Benchmark["BenchmarkProvider"]
     Worker --> Agent["AgentProvider"]
@@ -145,13 +145,14 @@ Original runner wrapper research:
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
-| Unified evaluation backend | Planning | Contract keeps latent native adapters and Harbor integration on one backend surface |
+| Unified evaluation backend | Documented | Contract keeps latent native adapters and Harbor integration on one backend surface |
 | Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
 | Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | Started | Docker terminal sandbox contract, local artifact persistence, and MinIO-compatible object-store upload/download smoke are covered by tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
 | Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
 | Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
+| Queue and worker orchestration | Started | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are under active development |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
@@ -235,11 +236,17 @@ Verify local MinIO bucket bootstrap and upload/download:
 docker compose -f docker-compose.dev.yml run --rm --build object-storage-smoke
 ```
 
-Start the long-running development API service:
+Verify queue claim and fixture worker execution:
+
+```bash
+docker compose -f docker-compose.dev.yml run --rm --build worker-smoke
+```
+
+Start the long-running development API and worker services:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build migrate
-docker compose -f docker-compose.dev.yml up --build api
+docker compose -f docker-compose.dev.yml up --build api worker
 curl http://localhost:8000/healthz
 ```
 

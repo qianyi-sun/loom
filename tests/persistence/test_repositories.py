@@ -314,6 +314,96 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[2].to_status, RunStatus.QUEUED)
         self.assertEqual(events[2].attempt_id, "run_lifecycle_001:attempt:2")
 
+    def test_run_repository_claims_next_queued_run_once_for_worker(self):
+        run = _queued_run(run_id="run_claim_001")
+
+        with session_scope(self.engine) as session:
+            identities = IdentityRepository(session)
+            identities.create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            identities.create_user(
+                user_id="[REDACTED_OWNER]",
+                email="[REDACTED_OWNER]@example.com",
+                display_name="[REDACTED_OWNER]",
+                team_id="pilot-project",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+                created_by_user_id="[REDACTED_OWNER]",
+            )
+            runs = RunRepository(session)
+
+            runs.create_run(run, created_by_user_id="[REDACTED_OWNER]", request_id="req-create-001")
+            claimed = runs.claim_next_queued_run(worker_id="worker-a", request_id="req-claim-001")
+            claimed_again = runs.claim_next_queued_run(worker_id="worker-b", request_id="req-claim-002")
+            events = runs.list_status_events(run.run_id)
+
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed.run_id, "run_claim_001")
+        self.assertEqual(claimed.status, RunStatus.PROVISIONING)
+        self.assertIsNone(claimed_again)
+        self.assertEqual([event.event_type for event in events], ["run.created", "run.claimed"])
+        self.assertEqual(events[1].from_status, RunStatus.QUEUED)
+        self.assertEqual(events[1].to_status, RunStatus.PROVISIONING)
+        self.assertEqual(events[1].request_id, "req-claim-001")
+        self.assertEqual(events[1].metadata["worker_id"], "worker-a")
+
+    def test_run_repository_does_not_overwrite_canceled_run_with_late_worker_result(self):
+        run = _queued_run(run_id="run_cancel_after_claim_001")
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            runs = RunRepository(session)
+
+            runs.create_run(run, request_id="req-create-001")
+            claimed = runs.claim_next_queued_run(worker_id="worker-a", request_id="req-claim-001")
+            canceled = runs.cancel_run(
+                run.run_id,
+                reason="operator canceled during provisioning",
+                request_id="req-cancel-001",
+            )
+            claimed.transition_to(RunStatus.RUNNING)
+            claimed.transition_to(RunStatus.EVALUATING)
+            claimed.attach_evaluator_result(
+                EvaluatorResult(
+                    evaluator_id="llm-judge-v0",
+                    status="completed",
+                    score=0.91,
+                    metrics={"task_success": True},
+                    verbal_feedback="Late worker result should be ignored.",
+                    judge=JudgeConfig(
+                        provider="mock",
+                        model_name="deterministic-judge",
+                        rubric_version="latent-skill-v0",
+                    ),
+                    artifact_refs=[],
+                )
+            )
+            claimed.transition_to(RunStatus.SUCCEEDED)
+            saved = runs.save_worker_result(
+                claimed,
+                worker_id="worker-a",
+                request_id="req-worker-finish-001",
+            )
+            events = runs.list_status_events(run.run_id)
+
+        self.assertEqual(canceled.status, RunStatus.CANCELED)
+        self.assertEqual(saved.status, RunStatus.CANCELED)
+        self.assertEqual(saved.failure_reason, "operator canceled during provisioning")
+        self.assertEqual([event.event_type for event in events], ["run.created", "run.claimed", "run.canceled"])
+
     def test_run_repository_rejects_invalid_lifecycle_transitions(self):
         run = _completed_run()
 
