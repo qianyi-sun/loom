@@ -162,6 +162,8 @@ class FrontendE2EResourcesTest(unittest.TestCase):
         self.assertEqual([harness["harness_id"] for harness in harnesses], ["docker-terminal", "harbor-local-docker"])
         self.assertEqual(harnesses[0]["sandbox_backend"], "docker_terminal")
         self.assertTrue(harnesses[1]["metadata"]["harbor_compatible"])
+        self.assertEqual(harnesses[1]["metadata"]["status"], "ready")
+        self.assertEqual(harnesses[1]["metadata"]["harbor_task_template"], "harbor-cli-smoke")
         self.assertEqual(response.json()["request_id"], "req-harnesses-001")
 
     def test_run_telemetry_is_scoped_and_reports_runtime_health_without_secret_leaks(self):

@@ -21,6 +21,9 @@ All notable changes to this project will be documented in this file.
   `result.json` when standalone reward files are absent.
 - Installed the Docker Compose CLI plugin in the dev image so Harbor local
   Docker jobs can call `docker compose` from inside the worker container.
+- Updated the frontend launch path and `frontend-smoke` to submit real
+  `metadata.harbor_run`, materialize the generated Harbor smoke task in the
+  worker, ingest Harbor verifier output, and validate artifact bundle download.
 
 ## 0.0.0 - 2026-05-27
 

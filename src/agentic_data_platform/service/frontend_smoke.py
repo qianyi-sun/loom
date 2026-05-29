@@ -222,11 +222,11 @@ def _validate_detail(detail: dict[str, Any]) -> None:
     turn_count = _int_value(progress.get("turn_count"), "run.progress.turn_count")
     if artifact_count < 3:
         raise FrontendSmokeError(f"frontend smoke expected at least 3 artifacts, got {artifact_count}")
-    if turn_count < 1:
-        raise FrontendSmokeError("frontend smoke expected at least one terminal trajectory turn")
     evaluator = run.get("evaluator")
     if not isinstance(evaluator, dict) or evaluator.get("status") != "completed":
         raise FrontendSmokeError("frontend smoke evaluator output was not completed")
+    if turn_count < 1 and evaluator.get("mode") != "harbor_verifier":
+        raise FrontendSmokeError("frontend smoke expected at least one terminal trajectory turn")
 
 
 def _run_create_payload(
@@ -242,13 +242,33 @@ def _run_create_payload(
         _dict_value(task.get("metadata") or {}, "task.metadata").get("instruction")
         or f"Follow {benchmark['suite_name']} task {task['task_family']}/{task['instance_id']} from {task['instruction_ref']}."
     )
-    command = (
-        "python - <<'PY'\n"
-        "from pathlib import Path\n"
-        f"Path('frontend-smoke-output.txt').write_text('frontend smoke {config.run_id}\\n')\n"
-        "print('frontend smoke complete')\n"
-        "PY"
-    )
+    harness_metadata = _dict_value(harness.get("metadata") or {}, "harness.metadata")
+    launch_metadata: dict[str, Any] = {"launched_from": "frontend-smoke", "harness_id": harness["harness_id"]}
+    if harness_metadata.get("harbor_compatible"):
+        launch_metadata["harbor_run"] = _harbor_run_config_for_harness(harness)
+        evaluators = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+    else:
+        command = (
+            "python - <<'PY'\n"
+            "from pathlib import Path\n"
+            f"Path('frontend-smoke-output.txt').write_text('frontend smoke {config.run_id}\\n')\n"
+            "print('frontend smoke complete')\n"
+            "PY"
+        )
+        launch_metadata["worker_commands"] = [
+            {"command": command, "cwd": "/workspace", "model_call_id": "frontend-smoke-call-1"}
+        ]
+        evaluators = [
+            {
+                "evaluator_id": "mock-judge-v0",
+                "mode": "llm_judge",
+                "judge": {
+                    "provider": "mock",
+                    "model_name": "deterministic-judge",
+                    "rubric_version": "frontend-e2e-v0",
+                },
+            }
+        ]
     return {
         "run_id": config.run_id,
         "project_id": project["project_id"],
@@ -284,23 +304,33 @@ def _run_create_payload(
                 or _dict_value(harness.get("metadata") or {}, "harness.metadata").get("runner_contract"),
             },
         },
-        "evaluators": [
-            {
-                "evaluator_id": "mock-judge-v0",
-                "mode": "llm_judge",
-                "judge": {
-                    "provider": "mock",
-                    "model_name": "deterministic-judge",
-                    "rubric_version": "frontend-e2e-v0",
-                },
-            }
-        ],
-        "metadata": {
-            "launched_from": "frontend-smoke",
-            "harness_id": harness["harness_id"],
-            "worker_commands": [{"command": command, "cwd": "/workspace", "model_call_id": "frontend-smoke-call-1"}],
-        },
+        "evaluators": evaluators,
+        "metadata": launch_metadata,
     }
+
+
+def _harbor_run_config_for_harness(harness: dict[str, Any]) -> dict[str, Any]:
+    metadata = _dict_value(harness.get("metadata") or {}, "harness.metadata")
+    resource_limits = _dict_value(harness.get("resource_limits") or {}, "harness.resource_limits")
+    harbor_config: dict[str, Any] = {
+        "task_template": _str_metadata(metadata.get("harbor_task_template"), "harbor-cli-smoke"),
+        "agent": _str_metadata(metadata.get("harbor_agent"), "oracle"),
+        "environment": _str_metadata(metadata.get("harbor_environment"), "docker"),
+        "timeout_seconds": _int_metadata(
+            metadata.get("harbor_timeout_seconds") or resource_limits.get("timeout_seconds"),
+            default=600,
+            field_name="harness.metadata.harbor_timeout_seconds",
+        ),
+        "extra_args": _str_list_metadata(
+            metadata.get("harbor_extra_args"),
+            default=["--n-tasks", "1", "--quiet"],
+            field_name="harness.metadata.harbor_extra_args",
+        ),
+    }
+    model_name = metadata.get("harbor_model_name")
+    if isinstance(model_name, str) and model_name.strip():
+        harbor_config["model_name"] = model_name.strip()
+    return harbor_config
 
 
 def _select_project(payload: dict[str, Any], *, preferred_project_id: str) -> dict[str, Any]:
@@ -425,6 +455,26 @@ def _int_value(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise FrontendSmokeError(f"frontend smoke expected integer at {name}")
     return value
+
+
+def _int_metadata(value: object, *, default: int, field_name: str) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise FrontendSmokeError(f"frontend smoke expected positive integer at {field_name}")
+    return value
+
+
+def _str_metadata(value: object, default: str) -> str:
+    return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+def _str_list_metadata(value: object, *, default: list[str], field_name: str) -> list[str]:
+    if value is None:
+        return list(default)
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise FrontendSmokeError(f"frontend smoke expected string list at {field_name}")
+    return [item.strip() for item in value]
 
 
 def _env(values: Mapping[str, str], key: str, default: str) -> str:

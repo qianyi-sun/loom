@@ -141,7 +141,7 @@ Original runner wrapper research:
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Active | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, and API-created Docker sandbox smoke checks; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 |
+| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, API-created Docker sandbox smoke, and frontend-driven Harbor launch smoke checks; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
@@ -158,7 +158,7 @@ Original runner wrapper research:
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
-| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend exposes a `harbor-local-docker` harness option for compatibility smoke, multi-evaluator records can preserve Harbor verifier and LLM judge outputs, and the Harbor runner/`jobs/` ingestion slices now include a real CLI local-Docker smoke path in shared dev |
+| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes the generated Harbor smoke task, and the Harbor runner/`jobs/` ingestion path is covered by shared dev smoke checks |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -281,9 +281,9 @@ running:
 docker compose -f docker-compose.dev.yml run --rm --build api-smoke
 ```
 
-Verify the frontend login, model/harness/benchmark discovery, run launch,
-telemetry polling, and object-store-backed artifact bundle download path with
-API and worker running:
+Verify the frontend login, model/harness/benchmark discovery, Harbor-backed run
+launch, telemetry polling, Harbor verifier output, and object-store-backed
+artifact bundle download path with API and worker running:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke

@@ -35,7 +35,7 @@ def run_harbor_cli_smoke(
     if run_root.exists():
         shutil.rmtree(run_root)
     task_dir.mkdir(parents=True)
-    _write_smoke_task(task_dir)
+    write_harbor_cli_smoke_task(task_dir)
 
     runner_result = HarborRunnerBackend(
         executable=config.executable,
@@ -99,7 +99,7 @@ def _config_from_env(environ: Mapping[str, str] | None = None) -> HarborCliSmoke
     )
 
 
-def _write_smoke_task(task_dir: Path) -> None:
+def write_harbor_cli_smoke_task(task_dir: Path) -> None:
     (task_dir / "environment").mkdir(parents=True, exist_ok=True)
     (task_dir / "solution").mkdir(parents=True, exist_ok=True)
     (task_dir / "tests").mkdir(parents=True, exist_ok=True)
@@ -164,6 +164,9 @@ def _write_smoke_task(task_dir: Path) -> None:
     )
     solve_path.chmod(0o755)
     test_path.chmod(0o755)
+
+
+_write_smoke_task = write_harbor_cli_smoke_task
 
 
 def _env(values: Mapping[str, str], key: str, default: str) -> str:

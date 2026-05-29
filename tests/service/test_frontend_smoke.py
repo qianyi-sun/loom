@@ -44,6 +44,23 @@ class FrontendSmokeTest(unittest.TestCase):
         self.assertEqual(client.requests[0]["path"], "/auth/login")
         self.assertIn("/runs/frontend_smoke_001/artifact-bundle", [request["path"] for request in client.requests])
         self.assertNotIn("Authorization", str(client.requests))
+        run_launch = next(request for request in client.requests if request["method"] == "POST" and request["path"] == "/runs")
+        launch_metadata = run_launch["json"]["metadata"]
+        self.assertEqual(launch_metadata["harness_id"], "harbor-local-docker")
+        self.assertIn("harbor_run", launch_metadata)
+        self.assertNotIn("worker_commands", launch_metadata)
+        self.assertEqual(
+            launch_metadata["harbor_run"],
+            {
+                "task_template": "harbor-cli-smoke",
+                "agent": "oracle",
+                "model_name": "smoke/noop",
+                "environment": "docker",
+                "timeout_seconds": 60,
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            },
+        )
+        self.assertEqual(run_launch["json"]["evaluators"], [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}])
 
     def test_frontend_smoke_retries_transient_run_detail_404_after_launch(self):
         client = FakeFrontendSmokeClient(
@@ -71,6 +88,28 @@ class FrontendSmokeTest(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         detail_reads = [request for request in client.requests if request["path"] == "/runs/frontend_smoke_001"]
         self.assertEqual(len(detail_reads), 3)
+
+    def test_frontend_smoke_accepts_harbor_verifier_without_terminal_turns(self):
+        client = FakeFrontendSmokeClient(
+            run_details=[_run_detail("succeeded", artifact_count=5, turn_count=0, evaluator_mode="harbor_verifier")],
+            telemetry=_telemetry("succeeded"),
+            bundle=_bundle(),
+        )
+
+        result = run_frontend_smoke(
+            FrontendSmokeConfig(
+                base_url="http://api:8000",
+                username="[REDACTED_OWNER]",
+                password="[REDACTED_PASSWORD]",
+                run_id="frontend_smoke_001",
+                poll_interval_seconds=0,
+            ),
+            client=client,
+            sleep=lambda _: None,
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.artifact_count, 5)
 
     def test_frontend_smoke_rejects_empty_bundle_download(self):
         client = FakeFrontendSmokeClient(
@@ -180,7 +219,16 @@ class FakeFrontendSmokeClient:
                             "default_image": "python:3.12-slim",
                             "internet_access": True,
                             "resource_limits": {"cpu": 1, "memory_mb": 512, "timeout_seconds": 60},
-                            "metadata": {"harbor_compatible": True, "runner_contract": "harbor-local-docker-v0"},
+                            "metadata": {
+                                "harbor_compatible": True,
+                                "runner_contract": "harbor-local-docker-v0",
+                                "status": "ready",
+                                "harbor_task_template": "harbor-cli-smoke",
+                                "harbor_agent": "oracle",
+                                "harbor_model_name": "smoke/noop",
+                                "harbor_environment": "docker",
+                                "harbor_extra_args": ["--n-tasks", "1", "--quiet"],
+                            },
                         },
                     ]
                 },
@@ -243,14 +291,16 @@ class FakeResponse:
         return self._payload
 
 
-def _run_detail(status="succeeded", *, artifact_count=3, turn_count=1):
+def _run_detail(status="succeeded", *, artifact_count=3, turn_count=1, evaluator_mode="llm_judge"):
     return {
         "run": {
             "run_id": "frontend_smoke_001",
             "project": {"project_id": "pilot-project"},
             "status": status,
             "progress": {"artifact_count": artifact_count, "turn_count": turn_count},
-            "evaluator": {"status": "completed", "verbal_feedback_summary": "ok"} if status == "succeeded" else None,
+            "evaluator": {"mode": evaluator_mode, "status": "completed", "verbal_feedback_summary": "ok"}
+            if status == "succeeded"
+            else None,
         },
         "trajectory": [
             {"turn_index": 0, "command": "python solve.py", "exit_code": 0, "stdout": "ok", "stderr": ""}

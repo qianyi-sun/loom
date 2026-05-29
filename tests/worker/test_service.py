@@ -319,6 +319,56 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
         )
 
+    def test_worker_materializes_generated_harbor_smoke_task(self):
+        payload = _run_create_payload("run_worker_harbor_smoke_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "task_template": "harbor-cli-smoke",
+                "agent": "oracle",
+                "model_name": "smoke/noop",
+                "environment": "docker",
+                "timeout_seconds": 30,
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-smoke-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-smoke-001")
+            harbor_args = command_runner.calls[0]["args"]
+            task_dir = Path(harbor_args[harbor_args.index("-p") + 1])
+
+            self.assertTrue((task_dir / "task.toml").is_file())
+            self.assertTrue((task_dir / "solution" / "solve.sh").is_file())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(harbor_args[:3], ["harbor", "run", "-p"])
+        self.assertIn("--model", harbor_args)
+        self.assertEqual(harbor_args[harbor_args.index("--model") + 1], "smoke/noop")
+        self.assertIn("--quiet", harbor_args)
+
+        detail = self.client.get("/runs/run_worker_harbor_smoke_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "succeeded")
+        self.assertEqual(payload["run"]["evaluator"]["mode"], "harbor_verifier")
+        self.assertGreaterEqual(payload["run"]["progress"]["artifact_count"], 4)
+
     def test_worker_normalizes_harbor_runner_failure(self):
         payload = _run_create_payload("run_worker_harbor_failed_001")
         payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}

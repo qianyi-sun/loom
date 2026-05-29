@@ -11,6 +11,7 @@ from agentic_data_platform.domain.run_records import ArtifactKind, ArtifactRef, 
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
 from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
+from agentic_data_platform.harbor.smoke import write_harbor_cli_smoke_task
 from agentic_data_platform.models.providers import ModelCommand, ScriptedModelProvider
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.runs.terminal_benchmark import TerminalBenchmarkRunner, TerminalBenchmarkRunRequest
@@ -264,8 +265,7 @@ def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborR
         return None
 
     dataset_ref = _optional_str(configured.get("dataset_ref"))
-    task_path_value = _optional_str(configured.get("task_path"))
-    task_path = Path(task_path_value) if task_path_value is not None else None
+    task_path = _harbor_task_path_for_run(run, configured=configured, workspace_root=workspace_root)
     agent_import_path_value = _optional_str(configured.get("agent_import_path"))
     agent_import_path = Path(agent_import_path_value) if agent_import_path_value is not None else None
     timeout_seconds = _int_or_default(
@@ -281,7 +281,7 @@ def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborR
         task_path=task_path,
         agent=_optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "oracle",
         agent_import_path=agent_import_path,
-        model_name=run.model.model_name,
+        model_name=_optional_str(configured.get("model_name")) or run.model.model_name,
         environment=(
             _optional_str(configured.get("environment"))
             or _optional_str(configured.get("env"))
@@ -296,6 +296,26 @@ def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborR
         verifier_env=_string_list(configured.get("verifier_env", []), field_name="harbor_run.verifier_env"),
         extra_args=_string_list(configured.get("extra_args", []), field_name="harbor_run.extra_args"),
     )
+
+
+def _harbor_task_path_for_run(run: RunRecord, *, configured: dict[str, object], workspace_root: Path) -> Path | None:
+    task_path_value = _optional_str(configured.get("task_path"))
+    task_template = _optional_str(configured.get("task_template"))
+    if task_path_value is not None and task_template is not None:
+        raise ValueError("harbor_run must not set both task_path and task_template")
+
+    if task_path_value is not None:
+        return Path(task_path_value)
+
+    if task_template is None:
+        return None
+
+    if task_template != "harbor-cli-smoke":
+        raise ValueError(f"unsupported harbor_run.task_template: {task_template}")
+
+    task_path = workspace_root / run.run_id / "harbor-task"
+    write_harbor_cli_smoke_task(task_path)
+    return task_path
 
 
 def _attach_harbor_ingestion(run: RunRecord, ingested: HarborIngestionResult) -> None:

@@ -186,13 +186,35 @@ function buildRunPayload({ runId, project, model, harness, benchmark, task }) {
   const instruction =
     task.metadata?.instruction ||
     `Follow ${benchmark.suite_name} task ${task.task_family}/${task.instance_id} from ${task.instruction_ref}.`;
-  const command = [
-    "python - <<'PY'",
-    "from pathlib import Path",
-    `Path('frontend-output.txt').write_text('frontend run ${runId}\\n')`,
-    "print('frontend evaluation smoke complete')",
-    "PY",
-  ].join("\n");
+  const launchMetadata = {
+    launched_from: "frontend",
+    harness_id: harness.harness_id,
+  };
+  let evaluators;
+  if (harness.metadata?.harbor_compatible) {
+    launchMetadata.harbor_run = harborRunConfig(harness);
+    evaluators = [{ evaluator_id: "harbor-verifier", mode: "harbor_verifier" }];
+  } else {
+    const command = [
+      "python - <<'PY'",
+      "from pathlib import Path",
+      `Path('frontend-output.txt').write_text('frontend run ${runId}\\n')`,
+      "print('frontend evaluation smoke complete')",
+      "PY",
+    ].join("\n");
+    launchMetadata.worker_commands = [{ command, cwd: "/workspace", model_call_id: "frontend-call-1" }];
+    evaluators = [
+      {
+        evaluator_id: "mock-judge-v0",
+        mode: "llm_judge",
+        judge: {
+          provider: "mock",
+          model_name: "deterministic-judge",
+          rubric_version: "frontend-e2e-v0",
+        },
+      },
+    ];
+  }
   return {
     run_id: runId,
     project_id: project.project_id,
@@ -227,23 +249,25 @@ function buildRunPayload({ runId, project, model, harness, benchmark, task }) {
         runner_contract: task.runner_contract || harness.metadata?.runner_contract,
       },
     },
-    evaluators: [
-      {
-        evaluator_id: "mock-judge-v0",
-        mode: "llm_judge",
-        judge: {
-          provider: "mock",
-          model_name: "deterministic-judge",
-          rubric_version: "frontend-e2e-v0",
-        },
-      },
-    ],
-    metadata: {
-      launched_from: "frontend",
-      harness_id: harness.harness_id,
-      worker_commands: [{ command, cwd: "/workspace", model_call_id: "frontend-call-1" }],
-    },
+    evaluators,
+    metadata: launchMetadata,
   };
+}
+
+function harborRunConfig(harness) {
+  const metadata = harness.metadata || {};
+  const resourceLimits = harness.resource_limits || {};
+  const config = {
+    task_template: nonEmptyString(metadata.harbor_task_template, "harbor-cli-smoke"),
+    agent: nonEmptyString(metadata.harbor_agent, "oracle"),
+    environment: nonEmptyString(metadata.harbor_environment, "docker"),
+    timeout_seconds: positiveInteger(metadata.harbor_timeout_seconds || resourceLimits.timeout_seconds, 600),
+    extra_args: stringList(metadata.harbor_extra_args, ["--n-tasks", "1", "--quiet"]),
+  };
+  if (typeof metadata.harbor_model_name === "string" && metadata.harbor_model_name.trim()) {
+    config.model_name = metadata.harbor_model_name.trim();
+  }
+  return config;
 }
 
 function startPolling(runId) {
@@ -357,6 +381,20 @@ function formatRatio(value) {
 
 function formatPercent(value) {
   return typeof value === "number" ? `${Math.round(value * 100)}%` : "n/a";
+}
+
+function nonEmptyString(value, fallback) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function positiveInteger(value, fallback) {
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function stringList(value, fallback) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim())
+    ? value.map((item) => item.trim())
+    : [...fallback];
 }
 
 function escapeHtml(value) {

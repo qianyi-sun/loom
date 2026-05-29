@@ -50,8 +50,13 @@ def harness_catalog() -> list[dict[str, Any]]:
             "metadata": {
                 "runner_contract": "harbor-local-docker-v0",
                 "harbor_compatible": True,
-                "status": "compatibility_smoke",
-                "follow_up_issues": ["#64", "#65", "#66"],
+                "status": "ready",
+                "harbor_task_template": "harbor-cli-smoke",
+                "harbor_agent": "oracle",
+                "harbor_model_name": "smoke/noop",
+                "harbor_environment": "docker",
+                "harbor_extra_args": ["--n-tasks", "1", "--quiet"],
+                "follow_up_issues": ["#62", "#63", "#67"],
             },
         },
     ]

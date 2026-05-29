@@ -127,10 +127,12 @@ present, and returns a local scripted dev model when no provider is configured.
 
 `GET /harnesses` returns the v0 launch harness catalog. `docker-terminal` is
 the platform-native Docker terminal path. `harbor-local-docker` is a
-frontend-visible Harbor-compatible smoke surface that still executes through
-the existing Docker terminal worker. The backend now has a real Harbor CLI
-runner path and deploy-time CLI smoke, but frontend submission still needs to
-emit real `harbor_run` metadata before #64/#65/#96 can be closed.
+frontend-visible Harbor local-Docker smoke surface that submits real
+`metadata.harbor_run`. For the MVP smoke it uses a generated
+`harbor-cli-smoke` task template with the Harbor Oracle agent and deterministic
+`smoke/noop` model while still recording the selected API model in the platform
+run envelope. Published Harbor benchmark catalog discovery, built-in agent
+catalog discovery, and uploaded Harbor task directories remain follow-up work.
 
 `POST /runs` accepts the durable submission envelope the worker will later
 consume: `project_id`, a compatibility `owner_team` display hint, a benchmark
@@ -228,9 +230,10 @@ serializing dashboard payloads.
   `MODEL_PROVIDER_MODELS` allowlist should be used for controlled dev/pilot
   launches; production provider discovery needs provider-specific filtering,
   caching policy, and capability detection.
-- The `harbor-local-docker` harness is a frontend compatibility smoke surface,
-  not the final frontend-to-Harbor runner. It deliberately keeps #64/#65/#96
-  open until launch requests produce real Harbor CLI jobs from the UI/API path.
+- The `harbor-local-docker` harness is a frontend-to-Harbor launch smoke
+  surface, not the final Harbor catalog/provider interface. It deliberately
+  keeps #62/#63/#67 follow-ups open for published Harbor benchmark discovery,
+  built-in agent discovery, and uploaded Harbor-compatible task directories.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and
