@@ -71,7 +71,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary for a run | `RunDashboardProjection.evaluator` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_runs()` + aggregate projection |
-| `GET /ops/metrics` | Return basic run status counts and queue depth | `RunRepository.list_runs()` |
+| `GET /ops/metrics` | Return scoped run status counts and queue depth visible to the authenticated user | `RunRepository.list_runs()` |
 
 `benchmark_version` is a query parameter for benchmark detail, task-family, and
 task routes because current versions can contain slashes, such as
@@ -96,10 +96,16 @@ counts, queue depth, terminal run count, artifact count, turn count, evaluator
 completion count, average evaluator score, and latest update timestamp.
 
 `POST /runs` accepts the durable submission envelope the worker will later
-consume: `project_id`, `owner_team`, a benchmark `task`, API-only `model`
-configuration, Docker-terminal `runner` configuration, one or more
-`evaluators`, optional `created_by_user_id`, and caller metadata. The checked-in
-example payload is `docs/examples/run-create-request.json`.
+consume: `project_id`, a compatibility `owner_team` display hint, a benchmark
+`task`, API-only `model` configuration, Docker-terminal `runner` configuration,
+one or more `evaluators`, optional `created_by_user_id`, and caller metadata.
+The service derives the stored run owner-team snapshot from the authorized
+project record rather than trusting the request body. The checked-in example
+payload is `docs/examples/run-create-request.json`.
+
+Run submission requires `task.metadata.instruction` to be a non-empty string.
+This keeps malformed terminal-agent requests from reaching the worker, where
+the model-provider prompt context requires the instruction.
 
 Model and evaluator payloads can include `provider_config_id` plus `secret_ref`
 values such as `env:MODEL_PROVIDER_API_KEY` or
@@ -147,7 +153,8 @@ serializing dashboard payloads.
 - `POST /runs`, cancel, retry, and project update operations write structured
   `audit_events` with actor user id, project id, run id where applicable,
   request id, and event payload. The ops metrics endpoint exposes v0 run status
-  counts and queue depth for shared dev debugging.
+  counts, queue depth, and visible project count after applying the
+  authenticated user's project membership boundary.
 - Request middleware emits `request_completed` service logs with request id,
   method, path, status code, and authenticated user id when present.
 

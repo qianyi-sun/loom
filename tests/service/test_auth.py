@@ -70,6 +70,7 @@ class ServiceAuthTest(unittest.TestCase):
                 created_by_user_id="outsider",
             )
             RunRepository(session).save_run(_queued_run("run_existing_001", project_id="latent-skill-pilot"))
+            RunRepository(session).save_run(_queued_run("run_other_001", project_id="other-project"))
 
         self.client = TestClient(_app(self.engine))
 
@@ -172,6 +173,23 @@ class ServiceAuthTest(unittest.TestCase):
         self.assertEqual(payload["runs_by_status"]["queued"], 1)
         self.assertEqual(payload["queue_depth"], 1)
 
+    def test_ops_metrics_are_scoped_to_authenticated_user_projects(self):
+        latent_metrics = self.client.get(
+            "/ops/metrics",
+            headers=_auth("[REDACTED_OWNER]-token", request_id="req-latent-metrics-001"),
+        )
+        other_metrics = self.client.get(
+            "/ops/metrics",
+            headers=_auth("outsider-token", request_id="req-other-metrics-001"),
+        )
+
+        self.assertEqual(latent_metrics.status_code, 200)
+        self.assertEqual(other_metrics.status_code, 200)
+        self.assertEqual(latent_metrics.json()["queue_depth"], 1)
+        self.assertEqual(latent_metrics.json()["visible_project_count"], 1)
+        self.assertEqual(other_metrics.json()["queue_depth"], 1)
+        self.assertEqual(other_metrics.json()["visible_project_count"], 1)
+
 
 def _app(engine):
     return create_app(
@@ -208,7 +226,7 @@ def _queued_run(run_id: str, *, project_id: str) -> RunRecord:
             source_uri="https://github.com/cxcscmu/SkillLearnBench",
             input_artifact_refs=[],
             required_artifacts=["trajectory", "workspace_snapshot", "evaluator_report"],
-            metadata={},
+            metadata={"instruction": "Read receipts and create a spreadsheet."},
         ),
         model=ModelConfig(
             provider="openai",
@@ -241,7 +259,7 @@ def _run_create_payload(run_id: str, *, created_by_user_id: str | None = "[REDAC
             "source_uri": "https://github.com/cxcscmu/SkillLearnBench",
             "input_artifact_refs": [],
             "required_artifacts": ["trajectory", "workspace_snapshot", "evaluator_report"],
-            "metadata": {},
+            "metadata": {"instruction": "Read receipts and create a spreadsheet."},
         },
         "model": {
             "provider": "openai",

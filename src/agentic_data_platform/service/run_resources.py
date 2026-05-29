@@ -19,7 +19,12 @@ from agentic_data_platform.domain.run_records import (
     RunStatus,
     TerminalTurn,
 )
-from agentic_data_platform.persistence.repositories import AuditEventRepository, RunRepository
+from agentic_data_platform.persistence.repositories import (
+    AuditEventRepository,
+    IdentityRepository,
+    ProjectRecord,
+    RunRepository,
+)
 from agentic_data_platform.providers.config import redact_sensitive_metadata, validate_secret_ref
 from agentic_data_platform.service.security import (
     accessible_project_ids,
@@ -38,6 +43,14 @@ class BenchmarkTaskInstanceRequest(BaseModel):
     input_artifact_refs: list[str]
     required_artifacts: list[str]
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata")
+    @classmethod
+    def require_instruction(cls, value: dict[str, Any]) -> dict[str, Any]:
+        instruction = value.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ValueError("task.metadata.instruction must be a non-empty string")
+        return value
 
 
 class ModelConfigRequest(BaseModel):
@@ -111,10 +124,14 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
     ) -> dict[str, Any]:
         auth = require_authenticated_user(request, session)
         actor_user_id = require_same_actor(auth, payload.created_by_user_id)
-        require_project_role(session, auth, payload.project_id, minimum_role="member")
+        project = require_project_role(session, auth, payload.project_id, minimum_role="member")
 
         try:
-            run = _run_from_create_request(payload, created_by_user_id=actor_user_id)
+            run = _run_from_create_request(
+                payload,
+                created_by_user_id=actor_user_id,
+                owner_team=_project_owner_team_name(session, project),
+            )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -285,11 +302,16 @@ def _get_run_or_404(session: Session, run_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
 
 
-def _run_from_create_request(payload: RunCreateRequest, *, created_by_user_id: str | None = None) -> RunRecord:
+def _run_from_create_request(
+    payload: RunCreateRequest,
+    *,
+    created_by_user_id: str | None = None,
+    owner_team: str,
+) -> RunRecord:
     return RunRecord.create(
         run_id=payload.run_id or f"run_{uuid4().hex}",
         project_id=payload.project_id,
-        owner_team=payload.owner_team,
+        owner_team=owner_team,
         task=BenchmarkTaskInstance(**payload.task.model_dump()),
         model=_model_config(payload.model),
         runner=RunnerConfig(**payload.runner.model_dump()),
@@ -297,6 +319,15 @@ def _run_from_create_request(payload: RunCreateRequest, *, created_by_user_id: s
         created_by_user_id=created_by_user_id,
         metadata=redact_sensitive_metadata(payload.metadata),
     )
+
+
+def _project_owner_team_name(session: Session, project: ProjectRecord) -> str:
+    if project.owner_team_id is None:
+        return project.name
+    try:
+        return IdentityRepository(session).get_team(project.owner_team_id).name
+    except KeyError:
+        return project.owner_team_id
 
 
 def _model_config(payload: ModelConfigRequest) -> ModelConfig:

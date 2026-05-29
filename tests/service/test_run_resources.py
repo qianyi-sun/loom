@@ -185,6 +185,33 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(detail.json()["run"]["evaluators"][0]["evaluator_id"], "llm-judge-v0")
         self.assertEqual(detail.json()["lifecycle_events"][0]["event_type"], "run.created")
 
+    def test_create_run_uses_project_owner_team_instead_of_request_snapshot(self):
+        payload = _run_create_payload(run_id="run_owner_team_001")
+        payload["owner_team"] = "Forged Team Name"
+
+        response = self.client.post(
+            "/runs",
+            json=payload,
+            headers={"X-Request-ID": "req-owner-team-001"},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["run"]["project"]["owner_team"], "pilot group")
+
+    def test_create_run_rejects_missing_task_instruction_at_submission(self):
+        payload = _run_create_payload(run_id="run_missing_instruction_001")
+        del payload["task"]["metadata"]["instruction"]
+
+        response = self.client.post(
+            "/runs",
+            json=payload,
+            headers={"X-Request-ID": "req-missing-instruction-001"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "validation_error")
+        self.assertIn("instruction", response.json()["error"]["message"])
+
     def test_create_run_rejects_invalid_nested_request_with_422(self):
         payload = _run_create_payload(run_id="run_bad_payload_001")
         del payload["task"]["source_uri"]

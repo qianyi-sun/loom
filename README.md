@@ -140,21 +140,21 @@ Original runner wrapper research:
 | --- | --- | --- |
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
-| Development workflow | Started | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | Started | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, API health, and API-created Docker sandbox smoke checks |
+| Development workflow | Active | `dev` is the default integration branch; `main` is reserved for production releases |
+| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, API health, and API-created Docker sandbox smoke checks; the dev image verifies the static Docker CLI download by SHA-256 |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
-| MVP architecture | In progress | Terminal benchmark architecture spec is now the first architecture anchor |
+| MVP architecture | In progress | Terminal benchmark architecture, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
 | Unified evaluation backend | Documented | Contract keeps latent native adapters and Harbor integration on one backend surface |
-| Run data contract | Started | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
-| Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
+| Run data contract | MVP backend slice merged | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
+| Persistence foundation | MVP backend slice merged | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | MVP backend slice merged | Docker terminal sandbox contract, worker-managed Docker executor path, local artifact persistence, MinIO-compatible object-store upload/download smoke, and API-created Docker sandbox deploy smoke are covered |
-| Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
-| Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, run detail trajectories, sanitized artifacts, evaluator feedback, and PM progress summaries with OpenAPI examples |
-| Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
+| Evaluation contract | MVP backend slice merged | Deterministic mock evaluator and evaluator input contract are available for local smoke runs; #66 tracks the required multi-evaluator schema/API migration before Harbor verifier work |
+| Core API resources | MVP backend slice merged | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, run detail trajectories, sanitized artifacts, evaluator feedback, and PM progress summaries with OpenAPI examples |
+| Run lifecycle API | MVP backend slice merged | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
 | Queue and worker orchestration | MVP slice merged | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are available |
 | Provider config and secrets | MVP slice merged | Dev provider config refs, env secret refs, sensitive metadata redaction, and normalized provider errors are available |
-| Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and `/ops/metrics` are available |
+| Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and scoped `/ops/metrics` are available |
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
