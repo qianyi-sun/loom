@@ -16,6 +16,10 @@ class ServiceSettings:
     object_storage_access_key: str
     object_storage_secret_key: str
     object_storage_region: str
+    model_provider_base_url: str = ""
+    model_provider_api_key: str = ""
+    evaluator_provider_base_url: str = ""
+    evaluator_provider_api_key: str = ""
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -30,6 +34,10 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         object_storage_access_key=_get(values, "OBJECT_STORAGE_ACCESS_KEY", ""),
         object_storage_secret_key=_get(values, "OBJECT_STORAGE_SECRET_KEY", ""),
         object_storage_region=_get(values, "OBJECT_STORAGE_REGION", "us-east-1"),
+        model_provider_base_url=_get(values, "MODEL_PROVIDER_BASE_URL", ""),
+        model_provider_api_key=_get(values, "MODEL_PROVIDER_API_KEY", ""),
+        evaluator_provider_base_url=_get(values, "EVALUATOR_PROVIDER_BASE_URL", ""),
+        evaluator_provider_api_key=_get(values, "EVALUATOR_PROVIDER_API_KEY", ""),
     )
 
 

@@ -153,6 +153,7 @@ Original runner wrapper research:
 | Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
 | Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
 | Queue and worker orchestration | Started | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are under active development |
+| Provider config and secrets | Started | Dev provider config refs, env secret refs, sensitive metadata redaction, and normalized provider errors are under active development |
 | Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
@@ -172,6 +173,8 @@ Original runner wrapper research:
 - Postgres persistence foundation: [#51](https://github.com/carinrc/agentic-data-platform/issues/51)
 - Core API resources: [#52](https://github.com/carinrc/agentic-data-platform/issues/52)
 - Run lifecycle API: [#53](https://github.com/carinrc/agentic-data-platform/issues/53)
+- Provider config and secret boundary:
+  [#56](https://github.com/carinrc/agentic-data-platform/issues/56)
 - Harbor-compatible benchmark and agent integration:
   [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
 - Unified evaluation backend contract:

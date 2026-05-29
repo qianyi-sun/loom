@@ -15,6 +15,7 @@ from agentic_data_platform.artifacts.store import (
 )
 from agentic_data_platform.persistence import create_database_engine, session_scope
 from agentic_data_platform.persistence.repositories import RunRepository
+from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
 from agentic_data_platform.worker.executors import FixtureTerminalBenchmarkExecutor, WorkerRunExecutor
 
@@ -97,6 +98,7 @@ def build_configured_worker(
         worker_id=worker_id,
         executor=FixtureTerminalBenchmarkExecutor(
             artifact_persistence=ArtifactPersistence(store),
+            provider_registry=DevProviderConfigRegistry.from_settings(service_settings),
         ),
     )
 

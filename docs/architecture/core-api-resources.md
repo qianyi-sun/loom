@@ -68,6 +68,13 @@ configuration, Docker-terminal `runner` configuration, one or more
 `evaluators`, optional `created_by_user_id`, and caller metadata. The checked-in
 example payload is `docs/examples/run-create-request.json`.
 
+Model and evaluator payloads can include `provider_config_id` plus `secret_ref`
+values such as `env:MODEL_PROVIDER_API_KEY` or
+`env:EVALUATOR_PROVIDER_API_KEY`. The API persists those safe references and
+redacts sensitive metadata keys such as `api_key`, `access_token`,
+`authorization`, `password`, `secret`, and `token` before writing run records or
+serializing dashboard payloads.
+
 ## Response Shape Principles
 
 - Success responses include `request_id` when request middleware attaches one.
@@ -107,9 +114,10 @@ example payload is `docs/examples/run-create-request.json`.
   and deployment smoke checks. Real Docker terminal execution and provider-backed
   model/evaluator calls remain follow-up work before real pilot workloads run
   through this service.
-- Model and evaluator configs are stored as metadata only in this slice.
-  Provider registration, secret indirection, and API-key boundaries remain
-  tracked under #56.
+- Provider configuration is still dev-scoped. The current implementation
+  supports safe provider config references, env secret references, and redaction
+  of raw secret-looking metadata. Production secret management should replace
+  dev env vars before real internal workloads are onboarded.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

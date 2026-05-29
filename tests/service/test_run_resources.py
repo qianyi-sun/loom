@@ -212,6 +212,50 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(response.json()["error"]["code"], "not_found")
         self.assertIn("User not found", response.json()["error"]["message"])
 
+    def test_create_run_redacts_provider_secrets_and_preserves_config_refs(self):
+        payload = _run_create_payload(run_id="run_secret_boundary_001")
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["model"]["secret_ref"] = "env:MODEL_PROVIDER_API_KEY"
+        payload["model"]["metadata"] = {
+            "temperature": 0,
+            "api_key": "sk-raw-model-secret",
+            "safe_note": "dev model config",
+        }
+        payload["evaluators"][0]["provider_config_id"] = "default-evaluator-model"
+        payload["evaluators"][0]["secret_ref"] = "env:EVALUATOR_PROVIDER_API_KEY"
+        payload["evaluators"][0]["metadata"] = {
+            "evaluation_mode": "llm_judge",
+            "access_token": "raw-evaluator-token",
+        }
+        payload["evaluators"][0]["judge"]["metadata"] = {"authorization": "Bearer raw-judge-secret"}
+
+        response = self.client.post(
+            "/runs",
+            json=payload,
+            headers={"X-Request-ID": "req-secret-boundary-001"},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        rendered_response = json.dumps(response.json())
+        self.assertNotIn("sk-raw-model-secret", rendered_response)
+        self.assertNotIn("raw-evaluator-token", rendered_response)
+        self.assertNotIn("raw-judge-secret", rendered_response)
+        evaluator = response.json()["run"]["evaluators"][0]
+        self.assertEqual(evaluator["metadata"]["provider_config_id"], "default-evaluator-model")
+        self.assertEqual(evaluator["metadata"]["secret_ref"], "env:EVALUATOR_PROVIDER_API_KEY")
+        self.assertEqual(evaluator["metadata"]["access_token"], "[redacted]")
+
+        with session_scope(self.engine) as session:
+            persisted = RunRepository(session).get_run("run_secret_boundary_001")
+
+        rendered_persisted = json.dumps(persisted.to_dict())
+        self.assertNotIn("sk-raw-model-secret", rendered_persisted)
+        self.assertNotIn("raw-evaluator-token", rendered_persisted)
+        self.assertNotIn("raw-judge-secret", rendered_persisted)
+        self.assertEqual(persisted.model.metadata["provider_config_id"], "default-agent-model")
+        self.assertEqual(persisted.model.metadata["secret_ref"], "env:MODEL_PROVIDER_API_KEY")
+        self.assertEqual(persisted.model.metadata["api_key"], "[redacted]")
+
     def test_list_runs_filters_by_benchmark_task_creator_and_time_range(self):
         create_response = self.client.post("/runs", json=_run_create_payload(run_id="run_filter_001"))
         self.assertEqual(create_response.status_code, 201)

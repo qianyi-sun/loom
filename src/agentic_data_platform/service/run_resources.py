@@ -19,6 +19,7 @@ from agentic_data_platform.domain.run_records import (
     RunStatus,
 )
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
+from agentic_data_platform.providers.config import redact_sensitive_metadata, validate_secret_ref
 
 
 class BenchmarkTaskInstanceRequest(BaseModel):
@@ -38,6 +39,8 @@ class ModelConfigRequest(BaseModel):
     mode: str
     prompt_template_version: str
     model_version: str | None = None
+    provider_config_id: str | None = None
+    secret_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -63,6 +66,8 @@ class EvaluatorConfigRequest(BaseModel):
     evaluator_id: str
     mode: str
     judge: JudgeConfigRequest | None = None
+    provider_config_id: str | None = None
+    secret_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -236,22 +241,66 @@ def _run_from_create_request(payload: RunCreateRequest) -> RunRecord:
         project_id=payload.project_id,
         owner_team=payload.owner_team,
         task=BenchmarkTaskInstance(**payload.task.model_dump()),
-        model=ModelConfig(**payload.model.model_dump()),
+        model=_model_config(payload.model),
         runner=RunnerConfig(**payload.runner.model_dump()),
         evaluator_configs=[_evaluator_config(config) for config in payload.evaluators],
         created_by_user_id=payload.created_by_user_id,
-        metadata=dict(payload.metadata),
+        metadata=redact_sensitive_metadata(payload.metadata),
+    )
+
+
+def _model_config(payload: ModelConfigRequest) -> ModelConfig:
+    return ModelConfig(
+        provider=payload.provider,
+        model_name=payload.model_name,
+        mode=payload.mode,
+        prompt_template_version=payload.prompt_template_version,
+        model_version=payload.model_version,
+        metadata=_provider_metadata(
+            payload.metadata,
+            provider_config_id=payload.provider_config_id,
+            secret_ref=payload.secret_ref,
+        ),
     )
 
 
 def _evaluator_config(payload: EvaluatorConfigRequest) -> EvaluatorConfig:
-    judge = JudgeConfig(**payload.judge.model_dump()) if payload.judge is not None else None
+    judge = _judge_config(payload.judge) if payload.judge is not None else None
     return EvaluatorConfig(
         evaluator_id=payload.evaluator_id,
         mode=payload.mode,
         judge=judge,
-        metadata=dict(payload.metadata),
+        metadata=_provider_metadata(
+            payload.metadata,
+            provider_config_id=payload.provider_config_id,
+            secret_ref=payload.secret_ref,
+        ),
     )
+
+
+def _judge_config(payload: JudgeConfigRequest) -> JudgeConfig:
+    return JudgeConfig(
+        provider=payload.provider,
+        model_name=payload.model_name,
+        rubric_version=payload.rubric_version,
+        model_version=payload.model_version,
+        metadata=redact_sensitive_metadata(payload.metadata),
+    )
+
+
+def _provider_metadata(
+    metadata: dict[str, Any],
+    *,
+    provider_config_id: str | None,
+    secret_ref: str | None,
+) -> dict[str, Any]:
+    safe_metadata = redact_sensitive_metadata(metadata)
+    if provider_config_id is not None:
+        safe_metadata["provider_config_id"] = provider_config_id
+    if secret_ref is not None:
+        validate_secret_ref(secret_ref)
+        safe_metadata["secret_ref"] = secret_ref
+    return safe_metadata
 
 
 def _validate_user_or_404(session: Session, user_id: str | None) -> None:

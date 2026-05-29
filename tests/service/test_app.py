@@ -28,6 +28,10 @@ class ServiceAppTest(unittest.TestCase):
                 "OBJECT_STORAGE_ACCESS_KEY": "loomdev",
                 "OBJECT_STORAGE_SECRET_KEY": "miniosecret",
                 "OBJECT_STORAGE_REGION": "us-west-2",
+                "MODEL_PROVIDER_BASE_URL": "https://models.example/v1",
+                "MODEL_PROVIDER_API_KEY": "sk-model-secret",
+                "EVALUATOR_PROVIDER_BASE_URL": "https://judge.example/v1",
+                "EVALUATOR_PROVIDER_API_KEY": "sk-judge-secret",
             }
         )
 
@@ -40,6 +44,10 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.object_storage_access_key, "loomdev")
         self.assertEqual(settings.object_storage_secret_key, "miniosecret")
         self.assertEqual(settings.object_storage_region, "us-west-2")
+        self.assertEqual(settings.model_provider_base_url, "https://models.example/v1")
+        self.assertEqual(settings.model_provider_api_key, "sk-model-secret")
+        self.assertEqual(settings.evaluator_provider_base_url, "https://judge.example/v1")
+        self.assertEqual(settings.evaluator_provider_api_key, "sk-judge-secret")
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))
