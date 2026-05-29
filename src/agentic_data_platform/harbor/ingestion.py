@@ -204,7 +204,7 @@ def _verifier_result(
     trial_result: dict[str, Any],
     artifact_refs: list[str] | None = None,
 ) -> EvaluatorResult:
-    reward_payload = _read_reward_payload(trial_dir)
+    reward_payload = _read_reward_payload(trial_dir=trial_dir, trial_result=trial_result)
     reward = reward_payload["reward"]
     verifier_version = str(
         reward_payload.get("verifier_version")
@@ -229,7 +229,7 @@ def _verifier_result(
     )
 
 
-def _read_reward_payload(trial_dir: Path) -> dict[str, Any]:
+def _read_reward_payload(*, trial_dir: Path, trial_result: dict[str, Any]) -> dict[str, Any]:
     reward_json = trial_dir / "verifier" / "reward.json"
     reward_txt = trial_dir / "verifier" / "reward.txt"
     payload: dict[str, Any]
@@ -239,6 +239,8 @@ def _read_reward_payload(trial_dir: Path) -> dict[str, Any]:
     elif reward_txt.exists():
         payload = {}
         raw_reward = reward_txt.read_text(encoding="utf-8").strip()
+    elif (payload := _trial_result_reward_payload(trial_result)) is not None:
+        raw_reward = payload.get("reward", payload.get("score"))
     else:
         raise ValueError("Missing Harbor verifier reward.txt or reward.json")
 
@@ -250,6 +252,16 @@ def _read_reward_payload(trial_dir: Path) -> dict[str, Any]:
         raise ValueError("Harbor verifier reward must be between 0 and 1")
 
     return {"reward": reward, **payload}
+
+
+def _trial_result_reward_payload(trial_result: dict[str, Any]) -> dict[str, Any] | None:
+    verifier_result = trial_result.get("verifier_result")
+    if not isinstance(verifier_result, dict):
+        return None
+    rewards = verifier_result.get("rewards")
+    if not isinstance(rewards, dict):
+        return None
+    return dict(rewards)
 
 
 def _collected_artifact_refs(*, job_name: str, trial_name: str, trial_dir: Path) -> list[ArtifactRef]:

@@ -17,6 +17,8 @@ All notable changes to this project will be documented in this file.
   Docker smoke check.
 - Fixed the generated Harbor CLI smoke task metadata so Harbor 0.9.0 recognizes
   it as a valid task instead of treating the path as an empty dataset.
+- Added Harbor ingestor support for verifier rewards persisted in trial
+  `result.json` when standalone reward files are absent.
 
 ## 0.0.0 - 2026-05-27
 

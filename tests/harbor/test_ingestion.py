@@ -70,6 +70,30 @@ class HarborResultIngestorTest(unittest.TestCase):
                     jobs_dir=jobs_dir,
                 )
 
+    def test_ingests_verifier_rewards_from_trial_result_when_reward_files_are_absent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            jobs_dir = _write_harbor_job_fixture(temp_path / "jobs")
+            trial_dir = jobs_dir / "job-001" / "trial-hello"
+            (trial_dir / "verifier" / "reward.txt").unlink()
+            trial_result_path = trial_dir / "result.json"
+            trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+            trial_result["verifier_result"] = {"rewards": {"reward": 1.0, "smoke_metric": 0.75}}
+            trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+            ingestor = HarborResultIngestor(
+                artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "store"))
+            )
+
+            result = ingestor.ingest(
+                run_id="run_harbor_003",
+                task_instance_id="terminal-bench-hello",
+                jobs_dir=jobs_dir,
+            )
+
+            self.assertEqual(result.evaluator_results[0].score, 1.0)
+            self.assertEqual(result.evaluator_results[0].metrics["reward"], 1.0)
+            self.assertEqual(result.evaluator_results[0].metrics["smoke_metric"], 0.75)
+
 
 def _write_harbor_job_fixture(root: Path) -> Path:
     job_dir = root / "job-001"
