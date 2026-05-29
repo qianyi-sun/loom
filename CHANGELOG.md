@@ -19,6 +19,8 @@ All notable changes to this project will be documented in this file.
   it as a valid task instead of treating the path as an empty dataset.
 - Added Harbor ingestor support for verifier rewards persisted in trial
   `result.json` when standalone reward files are absent.
+- Installed the Docker Compose CLI plugin in the dev image so Harbor local
+  Docker jobs can call `docker compose` from inside the worker container.
 
 ## 0.0.0 - 2026-05-27
 

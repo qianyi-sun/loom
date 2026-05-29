@@ -141,7 +141,7 @@ Original runner wrapper research:
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Active | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, and API-created Docker sandbox smoke checks; the dev image verifies the static Docker CLI download by SHA-256 and installs Harbor 0.9.0 |
+| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, and API-created Docker sandbox smoke checks; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
