@@ -106,6 +106,7 @@ class RunResourcesTest(unittest.TestCase):
             response.json(),
             {
                 "run": RunDashboardProjection.from_run(self.completed_run).to_dict(),
+                "trajectory": [_trajectory_payload(turn) for turn in self.completed_run.trajectory],
                 "lifecycle_events": [],
                 "request_id": "req-run-001",
             },
@@ -550,3 +551,21 @@ def _run_create_payload(*, run_id: str) -> dict:
         ],
         "metadata": {"benchmark_adapter": "SkillLearnBench"},
     }
+
+
+def _trajectory_payload(turn: TerminalTurn) -> dict:
+    payload = {
+        "turn_index": turn.turn_index,
+        "command": turn.command,
+        "cwd": turn.cwd,
+        "started_at": turn.started_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "completed_at": turn.completed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "exit_code": turn.exit_code,
+        "stdout": turn.stdout,
+        "stderr": turn.stderr,
+        "changed_paths": list(turn.changed_paths),
+        "metadata": dict(turn.metadata),
+    }
+    if turn.model_call_id is not None:
+        payload["model_call_id"] = turn.model_call_id
+    return payload

@@ -9,6 +9,7 @@ Related trackers:
 - Run lifecycle API: https://github.com/carinrc/agentic-data-platform/issues/53
 - Postgres persistence foundation: https://github.com/carinrc/agentic-data-platform/issues/51
 - Auth/RBAC/ops baseline: https://github.com/carinrc/agentic-data-platform/issues/57
+- Frontend and PM dashboard API contract: https://github.com/carinrc/agentic-data-platform/issues/58
 
 ## Goal
 
@@ -16,7 +17,8 @@ Issues #52 and #53 expose the first Postgres-backed resource and run lifecycle
 surface for PM dashboards, researcher inspection, and future frontend
 development. The API is still an internal control-plane surface, but it now has
 stable routes for projects, benchmark tasks, queued run submission, lifecycle
-events, run summaries, artifacts, evaluator feedback, cancel, and retry.
+events, run summaries, run detail trajectories, artifacts, evaluator feedback,
+PM progress summaries, cancel, and retry.
 
 The implementation deliberately reuses existing domain and dashboard projection
 contracts rather than introducing a second API-only data model.
@@ -63,11 +65,12 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /tasks/{task_family}/{instance_id}` | Inspect one task instance | `BenchmarkCatalogRepository.get_task_instance()` |
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
-| `GET /runs/{run_id}` | Inspect one dashboard-ready run plus lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
+| `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary for a run | `RunDashboardProjection.evaluator` |
+| `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_runs()` + aggregate projection |
 | `GET /ops/metrics` | Return basic run status counts and queue depth | `RunRepository.list_runs()` |
 
 `benchmark_version` is a query parameter for benchmark detail, task-family, and
@@ -79,6 +82,18 @@ task routes because current versions can contain slashes, such as
 `created_after`, and `created_before`.
 When `project_id` is omitted, the route only returns runs whose projects belong
 to teams where the authenticated user has membership.
+
+`GET /runs/{run_id}` is the heavier researcher detail payload. It includes the
+same `run` projection used by lists, a full `trajectory` array with command,
+cwd, timestamps, exit code, stdout, stderr, changed paths, model call id, and
+turn metadata, plus lifecycle events. The list endpoint intentionally does not
+embed full trajectories.
+
+`GET /dashboard/progress` returns the PM summary surface. It accepts optional
+`project_id` and `owner_team` filters, enforces the same project viewer boundary
+as run reads, and returns a global `summary` plus per-project rows with status
+counts, queue depth, terminal run count, artifact count, turn count, evaluator
+completion count, average evaluator score, and latest update timestamp.
 
 `POST /runs` accepts the durable submission envelope the worker will later
 consume: `project_id`, `owner_team`, a benchmark `task`, API-only `model`
@@ -105,9 +120,14 @@ serializing dashboard payloads.
   `BenchmarkFixtureInstance`.
 - Run responses reuse `RunDashboardProjection.to_dict()` so dashboards and API
   consumers share the same visible status/progress/evaluator payload.
+- Run list responses stay lightweight. Full terminal stdout/stderr trajectory is
+  exposed on run detail so researcher views can inspect execution without
+  forcing PM lists to hydrate large traces.
 - Run projections include `created_by_user_id`, `failure_reason`, and submitted
   evaluator configurations so dashboard clients can display ownership and
   planned evaluator mode before worker execution produces evaluator results.
+- PM progress responses are aggregate-only and do not expose model prompts,
+  terminal stdout/stderr, artifact URIs, or provider metadata.
 - Run detail and lifecycle-mutating responses include `lifecycle_events` with
   `event_type`, `from_status`, `to_status`, `attempt_id`, `reason`,
   `actor_user_id`, `request_id`, and `created_at`.
@@ -154,9 +174,10 @@ serializing dashboard payloads.
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and
   trajectories.
-- Artifact and evaluator routes are projection-backed. Dedicated artifact and
-  evaluation repositories should be added when upload/download, pagination,
-  retention, and detailed evaluator history are implemented.
+- Artifact, evaluator, and dashboard progress routes are projection-backed.
+  Dedicated artifact, evaluation, and analytics repositories should be added
+  when upload/download, pagination, retention, detailed evaluator history, and
+  high-volume PM reporting are implemented.
 - List endpoints do not yet include pagination or quota-aware filtering. Add
   these before broad internal rollout.
 - `GET /runs` currently hydrates complete `RunRecord` objects before projecting

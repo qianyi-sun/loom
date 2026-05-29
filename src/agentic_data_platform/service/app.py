@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from agentic_data_platform.persistence import create_database_engine
 from agentic_data_platform.service.benchmark_resources import register_benchmark_routes
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
+from agentic_data_platform.service.dashboard_resources import register_dashboard_routes
 from agentic_data_platform.service.dependencies import build_session_dependency
 from agentic_data_platform.service.ops_resources import register_ops_routes
 from agentic_data_platform.service.project_resources import register_project_routes
@@ -49,6 +50,7 @@ def create_app(
     register_project_routes(app, app.state.session_dependency)
     register_benchmark_routes(app, app.state.session_dependency)
     register_run_routes(app, app.state.session_dependency)
+    register_dashboard_routes(app, app.state.session_dependency)
     register_ops_routes(app, app.state.session_dependency)
 
     @app.get("/healthz", tags=["operations"])

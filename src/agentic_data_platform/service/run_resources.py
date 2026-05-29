@@ -17,6 +17,7 @@ from agentic_data_platform.domain.run_records import (
     RunnerConfig,
     RunRecord,
     RunStatus,
+    TerminalTurn,
 )
 from agentic_data_platform.persistence.repositories import AuditEventRepository, RunRepository
 from agentic_data_platform.providers.config import redact_sensitive_metadata, validate_secret_ref
@@ -380,9 +381,28 @@ def _run_detail_payload(request: Request, session: Session, run: RunRecord) -> d
         request,
         {
             "run": RunDashboardProjection.from_run(run).to_dict(),
+            "trajectory": [_terminal_turn_payload(turn) for turn in run.trajectory],
             "lifecycle_events": events,
         },
     )
+
+
+def _terminal_turn_payload(turn: TerminalTurn) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "turn_index": turn.turn_index,
+        "command": turn.command,
+        "cwd": turn.cwd,
+        "started_at": _datetime(turn.started_at),
+        "completed_at": _datetime(turn.completed_at),
+        "exit_code": turn.exit_code,
+        "stdout": turn.stdout,
+        "stderr": turn.stderr,
+        "changed_paths": list(turn.changed_paths),
+        "metadata": dict(turn.metadata),
+    }
+    if turn.model_call_id is not None:
+        payload["model_call_id"] = turn.model_call_id
+    return payload
 
 
 def _status_event_payload(event) -> dict[str, Any]:
@@ -505,9 +525,23 @@ _LIFECYCLE_EVENT_EXAMPLE = {
     "metadata": {},
     "created_at": "2026-05-28T12:00:00Z",
 }
+_TRAJECTORY_TURN_EXAMPLE = {
+    "turn_index": 0,
+    "command": "python solve.py",
+    "cwd": "/workspace",
+    "started_at": "2026-05-28T12:00:00Z",
+    "completed_at": "2026-05-28T12:00:02Z",
+    "exit_code": 0,
+    "stdout": "created answer.xlsx\n",
+    "stderr": "",
+    "changed_paths": ["answer.xlsx"],
+    "model_call_id": "call_001",
+    "metadata": {"sandbox_run_id": "run_001", "timed_out": False},
+}
 _RUNS_EXAMPLE = {"runs": [_RUN_PAYLOAD_EXAMPLE], "request_id": "req_123"}
 _RUN_EXAMPLE = {
     "run": _RUN_PAYLOAD_EXAMPLE,
+    "trajectory": [_TRAJECTORY_TURN_EXAMPLE],
     "lifecycle_events": [_LIFECYCLE_EVENT_EXAMPLE],
     "request_id": "req_123",
 }

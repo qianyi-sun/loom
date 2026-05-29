@@ -150,12 +150,12 @@ Original runner wrapper research:
 | Persistence foundation | Started | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
 | Sandbox and artifacts | MVP slice in progress | Docker terminal sandbox contract, worker-managed Docker executor path, local artifact persistence, and MinIO-compatible object-store upload/download smoke are covered by tests |
 | Evaluation contract | Started | Deterministic mock evaluator and evaluator input contract are available for local smoke runs |
-| Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, sanitized artifacts, and evaluator feedback with OpenAPI examples |
+| Core API resources | Started | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, run detail trajectories, sanitized artifacts, evaluator feedback, and PM progress summaries with OpenAPI examples |
 | Run lifecycle API | Started | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
 | Queue and worker orchestration | MVP slice merged | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are available |
 | Provider config and secrets | MVP slice merged | Dev provider config refs, env secret refs, sensitive metadata redaction, and normalized provider errors are available |
 | Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and `/ops/metrics` are available |
-| Dashboard/API projection | Started | First run visibility payload exposes status, progress, artifacts, evaluator score, feedback, and failure reasons |
+| Dashboard/API projection | MVP contract in progress | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
 | Harbor integration | Planning | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
@@ -180,6 +180,8 @@ Original runner wrapper research:
   [#57](https://github.com/carinrc/agentic-data-platform/issues/57)
 - Worker-managed Docker terminal sandbox execution:
   [#79](https://github.com/carinrc/agentic-data-platform/issues/79)
+- Frontend and PM dashboard API contract:
+  [#58](https://github.com/carinrc/agentic-data-platform/issues/58)
 - Harbor-compatible benchmark and agent integration:
   [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
 - Unified evaluation backend contract:
@@ -270,6 +272,8 @@ curl -H 'Authorization: Bearer [REDACTED_TOKEN]' \
   'http://localhost:8000/tasks?benchmark_suite=SkillFlow&benchmark_version=<version>'
 curl -H 'Authorization: Bearer [REDACTED_TOKEN]' \
   'http://localhost:8000/runs?project_id=latent-skill-pilot'
+curl -H 'Authorization: Bearer [REDACTED_TOKEN]' \
+  'http://localhost:8000/dashboard/progress?project_id=latent-skill-pilot'
 curl -H 'Authorization: Bearer [REDACTED_TOKEN]' http://localhost:8000/ops/metrics
 curl -X POST http://localhost:8000/runs \
   -H 'Authorization: Bearer [REDACTED_TOKEN]' \
