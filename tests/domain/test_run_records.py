@@ -6,6 +6,7 @@ from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
     BenchmarkTaskInstance,
+    EvaluatorConfig,
     EvaluatorResult,
     JudgeConfig,
     ModelConfig,
@@ -139,6 +140,50 @@ class RunRecordTest(unittest.TestCase):
         self.assertIn("missing receipt date", payload["evaluator_result"]["verbal_feedback"])
         self.assertEqual(payload["evaluator_result"]["judge"]["rubric_version"], "latent-skill-benchmark-2026-05-28")
 
+    def test_multiple_evaluator_results_keep_primary_latest_summary(self):
+        run = self._minimal_run()
+        run.transition_to(RunStatus.PROVISIONING)
+        run.transition_to(RunStatus.RUNNING)
+        run.transition_to(RunStatus.EVALUATING)
+
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="harbor-verifier-v1",
+                mode="harbor_verifier",
+                status="completed",
+                score=0.7,
+                metrics={"reward": 0.7, "verifier_version": "harbor-2026-05-29"},
+                verbal_feedback="",
+                judge=None,
+                artifact_refs=["minio://runs/run_001/evaluation/harbor-verifier/report.json"],
+                metadata={"verifier_version": "harbor-2026-05-29"},
+            )
+        )
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="llm-judge-v0",
+                mode="llm_judge",
+                status="completed",
+                score=0.82,
+                metrics={"task_success": True},
+                verbal_feedback="The spreadsheet is correct except for one missing receipt date.",
+                judge=JudgeConfig(
+                    provider="openai",
+                    model_name="gpt-5",
+                    rubric_version="latent-skill-benchmark-2026-05-28",
+                ),
+                artifact_refs=["minio://runs/run_001/evaluation/llm-judge/report.json"],
+            )
+        )
+        run.transition_to(RunStatus.SUCCEEDED)
+
+        payload = run.to_dict()
+
+        self.assertEqual([result["mode"] for result in payload["evaluator_results"]], ["harbor_verifier", "llm_judge"])
+        self.assertEqual(payload["evaluator_result"]["evaluator_id"], "llm-judge-v0")
+        self.assertEqual(payload["evaluator_results"][0]["metadata"]["verifier_version"], "harbor-2026-05-29")
+        self.assertNotIn("judge", payload["evaluator_results"][0])
+
     def test_model_mode_rejects_local_weights_for_v0(self):
         with self.assertRaisesRegex(ValueError, "API-based model access"):
             ModelConfig(
@@ -147,6 +192,10 @@ class RunRecordTest(unittest.TestCase):
                 mode="local_weights",
                 prompt_template_version="terminal-agent-v0",
             )
+
+    def test_hybrid_evaluator_config_requires_judge(self):
+        with self.assertRaisesRegex(ValueError, "hybrid evaluator config requires a judge"):
+            EvaluatorConfig(evaluator_id="hybrid-v0", mode="hybrid", judge=None)
 
     def test_skill_object_schema_allows_opaque_or_continuous_representations(self):
         skill = SkillObjectRef(

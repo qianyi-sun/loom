@@ -76,6 +76,51 @@ class RunDashboardProjectionTest(unittest.TestCase):
         self.assertEqual(payload["artifacts"][1]["storage_key"], "runs/run_001/workspace")
         self.assertNotIn("/srv/private", json.dumps(payload))
 
+    def test_projection_exposes_multiple_evaluator_results_with_latest_primary(self):
+        run = _minimal_run(status=RunStatus.SUCCEEDED)
+        run.evaluator_results = [
+            EvaluatorResult(
+                evaluator_id="harbor-verifier-v1",
+                mode="harbor_verifier",
+                status="completed",
+                score=0.65,
+                metrics={"reward": 0.65},
+                verbal_feedback="",
+                judge=None,
+                artifact_refs=["file:///srv/private/eval/verifier.json"],
+                metadata={"verifier_version": "harbor-2026-05-29", "access_token": "raw-secret"},
+            ),
+            EvaluatorResult(
+                evaluator_id="llm-judge-v0",
+                mode="llm_judge",
+                status="completed",
+                score=0.91,
+                metrics={"task_success": True},
+                verbal_feedback="The generated spreadsheet is correct and includes every receipt.",
+                judge=JudgeConfig(
+                    provider="openai",
+                    model_name="gpt-5",
+                    rubric_version="latent-skill-v0",
+                    metadata={"judge_prompt_version": "v3"},
+                ),
+                artifact_refs=["https://storage.example/eval/judge.json?X-Amz-Signature=secret"],
+            ),
+        ]
+        run.evaluator_result = run.evaluator_results[-1]
+
+        payload = RunDashboardProjection.from_run(run).to_dict()
+        rendered = json.dumps(payload)
+
+        self.assertEqual(payload["evaluator"]["evaluator_id"], "llm-judge-v0")
+        self.assertEqual([result["mode"] for result in payload["evaluator_results"]], ["harbor_verifier", "llm_judge"])
+        self.assertEqual(payload["evaluator_results"][0]["metadata"]["verifier_version"], "harbor-2026-05-29")
+        self.assertEqual(payload["evaluator_results"][0]["metadata"]["access_token"], "[redacted]")
+        self.assertNotIn("judge", payload["evaluator_results"][0])
+        self.assertEqual(payload["evaluator_results"][1]["judge"]["metadata"]["judge_prompt_version"], "v3")
+        self.assertNotIn("/srv/private", rendered)
+        self.assertNotIn("raw-secret", rendered)
+        self.assertNotIn("X-Amz-Signature", rendered)
+
     def test_failed_run_projection_shows_failure_reason_and_evaluator_failure(self):
         run = _minimal_run(status=RunStatus.FAILED, failure_reason="sandbox command timed out")
         run.evaluator_result = EvaluatorResult(

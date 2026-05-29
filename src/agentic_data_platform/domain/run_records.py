@@ -195,8 +195,8 @@ class EvaluatorConfig:
     def __post_init__(self) -> None:
         _require_non_empty("evaluator_id", self.evaluator_id)
         _require_non_empty("mode", self.mode)
-        if self.mode == "llm_judge" and self.judge is None:
-            raise ValueError("llm_judge evaluator config requires a judge")
+        if self.mode in {"llm_judge", "hybrid"} and self.judge is None:
+            raise ValueError(f"{self.mode} evaluator config requires a judge")
 
 
 @dataclass(frozen=True)
@@ -206,21 +206,34 @@ class EvaluatorResult:
     score: float | None
     metrics: dict[str, Any]
     verbal_feedback: str
-    judge: JudgeConfig
+    judge: JudgeConfig | None
     artifact_refs: list[str]
+    mode: str = "llm_judge"
     failure_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
         _require_non_empty("evaluator_id", self.evaluator_id)
         _require_non_empty("status", self.status)
+        _require_non_empty("mode", self.mode)
         _require_strings("artifact_refs", self.artifact_refs)
+
+        if self.mode not in _EVALUATOR_MODES:
+            allowed = ", ".join(sorted(_EVALUATOR_MODES))
+            raise ValueError(f"mode must be one of: {allowed}")
+
+        if self.mode in {"llm_judge", "hybrid"} and self.judge is None:
+            raise ValueError(f"{self.mode} evaluator result requires a judge")
 
         if self.score is not None and not 0 <= self.score <= 1:
             raise ValueError("score must be between 0 and 1")
 
-        if self.status == "completed":
+        if self.status == "completed" and self.mode in {"llm_judge", "hybrid", "manual_review"}:
             _require_non_empty("verbal_feedback", self.verbal_feedback)
+
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
 
 
 @dataclass(frozen=True)
@@ -262,6 +275,7 @@ class RunRecord:
     trajectory: list[TerminalTurn] = field(default_factory=list)
     artifacts: list[ArtifactRef] = field(default_factory=list)
     evaluator_configs: list[EvaluatorConfig] = field(default_factory=list)
+    evaluator_results: list[EvaluatorResult] = field(default_factory=list)
     evaluator_result: EvaluatorResult | None = None
     failure_reason: str | None = None
     created_by_user_id: str | None = None
@@ -312,6 +326,13 @@ class RunRecord:
         for evaluator_config in self.evaluator_configs:
             if not isinstance(evaluator_config, EvaluatorConfig):
                 raise ValueError("evaluator_configs must contain EvaluatorConfig values")
+        for evaluator_result in self.evaluator_results:
+            if not isinstance(evaluator_result, EvaluatorResult):
+                raise ValueError("evaluator_results must contain EvaluatorResult values")
+        if self.evaluator_results and self.evaluator_result is None:
+            self.evaluator_result = self.evaluator_results[-1]
+        elif self.evaluator_result is not None and self.evaluator_result not in self.evaluator_results:
+            self.evaluator_results.append(self.evaluator_result)
 
     def transition_to(self, next_status: RunStatus | str) -> None:
         next_status = _coerce_enum(RunStatus, next_status, "next_status")
@@ -343,8 +364,15 @@ class RunRecord:
         if self.status is not RunStatus.EVALUATING:
             raise ValueError("evaluator results can only be attached while the run is evaluating")
 
+        self.evaluator_results.append(result)
         self.evaluator_result = result
         self.updated_at = datetime.now(timezone.utc)
+
+    def all_evaluator_results(self) -> list[EvaluatorResult]:
+        results = list(self.evaluator_results)
+        if self.evaluator_result is not None and self.evaluator_result not in results:
+            results.append(self.evaluator_result)
+        return results
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -394,6 +422,8 @@ _VALID_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.FAILED: set(),
     RunStatus.CANCELED: set(),
 }
+
+_EVALUATOR_MODES = {"harbor_verifier", "llm_judge", "hybrid", "manual_review"}
 
 
 def _require_non_empty(name: str, value: str) -> None:

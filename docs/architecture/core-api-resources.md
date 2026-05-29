@@ -69,7 +69,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
-| `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary for a run | `RunDashboardProjection.evaluator` |
+| `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunDashboardProjection.evaluator` + `RunDashboardProjection.evaluator_results` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_runs()` + aggregate projection |
 | `GET /ops/metrics` | Return scoped run status counts and queue depth visible to the authenticated user | `RunRepository.list_runs()` |
 
@@ -88,6 +88,13 @@ same `run` projection used by lists, a full `trajectory` array with command,
 cwd, timestamps, exit code, stdout, stderr, changed paths, model call id, and
 turn metadata, plus lifecycle events. The list endpoint intentionally does not
 embed full trajectories.
+
+Evaluator projections expose `evaluator` as the latest primary summary for
+existing clients and `evaluator_results` as the full side-by-side collection
+when a run has multiple outputs such as Harbor verifier reward plus platform LLM
+judge feedback. `GET /runs/{run_id}/evaluation` keeps the old single-summary
+shape for single-evaluator runs and adds `evaluator_results` only when multiple
+results exist.
 
 `GET /dashboard/progress` returns the PM summary surface. It accepts optional
 `project_id` and `owner_team` filters, enforces the same project viewer boundary

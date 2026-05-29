@@ -149,6 +149,54 @@ class RunResourcesTest(unittest.TestCase):
             },
         )
 
+    def test_get_evaluation_returns_primary_and_all_evaluator_results(self):
+        run = _completed_run("run_multi_eval_001", project_id="pilot-project")
+        run.status = RunStatus.EVALUATING
+        run.evaluator_result = None
+        run.evaluator_results.clear()
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="harbor-verifier-v1",
+                mode="harbor_verifier",
+                status="completed",
+                score=0.65,
+                metrics={"reward": 0.65},
+                verbal_feedback="",
+                judge=None,
+                artifact_refs=["minio://runs/run_multi_eval_001/evaluation/harbor-verifier/report.json"],
+                metadata={"verifier_version": "harbor-2026-05-29"},
+            )
+        )
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="llm-judge-v0",
+                mode="llm_judge",
+                status="completed",
+                score=0.91,
+                metrics={"task_success": True},
+                verbal_feedback="The generated spreadsheet is correct.",
+                judge=JudgeConfig(
+                    provider="openai",
+                    model_name="gpt-5",
+                    rubric_version="latent-skill-v0",
+                ),
+                artifact_refs=["minio://runs/run_multi_eval_001/evaluation/llm-judge/report.json"],
+            )
+        )
+        run.transition_to(RunStatus.SUCCEEDED)
+        with session_scope(self.engine) as session:
+            RunRepository(session).save_run(run)
+
+        response = self.client.get("/runs/run_multi_eval_001/evaluation", headers={"X-Request-ID": "req-eval-multi-001"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["evaluation"]["evaluator_id"], "llm-judge-v0")
+        self.assertEqual([result["evaluator_id"] for result in payload["evaluator_results"]], ["harbor-verifier-v1", "llm-judge-v0"])
+        self.assertEqual(payload["evaluator_results"][0]["mode"], "harbor_verifier")
+        self.assertEqual(payload["evaluator_results"][0]["metadata"]["verifier_version"], "harbor-2026-05-29")
+        self.assertEqual(payload["request_id"], "req-eval-multi-001")
+
     def test_get_evaluation_returns_404_when_run_has_no_evaluator(self):
         response = self.client.get("/runs/run_002/evaluation")
 

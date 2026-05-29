@@ -591,8 +591,8 @@ class RunRepository:
         for index, artifact in enumerate(run.artifacts):
             self.session.add(_artifact_row(run_id=run.run_id, attempt_id=attempt_id, artifact=artifact, index=index))
 
-        if run.evaluator_result is not None:
-            self.session.add(_evaluator_result_row(run_id=run.run_id, attempt_id=attempt_id, result=run.evaluator_result))
+        for evaluator_result in run.all_evaluator_results():
+            self.session.add(_evaluator_result_row(run_id=run.run_id, attempt_id=attempt_id, result=evaluator_result))
 
         self.session.flush()
 
@@ -721,13 +721,16 @@ class RunRepository:
                 .order_by(ArtifactRow.artifact_index)
             )
         ]
-        evaluator_row = self.session.scalar(
-            select(EvaluatorResultRow)
-            .where(EvaluatorResultRow.run_id == row.run_id)
-            .where(EvaluatorResultRow.attempt_id == latest_attempt.attempt_id)
-            .order_by(EvaluatorResultRow.id.desc())
-            .limit(1)
+        evaluator_rows = list(
+            self.session.scalars(
+                select(EvaluatorResultRow)
+                .where(EvaluatorResultRow.run_id == row.run_id)
+                .where(EvaluatorResultRow.attempt_id == latest_attempt.attempt_id)
+                .order_by(EvaluatorResultRow.id)
+            )
         )
+        evaluator_results = [_evaluator_result(evaluator_row) for evaluator_row in evaluator_rows]
+        evaluator_result = evaluator_results[-1] if evaluator_results else None
         return RunRecord(
             run_id=row.run_id,
             project_id=row.project_id,
@@ -765,7 +768,8 @@ class RunRepository:
             trajectory=turns,
             artifacts=artifacts,
             evaluator_configs=[_evaluator_config(config) for config in row.evaluator_configs or []],
-            evaluator_result=_evaluator_result(evaluator_row) if evaluator_row is not None else None,
+            evaluator_results=evaluator_results,
+            evaluator_result=evaluator_result,
             failure_reason=row.failure_reason,
             created_by_user_id=row.created_by_user_id,
             metadata=dict(row.metadata_json or {}),
@@ -1012,38 +1016,51 @@ def _evaluator_result_row(*, run_id: str, attempt_id: str, result: EvaluatorResu
         run_id=run_id,
         attempt_id=attempt_id,
         evaluator_id=result.evaluator_id,
+        mode=result.mode,
         status=result.status,
         score=result.score,
         metrics=dict(result.metrics),
         verbal_feedback=result.verbal_feedback,
-        judge_provider=result.judge.provider,
-        judge_model_name=result.judge.model_name,
-        judge_model_version=result.judge.model_version,
-        judge_rubric_version=result.judge.rubric_version,
-        judge_metadata=dict(result.judge.metadata),
+        judge_provider=result.judge.provider if result.judge is not None else None,
+        judge_model_name=result.judge.model_name if result.judge is not None else None,
+        judge_model_version=result.judge.model_version if result.judge is not None else None,
+        judge_rubric_version=result.judge.rubric_version if result.judge is not None else None,
+        judge_metadata=dict(result.judge.metadata) if result.judge is not None else {},
         artifact_refs=list(result.artifact_refs),
         failure_reason=result.failure_reason,
         metadata_json=dict(result.metadata),
+        created_at=result.created_at,
     )
 
 
 def _evaluator_result(row: EvaluatorResultRow) -> EvaluatorResult:
+    has_judge = (
+        row.judge_provider is not None
+        and row.judge_model_name is not None
+        and row.judge_rubric_version is not None
+    )
     return EvaluatorResult(
         evaluator_id=row.evaluator_id,
+        mode=row.mode,
         status=row.status,
         score=row.score,
         metrics=dict(row.metrics or {}),
         verbal_feedback=row.verbal_feedback,
-        judge=JudgeConfig(
-            provider=row.judge_provider,
-            model_name=row.judge_model_name,
-            rubric_version=row.judge_rubric_version,
-            model_version=row.judge_model_version,
-            metadata=dict(row.judge_metadata or {}),
+        judge=(
+            JudgeConfig(
+                provider=row.judge_provider,
+                model_name=row.judge_model_name,
+                rubric_version=row.judge_rubric_version,
+                model_version=row.judge_model_version,
+                metadata=dict(row.judge_metadata or {}),
+            )
+            if has_judge
+            else None
         ),
         artifact_refs=list(row.artifact_refs or []),
         failure_reason=row.failure_reason,
         metadata=dict(row.metadata_json or {}),
+        created_at=_aware(row.created_at),
     )
 
 

@@ -89,8 +89,13 @@ turns and artifacts after a retry without replacing attempt 1. Cancel and retry
 events record `from_status`, `to_status`, `reason`, `actor_user_id`, and
 `request_id` in `run_status_events` for dashboard and debugging use. Status
 events have a monotonic integer primary key and are rendered in insertion order.
-Evaluator results are stored as many rows, while current callers receive the
-latest result for the latest attempt through `RunRecord.evaluator_result`.
+Evaluator results are stored as many rows per latest attempt. `RunRecord`
+hydrates the ordered `evaluator_results` collection and continues to expose the
+latest result through `RunRecord.evaluator_result` for existing worker,
+dashboard, and API clients. The `evaluator_results.mode` column distinguishes
+Harbor verifier, platform LLM judge, hybrid, and future manual-review outputs;
+judge metadata is nullable so deterministic verifier rewards can be stored
+without synthesizing an LLM judge identity.
 
 The #53 lifecycle migration adds indexes for dashboard filters:
 `runs(project_id, status, created_at)`,

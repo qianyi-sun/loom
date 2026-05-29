@@ -292,7 +292,11 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         evaluation = projection.get("evaluator")
         if evaluation is None:
             raise HTTPException(status_code=404, detail=f"Run has no evaluation: {run_id}")
-        return _with_request_id(request, {"run_id": run_id, "evaluation": evaluation})
+        response_payload = {"run_id": run_id, "evaluation": evaluation}
+        evaluator_results = projection.get("evaluator_results", [])
+        if len(evaluator_results) > 1:
+            response_payload["evaluator_results"] = evaluator_results
+        return _with_request_id(request, response_payload)
 
 
 def _get_run_or_404(session: Session, run_id: str):
@@ -528,21 +532,26 @@ _RUN_PAYLOAD_EXAMPLE: dict[str, Any] = {
     ],
     "evaluator": {
         "evaluator_id": "llm-judge-v0",
+        "mode": "llm_judge",
         "status": "completed",
         "score": 0.91,
         "metrics": {"task_success": True},
         "verbal_feedback_summary": "The generated workbook is correct.",
+        "metadata": {},
         "judge": {
             "provider": "openai",
             "model_name": "gpt-5",
             "model_version": None,
             "rubric_version": "latent-skill-benchmark-2026-05-28",
+            "metadata": {},
         },
         "artifact_refs": ["report.json"],
+        "created_at": "2026-05-28T12:30:00Z",
     },
     "created_at": "2026-05-28T12:00:00Z",
     "updated_at": "2026-05-28T12:30:00Z",
 }
+_RUN_PAYLOAD_EXAMPLE["evaluator_results"] = [_RUN_PAYLOAD_EXAMPLE["evaluator"]]
 _LIFECYCLE_EVENT_EXAMPLE = {
     "event_id": "evt_001",
     "run_id": "run_001",

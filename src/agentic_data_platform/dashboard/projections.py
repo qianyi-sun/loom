@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 from agentic_data_platform.domain.run_records import ArtifactRef, EvaluatorConfig, EvaluatorResult, RunRecord, RunStatus
+from agentic_data_platform.providers.config import redact_sensitive_metadata
 
 
 @dataclass(frozen=True)
@@ -55,8 +56,10 @@ class RunDashboardProjection:
             "updated_at": _datetime(run.updated_at),
         }
 
-        if run.evaluator_result is not None:
-            payload["evaluator"] = _evaluator_summary(run.evaluator_result)
+        evaluator_results = run.all_evaluator_results()
+        if evaluator_results:
+            payload["evaluator_results"] = [_evaluator_summary(result) for result in evaluator_results]
+            payload["evaluator"] = payload["evaluator_results"][-1]
 
         return payload
 
@@ -95,17 +98,23 @@ def _artifact_link(ref: ArtifactRef) -> dict[str, Any]:
 def _evaluator_summary(result: EvaluatorResult) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "evaluator_id": result.evaluator_id,
+        "mode": result.mode,
         "status": result.status,
         "metrics": result.metrics,
         "verbal_feedback_summary": _feedback_summary(result.verbal_feedback),
-        "judge": {
+        "metadata": redact_sensitive_metadata(result.metadata),
+        "artifact_refs": [_safe_artifact_ref(ref) for ref in result.artifact_refs],
+        "created_at": _datetime(result.created_at),
+    }
+
+    if result.judge is not None:
+        payload["judge"] = {
             "provider": result.judge.provider,
             "model_name": result.judge.model_name,
             "model_version": result.judge.model_version,
             "rubric_version": result.judge.rubric_version,
-        },
-        "artifact_refs": [_safe_artifact_ref(ref) for ref in result.artifact_refs],
-    }
+            "metadata": redact_sensitive_metadata(result.judge.metadata),
+        }
 
     if result.score is not None:
         payload["score"] = result.score

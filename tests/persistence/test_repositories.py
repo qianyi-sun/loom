@@ -40,7 +40,8 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_initial_migration_creates_core_backend_tables(self):
-        tables = set(inspect(self.engine).get_table_names())
+        inspector = inspect(self.engine)
+        tables = set(inspector.get_table_names())
 
         self.assertTrue(
             {
@@ -58,6 +59,11 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "audit_events",
             }.issubset(tables)
         )
+        evaluator_columns = {column["name"]: column for column in inspector.get_columns("evaluator_results")}
+        self.assertIn("mode", evaluator_columns)
+        self.assertTrue(evaluator_columns["judge_provider"]["nullable"])
+        self.assertTrue(evaluator_columns["judge_model_name"]["nullable"])
+        self.assertTrue(evaluator_columns["judge_rubric_version"]["nullable"])
 
     def test_project_identity_repositories_create_read_list_and_update(self):
         with session_scope(self.engine) as session:
@@ -314,6 +320,64 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[2].to_status, RunStatus.QUEUED)
         self.assertEqual(events[2].attempt_id, "run_lifecycle_001:attempt:2")
 
+    def test_run_round_trip_preserves_multiple_evaluator_results_for_latest_attempt(self):
+        run = _completed_run(run_id="run_multi_eval_001")
+        run.status = RunStatus.EVALUATING
+        run.evaluator_result = None
+        run.evaluator_results.clear()
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="harbor-verifier-v1",
+                mode="harbor_verifier",
+                status="completed",
+                score=0.65,
+                metrics={"reward": 0.65},
+                verbal_feedback="",
+                judge=None,
+                artifact_refs=["minio://runs/run_multi_eval_001/evaluation/harbor-verifier/report.json"],
+                metadata={"verifier_version": "harbor-2026-05-29"},
+            )
+        )
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="llm-judge-v0",
+                mode="llm_judge",
+                status="completed",
+                score=0.91,
+                metrics={"task_success": True},
+                verbal_feedback="The extracted invoice workbook is correct.",
+                judge=JudgeConfig(
+                    provider="openai",
+                    model_name="gpt-5",
+                    rubric_version="latent-skill-benchmark-2026-05-28",
+                ),
+                artifact_refs=["minio://runs/run_multi_eval_001/evaluation/llm-judge/report.json"],
+            )
+        )
+        run.transition_to(RunStatus.SUCCEEDED)
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            RunRepository(session).save_run(run)
+
+        with session_scope(self.engine) as session:
+            loaded = RunRepository(session).get_run("run_multi_eval_001")
+
+        self.assertEqual([result.evaluator_id for result in loaded.evaluator_results], ["harbor-verifier-v1", "llm-judge-v0"])
+        self.assertEqual(loaded.evaluator_result.evaluator_id, "llm-judge-v0")
+        self.assertEqual(loaded.evaluator_results[0].mode, "harbor_verifier")
+        self.assertIsNone(loaded.evaluator_results[0].judge)
+        self.assertEqual(loaded.evaluator_results[0].metadata["verifier_version"], "harbor-2026-05-29")
+        self.assertIsNotNone(loaded.evaluator_results[0].created_at)
+
     def test_run_repository_claims_next_queued_run_once_for_worker(self):
         run = _queued_run(run_id="run_claim_001")
 
@@ -428,9 +492,9 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 runs.retry_run(run.run_id, reason="retry succeeded run")
 
 
-def _completed_run() -> RunRecord:
+def _completed_run(run_id: str = "run_001") -> RunRecord:
     run = RunRecord.create(
-        run_id="run_001",
+        run_id=run_id,
         project_id="pilot-project",
         owner_team="pilot group",
         task=BenchmarkTaskInstance(
@@ -491,24 +555,24 @@ def _completed_run() -> RunRecord:
     run.transition_to(RunStatus.EVALUATING)
     run.attach_artifact(
         ArtifactRef(
-            artifact_id="run_001-trajectory",
+            artifact_id=f"{run_id}-trajectory",
             kind=ArtifactKind.TRAJECTORY,
-            uri="minio://runs/run_001/trajectory.jsonl",
+            uri=f"minio://runs/{run_id}/trajectory.jsonl",
             media_type="application/x-ndjson",
             sha256="1" * 64,
             size_bytes=512,
-            metadata={"storage_key": "runs/run_001/trajectory.jsonl"},
+            metadata={"storage_key": f"runs/{run_id}/trajectory.jsonl"},
         )
     )
     run.attach_artifact(
         ArtifactRef(
-            artifact_id="run_001-workspace-snapshot",
+            artifact_id=f"{run_id}-workspace-snapshot",
             kind=ArtifactKind.WORKSPACE_SNAPSHOT,
-            uri="minio://runs/run_001/workspace/snapshot.json",
+            uri=f"minio://runs/{run_id}/workspace/snapshot.json",
             media_type="application/json",
             sha256="2" * 64,
             size_bytes=2048,
-            metadata={"storage_key": "runs/run_001/workspace/snapshot.json"},
+            metadata={"storage_key": f"runs/{run_id}/workspace/snapshot.json"},
         )
     )
     run.attach_evaluator_result(
@@ -523,18 +587,18 @@ def _completed_run() -> RunRecord:
                 model_name="gpt-5",
                 rubric_version="latent-skill-benchmark-2026-05-28",
             ),
-            artifact_refs=["minio://runs/run_001/evaluation/report.json"],
+            artifact_refs=[f"minio://runs/{run_id}/evaluation/report.json"],
         )
     )
     run.attach_artifact(
         ArtifactRef(
-            artifact_id="run_001-llm-judge-v0-report",
+            artifact_id=f"{run_id}-llm-judge-v0-report",
             kind=ArtifactKind.EVALUATOR_REPORT,
-            uri="minio://runs/run_001/evaluation/report.json",
+            uri=f"minio://runs/{run_id}/evaluation/report.json",
             media_type="application/json",
             sha256="3" * 64,
             size_bytes=1024,
-            metadata={"storage_key": "runs/run_001/evaluation/report.json"},
+            metadata={"storage_key": f"runs/{run_id}/evaluation/report.json"},
         )
     )
     run.transition_to(RunStatus.SUCCEEDED)
