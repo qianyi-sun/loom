@@ -201,14 +201,18 @@ Implemented wrapper behavior:
 
 - SkillFlow writes a normalized `result.json` and a
   `artifacts/planned-command.json` file for the upstream
-  `family_job_runner.py` command. In executable mode it requires
-  `--upstream-root`, invokes the upstream script there, and writes
-  `artifacts/stdout.log` and `artifacts/stderr.log`.
+  `family_job_runner.py` command. It synthesizes
+  `artifacts/upstream-config.json` from platform model metadata and passes that
+  generated path to `--config` instead of relying on a committed upstream
+  baseline config. In executable mode it requires `--upstream-root`, invokes the
+  upstream script there, and writes `artifacts/stdout.log` and
+  `artifacts/stderr.log`.
 - SkillLearnBench writes the same normalized output for
   `evaluate_skills.py <task>`; when an instance id ends in a numeric suffix,
   the wrapper emits `--subtask-range N-N` so the planned command is
   instance-scoped.
-- Both wrappers validate the suite name in `/input/task.json`, expose
+- Both wrappers validate the suite name in `/input/task.json`, write the
+  redacted `artifacts/upstream-config.json` runner config artifact, expose
   `ADP_*` environment variables to the upstream process, preserve stdout/stderr
   logs, and map non-zero upstream exits or upstream timeouts to failed wrapper
   results.
@@ -252,8 +256,9 @@ just to run a supported suite.
 - Extend upstream checkout/download management beyond the current local-tree and
   git cache/lock boundary if SkillFlow needs additional Hugging Face dataset or
   Git LFS handling.
-- Generate benchmark-specific config files from platform model/provider
-  settings instead of relying on committed upstream defaults.
+- Expand benchmark-specific config synthesis beyond the current redacted
+  `artifacts/upstream-config.json` contract if upstream runners require
+  suite-native YAML or environment files.
 - Normalize upstream report directories and generated files into first-class
   platform artifacts.
 - Add optional smoke tests that run against real upstream dry-run commands when

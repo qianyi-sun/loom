@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentic_data_platform.providers.config import redact_sensitive_metadata
+
+_UPSTREAM_CONFIG_ARTIFACT = "upstream-config.json"
+
 
 @dataclass(frozen=True)
 class WrapperPaths:
@@ -105,6 +109,7 @@ def run_wrapper(
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.output.parent.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _write_upstream_config(paths=paths, manifest=manifest)
     _write_planned_command(paths=paths, manifest=manifest, planned_command=planned_command)
 
     if paths.dry_run:
@@ -177,6 +182,45 @@ def _write_process_logs(*, paths: WrapperPaths, stdout: str, stderr: str) -> Non
     (paths.artifacts_dir / "stderr.log").write_text(stderr, encoding="utf-8")
 
 
+def upstream_config_path(paths: WrapperPaths) -> Path:
+    return paths.artifacts_dir / _UPSTREAM_CONFIG_ARTIFACT
+
+
+def _write_upstream_config(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> None:
+    config = {
+        "schema_version": "adp.wrapper_config.v1",
+        "run_id": manifest.run_id,
+        "suite_name": manifest.suite_name,
+        "benchmark_version": manifest.benchmark_version,
+        "source_uri": manifest.source_uri,
+        "source_version": manifest.source_version,
+        "task_family": manifest.task_family,
+        "instance_id": manifest.instance_id,
+        "instruction_ref": manifest.instruction_ref,
+        "input_files": manifest.input_files,
+        "model": redact_sensitive_metadata(manifest.model),
+        "execution": {
+            "output_dir": manifest.output_dir,
+            "artifacts_dir": manifest.artifacts_dir,
+        },
+        "environment_contract": [
+            "ADP_RUN_ID",
+            "ADP_SUITE_NAME",
+            "ADP_TASK_FAMILY",
+            "ADP_INSTANCE_ID",
+            "ADP_WORKSPACE",
+            "ADP_OUTPUT_DIR",
+            "ADP_ARTIFACTS_DIR",
+            "ADP_MODEL_PROVIDER",
+            "ADP_MODEL_NAME",
+        ],
+    }
+    upstream_config_path(paths).write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _process_output(output: bytes | str | None) -> str:
     if output is None:
         return ""
@@ -224,6 +268,11 @@ def _write_result(
             "kind": "log",
             "path": "artifacts/planned-command.json",
             "media_type": "application/json",
+        },
+        {
+            "kind": "runner_config",
+            "path": f"artifacts/{_UPSTREAM_CONFIG_ARTIFACT}",
+            "media_type": "application/json",
         }
     ]
     if not dry_run:
@@ -270,6 +319,8 @@ def _write_result(
 
 def _execution_env(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> dict[str, str]:
     env = dict(os.environ)
+    provider = manifest.model.get("provider")
+    model_name = manifest.model.get("model_name")
     env.update(
         {
             "ADP_RUN_ID": manifest.run_id,
@@ -281,6 +332,10 @@ def _execution_env(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> dic
             "ADP_ARTIFACTS_DIR": str(paths.artifacts_dir),
         }
     )
+    if isinstance(provider, str) and provider.strip():
+        env["ADP_MODEL_PROVIDER"] = provider
+    if isinstance(model_name, str) and model_name.strip():
+        env["ADP_MODEL_NAME"] = model_name
     return env
 
 

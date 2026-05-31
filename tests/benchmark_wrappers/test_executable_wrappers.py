@@ -73,9 +73,11 @@ class ExecutableWrapperTest(unittest.TestCase):
         self.assertNotIn("--dry-run", result["planned_command"])
         self.assertIn("ran skillflow OCR-Data-Extraction", result["stdout"])
         self.assertEqual(result["stderr"], "")
-        self.assertEqual(result["artifacts"][0]["path"], "artifacts/planned-command.json")
-        self.assertEqual(result["artifacts"][1]["path"], "artifacts/stdout.log")
-        self.assertEqual(result["artifacts"][2]["path"], "artifacts/stderr.log")
+        artifact_paths = {artifact["path"] for artifact in result["artifacts"]}
+        self.assertIn("artifacts/planned-command.json", artifact_paths)
+        self.assertIn("artifacts/upstream-config.json", artifact_paths)
+        self.assertIn("artifacts/stdout.log", artifact_paths)
+        self.assertIn("artifacts/stderr.log", artifact_paths)
 
     def test_skilllearnbench_wrapper_executes_instance_scoped_upstream_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:

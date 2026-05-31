@@ -50,6 +50,66 @@ class DryRunWrapperTest(unittest.TestCase):
         self.assertIn("--dry-run", result["planned_command"])
         self.assertEqual(result["artifacts"][0]["path"], "artifacts/planned-command.json")
 
+    def test_skillflow_wrapper_synthesizes_safe_upstream_config_from_model_manifest(self):
+        manifest = _task_manifest(
+            suite_name="SkillFlow",
+            task_family="OCR-Data-Extraction",
+            instance_id="task_family_invoice_images",
+            model={
+                "provider": "openai-compatible",
+                "model_name": "gpt-5-mini",
+                "api_key": "sk-raw-secret",
+                "secret_ref": "env:MODEL_PROVIDER_API_KEY",
+                "headers": {
+                    "authorization": "Bearer raw-secret",
+                    "x-safe-header": "team-latent",
+                },
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            manifest_path = temp_path / "task.json"
+            output_path = temp_path / "result.json"
+            artifacts_dir = temp_path / "artifacts"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            exit_code = skillflow_main(
+                [
+                    "--task-manifest",
+                    str(manifest_path),
+                    "--workspace",
+                    str(temp_path / "workspace"),
+                    "--output",
+                    str(output_path),
+                    "--artifacts-dir",
+                    str(artifacts_dir),
+                    "--dry-run",
+                ]
+            )
+
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+            config = json.loads((artifacts_dir / "upstream-config.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(str(artifacts_dir / "upstream-config.json"), result["planned_command"])
+        self.assertIn(
+            {
+                "kind": "runner_config",
+                "path": "artifacts/upstream-config.json",
+                "media_type": "application/json",
+            },
+            result["artifacts"],
+        )
+        self.assertEqual(config["schema_version"], "adp.wrapper_config.v1")
+        self.assertEqual(config["suite_name"], "SkillFlow")
+        self.assertEqual(config["model"]["provider"], "openai-compatible")
+        self.assertEqual(config["model"]["model_name"], "gpt-5-mini")
+        self.assertEqual(config["model"]["api_key"], "[redacted]")
+        self.assertEqual(config["model"]["secret_ref"], "env:MODEL_PROVIDER_API_KEY")
+        self.assertEqual(config["model"]["headers"]["authorization"], "[redacted]")
+        self.assertEqual(config["model"]["headers"]["x-safe-header"], "team-latent")
+
     def test_skilllearnbench_wrapper_writes_instance_scoped_dry_run_result(self):
         manifest = _task_manifest(
             suite_name="SkillLearnBench",
@@ -79,6 +139,7 @@ class DryRunWrapperTest(unittest.TestCase):
             )
 
             result = json.loads(output_path.read_text(encoding="utf-8"))
+            config = json.loads((artifacts_dir / "upstream-config.json").read_text(encoding="utf-8"))
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(result["status"], "completed")
@@ -88,6 +149,16 @@ class DryRunWrapperTest(unittest.TestCase):
         self.assertIn("--subtask-range 2-2", result["planned_command"])
         self.assertIn("--skill-path none", result["planned_command"])
         self.assertEqual(result["artifacts"][0]["kind"], "log")
+        self.assertIn(
+            {
+                "kind": "runner_config",
+                "path": "artifacts/upstream-config.json",
+                "media_type": "application/json",
+            },
+            result["artifacts"],
+        )
+        self.assertEqual(config["suite_name"], "SkillLearnBench")
+        self.assertEqual(config["model"]["provider"], "mock-api")
 
     def test_wrapper_rejects_wrong_suite_manifest(self):
         manifest = _task_manifest(
@@ -116,7 +187,13 @@ class DryRunWrapperTest(unittest.TestCase):
                 )
 
 
-def _task_manifest(*, suite_name: str, task_family: str, instance_id: str) -> dict[str, object]:
+def _task_manifest(
+    *,
+    suite_name: str,
+    task_family: str,
+    instance_id: str,
+    model: dict[str, object] | None = None,
+) -> dict[str, object]:
     catalog = load_fixture_catalog(suite_name)
     spec = catalog.to_task_spec(task_family=task_family, instance_id=instance_id)
     return {
@@ -129,7 +206,7 @@ def _task_manifest(*, suite_name: str, task_family: str, instance_id: str) -> di
         "instance_id": instance_id,
         "instruction_ref": spec.metadata["instruction_ref"],
         "input_files": spec.metadata["input_files"],
-        "model": {
+        "model": model or {
             "provider": "mock-api",
             "model_name": "scripted-terminal-agent",
         },

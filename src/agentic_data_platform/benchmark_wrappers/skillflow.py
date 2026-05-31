@@ -6,6 +6,7 @@ from agentic_data_platform.benchmark_wrappers.contracts import (
     load_task_manifest,
     parse_wrapper_args,
     run_wrapper,
+    upstream_config_path,
 )
 
 
@@ -16,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.executable,
         "family_job_runner.py",
         "--config",
-        "configs/baseline.yaml",
+        str(upstream_config_path(paths)),
         "--dataset-path",
         "test_tasks",
         "--run-root-dir",
