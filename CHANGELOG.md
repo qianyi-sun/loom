@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the pilot group native workflow architecture target for #103,
+  including trial/retry/refinement attempts, verifier rewards, LLM-judge
+  feedback, final workspaces, artifact bundles, and future skill object hooks.
 - Added multi-evaluator run result semantics for Harbor verifier and platform
   LLM judge outputs while preserving the latest evaluator summary.
 - Added a fixture-backed Harbor `jobs/` result ingestor that maps trajectories,

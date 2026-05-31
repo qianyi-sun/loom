@@ -125,6 +125,8 @@ Core object model:
 - `SkillObject`: flexible skill artifact; not assumed to be `skill.md`.
 
 Detailed design: [terminal-benchmark-mvp.md](docs/architecture/terminal-benchmark-mvp.md).
+pilot group native workflow:
+[pilot-project-native-workflow.md](docs/architecture/pilot-project-native-workflow.md).
 Unified evaluation backend contract:
 [unified-evaluation-backend-contract.md](docs/architecture/unified-evaluation-backend-contract.md).
 Persistence design: [postgres-persistence.md](docs/architecture/postgres-persistence.md).
@@ -144,7 +146,7 @@ Original runner wrapper research:
 | Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, API-created Docker sandbox smoke, and frontend-driven Harbor launch smoke checks; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
-| MVP architecture | In progress | Terminal benchmark architecture, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
+| MVP architecture | In progress | Terminal benchmark architecture, pilot group native workflow, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
 | Unified evaluation backend | Documented | Contract keeps latent native adapters and Harbor integration on one backend surface |
 | Run data contract | MVP backend slice merged | Python domain schema covers benchmark task identity, API model config, Docker runner config, terminal turns, artifacts, evaluator feedback, and flexible skill objects |
 | Persistence foundation | MVP backend slice merged | Alembic + SQLAlchemy persistence covers identity, projects, benchmark catalogs, runs, attempts, status events, artifacts, evaluator results, and audit events |
@@ -157,7 +159,7 @@ Original runner wrapper research:
 | Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and scoped `/ops/metrics` are available |
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
-| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, and terminal benchmark run orchestrator are under active development |
+| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, API-only model command provider, terminal benchmark run orchestrator, and latent native workflow target are under active development |
 | Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes the generated Harbor smoke task, and the Harbor runner/`jobs/` ingestion path is covered by shared dev smoke checks |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
@@ -170,6 +172,8 @@ Original runner wrapper research:
 - Architecture design: [#4](https://github.com/carinrc/agentic-data-platform/issues/4)
 - User runner/pipeline contract: [#21](https://github.com/carinrc/agentic-data-platform/issues/21)
 - SkillFlow / SkillLearnBench adapters: [#22](https://github.com/carinrc/agentic-data-platform/issues/22)
+- pilot group native workflow:
+  [#103](https://github.com/carinrc/agentic-data-platform/issues/103)
 - Flexible skill object model: [#23](https://github.com/carinrc/agentic-data-platform/issues/23)
 - Backend service epic: [#49](https://github.com/carinrc/agentic-data-platform/issues/49)
 - Postgres persistence foundation: [#51](https://github.com/carinrc/agentic-data-platform/issues/51)
