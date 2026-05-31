@@ -64,6 +64,9 @@ class ExecutableWrapperTest(unittest.TestCase):
             )
 
             result = json.loads(output_path.read_text(encoding="utf-8"))
+            copied_report = json.loads(
+                (artifacts_dir / "upstream-output/report.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(result["status"], "completed")
@@ -78,6 +81,16 @@ class ExecutableWrapperTest(unittest.TestCase):
         self.assertIn("artifacts/upstream-config.json", artifact_paths)
         self.assertIn("artifacts/stdout.log", artifact_paths)
         self.assertIn("artifacts/stderr.log", artifact_paths)
+        self.assertIn("artifacts/upstream-output/report.json", artifact_paths)
+        self.assertEqual(copied_report["group"], "OCR-Data-Extraction")
+        self.assertIn(
+            {
+                "kind": "upstream_output",
+                "path": "artifacts/upstream-output/report.json",
+                "media_type": "application/json",
+            },
+            result["artifacts"],
+        )
 
     def test_skilllearnbench_wrapper_executes_instance_scoped_upstream_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:

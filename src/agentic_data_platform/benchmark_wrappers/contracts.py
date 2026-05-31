@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Any
 from agentic_data_platform.providers.config import redact_sensitive_metadata
 
 _UPSTREAM_CONFIG_ARTIFACT = "upstream-config.json"
+_UPSTREAM_OUTPUT_DIR = "upstream-output"
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,7 @@ def run_wrapper(
             stdout="",
             stderr="",
             failure_reason=None,
+            upstream_artifacts=[],
         )
         return 0
 
@@ -144,6 +148,7 @@ def run_wrapper(
         stdout = _process_output(error.stdout)
         stderr = _process_output(error.stderr)
         _write_process_logs(paths=paths, stdout=stdout, stderr=stderr)
+        upstream_artifacts = _collect_upstream_output_artifacts(paths=paths, manifest=manifest)
         _write_result(
             paths=paths,
             manifest=manifest,
@@ -153,12 +158,14 @@ def run_wrapper(
             stdout=stdout,
             stderr=stderr,
             failure_reason=f"upstream runner timed out after {paths.timeout_seconds} seconds",
+            upstream_artifacts=upstream_artifacts,
         )
         return 124
 
     stdout = completed.stdout
     stderr = completed.stderr
     _write_process_logs(paths=paths, stdout=stdout, stderr=stderr)
+    upstream_artifacts = _collect_upstream_output_artifacts(paths=paths, manifest=manifest)
 
     failure_reason = None
     if completed.returncode != 0:
@@ -173,6 +180,7 @@ def run_wrapper(
         stdout=stdout,
         stderr=stderr,
         failure_reason=failure_reason,
+        upstream_artifacts=upstream_artifacts,
     )
     return completed.returncode
 
@@ -180,6 +188,41 @@ def run_wrapper(
 def _write_process_logs(*, paths: WrapperPaths, stdout: str, stderr: str) -> None:
     (paths.artifacts_dir / "stdout.log").write_text(stdout, encoding="utf-8")
     (paths.artifacts_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+
+
+def _collect_upstream_output_artifacts(
+    *,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+) -> list[dict[str, str]]:
+    output_root = Path(manifest.output_dir)
+    if not output_root.exists() or not output_root.is_dir():
+        return []
+
+    artifacts_root = paths.artifacts_dir.resolve()
+    upstream_artifacts_root = paths.artifacts_dir / _UPSTREAM_OUTPUT_DIR
+    artifacts: list[dict[str, str]] = []
+    for source_path in sorted(output_root.rglob("*")):
+        if source_path.is_symlink() or not source_path.is_file():
+            continue
+
+        resolved_source = source_path.resolve()
+        if resolved_source.is_relative_to(artifacts_root):
+            continue
+
+        relative_path = source_path.relative_to(output_root)
+        target_path = upstream_artifacts_root / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+        artifacts.append(
+            {
+                "kind": "upstream_output",
+                "path": f"artifacts/{_UPSTREAM_OUTPUT_DIR}/{relative_path.as_posix()}",
+                "media_type": mimetypes.guess_type(target_path.name)[0] or "application/octet-stream",
+            }
+        )
+
+    return artifacts
 
 
 def upstream_config_path(paths: WrapperPaths) -> Path:
@@ -262,6 +305,7 @@ def _write_result(
     stdout: str,
     stderr: str,
     failure_reason: str | None,
+    upstream_artifacts: list[dict[str, str]],
 ) -> None:
     artifacts = [
         {
@@ -290,6 +334,8 @@ def _write_result(
                 },
             ]
         )
+
+    artifacts.extend(upstream_artifacts)
 
     result = {
         "status": "completed" if exit_code == 0 else "failed",

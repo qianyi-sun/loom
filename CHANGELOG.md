@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
   `artifacts/upstream-config.json` runner config artifact from platform model
   metadata, and SkillFlow uses the generated config path instead of the
   committed upstream baseline config.
+- Added first upstream output artifact normalization for #22. Executable
+  wrapper runs now copy generated upstream output files into
+  `artifacts/upstream-output/` and expose them as `upstream_output` artifacts.
 - Added the pilot group native workflow architecture target for #103,
   including trial/retry/refinement attempts, verifier rewards, LLM-judge
   feedback, final workspaces, artifact bundles, and future skill object hooks.

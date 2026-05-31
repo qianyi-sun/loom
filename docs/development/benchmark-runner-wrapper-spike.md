@@ -214,8 +214,9 @@ Implemented wrapper behavior:
 - Both wrappers validate the suite name in `/input/task.json`, write the
   redacted `artifacts/upstream-config.json` runner config artifact, expose
   `ADP_*` environment variables to the upstream process, preserve stdout/stderr
-  logs, and map non-zero upstream exits or upstream timeouts to failed wrapper
-  results.
+  logs, copy generated upstream output files into
+  `artifacts/upstream-output/` as `upstream_output` artifacts, and map non-zero
+  upstream exits or upstream timeouts to failed wrapper results.
 - `--dry-run` still writes planned-command artifacts without invoking upstream
   code or requiring model API keys.
 
@@ -259,8 +260,9 @@ just to run a supported suite.
 - Expand benchmark-specific config synthesis beyond the current redacted
   `artifacts/upstream-config.json` contract if upstream runners require
   suite-native YAML or environment files.
-- Normalize upstream report directories and generated files into first-class
-  platform artifacts.
+- Deepen suite-specific parsing of upstream report directories once real
+  upstream output shapes are stable; the current wrapper already preserves
+  generated files as first-class `upstream_output` artifacts.
 - Add optional smoke tests that run against real upstream dry-run commands when
   the upstream repos are available locally.
 - Add a user-facing custom runner contract under #21 using the same input and
