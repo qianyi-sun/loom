@@ -24,6 +24,7 @@ from agentic_data_platform.service.config import ServiceSettings, load_service_s
 from agentic_data_platform.service.dashboard_resources import register_dashboard_routes
 from agentic_data_platform.service.dependencies import build_session_dependency
 from agentic_data_platform.service.harness_resources import register_harness_routes
+from agentic_data_platform.service.harbor_task_resources import register_harbor_task_routes
 from agentic_data_platform.service.model_resources import register_model_routes
 from agentic_data_platform.service.ops_resources import register_ops_routes
 from agentic_data_platform.service.project_resources import register_project_routes
@@ -65,6 +66,7 @@ def create_app(
     register_auth_routes(app, app.state.session_dependency)
     register_project_routes(app, app.state.session_dependency)
     register_benchmark_routes(app, app.state.session_dependency)
+    register_harbor_task_routes(app, app.state.session_dependency)
     register_model_routes(app, app.state.session_dependency)
     register_harness_routes(app, app.state.session_dependency)
     register_run_routes(app, app.state.session_dependency)

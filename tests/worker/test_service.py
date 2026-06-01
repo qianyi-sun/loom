@@ -2,6 +2,8 @@ import json
 import subprocess
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -550,6 +552,63 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["evaluator"]["mode"], "harbor_verifier")
         self.assertGreaterEqual(payload["run"]["progress"]["artifact_count"], 4)
 
+    def test_worker_materializes_uploaded_harbor_task_archive(self):
+        payload = _run_create_payload("run_worker_harbor_upload_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            artifact_persistence = ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts"))
+            stored = artifact_persistence.store.put_bytes(
+                "harbor-task-uploads/pilot-project/upload-001/task.zip",
+                _uploaded_harbor_task_zip(),
+                media_type="application/zip",
+                metadata={"content_type": "harbor_task_archive"},
+            )
+            payload["metadata"] = {
+                "harbor_run": {
+                    "task_archive_storage_key": stored.key,
+                    "agent": "oracle",
+                    "model_name": "smoke/noop",
+                    "environment": "docker",
+                    "extra_args": ["--quiet"],
+                }
+            }
+            create_response = self.client.post("/runs", json=payload)
+            self.assertEqual(create_response.status_code, 201)
+
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-upload-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=artifact_persistence,
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-upload-001")
+            harbor_args = command_runner.calls[0]["args"]
+            task_dir = Path(harbor_args[harbor_args.index("-p") + 1])
+
+            self.assertTrue((task_dir / "instruction.md").is_file())
+            self.assertTrue((task_dir / "task.toml").is_file())
+            self.assertTrue((task_dir / "environment" / "Dockerfile").is_file())
+            self.assertTrue((task_dir / "tests" / "test.sh").is_file())
+            self.assertFalse((task_dir / "uploaded-harbor-task").exists())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(harbor_args[:3], ["harbor", "run", "-p"])
+        self.assertIn("--quiet", harbor_args)
+
+        detail = self.client.get("/runs/run_worker_harbor_upload_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "succeeded")
+        self.assertEqual(payload["run"]["evaluator"]["mode"], "harbor_verifier")
+
     def test_worker_normalizes_harbor_runner_failure(self):
         payload = _run_create_payload("run_worker_harbor_failed_001")
         payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
@@ -955,3 +1014,38 @@ def _write_harbor_job_fixture(root: Path) -> None:
         json.dumps([{"destination": "artifacts/answer.txt", "type": "file", "status": "ok"}]),
         encoding="utf-8",
     )
+
+
+def _uploaded_harbor_task_zip() -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("uploaded-harbor-task/instruction.md", "Write the answer file.\n")
+        archive.writestr(
+            "uploaded-harbor-task/task.toml",
+            "\n".join(
+                [
+                    'schema_version = "1.2"',
+                    'artifacts = ["/logs/artifacts/answer.txt"]',
+                    "",
+                    "[task]",
+                    'name = "latent/uploaded-harbor-task"',
+                    "",
+                    "[verifier]",
+                    "timeout_sec = 120.0",
+                    "",
+                    "[agent]",
+                    "timeout_sec = 120.0",
+                    "",
+                    "[environment]",
+                    'os = "linux"',
+                    "allow_internet = true",
+                    "",
+                ]
+            ),
+        )
+        archive.writestr("uploaded-harbor-task/environment/Dockerfile", "FROM ubuntu:24.04\n")
+        archive.writestr(
+            "uploaded-harbor-task/tests/test.sh",
+            "mkdir -p /logs/verifier\nprintf '1\\n' > /logs/verifier/reward.txt\n",
+        )
+    return buffer.getvalue()

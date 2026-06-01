@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from agentic_data_platform.artifacts.store import ArtifactPersistence
+from agentic_data_platform.artifacts.store import Artifacpilot groupjectStore, ArtifactPersistence
 from agentic_data_platform.benchmarks.adapters import BenchmarkRegistration
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
@@ -29,6 +29,7 @@ from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
 from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
 from agentic_data_platform.harbor.smoke import write_harbor_cli_smoke_task
+from agentic_data_platform.harbor.task_uploads import materialize_harbor_task_archive
 from agentic_data_platform.models.providers import (
     ModelCommand,
     ModelProvider,
@@ -84,7 +85,11 @@ class DockerTerminalWorkerExecutor:
 
     def execute(self, run: RunRecord) -> RunRecord:
         self._resolve_provider_refs(run)
-        harbor_spec = _harbor_run_spec_for_run(run, workspace_root=self.workspace_root)
+        harbor_spec = _harbor_run_spec_for_run(
+            run,
+            workspace_root=self.workspace_root,
+            artifact_store=self.artifact_persistence.store,
+        )
         if harbor_spec is not None:
             return self._execute_harbor_run(run, harbor_spec)
         wrapper_spec = _original_wrapper_run_spec_for_run(run)
@@ -801,13 +806,23 @@ def _missing_original_wrapper_result_reason(process: subprocess.CompletedProcess
     return "Original benchmark wrapper did not write a result file"
 
 
-def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborRunSpec | None:
+def _harbor_run_spec_for_run(
+    run: RunRecord,
+    *,
+    workspace_root: Path,
+    artifact_store: Artifacpilot groupjectStore,
+) -> HarborRunSpec | None:
     configured = run.metadata.get("harbor_run")
     if not isinstance(configured, dict):
         return None
 
     dataset_ref = _optional_str(configured.get("dataset_ref"))
-    task_path = _harbor_task_path_for_run(run, configured=configured, workspace_root=workspace_root)
+    task_path = _harbor_task_path_for_run(
+        run,
+        configured=configured,
+        workspace_root=workspace_root,
+        artifact_store=artifact_store,
+    )
     agent_import_path_value = _optional_str(configured.get("agent_import_path"))
     agent_import_path = Path(agent_import_path_value) if agent_import_path_value is not None else None
     timeout_seconds = _int_or_default(
@@ -840,14 +855,35 @@ def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborR
     )
 
 
-def _harbor_task_path_for_run(run: RunRecord, *, configured: dict[str, object], workspace_root: Path) -> Path | None:
+def _harbor_task_path_for_run(
+    run: RunRecord,
+    *,
+    configured: dict[str, object],
+    workspace_root: Path,
+    artifact_store: Artifacpilot groupjectStore,
+) -> Path | None:
     task_path_value = _optional_str(configured.get("task_path"))
     task_template = _optional_str(configured.get("task_template"))
-    if task_path_value is not None and task_template is not None:
-        raise ValueError("harbor_run must not set both task_path and task_template")
+    task_archive_storage_key = _optional_str(configured.get("task_archive_storage_key"))
+    configured_sources = [
+        value
+        for value in (task_path_value, task_template, task_archive_storage_key)
+        if value is not None
+    ]
+    if len(configured_sources) > 1:
+        raise ValueError("harbor_run must set only one of task_path, task_template, or task_archive_storage_key")
 
     if task_path_value is not None:
         return Path(task_path_value)
+
+    if task_archive_storage_key is not None:
+        task_path = workspace_root / run.run_id / "harbor-task-upload"
+        materialize_harbor_task_archive(
+            artifact_store.get_bytes(task_archive_storage_key),
+            filename=Path(task_archive_storage_key).name,
+            destination=task_path,
+        )
+        return task_path
 
     if task_template is None:
         return None

@@ -71,6 +71,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /task-families/{task_family}` | Inspect one task family and its tasks | `BenchmarkFixtureCatalog.task_families` |
 | `GET /tasks` | List task instances for one suite/version | `BenchmarkCatalogRepository.get_fixture_catalog()` |
 | `GET /tasks/{task_family}/{instance_id}` | Inspect one task instance | `BenchmarkCatalogRepository.get_task_instance()` |
+| `POST /harbor/task-uploads` | Upload and validate a zipped Harbor-compatible task directory for a project | `Artifacpilot groupjectStore` + `AuditEventRepository` |
 | `GET /models` | List frontend-selectable API models from configured provider discovery or static allowlist | `ServiceSettings` + provider config refs |
 | `GET /harnesses` | List frontend-selectable launch harnesses including Docker terminal and Harbor-compatible local Docker smoke | static launch catalog |
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
@@ -131,8 +132,19 @@ frontend-visible Harbor local-Docker smoke surface that submits real
 `metadata.harbor_run`. For the MVP smoke it uses a generated
 `harbor-cli-smoke` task template with the Harbor Oracle agent and deterministic
 `smoke/noop` model while still recording the selected API model in the platform
-run envelope. Published Harbor benchmark catalog discovery, built-in agent
-catalog discovery, and uploaded Harbor task directories remain follow-up work.
+run envelope. Published Harbor benchmark catalog discovery and built-in agent
+catalog discovery remain follow-up work.
+
+`POST /harbor/task-uploads` is the first user-facing custom benchmark intake
+path. A project member uploads a `.zip` Harbor task directory; the API validates
+`instruction.md`, `task.toml`, `environment/Dockerfile`, `tests/`, declared
+artifacts, and whether verifier tests mention `reward.txt`. The archive is
+stored in the configured object store and an audit event records task name,
+source metadata, environment settings, resource timeouts, declared artifacts,
+size, checksum, and storage key. The response includes
+`launch_metadata.harbor_run.task_archive_storage_key`, which can be copied into
+a normal `POST /runs` request so the worker materializes the uploaded task and
+launches Harbor with `harbor run -p`.
 
 `POST /runs` accepts the durable submission envelope the worker will later
 consume: `project_id`, a compatibility `owner_team` display hint, a benchmark
@@ -232,8 +244,8 @@ serializing dashboard payloads.
   caching policy, and capability detection.
 - The `harbor-local-docker` harness is a frontend-to-Harbor launch smoke
   surface, not the final Harbor catalog/provider interface. It deliberately
-  keeps #62/#63/#67 follow-ups open for published Harbor benchmark discovery,
-  built-in agent discovery, and uploaded Harbor-compatible task directories.
+  keeps #62/#63 follow-ups open for published Harbor benchmark discovery and
+  built-in agent discovery.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

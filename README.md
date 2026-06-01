@@ -162,8 +162,8 @@ User runner and pipeline contract:
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | MVP pilot slice merged | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, queued worker execution of original wrapper contracts, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only terminal-agent model provider, upstream runner provider env/config mapping, terminal benchmark run orchestrator, and latent native workflow target are merged. SkillFlow now has a pinned runner commit, pinned Hugging Face task dataset commit, task-asset lock file, recorded source patch for Harbor API compatibility, and opt-in shared dev real-upstream smoke evidence. |
-| User runner/pipeline contract | Documented | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and how #67 Harbor-compatible task uploads reuse the same run lifecycle |
-| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes the generated Harbor smoke task, and the Harbor runner/`jobs/` ingestion path is covered by shared dev smoke checks |
+| User runner/pipeline contract | MVP backend slice merged | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and the first Harbor-compatible task-upload implementation |
+| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor runner/`jobs/` ingestion path is covered by shared dev smoke checks |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -174,6 +174,8 @@ User runner and pipeline contract:
 - Requirements discovery: [#3](https://github.com/carinrc/agentic-data-platform/issues/3)
 - Architecture design: [#4](https://github.com/carinrc/agentic-data-platform/issues/4)
 - User runner/pipeline contract: [#21](https://github.com/carinrc/agentic-data-platform/issues/21)
+- Harbor-compatible task upload and validation:
+  [#67](https://github.com/carinrc/agentic-data-platform/issues/67)
 - SkillFlow / SkillLearnBench adapters: [#22](https://github.com/carinrc/agentic-data-platform/issues/22)
 - pilot group native workflow:
   [#103](https://github.com/carinrc/agentic-data-platform/issues/103)

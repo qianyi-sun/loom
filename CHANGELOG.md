@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first Harbor-compatible task upload path for #67. The API now
+  accepts zipped Harbor task directories at `POST /harbor/task-uploads`,
+  validates `instruction.md`, `task.toml`, Docker environment files, verifier
+  tests, declared artifacts, and reward-file expectations, persists the archive
+  in the configured object store, records an audit event with task metadata,
+  and returns `metadata.harbor_run.task_archive_storage_key` for launching the
+  uploaded task through the existing Harbor worker/backend path.
 - Documented the user runner and pipeline integration contract for #21,
   including the task manifest, runner result schema, artifact path rules,
   lifecycle mapping, registration metadata, local validation expectations, and
