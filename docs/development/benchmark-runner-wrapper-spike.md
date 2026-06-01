@@ -179,6 +179,25 @@ python -m agentic_data_platform.benchmark_wrappers.<suite> \
   --dry-run
 ```
 
+The reusable wrapper smoke entrypoint builds the fixture-derived manifest and
+invokes the same wrapper envelope:
+
+```bash
+python -m agentic_data_platform.benchmark_wrappers.smoke \
+  --suite SkillFlow \
+  --dry-run
+```
+
+When a local upstream checkout is available, use `--execute` with
+`--upstream-root`:
+
+```bash
+python -m agentic_data_platform.benchmark_wrappers.smoke \
+  --suite SkillLearnBench \
+  --upstream-root /opt/upstream/SkillLearnBench \
+  --execute
+```
+
 Required output:
 
 ```json
@@ -219,6 +238,11 @@ Implemented wrapper behavior:
   upstream exits or upstream timeouts to failed wrapper results.
 - `--dry-run` still writes planned-command artifacts without invoking upstream
   code or requiring model API keys.
+- `agentic_data_platform.benchmark_wrappers.smoke` creates a temporary
+  fixture-derived task manifest, runs the selected wrapper, and returns a JSON
+  summary with status, planned command, stdout/stderr, and artifact paths. It is
+  suitable for CI dry-runs and for local real-upstream checks when upstream
+  roots are mounted.
 
 The generated upstream manifest import path lives in
 `agentic_data_platform.benchmarks.manifests`. It accepts generated repository or
@@ -263,8 +287,8 @@ just to run a supported suite.
 - Deepen suite-specific parsing of upstream report directories once real
   upstream output shapes are stable; the current wrapper already preserves
   generated files as first-class `upstream_output` artifacts.
-- Add optional smoke tests that run against real upstream dry-run commands when
-  the upstream repos are available locally.
+- Run the reusable wrapper smoke entrypoint against real pinned upstream roots
+  when those sources are available locally or on shared dev.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.
 - Decide how task-specific secrets such as `GH_TOKEN` are requested, scoped, and

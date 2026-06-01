@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a reusable SkillFlow/SkillLearnBench wrapper smoke entrypoint for #22.
+  `python -m agentic_data_platform.benchmark_wrappers.smoke` can run fixture
+  dry-runs in CI or executable local-upstream checks when an upstream root is
+  available.
 - Added benchmark wrapper upstream config synthesis for #22. Original
   SkillFlow/SkillLearnBench wrapper runs now write a redacted
   `artifacts/upstream-config.json` runner config artifact from platform model
