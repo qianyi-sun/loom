@@ -381,6 +381,19 @@ artifact bundle download path with API and worker running:
 docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke
 ```
 
+Install local browser-control tools when validating the actual `/app/` UI in a
+real Chromium browser:
+
+```bash
+scripts/setup-browser-tools.sh
+python -m agentic_data_platform.service.frontend_browser_smoke
+```
+
+The browser smoke uses the dev login, waits for catalog readiness, and verifies
+the selected project/model/harness/benchmark text from the rendered page. Set
+`FRONTEND_BROWSER_SMOKE_APP_URL` when the app is exposed through a forwarded
+port such as `http://127.0.0.1:8766/app/`.
+
 Run the manual Harbor E2E browser checklist when owner-visible acceptance is
 needed:
 

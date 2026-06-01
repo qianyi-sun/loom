@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added local browser-control tooling for owner-visible frontend validation.
+  `scripts/setup-browser-tools.sh` installs the `browser` development extra and
+  Chromium for Playwright, while
+  `agentic_data_platform.service.frontend_browser_smoke` drives a real browser
+  through login and catalog readiness checks without adding browser runtime
+  dependencies to the API or worker services.
 - Added #160 stale-run recovery slices for dispatched and active worker states.
   The scheduler can now requeue stale `dispatched` runs back to `queued`, fail
   active runs with expired worker heartbeats, record durable `run.recovered`

@@ -31,6 +31,11 @@ dependencies = [
   "uvicorn[standard]>=0.32,<1.0",
 ]
 
+[project.optional-dependencies]
+browser = [
+  "playwright>=1.60,<2.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
