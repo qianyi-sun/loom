@@ -27,7 +27,7 @@ from agentic_data_platform.domain.run_records import (
 )
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
-from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
+from agentic_data_platform.harbor.runner import HarborCliRunnerBackend, HarborRunSpec
 from agentic_data_platform.harbor.smoke import write_harbor_cli_smoke_task
 from agentic_data_platform.harbor.task_uploads import materialize_harbor_task_archive
 from agentic_data_platform.models.providers import (
@@ -297,7 +297,7 @@ class DockerTerminalWorkerExecutor:
             run.transition_to(RunStatus.PROVISIONING)
         run.transition_to(RunStatus.RUNNING)
 
-        result = HarborRunnerBackend(command_runner=self.harbor_command_runner).run(spec)
+        result = HarborCliRunnerBackend(command_runner=self.harbor_command_runner).run(spec)
         run.attach_artifact(
             self.artifact_persistence.persist_harbor_runner_report(
                 run_id=run.run_id,
@@ -834,6 +834,7 @@ def _harbor_run_spec_for_run(
     return HarborRunSpec(
         run_id=run.run_id,
         task_instance_id=run.task.instance_id,
+        backend=_optional_str(configured.get("backend")) or "cli",
         dataset_ref=dataset_ref,
         task_path=task_path,
         agent=_optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "oracle",

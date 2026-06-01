@@ -15,6 +15,7 @@ class HarborRunSpec:
     task_instance_id: str
     model_name: str
     jobs_dir: Path
+    backend: str = "cli"
     dataset_ref: str | None = None
     task_path: Path | None = None
     agent: str = "oracle"
@@ -31,9 +32,12 @@ class HarborRunSpec:
         _require_non_empty("run_id", self.run_id)
         _require_non_empty("task_instance_id", self.task_instance_id)
         _require_non_empty("model_name", self.model_name)
+        _require_non_empty("backend", self.backend)
         _require_non_empty("agent", self.agent)
         _require_non_empty("environment", self.environment)
 
+        if self.backend not in {"cli", "native"}:
+            raise ValueError("backend must be one of: cli, native")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if bool(self.dataset_ref) == bool(self.task_path):
@@ -49,6 +53,7 @@ class HarborRunSpec:
 @dataclass(frozen=True)
 class HarborRunnerResult:
     run_id: str
+    backend: str
     command: list[str]
     jobs_dir: Path
     started_at: datetime
@@ -65,6 +70,7 @@ class HarborRunnerResult:
     def to_report(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
+            "backend": self.backend,
             "command": _redacted_command(self.command),
             "jobs_dir": self.jobs_dir.name,
             "started_at": _datetime(self.started_at),
@@ -77,7 +83,7 @@ class HarborRunnerResult:
         }
 
 
-class HarborRunnerBackend:
+class HarborCliRunnerBackend:
     def __init__(
         self,
         *,
@@ -89,6 +95,8 @@ class HarborRunnerBackend:
         self.command_runner = command_runner or SubprocessCommandRunner()
 
     def run(self, spec: HarborRunSpec) -> HarborRunnerResult:
+        if spec.backend != "cli":
+            raise ValueError("HarborCliRunnerBackend only supports backend='cli'")
         spec.jobs_dir.mkdir(parents=True, exist_ok=True)
         command = self.command_for(spec)
         started_at = datetime.now(timezone.utc)
@@ -108,6 +116,7 @@ class HarborRunnerBackend:
         completed_at = datetime.now(timezone.utc)
         return HarborRunnerResult(
             run_id=spec.run_id,
+            backend="cli",
             command=command,
             jobs_dir=spec.jobs_dir,
             started_at=started_at,
@@ -146,6 +155,9 @@ class HarborRunnerBackend:
             command.extend(["--verifier-env", env_value])
         command.extend(spec.extra_args)
         return command
+
+
+HarborRunnerBackend = HarborCliRunnerBackend
 
 
 def _coerce_output(value: str | bytes | None) -> str:

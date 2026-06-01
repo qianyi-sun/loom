@@ -100,7 +100,7 @@ flowchart LR
     Worker --> Model["ModelProvider API"]
     Worker --> Eval["EvaluatorAdapter"]
     Runner --> Sandbox["DockerTerminalRunnerBackend"]
-    Runner --> Harbor["HarborRunnerBackend"]
+    Runner --> Harbor["HarborCliRunnerBackend"]
     Sandbox --> Store[("MinIO artifacts")]
     Harbor --> Store
     Eval --> Store
@@ -132,6 +132,8 @@ Unified evaluation backend contract:
 Persistence design: [postgres-persistence.md](docs/architecture/postgres-persistence.md).
 Harbor integration roadmap:
 [harbor-integration-roadmap.md](docs/architecture/harbor-integration-roadmap.md).
+Harbor native integration design:
+[harbor-native-integration-design.md](docs/architecture/harbor-native-integration-design.md).
 API resource design: [core-api-resources.md](docs/architecture/core-api-resources.md).
 Original runner wrapper research:
 [benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
@@ -163,7 +165,7 @@ User runner and pipeline contract:
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | MVP pilot slice merged | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, queued worker execution of original wrapper contracts, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only terminal-agent model provider, upstream runner provider env/config mapping, terminal benchmark run orchestrator, and latent native workflow target are merged. SkillFlow now has a pinned runner commit, pinned Hugging Face task dataset commit, task-asset lock file, recorded source patch for Harbor API compatibility, and opt-in shared dev real-upstream smoke evidence. |
 | User runner/pipeline contract | MVP backend slice merged | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and the first Harbor-compatible task-upload implementation |
-| Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor runner/`jobs/` ingestion path is covered by shared dev smoke checks |
+| Harbor integration | Started | Roadmap and native design define CLI fallback, native runner backend, Harbor benchmark provider, agent provider, result ingestion, and hybrid evaluation path; the code now names the current CLI path `HarborCliRunnerBackend`, keeps `HarborRunnerBackend` as a compatibility alias, records `backend: cli` in runner reports, and adds a Harbor native capability probe. The frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor CLI runner/`jobs/` ingestion path is covered by shared dev smoke checks |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -196,6 +198,8 @@ User runner and pipeline contract:
   [#82](https://github.com/carinrc/agentic-data-platform/issues/82)
 - Harbor-compatible benchmark and agent integration:
   [#61](https://github.com/carinrc/agentic-data-platform/issues/61)
+- Harbor native integration design:
+  [#102](https://github.com/carinrc/agentic-data-platform/issues/102)
 - Unified evaluation backend contract:
   [#72](https://github.com/carinrc/agentic-data-platform/issues/72)
 - Harbor integration roadmap:

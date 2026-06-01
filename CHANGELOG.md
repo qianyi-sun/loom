@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Documented the Harbor native integration design for #102, including the
+  recommended CLI fallback/native backend split, Harbor capability probe,
+  programmatic `JobConfig`/trial-hook candidate path, file-based `jobs/`
+  ingestion boundary, provider responsibilities for #62/#63, progress events,
+  failure categories, and verification sequence. Added the first code boundary
+  by naming the current CLI path `HarborCliRunnerBackend`, retaining
+  `HarborRunnerBackend` as a compatibility alias, accepting
+  `metadata.harbor_run.backend`, recording `backend: cli` in runner reports, and
+  exposing `probe_harbor_native_capabilities()`.
 - Added the first Harbor-compatible task upload path for #67. The API now
   accepts zipped Harbor task directories at `POST /harbor/task-uploads`,
   validates `instruction.md`, `task.toml`, Docker environment files, verifier

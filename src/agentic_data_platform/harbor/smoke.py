@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
 from agentic_data_platform.harbor.ingestion import HarborResultIngestor
-from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
+from agentic_data_platform.harbor.runner import HarborCliRunnerBackend, HarborRunSpec
 from agentic_data_platform.sandbox.docker_terminal import CommandRunner
 
 
@@ -37,7 +37,7 @@ def run_harbor_cli_smoke(
     task_dir.mkdir(parents=True)
     write_harbor_cli_smoke_task(task_dir)
 
-    runner_result = HarborRunnerBackend(
+    runner_result = HarborCliRunnerBackend(
         executable=config.executable,
         command_runner=command_runner,
     ).run(

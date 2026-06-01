@@ -4,10 +4,60 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
+from agentic_data_platform.harbor.runner import HarborCliRunnerBackend, HarborRunSpec, HarborRunnerBackend
 
 
 class HarborRunnerBackendTest(unittest.TestCase):
+    def test_runner_backend_alias_preserves_cli_runner_compatibility(self):
+        self.assertIs(HarborRunnerBackend, HarborCliRunnerBackend)
+
+    def test_run_spec_defaults_to_cli_backend_and_accepts_native_selector(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli_spec = HarborRunSpec(
+                run_id="run_harbor_runner_backend_cli",
+                task_instance_id="local-task",
+                task_path=Path(temp_dir) / "task",
+                model_name="gpt-5",
+                jobs_dir=Path(temp_dir) / "jobs-cli",
+            )
+            native_spec = HarborRunSpec(
+                run_id="run_harbor_runner_backend_native",
+                task_instance_id="local-task",
+                task_path=Path(temp_dir) / "task",
+                model_name="gpt-5",
+                jobs_dir=Path(temp_dir) / "jobs-native",
+                backend="native",
+            )
+
+            self.assertEqual(cli_spec.backend, "cli")
+            self.assertEqual(native_spec.backend, "native")
+
+    def test_rejects_unknown_backend_selector(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "backend must be one of"):
+                HarborRunSpec(
+                    run_id="run_harbor_runner_backend_bad",
+                    task_instance_id="local-task",
+                    task_path=Path(temp_dir) / "task",
+                    model_name="gpt-5",
+                    jobs_dir=Path(temp_dir) / "jobs",
+                    backend="shell",
+                )
+
+    def test_cli_runner_rejects_native_backend_specs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "HarborCliRunnerBackend only supports backend='cli'"):
+                HarborCliRunnerBackend(command_runner=FakeCommandRunner(stdout="harbor ok\n")).run(
+                    HarborRunSpec(
+                        run_id="run_harbor_runner_native_on_cli",
+                        task_instance_id="local-task",
+                        task_path=Path(temp_dir) / "task",
+                        model_name="gpt-5",
+                        jobs_dir=Path(temp_dir) / "jobs",
+                        backend="native",
+                    )
+                )
+
     def test_builds_dataset_command_and_captures_jobs_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             jobs_dir = Path(temp_dir) / "jobs"
@@ -115,6 +165,20 @@ class HarborRunnerBackendTest(unittest.TestCase):
             self.assertIn("EVALUATOR_API_KEY=[redacted]", report["command"])
             self.assertNotIn("secret-key", json_string(report))
             self.assertNotIn("secret-evaluator-key", json_string(report))
+
+    def test_runner_report_records_cli_backend(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = HarborCliRunnerBackend(command_runner=FakeCommandRunner(stdout="harbor ok\n")).run(
+                HarborRunSpec(
+                    run_id="run_harbor_runner_backend_report",
+                    task_instance_id="local-task",
+                    task_path=Path(temp_dir) / "task",
+                    model_name="gpt-5",
+                    jobs_dir=Path(temp_dir) / "jobs",
+                )
+            )
+
+            self.assertEqual(result.to_report()["backend"], "cli")
 
     def test_requires_exactly_one_dataset_or_task_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
