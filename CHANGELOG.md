@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
   repository, worker, subprocess-failure, recovery, and run-audit paths use the
   shared contract while preserving existing string values in Postgres and API
   responses.
+- Added the first #159 artifact metadata contract slice. Artifact persistence
+  now centralizes object content types, upload states, and chunk metadata
+  vocabulary in `agentic_data_platform.domain.artifact_metadata`; object-store
+  writes annotate completed artifacts with schema version, upload status,
+  storage key, object byte size, and object SHA-256 while preserving existing
+  artifact refs and bundle behavior.
 - Added local browser-control tooling for owner-visible frontend validation.
   `scripts/setup-browser-tools.sh` installs the `browser` development extra and
   Chromium for Playwright, while

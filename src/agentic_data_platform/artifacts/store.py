@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
 
+from agentic_data_platform.domain.artifact_metadata import (
+    ArtifactContentType,
+    finalize_stored_artifact_metadata,
+)
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
@@ -77,8 +81,12 @@ class LocalArtifactStore:
         target.write_bytes(payload)
 
         digest = hashlib.sha256(payload).hexdigest()
-        artifact_metadata = dict(metadata or {})
-        artifact_metadata["storage_key"] = safe_key
+        artifact_metadata = finalize_stored_artifact_metadata(
+            metadata,
+            storage_key=safe_key,
+            size_bytes=len(payload),
+            sha256=digest,
+        )
 
         return StoredArtifact(
             key=safe_key,
@@ -125,9 +133,13 @@ class S3ArtifactStore:
         _require_non_empty("media_type", media_type)
 
         digest = hashlib.sha256(payload).hexdigest()
-        artifact_metadata = dict(metadata or {})
-        artifact_metadata["storage_key"] = safe_key
-        artifact_metadata["storage_bucket"] = self.bucket
+        artifact_metadata = finalize_stored_artifact_metadata(
+            metadata,
+            storage_key=safe_key,
+            size_bytes=len(payload),
+            sha256=digest,
+            storage_bucket=self.bucket,
+        )
 
         self.client.put_object(
             Bucket=self.bucket,
@@ -252,7 +264,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "trajectory_jsonl",
+                "content_type": ArtifactContentType.TRAJECTORY_JSONL,
                 "turn_count": len(turns),
             },
         )
@@ -280,7 +292,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "workspace_snapshot_manifest",
+                "content_type": ArtifactContentType.WORKSPACE_SNAPSHOT_MANIFEST,
                 "file_count": len(snapshot.files),
             },
         )
@@ -308,7 +320,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "evaluator_report",
+                "content_type": ArtifactContentType.EVALUATOR_REPORT,
                 "evaluator_id": result.evaluator_id,
                 "evaluator_status": result.status,
             },
@@ -340,7 +352,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "harbor_jobs_archive",
+                "content_type": ArtifactContentType.HARBOR_JOBS_ARCHIVE,
                 "job_name": job_name,
                 "file_count": file_count,
             },
@@ -367,7 +379,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "harbor_runner_report",
+                "content_type": ArtifactContentType.HARBOR_RUNNER_REPORT,
                 "exit_code": report.get("exit_code"),
                 "timed_out": report.get("timed_out", False),
             },
@@ -394,7 +406,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "harbor_ingestion_diagnostics",
+                "content_type": ArtifactContentType.HARBOR_INGESTION_DIAGNOSTICS,
                 "failure_category": diagnostics.get("category"),
                 "failure_source": diagnostics.get("source"),
             },
@@ -427,7 +439,7 @@ class ArtifactPersistence:
             metadata={
                 "run_id": run_id,
                 "task_instance_id": task_instance_id,
-                "content_type": "local_file_artifact",
+                "content_type": ArtifactContentType.LOCAL_FILE_ARTIFACT,
                 "artifact_path": "/".join(relative_parts),
                 **dict(metadata or {}),
             },

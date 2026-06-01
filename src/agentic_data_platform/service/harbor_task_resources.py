@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from agentic_data_platform.domain.artifact_metadata import ArtifactContentType
 from agentic_data_platform.harbor.task_uploads import HarborTaskArchiveError, validate_harbor_task_archive
 from agentic_data_platform.persistence.repositories import AuditEventRepository
 from agentic_data_platform.service.security import require_authenticated_user, require_project_role
@@ -61,7 +62,7 @@ def register_harbor_task_routes(app: FastAPI, session_dependency: Callable) -> N
             payload,
             media_type=archive.content_type or "application/zip",
             metadata={
-                "content_type": "harbor_task_archive",
+                "content_type": ArtifactContentType.HARBOR_TASK_ARCHIVE,
                 "project_id": project_id,
                 "task_upload_id": task_upload_id,
                 "task_name": validation.task_name,

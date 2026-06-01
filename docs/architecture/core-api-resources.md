@@ -246,6 +246,13 @@ serializing dashboard payloads.
   object-store-safe `storage_key` values, and strips query strings from external
   URLs. Absolute paths, `file://` values, traversal keys, drive-letter paths,
   and query/fragment-bearing keys are suppressed.
+- Artifact object metadata uses `agentic_data_platform.domain.artifact_metadata`
+  as the v1 contract for content type, upload status, object key, object byte
+  size, object SHA-256, and future log/trajectory chunk metadata. Current
+  object-store writes mark successfully persisted payloads as `completed` and
+  include `artifact_metadata_schema`, `upload_status`, `storage_key`,
+  `object_size_bytes`, and `object_sha256` in metadata. Upload-state repository
+  transitions and chunk-index APIs remain #159 follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured

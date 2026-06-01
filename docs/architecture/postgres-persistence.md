@@ -150,6 +150,16 @@ The API intentionally keeps artifact payloads out of Postgres responses. It
 returns stable metadata such as `artifact_id`, `media_type`, `size_bytes`, and
 `storage_key`, while `RunDashboardProjection` suppresses local host paths and
 signed URL query parameters.
+Artifact object metadata now has a v1 Python contract in
+`agentic_data_platform.domain.artifact_metadata`. Existing object-store writes
+persist completed payload metadata with `artifact_metadata_schema`,
+`upload_status=completed`, `storage_key`, `object_size_bytes`, and
+`object_sha256`; `ArtifactRow` continues to index the stable `storage_key`,
+SHA-256, size, media type, and metadata JSON. The contract also reserves upload
+states (`pending`, `started`, `completed`, `failed`, `expired`) and
+`artifact-chunk-metadata-v1` for future stdout/stderr, trajectory, and artifact
+chunk rows. Dedicated upload-state transitions, chunk tables, and recovery
+queries are still #159/#160 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

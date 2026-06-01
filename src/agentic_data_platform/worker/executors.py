@@ -14,6 +14,7 @@ import httpx
 
 from agentic_data_platform.artifacts.store import Artifacpilot groupjectStore, ArtifactPersistence
 from agentic_data_platform.benchmarks.adapters import BenchmarkRegistration
+from agentic_data_platform.domain.artifact_metadata import ArtifactContentType
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
@@ -263,7 +264,7 @@ class DockerTerminalWorkerExecutor:
             kind=ArtifactKind.LOG,
             media_type="application/json",
             metadata={
-                "content_type": "original_wrapper_result",
+                "content_type": ArtifactContentType.ORIGINAL_WRAPPER_RESULT,
                 "runner_contract": spec.runner_contract,
             },
         )
@@ -726,7 +727,7 @@ def _persist_original_wrapper_artifacts(
                 kind=_original_wrapper_artifact_kind(kind_name),
                 media_type=media_type,
                 metadata={
-                    "content_type": "original_wrapper_artifact",
+                    "content_type": ArtifactContentType.ORIGINAL_WRAPPER_ARTIFACT,
                     "runner_contract": runner_contract,
                     "wrapper_artifact_kind": kind_name,
                 },

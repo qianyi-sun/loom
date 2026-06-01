@@ -11,6 +11,11 @@ from agentic_data_platform.artifacts.store import (
     LocalArtifactStore,
     S3ArtifactStore,
 )
+from agentic_data_platform.domain.artifact_metadata import (
+    ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION,
+    ArtifactContentType,
+    ArtifactUploadStatus,
+)
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     EvaluatorResult,
@@ -70,6 +75,10 @@ class ArtifactStoreTest(unittest.TestCase):
         self.assertEqual(stored.size_bytes, 7)
         self.assertEqual(len(stored.sha256), 64)
         self.assertEqual(stored.metadata["run_id"], "run_001")
+        self.assertEqual(stored.metadata["artifact_metadata_schema"], ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION)
+        self.assertEqual(stored.metadata["upload_status"], ArtifactUploadStatus.COMPLETED.value)
+        self.assertEqual(stored.metadata["object_size_bytes"], 7)
+        self.assertEqual(stored.metadata["object_sha256"], stored.sha256)
 
     def test_local_store_reads_bytes_and_returns_file_url_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -100,6 +109,10 @@ class ArtifactStoreTest(unittest.TestCase):
         self.assertEqual(len(stored.sha256), 64)
         self.assertEqual(stored.metadata["storage_key"], "runs/run_001/tasks/task_001/generated/answer.txt")
         self.assertEqual(stored.metadata["storage_bucket"], "agentic-data-shared dev")
+        self.assertEqual(stored.metadata["artifact_metadata_schema"], ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION)
+        self.assertEqual(stored.metadata["upload_status"], ArtifactUploadStatus.COMPLETED.value)
+        self.assertEqual(stored.metadata["object_size_bytes"], 7)
+        self.assertEqual(stored.metadata["object_sha256"], stored.sha256)
         self.assertEqual(client.put_object_calls[0]["Bucket"], "agentic-data-shared dev")
         self.assertEqual(client.put_object_calls[0]["Key"], "runs/run_001/tasks/task_001/generated/answer.txt")
         self.assertEqual(client.put_object_calls[0]["Body"], b"answer\n")
@@ -154,6 +167,8 @@ class ArtifactStoreTest(unittest.TestCase):
         self.assertTrue(ref.uri.startswith("file://"))
         self.assertEqual(ref.metadata["run_id"], "run_001")
         self.assertEqual(ref.metadata["task_instance_id"], "conference-expense-03")
+        self.assertEqual(ref.metadata["content_type"], ArtifactContentType.TRAJECTORY_JSONL.value)
+        self.assertEqual(ref.metadata["upload_status"], ArtifactUploadStatus.COMPLETED.value)
         self.assertEqual(ref.metadata["storage_key"], "runs/run_001/tasks/conference-expense-03/trajectory/trajectory.jsonl")
         self.assertEqual(len(payload), 1)
         self.assertEqual(json.loads(payload[0])["command"], "python solve.py")
@@ -183,6 +198,8 @@ class ArtifactStoreTest(unittest.TestCase):
 
         self.assertEqual(ref.kind, ArtifactKind.WORKSPACE_SNAPSHOT)
         self.assertEqual(ref.media_type, "application/json")
+        self.assertEqual(ref.metadata["content_type"], ArtifactContentType.WORKSPACE_SNAPSHOT_MANIFEST.value)
+        self.assertEqual(ref.metadata["upload_status"], ArtifactUploadStatus.COMPLETED.value)
         self.assertEqual(payload["run_id"], "run_001")
         self.assertEqual(payload["files"][0]["path"], "answer.txt")
         self.assertEqual(payload["files"][1]["sha256"], "2" * 64)
@@ -215,6 +232,8 @@ class ArtifactStoreTest(unittest.TestCase):
             payload = json.loads(payload_path.read_text())
 
         self.assertEqual(ref.kind, ArtifactKind.EVALUATOR_REPORT)
+        self.assertEqual(ref.metadata["content_type"], ArtifactContentType.EVALUATOR_REPORT.value)
+        self.assertEqual(ref.metadata["upload_status"], ArtifactUploadStatus.COMPLETED.value)
         self.assertEqual(ref.metadata["evaluator_id"], "llm-judge-v0")
         self.assertEqual(payload["score"], 0.9)
         self.assertEqual(payload["judge"]["rubric_version"], "latent-skill-v0")
