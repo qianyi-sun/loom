@@ -76,9 +76,9 @@ read models:
 - `BenchmarkCatalogRepository`: fixture catalog upsert, suite-version listing,
   and task-instance detail/listing
 - `RunRepository`: `RunRecord` save/list/get, create queued runs,
-  scheduler dispatch, worker claim, cancel/retry state transitions,
-  status-event history, terminal turns, artifacts, and latest evaluator result
-  hydration
+  scheduler dispatch, stale-dispatch recovery, worker claim, cancel/retry state
+  transitions, status-event history, terminal turns, artifacts, and latest
+  evaluator result hydration
 - `AuditEventRepository`: structured event recording for later PM/operator views
 
 For v0, `RunRecord` has no public `attempt_id`, so `RunRepository.get_run()`
@@ -86,6 +86,9 @@ hydrates the latest internal attempt back into the existing dataclass shape.
 `RunRepository.dispatch_queued_runs(...)` moves eligible `queued` rows to
 `dispatched` after global, backend, and project capacity checks and records a
 `run.dispatched` event with scheduler id, backend key, and project id metadata.
+`RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
+rows back to `queued` in bounded batches and records `run.recovered` events
+with scheduler id, recovery reason, and stale cutoff metadata.
 Workers prefer `RunRepository.claim_next_dispatched_run(...)` and then retain
 `RunRepository.claim_next_queued_run(...)` as a compatibility path during
 scheduler rollout; both claim paths persist a `run.claimed` transition to

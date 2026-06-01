@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Engine
 
@@ -26,6 +27,23 @@ class SchedulerDispatchResult:
             "scheduler_id": self.scheduler_id,
             "dispatched_count": self.dispatched_count,
             "dispatched_run_ids": list(self.dispatched_run_ids),
+        }
+
+
+@dataclass(frozen=True)
+class SchedulerRecoveryResult:
+    scheduler_id: str
+    requeued_run_ids: list[str]
+
+    @property
+    def requeued_count(self) -> int:
+        return len(self.requeued_run_ids)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "scheduler_id": self.scheduler_id,
+            "requeued_count": self.requeued_count,
+            "requeued_run_ids": list(self.requeued_run_ids),
         }
 
 
@@ -56,6 +74,22 @@ class RunScheduler:
             dispatched_run_ids=[run.run_id for run in dispatched],
         )
 
+    def recover_once(self, *, request_id: str | None = None) -> SchedulerRecoveryResult:
+        older_than = datetime.now(timezone.utc) - timedelta(
+            seconds=self.settings.scheduler_stale_dispatched_timeout_seconds
+        )
+        with session_scope(self.engine) as session:
+            recovered = RunRepository(session).requeue_stale_dispatched_runs(
+                older_than=older_than,
+                scheduler_id=self.scheduler_id,
+                max_runs=self.settings.scheduler_recovery_batch_size,
+                request_id=request_id,
+            )
+        return SchedulerRecoveryResult(
+            scheduler_id=self.scheduler_id,
+            requeued_run_ids=[run.run_id for run in recovered],
+        )
+
 
 def build_configured_scheduler(
     settings: ServiceSettings | None = None,
@@ -78,20 +112,28 @@ def run_scheduler_loop(
     poll_interval_seconds: float = 5.0,
 ) -> None:
     while True:
+        recovery_result = scheduler.recover_once()
+        if recovery_result.requeued_count:
+            print(json.dumps({"action": "recover", **recovery_result.to_dict()}, sort_keys=True), flush=True)
         result = scheduler.dispatch_once()
         if result.dispatched_count:
-            print(json.dumps(result.to_dict(), sort_keys=True), flush=True)
+            print(json.dumps({"action": "dispatch", **result.to_dict()}, sort_keys=True), flush=True)
         time.sleep(poll_interval_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Agentic Data Platform run scheduler.")
     parser.add_argument("--once", action="store_true", help="dispatch at most one capacity window and exit")
+    parser.add_argument("--recover-once", action="store_true", help="recover stale dispatched runs and exit")
     parser.add_argument("--scheduler-id", default="scheduler-dev-1")
     parser.add_argument("--poll-interval-seconds", type=float, default=5.0)
     args = parser.parse_args(argv)
 
     scheduler = build_configured_scheduler(scheduler_id=args.scheduler_id)
+    if args.recover_once:
+        result = scheduler.recover_once()
+        print(json.dumps(result.to_dict(), sort_keys=True))
+        return 0
     if args.once:
         result = scheduler.dispatch_once()
         print(json.dumps(result.to_dict(), sort_keys=True))

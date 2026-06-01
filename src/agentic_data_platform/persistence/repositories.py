@@ -577,6 +577,64 @@ class RunRepository:
         self.session.flush()
         return [self.get_run(run_id) for run_id in dispatched_ids]
 
+    def requeue_stale_dispatched_runs(
+        self,
+        *,
+        older_than: datetime,
+        scheduler_id: str,
+        max_runs: int,
+        reason: str = "stale dispatched run expired",
+        request_id: str | None = None,
+    ) -> list[RunRecord]:
+        _require_non_empty("scheduler_id", scheduler_id)
+        if max_runs <= 0:
+            return []
+        if older_than.tzinfo is None:
+            raise ValueError("older_than must be timezone-aware")
+
+        candidates = self.session.scalars(
+            select(RunRow)
+            .where(RunRow.status == RunStatus.DISPATCHED.value)
+            .where(RunRow.updated_at < older_than)
+            .order_by(RunRow.updated_at, RunRow.run_id)
+            .with_for_update(skip_locked=True)
+            .limit(max_runs)
+        )
+        requeued_ids: list[str] = []
+        for row in candidates:
+            previous_status = RunStatus(row.status)
+            run = self._run_record(row)
+            run.transition_to(RunStatus.QUEUED)
+
+            row.status = run.status.value
+            row.failure_reason = None
+            row.updated_at = run.updated_at
+
+            attempt = self._latest_attempt_row(run.run_id)
+            attempt.status = run.status.value
+            attempt.failure_reason = None
+            attempt.completed_at = None
+            attempt.updated_at = utc_now()
+
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type="run.recovered",
+                from_status=previous_status,
+                to_status=RunStatus.QUEUED,
+                reason=reason,
+                request_id=request_id,
+                metadata={
+                    "scheduler_id": scheduler_id,
+                    "recovery": "stale_dispatched",
+                    "stale_before": older_than.isoformat(),
+                },
+            )
+            requeued_ids.append(run.run_id)
+
+        self.session.flush()
+        return [self.get_run(run_id) for run_id in requeued_ids]
+
     def claim_next_queued_run(
         self,
         *,

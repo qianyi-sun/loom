@@ -419,7 +419,7 @@ class RunStatusEvent:
 
 _VALID_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.QUEUED: {RunStatus.DISPATCHED, RunStatus.PROVISIONING, RunStatus.FAILED, RunStatus.CANCELED},
-    RunStatus.DISPATCHED: {RunStatus.PROVISIONING, RunStatus.FAILED, RunStatus.CANCELED},
+    RunStatus.DISPATCHED: {RunStatus.QUEUED, RunStatus.PROVISIONING, RunStatus.FAILED, RunStatus.CANCELED},
     RunStatus.PROVISIONING: {RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELED},
     RunStatus.RUNNING: {RunStatus.EVALUATING, RunStatus.FAILED, RunStatus.CANCELED},
     RunStatus.EVALUATING: {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED},

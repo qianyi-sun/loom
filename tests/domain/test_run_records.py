@@ -236,6 +236,14 @@ class RunRecordTest(unittest.TestCase):
 
         self.assertEqual(run.status, RunStatus.PROVISIONING)
 
+    def test_stale_dispatch_can_return_to_queued_for_scheduler_recovery(self):
+        run = self._minimal_run()
+
+        run.transition_to(RunStatus.DISPATCHED)
+        run.transition_to(RunStatus.QUEUED)
+
+        self.assertEqual(run.status, RunStatus.QUEUED)
+
     def _minimal_run(self):
         return RunRecord.create(
             run_id="run_001",

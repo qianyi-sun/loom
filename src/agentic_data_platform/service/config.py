@@ -36,6 +36,8 @@ class ServiceSettings:
     scheduler_global_max_active_runs: int = 1
     scheduler_backend_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_project_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_stale_dispatched_timeout_seconds: int = 300
+    scheduler_recovery_batch_size: int = 50
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -74,6 +76,12 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         scheduler_global_max_active_runs=_get_int(values, "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS", 1),
         scheduler_backend_max_active_runs=_get_int_map(values, "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS"),
         scheduler_project_max_active_runs=_get_int_map(values, "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS"),
+        scheduler_stale_dispatched_timeout_seconds=_get_int(
+            values,
+            "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS",
+            300,
+        ),
+        scheduler_recovery_batch_size=_get_int(values, "SCHEDULER_RECOVERY_BATCH_SIZE", 50),
     )
 
 

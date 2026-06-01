@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import inspect
 
@@ -22,6 +22,7 @@ from agentic_data_platform.domain.run_records import (
 )
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
+from agentic_data_platform.persistence.models import RunRow
 from agentic_data_platform.persistence.repositories import (
     AuditEventRepository,
     BenchmarkCatalogRepository,
@@ -590,6 +591,76 @@ class PersistenceRepositoryTest(unittest.TestCase):
 
         self.assertEqual([run.run_id for run in dispatched], ["run_dispatch_eligible"])
         self.assertEqual(dispatched[0].status, RunStatus.DISPATCHED)
+
+    def test_run_repository_requeues_stale_dispatched_runs(self):
+        stale_before = datetime.now(timezone.utc) - timedelta(minutes=10)
+        stale_timestamp = stale_before - timedelta(seconds=1)
+        fresh_timestamp = stale_before + timedelta(seconds=1)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            for run_id in ("run_recover_stale", "run_recover_fresh", "run_recover_queued"):
+                runs.create_run(_queued_run(run_id=run_id))
+            runs.dispatch_queued_runs(scheduler_id="scheduler-a", max_runs=2)
+
+            session.get(RunRow, "run_recover_stale").updated_at = stale_timestamp
+            session.get(RunRow, "run_recover_fresh").updated_at = fresh_timestamp
+
+            recovered = runs.requeue_stale_dispatched_runs(
+                older_than=stale_before,
+                scheduler_id="scheduler-a",
+                max_runs=10,
+                request_id="req-recover-dispatched-001",
+            )
+            statuses = {
+                run.run_id: run.status
+                for run in runs.list_runs(project_id="pilot-project")
+                if run.run_id.startswith("run_recover_")
+            }
+            events = runs.list_status_events("run_recover_stale")
+
+        self.assertEqual([run.run_id for run in recovered], ["run_recover_stale"])
+        self.assertEqual(statuses["run_recover_stale"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_recover_fresh"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_recover_queued"], RunStatus.QUEUED)
+        self.assertEqual(events[-1].event_type, "run.recovered")
+        self.assertEqual(events[-1].from_status, RunStatus.DISPATCHED)
+        self.assertEqual(events[-1].to_status, RunStatus.QUEUED)
+        self.assertEqual(events[-1].request_id, "req-recover-dispatched-001")
+        self.assertEqual(events[-1].reason, "stale dispatched run expired")
+        self.assertEqual(events[-1].metadata["scheduler_id"], "scheduler-a")
+        self.assertEqual(events[-1].metadata["recovery"], "stale_dispatched")
+        self.assertEqual(events[-1].metadata["stale_before"], stale_before.isoformat())
+
+    def test_run_repository_requeue_stale_dispatched_respects_batch_limit(self):
+        stale_before = datetime.now(timezone.utc) - timedelta(minutes=10)
+        stale_timestamp = stale_before - timedelta(seconds=1)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            for index in range(3):
+                runs.create_run(_queued_run(run_id=f"run_recover_batch_{index}"))
+            runs.dispatch_queued_runs(scheduler_id="scheduler-a", max_runs=3)
+            for index in range(3):
+                session.get(RunRow, f"run_recover_batch_{index}").updated_at = stale_timestamp
+
+            recovered = runs.requeue_stale_dispatched_runs(
+                older_than=stale_before,
+                scheduler_id="scheduler-a",
+                max_runs=2,
+            )
+            statuses = {
+                run.run_id: run.status
+                for run in runs.list_runs(project_id="pilot-project")
+                if run.run_id.startswith("run_recover_batch_")
+            }
+
+        self.assertEqual([run.run_id for run in recovered], ["run_recover_batch_0", "run_recover_batch_1"])
+        self.assertEqual(statuses["run_recover_batch_0"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_recover_batch_1"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_recover_batch_2"], RunStatus.DISPATCHED)
 
     def test_run_repository_does_not_overwrite_canceled_run_with_late_worker_result(self):
         run = _queued_run(run_id="run_cancel_after_claim_001")

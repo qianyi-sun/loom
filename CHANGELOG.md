@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #160 stale-run recovery slice. The scheduler can now
+  requeue stale `dispatched` runs back to `queued`, records a durable
+  `run.recovered` lifecycle event with scheduler metadata, exposes timeout and
+  batch-size settings, and runs recovery before dispatch in the long-running
+  scheduler loop.
 - Added the first #159 object-first log/artifact slice. Terminal stdout/stderr
   stored in Postgres trajectory rows are now bounded previews with truncation
   metadata, while full trajectory/log payloads remain available through

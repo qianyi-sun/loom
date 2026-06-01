@@ -45,6 +45,8 @@ class ServiceAppTest(unittest.TestCase):
                 "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS": "8",
                 "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS": "harbor-local-docker=3,docker_terminal=2",
                 "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS": "pilot-project=2,foundation-model=1",
+                "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS": "420",
+                "SCHEDULER_RECOVERY_BATCH_SIZE": "25",
             }
         )
 
@@ -83,6 +85,8 @@ class ServiceAppTest(unittest.TestCase):
             settings.scheduler_project_max_active_runs,
             {"pilot-project": 2, "foundation-model": 1},
         )
+        self.assertEqual(settings.scheduler_stale_dispatched_timeout_seconds, 420)
+        self.assertEqual(settings.scheduler_recovery_batch_size, 25)
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))
