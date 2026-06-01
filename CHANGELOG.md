@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added an opt-in shared dev real-upstream wrapper smoke path for #114. The
+  new `benchmark-real-upstream-smoke` Compose service materializes the pinned
+  SkillFlow runner, hydrates the selected Hugging Face task-family subset, and
+  invokes the existing executable wrapper smoke on a Docker-ready host when the
+  deploy workflow is manually dispatched with the real-upstream smoke flag.
 - Added a platform-maintained SkillFlow upstream source patch for #117. The
   upstream source lock records the applied patch id and SHA-256, and the patch
   updates the pinned SkillFlow runner to Harbor's `Task.is_valid_dir` and

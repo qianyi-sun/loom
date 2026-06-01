@@ -203,6 +203,20 @@ python -m agentic_data_platform.benchmark_wrappers.smoke \
   --execute
 ```
 
+For a real-upstream smoke that prepares the pinned source first, use:
+
+```bash
+python -m agentic_data_platform.benchmark_wrappers.real_upstream_smoke
+```
+
+The default command targets SkillFlow. It materializes the pinned runner from
+the fixture catalog metadata, applies the tracked Harbor API source patch,
+downloads the selected Hugging Face task-family subset under the materialized
+root, and then calls the same executable wrapper smoke. The Compose service
+`benchmark-real-upstream-smoke` runs this command with cache and workspace
+paths under `SANDBOX_HOST_WORKSPACE_ROOT`, which keeps Harbor child-container
+bind mounts visible to the host Docker daemon.
+
 Required output:
 
 ```json
@@ -251,6 +265,10 @@ Implemented wrapper behavior:
   summary with status, planned command, stdout/stderr, and artifact paths. It is
   suitable for CI dry-runs and for local real-upstream checks when upstream
   roots are mounted.
+- `agentic_data_platform.benchmark_wrappers.real_upstream_smoke` adds the
+  #114 evidence path above that materializes the source root before invoking the
+  wrapper smoke. It is opt-in because it can download benchmark assets and run
+  upstream Docker jobs.
 
 The generated upstream manifest import path lives in
 `agentic_data_platform.benchmarks.manifests`. It accepts generated repository or
@@ -305,9 +323,9 @@ just to run a supported suite.
   samples as new stable shapes appear. The first real SkillFlow Harbor
   `result.json` parser now extracts trial counts, evaluator error count, and
   mean score.
-- Run the reusable wrapper smoke entrypoint against real pinned upstream roots
-  on shared dev, where Docker is installed, after local source patch evidence
-  passes.
+- Run the opt-in `benchmark-real-upstream-smoke` service on shared dev, where
+  Docker is installed, and record whether SkillFlow completes or now blocks on
+  model/provider configuration rather than local Docker availability.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.
 - Decide how task-specific secrets such as `GH_TOKEN` are requested, scoped, and

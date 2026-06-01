@@ -179,6 +179,28 @@ services:
       - tools
     command: python -m agentic_data_platform.harbor.smoke
 
+  benchmark-real-upstream-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file:
+      - .env.example
+    environment:
+      BENCHMARK_REAL_UPSTREAM_SMOKE_SUITE: ${BENCHMARK_REAL_UPSTREAM_SMOKE_SUITE:-SkillFlow}
+      BENCHMARK_REAL_UPSTREAM_SMOKE_CACHE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}/benchmark-real-upstream-cache
+      BENCHMARK_REAL_UPSTREAM_SMOKE_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}/benchmark-real-upstream-smoke
+      BENCHMARK_REAL_UPSTREAM_SMOKE_RUN_ID: ${BENCHMARK_REAL_UPSTREAM_SMOKE_RUN_ID:-platform_dev_real_upstream_smoke}
+      BENCHMARK_REAL_UPSTREAM_SMOKE_TIMEOUT_SECONDS: ${BENCHMARK_REAL_UPSTREAM_SMOKE_TIMEOUT_SECONDS:-1200}
+    volumes:
+      - .:/workspace
+      - ${SANDBOX_HOST_WORKSPACE_ROOT:-./.runtime/sandbox-workspaces}:${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}
+      - /var/run/docker.sock:/var/run/docker.sock
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.benchmark_wrappers.real_upstream_smoke
+
   api-smoke:
     build:
       context: .

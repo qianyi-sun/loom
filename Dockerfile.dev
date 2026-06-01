@@ -43,6 +43,14 @@ COPY tests ./tests
 
 RUN python -m pip install --upgrade pip \
     && python -m pip install "harbor==${HARBOR_VERSION}" \
+    && python -m pip install \
+        "huggingface_hub>=0.36,<1.0" \
+        "litellm>=1.70.0" \
+        "matplotlib>=3.9.0" \
+        "numpy>=2.0.0" \
+        "openpyxl>=3.1.0" \
+        "pyyaml>=6.0.0" \
+        "tenacity>=9.0.0" \
     && harbor --version \
     && harbor run --help >/dev/null \
     && python -m pip install -e .

@@ -143,7 +143,7 @@ Original runner wrapper research:
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Active | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, API-created Docker sandbox smoke, and frontend-driven Harbor launch smoke checks; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 |
+| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, API-created Docker sandbox smoke, frontend-driven Harbor launch smoke checks, and an opt-in shared dev real-upstream wrapper smoke for #114; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 plus SkillFlow runner dependencies |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture, pilot group native workflow, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
@@ -159,7 +159,7 @@ Original runner wrapper research:
 | Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and scoped `/ops/metrics` are available |
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
-| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only model command provider, terminal benchmark run orchestrator, and latent native workflow target are under active development. Real upstream smoke has started; SkillFlow now has a recorded source patch for Harbor API compatibility, while SkillLearnBench still needs provider secret mapping. |
+| Benchmark run integration | Started | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only model command provider, terminal benchmark run orchestrator, and latent native workflow target are under active development. Real upstream smoke has started; SkillFlow now has a recorded source patch for Harbor API compatibility and an opt-in shared dev smoke path, while SkillLearnBench still needs provider secret mapping. |
 | Harbor integration | Started | Roadmap defines Harbor-compatible benchmark catalog, agent provider, runner backend, result ingestion, and hybrid evaluation path; the frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes the generated Harbor smoke task, and the Harbor runner/`jobs/` ingestion path is covered by shared dev smoke checks |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
@@ -266,6 +266,19 @@ Verify the real Harbor CLI local Docker path without external model keys:
 docker compose -f docker-compose.dev.yml run --rm --build harbor-smoke
 ```
 
+Verify the heavier real-upstream SkillFlow wrapper path on a Docker-ready host:
+
+```bash
+export SANDBOX_HOST_WORKSPACE_ROOT="$(pwd)/.runtime/sandbox-workspaces"
+docker compose -f docker-compose.dev.yml run --rm --build benchmark-real-upstream-smoke
+```
+
+This materializes the pinned SkillFlow runner, downloads the selected Hugging
+Face task-family subset, and executes the wrapper against the real upstream
+entrypoint. It is intentionally separate from the default deploy smokes because
+it touches networked benchmark assets and can build/run upstream task
+containers.
+
 Start the long-running development API and worker services:
 
 ```bash
@@ -319,6 +332,10 @@ Deploy or smoke-test the shared dev environment from a machine with SSH access:
 ```bash
 DEPLOY_HOST=shared dev DEPLOY_USER=<ssh-user> ./scripts/deploy-dev.sh
 ```
+
+For #114 evidence, manually dispatch the `Deploy` workflow for the `dev`
+environment with `run_real_upstream_benchmark_smoke=true`. The normal
+push-to-`dev` deployment leaves that heavier check disabled.
 
 pilot group pilot contributors should also read
 [pilot-project-onboarding.md](docs/development/pilot-project-onboarding.md).

@@ -13,6 +13,11 @@ on:
         options:
           - dev
           - prod
+      run_real_upstream_benchmark_smoke:
+        description: Run the opt-in SkillFlow real-upstream wrapper smoke on shared dev
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   deploy-dev:
@@ -31,6 +36,7 @@ jobs:
       DEPLOY_PORT: ${{ vars.PLATFORM_DEV_SSH_PORT }}
       DEPLOY_PATH: ${{ vars.PLATFORM_DEV_DEPLOY_PATH || '/srv/agentic-data-platform/dev/current' }}
       DEPLOY_PROJECT_NAME: agentic-data-shared dev
+      DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE: ${{ inputs.run_real_upstream_benchmark_smoke == true && '1' || '0' }}
       PLATFORM_DEV_SSH_KEY: ${{ secrets.PLATFORM_DEV_SSH_KEY }}
     steps:
       - name: Checkout
