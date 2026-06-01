@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #159 object-first log/artifact slice. Terminal stdout/stderr
+  stored in Postgres trajectory rows are now bounded previews with truncation
+  metadata, while full trajectory/log payloads remain available through
+  object-store artifacts and artifact bundles continue to record missing object
+  payloads in the manifest instead of failing the whole download.
 - Added the first #156 scheduler/capacity-gate slice. Runs can now move through
   `queued -> dispatched -> provisioning`, `RunRepository.dispatch_queued_runs`
   gates dispatch by global, backend, and project active-run capacity,

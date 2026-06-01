@@ -105,10 +105,12 @@ When `project_id` is omitted, the route only returns runs whose projects belong
 to teams where the authenticated user has membership.
 
 `GET /runs/{run_id}` is the heavier researcher detail payload. It includes the
-same `run` projection used by lists, a full `trajectory` array with command,
-cwd, timestamps, exit code, stdout, stderr, changed paths, model call id, and
-turn metadata, plus lifecycle events. The list endpoint intentionally does not
-embed full trajectories.
+same `run` projection used by lists, a bounded `trajectory` preview array with
+command, cwd, timestamps, exit code, stdout/stderr previews, changed paths,
+model call id, and turn metadata, plus lifecycle events. Full trajectory and log
+payloads are object-store artifacts surfaced through artifact metadata and the
+artifact-bundle download. The list endpoint intentionally does not embed
+trajectories.
 
 Evaluator projections expose `evaluator` as the latest primary summary for
 existing clients and `evaluator_results` as the full side-by-side collection
@@ -207,9 +209,10 @@ serializing dashboard payloads.
   `BenchmarkFixtureInstance`.
 - Run responses reuse `RunDashboardProjection.to_dict()` so dashboards and API
   consumers share the same visible status/progress/evaluator payload.
-- Run list responses stay lightweight. Full terminal stdout/stderr trajectory is
-  exposed on run detail so researcher views can inspect execution without
-  forcing PM lists to hydrate large traces.
+- Run list responses stay lightweight. Run detail exposes bounded terminal
+  stdout/stderr previews so researcher views can inspect recent execution
+  context without inflating Postgres rows. The full terminal trajectory remains
+  object-store-backed and downloadable from artifact bundles.
 - Run projections include `created_by_user_id`, `failure_reason`, and submitted
   evaluator configurations so dashboard clients can display ownership and
   planned evaluator mode before worker execution produces evaluator results.

@@ -265,6 +265,37 @@ class FrontendE2EResourcesTest(unittest.TestCase):
         self.assertIn("stored evaluator report", rendered_bundle)
         self.assertNotIn(str(temp_dir), rendered_bundle)
 
+    def test_artifact_bundle_download_records_missing_object_payloads(self):
+        with TemporaryDirectory() as temp_dir:
+            store = LocalArtifactStore(Path(temp_dir))
+            store.put_bytes(
+                "runs/run_frontend_001/tasks/task/trajectory/trajectory.jsonl",
+                b'{"turn_index": 0, "stdout": "stored trajectory"}\n',
+                media_type="application/x-ndjson",
+            )
+            self.client.app.state.artifact_store = store
+
+            response = self.client.get(
+                "/runs/run_frontend_001/artifact-bundle",
+                headers={"Authorization": "Bearer [REDACTED_TOKEN]", "X-Request-ID": "req-bundle-missing-001"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+
+        self.assertIn("artifacts/trajectory/run_frontend_001-trajectory.jsonl", names)
+        self.assertEqual(len(manifest["artifact_contents"]), 1)
+        self.assertEqual(len(manifest["artifact_content_errors"]), 2)
+        self.assertEqual(
+            {item["artifact_id"] for item in manifest["artifact_content_errors"]},
+            {"run_frontend_001-workspace", "run_frontend_001-evaluator"},
+        )
+        self.assertTrue(
+            all("not available" in item["message"] for item in manifest["artifact_content_errors"])
+        )
+
     def test_frontend_static_app_is_served_without_bearer_token(self):
         response = self.client.get("/app/", headers={"X-Request-ID": "req-app-001"})
 

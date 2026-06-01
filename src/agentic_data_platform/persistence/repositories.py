@@ -45,6 +45,9 @@ from agentic_data_platform.persistence.models import (
     utc_now,
 )
 
+_MAX_INLINE_TERMINAL_STREAM_BYTES = 64 * 1024
+_TRUNCATED_STREAM_MARKER = "\n[truncated: full stream is available in object-store artifacts]\n"
+
 
 @dataclass(frozen=True)
 class TeamRecord:
@@ -1113,6 +1116,11 @@ def _fixture_instance(row: TaskInstanceRow) -> BenchmarkFixtureInstance:
 
 
 def _turn_row(*, run_id: str, attempt_id: str, turn: TerminalTurn) -> RunTerminalTurnRow:
+    stdout, stdout_metadata = _bounded_terminal_stream(turn.stdout, stream_name="stdout")
+    stderr, stderr_metadata = _bounded_terminal_stream(turn.stderr, stream_name="stderr")
+    metadata = dict(turn.metadata)
+    metadata.update(stdout_metadata)
+    metadata.update(stderr_metadata)
     return RunTerminalTurnRow(
         run_id=run_id,
         attempt_id=attempt_id,
@@ -1122,12 +1130,31 @@ def _turn_row(*, run_id: str, attempt_id: str, turn: TerminalTurn) -> RunTermina
         started_at=turn.started_at,
         completed_at=turn.completed_at,
         exit_code=turn.exit_code,
-        stdout=turn.stdout,
-        stderr=turn.stderr,
+        stdout=stdout,
+        stderr=stderr,
         changed_paths=list(turn.changed_paths),
         model_call_id=turn.model_call_id,
-        metadata_json=dict(turn.metadata),
+        metadata_json=metadata,
     )
+
+
+def _bounded_terminal_stream(value: str, *, stream_name: str) -> tuple[str, dict[str, Any]]:
+    payload = value.encode("utf-8")
+    if len(payload) <= _MAX_INLINE_TERMINAL_STREAM_BYTES:
+        return value, {}
+
+    marker = _TRUNCATED_STREAM_MARKER
+    marker_bytes = marker.encode("utf-8")
+    preview_budget = max(_MAX_INLINE_TERMINAL_STREAM_BYTES - len(marker_bytes), 0)
+    preview = payload[:preview_budget].decode("utf-8", errors="ignore") + marker
+    preview_bytes = len(preview.encode("utf-8"))
+    return preview, {
+        f"{stream_name}_truncated": True,
+        f"{stream_name}_original_bytes": len(payload),
+        f"{stream_name}_inline_bytes": preview_bytes,
+        f"{stream_name}_inline_limit_bytes": _MAX_INLINE_TERMINAL_STREAM_BYTES,
+        f"{stream_name}_truncation_reason": "object_first_stream_preview",
+    }
 
 
 def _terminal_turn(row: RunTerminalTurnRow) -> TerminalTurn:

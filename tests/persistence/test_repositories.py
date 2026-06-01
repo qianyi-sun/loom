@@ -207,6 +207,50 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(len(loaded.artifacts), len(run.artifacts))
         self.assertEqual(events[0].event_type, "run.created")
 
+    def test_run_repository_stores_bounded_terminal_stream_previews(self):
+        run = _completed_run(run_id="run_large_stream_001")
+        large_stdout = "stdout-line\n" * 7000
+        large_stderr = "stderr-line\n" * 7000
+        original_turn = run.trajectory[0]
+        run.trajectory[0] = TerminalTurn(
+            turn_index=original_turn.turn_index,
+            command=original_turn.command,
+            cwd=original_turn.cwd,
+            started_at=original_turn.started_at,
+            completed_at=original_turn.completed_at,
+            exit_code=original_turn.exit_code,
+            stdout=large_stdout,
+            stderr=large_stderr,
+            changed_paths=list(original_turn.changed_paths),
+            model_call_id=original_turn.model_call_id,
+            metadata=dict(original_turn.metadata),
+        )
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            RunRepository(session).save_run(run)
+
+        with session_scope(self.engine) as session:
+            loaded = RunRepository(session).get_run(run.run_id)
+
+        loaded_turn = loaded.trajectory[0]
+        self.assertLess(len(loaded_turn.stdout.encode("utf-8")), len(large_stdout.encode("utf-8")))
+        self.assertLess(len(loaded_turn.stderr.encode("utf-8")), len(large_stderr.encode("utf-8")))
+        self.assertIn("truncated", loaded_turn.stdout)
+        self.assertIn("truncated", loaded_turn.stderr)
+        self.assertTrue(loaded_turn.metadata["stdout_truncated"])
+        self.assertTrue(loaded_turn.metadata["stderr_truncated"])
+        self.assertEqual(loaded_turn.metadata["stdout_original_bytes"], len(large_stdout.encode("utf-8")))
+        self.assertEqual(loaded_turn.metadata["stderr_original_bytes"], len(large_stderr.encode("utf-8")))
+
     def test_run_repository_records_create_cancel_and_retry_lifecycle(self):
         run = _queued_run(run_id="run_lifecycle_001")
 

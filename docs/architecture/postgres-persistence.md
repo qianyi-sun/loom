@@ -100,6 +100,10 @@ events have a monotonic integer primary key that is exposed as `seq` for
 durable replay. API clients can call `GET /runs/{run_id}/events?after_seq=N`
 or reconnect to `GET /runs/{run_id}/stream` to recover missed lifecycle events
 without hydrating full trajectories or artifact payloads.
+Terminal turn stdout/stderr columns are bounded previews, not canonical log
+storage. When a stream exceeds the inline limit, persistence stores truncation
+metadata such as original byte count and inline byte count, while full
+trajectory/log payloads remain object-store artifacts.
 Evaluator results are stored as many rows per latest attempt. `RunRecord`
 hydrates the ordered `evaluator_results` collection and continues to expose the
 latest result through `RunRecord.evaluator_result` for existing worker,
