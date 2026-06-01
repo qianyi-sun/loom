@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -15,6 +16,7 @@ from agentic_data_platform.domain.run_records import (
 )
 from agentic_data_platform.evaluation.types import EvaluatorAdapter, EvaluatorInput
 from agentic_data_platform.models.providers import ModelProvider, ModelProviderContext
+from agentic_data_platform.providers.errors import ProviderBoundaryError, normalize_provider_error
 from agentic_data_platform.sandbox.docker_terminal import SandboxCommandResult, WorkspaceSnapshot
 
 
@@ -145,13 +147,18 @@ class TerminalBenchmarkRunner:
         timeout_seconds: int,
     ) -> str | None:
         while True:
-            command = request.model_provider.next_command(
-                ModelProviderContext(
-                    run_id=run.run_id,
-                    task_instruction=run.task.metadata["instruction"],
-                    turns=list(run.trajectory),
+            try:
+                command = request.model_provider.next_command(
+                    ModelProviderContext(
+                        run_id=run.run_id,
+                        task_instruction=run.task.metadata["instruction"],
+                        turns=list(run.trajectory),
+                    )
                 )
-            )
+            except ProviderBoundaryError as exc:
+                return _provider_failure_reason(exc)
+            except Exception as exc:
+                return _provider_failure_reason(normalize_provider_error(exc))
             if command is None:
                 return None
 
@@ -169,3 +176,14 @@ class TerminalBenchmarkRunner:
                 return f"Terminal command timed out after {timeout_seconds} seconds: {command.command}"
             if result.exit_code != 0:
                 return f"Terminal command failed with exit code {result.exit_code}: {command.command}"
+
+
+def _provider_failure_reason(error: ProviderBoundaryError) -> str:
+    status = f" status {error.status_code}" if error.status_code is not None else ""
+    return f"model provider {error.code.value}{status}: {_redact_failure_message(error.message)}"
+
+
+def _redact_failure_message(message: str) -> str:
+    redacted = re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", message)
+    redacted = re.sub(r"Bearer\s+\S+", "Bearer [redacted]", redacted, flags=re.IGNORECASE)
+    return redacted

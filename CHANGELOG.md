@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first real OpenAI-compatible terminal-agent provider path for #116.
+  Docker terminal workers can now resolve configured model refs through the dev
+  provider registry, call `/chat/completions`, parse JSON terminal actions,
+  preserve the scripted no-cost smoke fallback, and normalize provider failures
+  into run-visible errors without exposing API keys.
 - Pinned the SkillFlow task dataset for #115. The checked-in SkillFlow catalog
   now records Hugging Face dataset commit
   `ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc`, the real-upstream smoke defaults

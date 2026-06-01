@@ -5,15 +5,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+import httpx
+
 from agentic_data_platform.artifacts.store import ArtifactPersistence
 from agentic_data_platform.benchmarks.adapters import BenchmarkRegistration
-from agentic_data_platform.domain.run_records import ArtifactKind, ArtifactRef, JudgeConfig, RunRecord, RunStatus
+from agentic_data_platform.domain.run_records import (
+    ArtifactKind,
+    ArtifactRef,
+    JudgeConfig,
+    ModelConfig,
+    RunRecord,
+    RunStatus,
+)
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
 from agentic_data_platform.harbor.runner import HarborRunSpec, HarborRunnerBackend
 from agentic_data_platform.harbor.smoke import write_harbor_cli_smoke_task
-from agentic_data_platform.models.providers import ModelCommand, ScriptedModelProvider
+from agentic_data_platform.models.providers import (
+    ModelCommand,
+    ModelProvider,
+    ModelProviderContext,
+    OpenAICompatibleModelProvider,
+    ScriptedModelProvider,
+)
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
+from agentic_data_platform.providers.errors import ProviderBoundaryError, ProviderErrorCode
 from agentic_data_platform.runs.terminal_benchmark import TerminalBenchmarkRunner, TerminalBenchmarkRunRequest
 from agentic_data_platform.sandbox.docker_terminal import (
     CommandRunner,
@@ -38,6 +54,7 @@ class DockerTerminalWorkerExecutor:
     evaluator_score: float = 0.75
     evaluator_feedback: str = "Mock evaluator feedback: Docker terminal trajectory and workspace were reviewed."
     provider_registry: DevProviderConfigRegistry | None = None
+    model_http_client: httpx.Client | None = None
     command_runner: CommandRunner | None = None
     harbor_command_runner: CommandRunner | None = None
 
@@ -65,9 +82,11 @@ class DockerTerminalWorkerExecutor:
                 project_id=run.project_id,
                 owner_team=run.owner_team,
                 registration=registration,
-                model_provider=ScriptedModelProvider(
-                    model=run.model,
-                    commands=_commands_for_run(run, metadata_keys=("worker_commands", "worker_fixture_commands")),
+                model_provider=_model_provider_for_run(
+                    run,
+                    registry=self.provider_registry,
+                    http_client=self.model_http_client,
+                    metadata_keys=("worker_commands", "worker_fixture_commands"),
                 ),
                 judge=judge,
                 rubric_id=judge.rubric_version,
@@ -135,7 +154,6 @@ class DockerTerminalWorkerExecutor:
     def _resolve_provider_refs(self, run: RunRecord) -> None:
         if self.provider_registry is None:
             return
-        _resolve_metadata_ref(self.provider_registry, run.model.metadata)
         for config in run.evaluator_configs:
             _resolve_metadata_ref(self.provider_registry, config.metadata)
 
@@ -217,12 +235,105 @@ class FixtureTerminalSandbox:
 
 
 def _commands_for_run(run: RunRecord, *, metadata_keys: tuple[str, ...]) -> list[ModelCommand]:
+    configured_commands = _configured_commands_for_run(run, metadata_keys=metadata_keys)
+    if configured_commands is not None:
+        return configured_commands
+
+    return [ModelCommand(command="python solve.py", cwd="/workspace", model_call_id="fixture-call-1")]
+
+
+def _configured_commands_for_run(run: RunRecord, *, metadata_keys: tuple[str, ...]) -> list[ModelCommand] | None:
     for key in metadata_keys:
         configured = run.metadata.get(key)
         if isinstance(configured, list) and configured:
             return [_model_command(item, index=index) for index, item in enumerate(configured, start=1)]
+    return None
 
-    return [ModelCommand(command="python solve.py", cwd="/workspace", model_call_id="fixture-call-1")]
+
+def _model_provider_for_run(
+    run: RunRecord,
+    *,
+    registry: DevProviderConfigRegistry | None,
+    http_client: httpx.Client | None,
+    metadata_keys: tuple[str, ...],
+) -> ModelProvider:
+    configured_commands = _configured_commands_for_run(run, metadata_keys=metadata_keys)
+    if configured_commands is not None:
+        return ScriptedModelProvider(model=run.model, commands=configured_commands)
+
+    provider_config_id = _optional_str(run.model.metadata.get("provider_config_id"))
+    secret_ref = _optional_str(run.model.metadata.get("secret_ref"))
+    if provider_config_id is None and secret_ref is None:
+        return ScriptedModelProvider(
+            model=run.model,
+            commands=[
+                ModelCommand(
+                    command="python solve.py",
+                    cwd="/workspace",
+                    model_call_id="fixture-call-1",
+                )
+            ],
+        )
+    if provider_config_id is None:
+        return _FailingModelProvider(
+            model=run.model,
+            error=ProviderBoundaryError(
+                code=ProviderErrorCode.INVALID_REQUEST,
+                message="model provider requires provider_config_id",
+            ),
+        )
+    if registry is None:
+        return _FailingModelProvider(
+            model=run.model,
+            error=ProviderBoundaryError(
+                code=ProviderErrorCode.INVALID_REQUEST,
+                message="model provider registry is not configured",
+            ),
+        )
+
+    try:
+        ref = registry.get(provider_config_id)
+    except (KeyError, ValueError) as exc:
+        return _FailingModelProvider(
+            model=run.model,
+            error=ProviderBoundaryError(
+                code=ProviderErrorCode.INVALID_REQUEST,
+                message=str(exc).strip("'"),
+            ),
+        )
+    try:
+        secret = registry.resolve_secret(secret_ref or ref.secret_ref)
+    except (KeyError, ValueError) as exc:
+        return _FailingModelProvider(
+            model=run.model,
+            error=ProviderBoundaryError(
+                code=ProviderErrorCode.INVALID_REQUEST,
+                message=str(exc).strip("'"),
+            ),
+        )
+    if not ref.base_url:
+        return _FailingModelProvider(
+            model=run.model,
+            error=ProviderBoundaryError(
+                code=ProviderErrorCode.INVALID_REQUEST,
+                message="model provider base_url is not configured",
+            ),
+        )
+    return OpenAICompatibleModelProvider(
+        model=run.model,
+        base_url=ref.base_url,
+        api_key=secret.value,
+        http_client=http_client,
+    )
+
+
+@dataclass(frozen=True)
+class _FailingModelProvider:
+    model: ModelConfig
+    error: ProviderBoundaryError
+
+    def next_command(self, context: ModelProviderContext) -> ModelCommand | None:
+        raise self.error
 
 
 def _model_command(value: object, *, index: int) -> ModelCommand:

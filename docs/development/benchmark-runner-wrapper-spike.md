@@ -75,7 +75,10 @@ Environment assumptions:
   prebuilding task images with `utils/prebuild_task_images.py`.
 - Config files carry model/provider settings. The platform wrapper should
   synthesize config from the platform run request rather than asking users to
-  edit YAML by hand.
+  edit YAML by hand. Native terminal-agent runs now have an OpenAI-compatible
+  `ModelProvider` path through `provider_config_id`; original upstream
+  SkillFlow config synthesis still needs to map that same safe provider ref into
+  the suite's expected YAML shape.
 
 Generated outputs to normalize:
 
@@ -116,7 +119,11 @@ Useful options:
 Environment assumptions:
 
 - Docker is required because each trial runs in a container.
-- API keys are read from `.env` and provider environment variables.
+- API keys are read from `.env` and provider environment variables. Native
+  terminal-agent runs now resolve the model API key server-side from
+  `provider_config_id`, but the SkillLearnBench wrapper still needs an explicit
+  mapping from the platform provider registry to upstream variables such as
+  `ANTHROPIC_API_KEY`.
 - Some tasks require extra variables such as `GH_TOKEN`.
 - The upstream task tree contains per-instance `instruction.md`, `task.toml`,
   `environment/`, `tests/`, and `solution/`.
@@ -325,8 +332,9 @@ just to run a supported suite.
 - Extend upstream checkout/download management if SkillFlow later needs
   additional Hugging Face private assets or Git LFS credential handling.
 - Expand benchmark-specific config synthesis beyond the current redacted
-  `artifacts/upstream-config.json` contract if upstream runners require
-  suite-native YAML or environment files.
+  `artifacts/upstream-config.json` contract so upstream runners can consume the
+  same safe platform provider refs through suite-native YAML or environment
+  files.
 - Continue refining suite-specific report parsing against real upstream output
   samples as new stable shapes appear. The first real SkillFlow Harbor
   `result.json` parser now extracts trial counts, evaluator error count, and

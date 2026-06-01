@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
@@ -212,6 +213,186 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 3)
         self.assertEqual(payload["run"]["evaluator"]["status"], "completed")
+
+    def test_docker_worker_uses_configured_api_model_provider_without_leaking_secret(self):
+        payload = _run_create_payload("run_worker_api_provider_001")
+        payload["model"]["provider"] = "openai-compatible"
+        payload["model"]["model_name"] = "gpt-5-mini"
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["metadata"] = {}
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        requests: list[httpx.Request] = []
+        responses = [
+            {
+                "id": "chatcmpl_worker_001",
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"run","command":"python solve.py",'
+                                '"cwd":"/workspace"}'
+                            )
+                        }
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_worker_002",
+                "choices": [{"message": {"content": '{"action":"finish"}'}}],
+            },
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=responses.pop(0))
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="sk-model-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                stdout="created receipts workbook\n",
+                write_files={"receipts.xlsx": "spreadsheet bytes\n"},
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-api-provider-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    command_runner=command_runner,
+                    model_http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-api-provider-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(command_runner.calls[0]["args"][-1], "python solve.py")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0].headers["authorization"], "Bearer sk-model-secret")
+        self.assertIn(
+            "created receipts workbook",
+            json.loads(requests[1].content)["messages"][-1]["content"],
+        )
+
+        detail = self.client.get("/runs/run_worker_api_provider_001")
+        rendered = json.dumps(detail.json())
+        self.assertNotIn("sk-model-secret", rendered)
+        self.assertNotIn("secret_ref", rendered)
+        self.assertEqual(detail.json()["run"]["progress"]["turn_count"], 1)
+
+    def test_docker_worker_normalizes_unknown_api_provider_config(self):
+        payload = _run_create_payload("run_worker_unknown_provider_config_001")
+        payload["model"]["provider"] = "openai-compatible"
+        payload["model"]["model_name"] = "gpt-5-mini"
+        payload["model"]["provider_config_id"] = "missing-agent-model"
+        payload["metadata"] = {}
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="sk-model-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-api-provider-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    command_runner=FakeDockerCommandRunner(),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-api-provider-unknown-config-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        detail = self.client.get("/runs/run_worker_unknown_provider_config_001")
+        rendered = json.dumps(detail.json())
+        self.assertIn("model provider invalid_request", detail.json()["run"]["failure_reason"])
+        self.assertIn("Unknown provider config", detail.json()["run"]["failure_reason"])
+        self.assertEqual(detail.json()["run"]["progress"]["artifact_count"], 2)
+        self.assertNotIn("sk-model-secret", rendered)
+
+    def test_docker_worker_normalizes_missing_api_provider_base_url(self):
+        payload = _run_create_payload("run_worker_missing_provider_base_url_001")
+        payload["model"]["provider"] = "openai-compatible"
+        payload["model"]["model_name"] = "gpt-5-mini"
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["model"]["secret_ref"] = "env:MODEL_PROVIDER_API_KEY"
+        payload["metadata"] = {}
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_api_key="sk-model-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-api-provider-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    command_runner=FakeDockerCommandRunner(),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-api-provider-missing-base-url-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        detail = self.client.get("/runs/run_worker_missing_provider_base_url_001")
+        rendered = json.dumps(detail.json())
+        self.assertIn("model provider invalid_request", detail.json()["run"]["failure_reason"])
+        self.assertEqual(detail.json()["run"]["progress"]["artifact_count"], 2)
+        self.assertNotIn("sk-model-secret", rendered)
 
     def test_worker_marks_docker_terminal_command_failure_with_diagnostics(self):
         payload = _run_create_payload("run_worker_docker_failed_001")

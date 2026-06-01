@@ -12,7 +12,8 @@ from agentic_data_platform.benchmarks.adapters import (
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
 from agentic_data_platform.domain.run_records import JudgeConfig, ModelConfig, ModelMode, RunStatus
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
-from agentic_data_platform.models.providers import ModelCommand, ScriptedModelProvider
+from agentic_data_platform.models.providers import ModelCommand, ModelProviderContext, ScriptedModelProvider
+from agentic_data_platform.providers.errors import ProviderBoundaryError, ProviderErrorCode
 from agentic_data_platform.runs.terminal_benchmark import TerminalBenchmarkRunner, TerminalBenchmarkRunRequest
 from agentic_data_platform.sandbox.docker_terminal import SandboxCommandResult, WorkspaceFile, WorkspaceSnapshot
 
@@ -207,6 +208,60 @@ class TerminalBenchmarkRunnerTest(unittest.TestCase):
         self.assertEqual(result.run.failure_reason, "rubric missing")
         self.assertEqual(result.dashboard["evaluator"]["failure_reason"], "rubric missing")
 
+    def test_runner_normalizes_model_provider_failure_as_run_failure(self):
+        adapter = SkillFlowBenchmarkAdapter(
+            benchmark_version="hf:zhang-ziao/SkillFlow-Task@2026-05-28",
+            source_uri="https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
+        )
+        registration = adapter.register_task(
+            BenchmarkTaskSpec(
+                task_family="receipt-to-spreadsheet",
+                instance_id="conference-expense-03",
+                instruction="Read receipts and create receipts.xlsx.",
+                input_artifact_refs=["minio://benchmarks/skillflow/conference/input.tar.zst"],
+                runner_image="python:3.12-slim",
+                runner_entrypoint=["python", "-m", "skillflow.runner"],
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = TerminalBenchmarkRunner(
+                artifact_persistence=ArtifactPersistence(LocalArtifactStore(Path(temp_dir))),
+                evaluator=MockEvaluatorAdapter(evaluator_id="mock-judge-v0", score=0.86),
+            )
+
+            result = runner.run(
+                TerminalBenchmarkRunRequest(
+                    run_id="run_provider_failure_001",
+                    project_id="pilot-project",
+                    owner_team="pilot group",
+                    registration=registration,
+                    model_provider=FailingModelProvider(),
+                    judge=JudgeConfig(
+                        provider="mock",
+                        model_name="deterministic-judge",
+                        rubric_version="latent-skill-v0",
+                    ),
+                    rubric_id="latent-skill-v0",
+                    sandbox=FakeSandbox(),
+                )
+            )
+
+            trajectory_path = (
+                Path(temp_dir)
+                / "runs/run_provider_failure_001/tasks/conference-expense-03/trajectory/trajectory.jsonl"
+            )
+            workspace_path = Path(temp_dir) / "runs/run_provider_failure_001/tasks/conference-expense-03/workspace/snapshot.json"
+            trajectory_exists = trajectory_path.exists()
+            workspace_exists = workspace_path.exists()
+
+        self.assertEqual(result.run.status, RunStatus.FAILED)
+        self.assertIn("model provider auth_failed", result.run.failure_reason)
+        self.assertNotIn("provider-token-123", result.run.failure_reason)
+        self.assertEqual(result.dashboard["status"], "failed")
+        self.assertTrue(trajectory_exists)
+        self.assertTrue(workspace_exists)
+
 
 class FakeSandbox:
     def __init__(self) -> None:
@@ -234,4 +289,21 @@ class FakeSandbox:
             workspace_path="/tmp/fake-workspace",
             captured_at=datetime(2026, 5, 28, 12, 3, 0, tzinfo=timezone.utc),
             files=[WorkspaceFile(path="receipts.xlsx", size_bytes=128, sha256="3" * 64)],
+        )
+
+
+class FailingModelProvider:
+    model = ModelConfig(
+        provider="openai-compatible",
+        model_name="gpt-5-mini",
+        mode=ModelMode.API,
+        prompt_template_version="terminal-agent-json-v0",
+    )
+
+    def next_command(self, context: ModelProviderContext) -> ModelCommand | None:
+        raise ProviderBoundaryError(
+            code=ProviderErrorCode.AUTH_FAILED,
+            message="401 unauthorized Bearer provider-token-123",
+            retryable=False,
+            status_code=401,
         )
