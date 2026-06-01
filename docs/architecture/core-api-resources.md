@@ -135,8 +135,17 @@ frontend-visible Harbor local-Docker smoke surface that submits real
 run envelope. The first Harbor benchmark provider now exposes a versioned
 `HarborTerminalBench` catalog using the explicit
 `terminal-bench/terminal-bench-2` dataset ref and can map uploaded Harbor task
-archives into checksum-versioned catalog entries. Built-in/custom Harbor agent
-catalog discovery remains follow-up #63.
+archives into checksum-versioned catalog entries.
+
+`GET /agents` returns authenticated launch agent metadata. The first
+implementation is `HarborAgentProvider`: it lists Harbor built-in agents,
+supports custom Harbor `--agent-import-path` entries, reports whether an agent
+is Harbor built-in, external CLI, or custom import mode, and exposes supported
+`harness_id`, sandbox backend, trajectory support, and required secret
+references. Required secrets are safe references such as `env:OPENAI_API_KEY`;
+raw key values are not accepted or returned. This lets launch and dashboard
+consumers distinguish Harbor agents from native platform runners before a full
+agent-selection UI is added.
 
 `POST /harbor/task-uploads` is the first user-facing custom benchmark intake
 path. A project member uploads a `.zip` Harbor task directory; the API validates
@@ -246,9 +255,10 @@ serializing dashboard payloads.
   launches; production provider discovery needs provider-specific filtering,
   caching policy, and capability detection.
 - The `harbor-local-docker` harness is a frontend-to-Harbor launch smoke
-  surface. The first #62 provider slice now gives the API a Harbor benchmark
-  read model, but frontend launch still uses the smoke harness until #63 agent
-  discovery and a full Harbor launch UX are available.
+  surface. The first #62 provider slice gives the API a Harbor benchmark read
+  model and #63 adds authenticated Harbor agent discovery, but frontend launch
+  still uses the smoke harness until a full Harbor launch UX wires agent
+  selection into run creation.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

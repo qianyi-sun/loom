@@ -18,6 +18,7 @@ from agentic_data_platform.service.artifact_bundle_resources import (
     build_service_artifact_store,
     register_artifact_bundle_routes,
 )
+from agentic_data_platform.service.agent_resources import register_agent_routes
 from agentic_data_platform.service.auth_resources import register_auth_routes
 from agentic_data_platform.service.benchmark_resources import register_benchmark_routes
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
@@ -69,6 +70,7 @@ def create_app(
     register_harbor_task_routes(app, app.state.session_dependency)
     register_model_routes(app, app.state.session_dependency)
     register_harness_routes(app, app.state.session_dependency)
+    register_agent_routes(app, app.state.session_dependency)
     register_run_routes(app, app.state.session_dependency)
     register_artifact_bundle_routes(app, app.state.session_dependency)
     register_telemetry_routes(app, app.state.session_dependency)

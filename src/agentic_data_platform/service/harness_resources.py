@@ -53,6 +53,8 @@ def harness_catalog() -> list[dict[str, Any]]:
                 "status": "ready",
                 "harbor_task_template": "harbor-cli-smoke",
                 "harbor_agent": "oracle",
+                "default_agent_id": "harbor:oracle",
+                "agent_catalog_endpoint": "/agents?harness_id=harbor-local-docker",
                 "harbor_model_name": "smoke/noop",
                 "harbor_environment": "docker",
                 "harbor_extra_args": ["--n-tasks", "1", "--quiet"],

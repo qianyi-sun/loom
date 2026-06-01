@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first Harbor agent provider for #63. The platform now exposes
+  `AgentProvider` / `HarborAgentProvider`, authenticated `GET /agents`,
+  Harbor built-in agent metadata, custom `--agent-import-path` validation, safe
+  required-secret references, supported harness/sandbox metadata, and
+  Harbor-vs-native runner distinctions for launch/dashboard consumers.
 - Added the first Harbor benchmark catalog provider for #62. The provider
   exposes a versioned `HarborTerminalBench` dataset catalog using the explicit
   `terminal-bench/terminal-bench-2` Harbor dataset ref, maps Harbor uploaded
