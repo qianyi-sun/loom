@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Preserved Harbor diagnostics when verifier/result ingestion fails for #151.
+  Worker failures caused by malformed or incomplete Harbor `jobs/` output now
+  keep the Harbor runner report, raw `jobs/` archive, partial trajectory when
+  available, and a redacted `harbor_ingestion_diagnostics` artifact in the run
+  record and downloadable artifact bundle.
 - Added catalog-backed Harbor launch support for #131, #142, and #144. The
   frontend can now select a Harbor agent and use the selected API model for
   catalog-backed Harbor runs, while preserving the deterministic `oracle` +

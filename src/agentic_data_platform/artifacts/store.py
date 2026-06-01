@@ -205,6 +205,9 @@ class ArtifactKeyFactory:
     def harbor_runner_report_key(self, run_id: str, task_instance_id: str) -> str:
         return self._key(run_id, task_instance_id, "logs", "harbor-runner.json")
 
+    def harbor_ingestion_diagnostics_key(self, run_id: str, task_instance_id: str) -> str:
+        return self._key(run_id, task_instance_id, "logs", "harbor-ingestion-diagnostics.json")
+
     def wrapper_artifact_key(self, run_id: str, task_instance_id: str, artifact_path: str) -> str:
         return self._key(run_id, task_instance_id, "wrapper", *_safe_relative_parts(artifact_path))
 
@@ -373,6 +376,33 @@ class ArtifactPersistence:
         return _artifact_ref(
             stored,
             artifact_id=f"{_safe_component(run_id)}-harbor-runner-report",
+            kind=ArtifactKind.LOG,
+        )
+
+    def persist_harbor_ingestion_diagnostics(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        diagnostics: dict[str, Any],
+    ) -> ArtifactRef:
+        key = self.key_factory.harbor_ingestion_diagnostics_key(run_id, task_instance_id)
+        stored = self.store.put_bytes(
+            key,
+            _json_bytes(diagnostics),
+            media_type="application/json",
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": "harbor_ingestion_diagnostics",
+                "failure_category": diagnostics.get("category"),
+                "failure_source": diagnostics.get("source"),
+            },
+        )
+
+        return _artifact_ref(
+            stored,
+            artifact_id=f"{_safe_component(run_id)}-harbor-ingestion-diagnostics",
             kind=ArtifactKind.LOG,
         )
 

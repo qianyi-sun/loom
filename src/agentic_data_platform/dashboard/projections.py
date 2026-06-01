@@ -61,6 +61,9 @@ class RunDashboardProjection:
             payload["evaluator_results"] = [_evaluator_summary(result) for result in evaluator_results]
             payload["evaluator"] = payload["evaluator_results"][-1]
 
+        if run.failure_reason:
+            payload["failure"] = _failure_summary(run)
+
         return payload
 
 
@@ -88,11 +91,34 @@ def _artifact_link(ref: ArtifactRef) -> dict[str, Any]:
     if storage_key:
         payload["storage_key"] = storage_key
 
+    content_type = ref.metadata.get("content_type")
+    if isinstance(content_type, str) and content_type.strip():
+        payload["content_type"] = content_type.strip()
+
     safe_uri = _safe_external_uri(ref.uri)
     if safe_uri is not None:
         payload["uri"] = safe_uri
 
     return payload
+
+
+def _failure_summary(run: RunRecord) -> dict[str, Any]:
+    failure = run.metadata.get("failure")
+    payload = redact_sensitive_metadata(failure) if isinstance(failure, dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    message = str(payload.get("message") or run.failure_reason or "")
+    category = str(payload.get("category") or "run_failed")
+    source = str(payload.get("source") or "worker")
+    return {
+        "category": category,
+        "source": source,
+        "message": message,
+        "metadata": redact_sensitive_metadata(payload.get("metadata", {}))
+        if isinstance(payload.get("metadata"), dict)
+        else {},
+    }
 
 
 def _evaluator_summary(result: EvaluatorResult) -> dict[str, Any]:

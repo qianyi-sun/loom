@@ -174,6 +174,8 @@ def _artifact_extension(artifact: ArtifactRef, storage_key: str) -> str:
         return ".json"
     if media_type.startswith("text/"):
         return ".txt"
+    if storage_key.endswith(".tar.gz"):
+        return ".tar.gz"
     suffix = Path(storage_key).suffix
     if suffix and re.fullmatch(r"\.[A-Za-z0-9]{1,12}", suffix):
         return suffix

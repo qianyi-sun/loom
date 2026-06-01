@@ -716,6 +716,66 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.failed"],
         )
 
+    def test_worker_preserves_harbor_diagnostics_when_verifier_ingestion_fails(self):
+        payload = _run_create_payload("run_worker_harbor_ingest_failed_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench/terminal-bench-2",
+                "agent": "opencode",
+                "model_name": "deepseek-v4-flash",
+                "trial_name": "trial-hello",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            artifact_persistence = ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts"))
+            self.client.app.state.artifact_store = artifact_persistence.store
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-ingestion-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=artifact_persistence,
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=FakeHarborCommandRunner(write_reward=False),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-ingest-fail-001")
+            detail = self.client.get("/runs/run_worker_harbor_ingest_failed_001").json()
+            bundle = self.client.get("/runs/run_worker_harbor_ingest_failed_001/artifact-bundle")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        run = detail["run"]
+        self.assertIn("Missing Harbor verifier reward", run["failure_reason"])
+        self.assertEqual(run["failure"]["category"], "harbor_verifier_missing_reward")
+        self.assertEqual(run["failure"]["source"], "harbor_ingestion")
+        content_types = {artifact.get("content_type") for artifact in run["artifacts"]}
+        self.assertIn("harbor_runner_report", content_types)
+        self.assertIn("harbor_jobs_archive", content_types)
+        self.assertIn("harbor_ingestion_diagnostics", content_types)
+        self.assertGreaterEqual(run["progress"]["artifact_count"], 3)
+        self.assertEqual(bundle.status_code, 200)
+        with zipfile.ZipFile(BytesIO(bundle.content)) as archive:
+            names = set(archive.namelist())
+            rendered_bundle = "\n".join(
+                archive.read(name).decode("utf-8", errors="replace")
+                for name in sorted(names)
+                if name.endswith((".json", ".jsonl"))
+            )
+        self.assertIn("artifacts/log/run_worker_harbor_ingest_failed_001-harbor-runner-report.json", names)
+        self.assertIn("artifacts/log/run_worker_harbor_ingest_failed_001-job-001-harbor-jobs.tar.gz", names)
+        self.assertIn("artifacts/log/run_worker_harbor_ingest_failed_001-harbor-ingestion-diagnostics.json", names)
+        self.assertIn("Missing Harbor verifier reward", rendered_bundle)
+        self.assertIn('"api_key": "[redacted]"', rendered_bundle)
+        self.assertNotIn("deepseek-secret", rendered_bundle)
+
     def test_worker_executes_original_wrapper_run_and_attaches_result_artifacts(self):
         payload = _run_create_payload("run_worker_wrapper_001")
         payload["task"]["metadata"]["instruction_ref"] = "inline:task.metadata.instruction"
@@ -926,16 +986,24 @@ def _workspace_from_docker_args(args: list[str]) -> Path:
 
 
 class FakeHarborCommandRunner:
-    def __init__(self, *, returncode: int = 0, stdout: str = "harbor complete\n", stderr: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        stdout: str = "harbor complete\n",
+        stderr: str = "",
+        write_reward: bool = True,
+    ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+        self.write_reward = write_reward
         self.calls: list[dict[str, object]] = []
 
     def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
         self.calls.append({"args": args, "timeout": timeout})
         jobs_dir = Path(args[args.index("--jobs-dir") + 1])
-        _write_harbor_job_fixture(jobs_dir)
+        _write_harbor_job_fixture(jobs_dir, write_reward=self.write_reward)
         return subprocess.CompletedProcess(
             args=args,
             returncode=self.returncode,
@@ -1045,14 +1113,20 @@ def _arg_value(args: list[str], name: str) -> str:
     return args[args.index(name) + 1]
 
 
-def _write_harbor_job_fixture(root: Path) -> None:
+def _write_harbor_job_fixture(root: Path, *, write_reward: bool = True) -> None:
     job_dir = root / "job-001"
     trial_dir = job_dir / "trial-hello"
     (trial_dir / "agent").mkdir(parents=True)
     (trial_dir / "verifier").mkdir()
     (trial_dir / "artifacts").mkdir()
     (job_dir / "config.json").write_text(
-        json.dumps({"dataset": "terminal-bench/terminal-bench-2", "agent": "default"}),
+        json.dumps(
+            {
+                "dataset": "terminal-bench/terminal-bench-2",
+                "agent": "default",
+                "api_key": "deepseek-secret",
+            }
+        ),
         encoding="utf-8",
     )
     (job_dir / "result.json").write_text(json.dumps({"status": "completed", "accuracy": 1.0}), encoding="utf-8")
@@ -1078,7 +1152,8 @@ def _write_harbor_job_fixture(root: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (trial_dir / "verifier" / "reward.txt").write_text("1.0\n", encoding="utf-8")
+    if write_reward:
+        (trial_dir / "verifier" / "reward.txt").write_text("1.0\n", encoding="utf-8")
     (trial_dir / "artifacts" / "answer.txt").write_text("42\n", encoding="utf-8")
     (trial_dir / "artifacts" / "manifest.json").write_text(
         json.dumps([{"destination": "artifacts/answer.txt", "type": "file", "status": "ok"}]),

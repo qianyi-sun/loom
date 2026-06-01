@@ -27,7 +27,11 @@ from agentic_data_platform.domain.run_records import (
     TerminalTurn,
 )
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
-from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
+from agentic_data_platform.harbor.ingestion import (
+    HarborIngestionFailureDiagnostics,
+    HarborIngestionResult,
+    HarborResultIngestor,
+)
 from agentic_data_platform.harbor.runner import HarborCliRunnerBackend, HarborRunSpec
 from agentic_data_platform.harbor.smoke import write_harbor_cli_smoke_task
 from agentic_data_platform.harbor.task_uploads import materialize_harbor_task_archive
@@ -313,12 +317,33 @@ class DockerTerminalWorkerExecutor:
             run.transition_to(RunStatus.FAILED)
             return run
 
-        ingested = HarborResultIngestor(artifact_persistence=self.artifact_persistence).ingest(
-            run_id=run.run_id,
-            task_instance_id=run.task.instance_id,
-            jobs_dir=result.jobs_dir,
-            trial_name=spec.trial_name,
-        )
+        ingestor = HarborResultIngestor(artifact_persistence=self.artifact_persistence)
+        try:
+            ingested = ingestor.ingest(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                jobs_dir=result.jobs_dir,
+                trial_name=spec.trial_name,
+            )
+        except ValueError as exc:
+            diagnostics = ingestor.failure_diagnostics(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                jobs_dir=result.jobs_dir,
+                error=exc,
+                trial_name=spec.trial_name,
+            )
+            _attach_harbor_failure_diagnostics(run, diagnostics)
+            run.failure_reason = diagnostics.message
+            run.metadata["failure"] = diagnostics.failure_payload()
+            run.metadata["harbor_runner"] = {
+                "jobs_dir": result.jobs_dir.name,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "duration_seconds": result.duration_seconds,
+            }
+            run.transition_to(RunStatus.FAILED)
+            return run
         _attach_harbor_ingestion(run, ingested)
         run.attach_artifact(
             self.artifact_persistence.persist_workspace_snapshot(
@@ -962,6 +987,13 @@ def _attach_harbor_ingestion(run: RunRecord, ingested: HarborIngestionResult) ->
     for turn in ingested.turns:
         run.add_turn(replace(turn, turn_index=len(run.trajectory)))
     for artifact in ingested.artifacts:
+        run.attach_artifact(artifact)
+
+
+def _attach_harbor_failure_diagnostics(run: RunRecord, diagnostics: HarborIngestionFailureDiagnostics) -> None:
+    for turn in diagnostics.turns:
+        run.add_turn(replace(turn, turn_index=len(run.trajectory)))
+    for artifact in diagnostics.artifacts:
         run.attach_artifact(artifact)
 
 

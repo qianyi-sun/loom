@@ -16,6 +16,7 @@ from agentic_data_platform.domain.run_records import (
     EvaluatorResult,
     TerminalTurn,
 )
+from agentic_data_platform.providers.config import redact_sensitive_metadata
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,23 @@ class HarborIngestionResult:
             "turns": [_turn_payload(turn) for turn in self.turns],
             "artifacts": [_artifact_payload(artifact) for artifact in self.artifacts],
             "evaluator_results": [_evaluator_payload(result) for result in self.evaluator_results],
+        }
+
+
+@dataclass(frozen=True)
+class HarborIngestionFailureDiagnostics:
+    category: str
+    message: str
+    turns: list[TerminalTurn]
+    artifacts: list[ArtifactRef]
+    metadata: dict[str, Any]
+
+    def failure_payload(self) -> dict[str, Any]:
+        return {
+            "category": self.category,
+            "source": "harbor_ingestion",
+            "message": self.message,
+            "metadata": dict(self.metadata),
         }
 
 
@@ -118,6 +136,103 @@ class HarborResultIngestor:
             evaluator_results=[verifier_result],
         )
 
+    def failure_diagnostics(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        jobs_dir: Path,
+        error: Exception,
+        trial_name: str | None = None,
+    ) -> HarborIngestionFailureDiagnostics:
+        message = str(error)
+        category = _failure_category(message)
+        diagnostics: dict[str, Any] = {
+            "schema_version": "harbor-ingestion-diagnostics-v1",
+            "category": category,
+            "source": "harbor_ingestion",
+            "message": message,
+            "jobs_dir": jobs_dir.name,
+        }
+        artifacts: list[ArtifactRef] = []
+        turns: list[TerminalTurn] = []
+
+        job_dir = _optional_job_dir(jobs_dir)
+        if job_dir is None:
+            diagnostics["jobs_dir_status"] = "missing"
+            diagnostics_ref = self.artifact_persistence.persist_harbor_ingestion_diagnostics(
+                run_id=run_id,
+                task_instance_id=task_instance_id,
+                diagnostics=diagnostics,
+            )
+            return HarborIngestionFailureDiagnostics(
+                category=category,
+                message=message,
+                turns=[],
+                artifacts=[diagnostics_ref],
+                metadata=_failure_metadata(diagnostics),
+            )
+
+        diagnostics["jobs_dir_status"] = "found"
+        diagnostics["job_name"] = job_dir.name
+        diagnostics["job_config"] = redact_sensitive_metadata(
+            _optional_json_object(job_dir / "config.json")
+        )
+        diagnostics["job_result"] = redact_sensitive_metadata(
+            _optional_json_object(job_dir / "result.json")
+        )
+        artifacts.append(
+            self.artifact_persistence.persist_harbor_jobs_archive(
+                run_id=run_id,
+                task_instance_id=task_instance_id,
+                job_name=job_dir.name,
+                jobs_dir=job_dir,
+            )
+        )
+
+        trial_dir = _optional_trial_dir(job_dir, trial_name=trial_name)
+        if trial_dir is not None:
+            diagnostics["trial_name"] = trial_dir.name
+            diagnostics["trial_config"] = redact_sensitive_metadata(
+                _optional_json_object(trial_dir / "config.json")
+            )
+            diagnostics["trial_result"] = redact_sensitive_metadata(
+                _optional_json_object(trial_dir / "result.json")
+            )
+            diagnostics["artifact_manifest"] = redact_sensitive_metadata(
+                _optional_json_value(trial_dir / "artifacts" / "manifest.json")
+            )
+            try:
+                turns = _read_trajectory(trial_dir / "agent" / "trajectory.json")
+            except ValueError as exc:
+                diagnostics["trajectory_error"] = str(exc)
+            else:
+                artifacts.append(
+                    self.artifact_persistence.persist_trajectory(
+                        run_id=run_id,
+                        task_instance_id=task_instance_id,
+                        turns=turns,
+                    )
+                )
+        else:
+            diagnostics["trial_status"] = "missing"
+            if trial_name:
+                diagnostics["requested_trial_name"] = trial_name
+
+        diagnostics_ref = self.artifact_persistence.persist_harbor_ingestion_diagnostics(
+            run_id=run_id,
+            task_instance_id=task_instance_id,
+            diagnostics=diagnostics,
+        )
+        artifacts.append(diagnostics_ref)
+        return HarborIngestionFailureDiagnostics(
+            category=category,
+            message=message,
+            turns=turns,
+            artifacts=artifacts,
+            metadata=_failure_metadata(diagnostics),
+        )
+
 
 def _resolve_job_dir(jobs_dir: Path) -> Path:
     if _is_harbor_job_dir(jobs_dir):
@@ -129,6 +244,13 @@ def _resolve_job_dir(jobs_dir: Path) -> Path:
     if len(job_dirs) > 1:
         raise ValueError("multiple Harbor jobs found; pass a single job directory")
     return job_dirs[0]
+
+
+def _optional_job_dir(jobs_dir: Path) -> Path | None:
+    try:
+        return _resolve_job_dir(jobs_dir)
+    except ValueError:
+        return None
 
 
 def _resolve_trial_dir(job_dir: Path, *, trial_name: str | None) -> Path:
@@ -144,6 +266,13 @@ def _resolve_trial_dir(job_dir: Path, *, trial_name: str | None) -> Path:
     if len(trial_dirs) > 1:
         raise ValueError("multiple Harbor trials found; pass trial_name to select one")
     return trial_dirs[0]
+
+
+def _optional_trial_dir(job_dir: Path, *, trial_name: str | None) -> Path | None:
+    try:
+        return _resolve_trial_dir(job_dir, trial_name=trial_name)
+    except ValueError:
+        return None
 
 
 def _is_harbor_job_dir(path: Path) -> bool:
@@ -164,6 +293,20 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Harbor JSON file must contain an object: {path.name}")
     return payload
+
+
+def _optional_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        return _read_json_object(path)
+    except ValueError:
+        return None
+
+
+def _optional_json_value(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
 
 def _read_trajectory(path: Path) -> list[TerminalTurn]:
@@ -262,6 +405,36 @@ def _trial_result_reward_payload(trial_result: dict[str, Any]) -> dict[str, Any]
     if not isinstance(rewards, dict):
         return None
     return dict(rewards)
+
+
+def _failure_category(message: str) -> str:
+    if "Missing Harbor verifier reward" in message:
+        return "harbor_verifier_missing_reward"
+    if "Harbor verifier reward must be numeric" in message or "Harbor verifier reward must be between" in message:
+        return "harbor_verifier_invalid_reward"
+    if "No Harbor job directory" in message:
+        return "harbor_jobs_missing"
+    if "No Harbor trial" in message or "Unknown Harbor trial" in message or "multiple Harbor trials" in message:
+        return "harbor_trial_resolution_failed"
+    if "trajectory" in message:
+        return "harbor_trajectory_parse_failed"
+    return "harbor_ingestion_failed"
+
+
+def _failure_metadata(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "schema_version",
+        "category",
+        "source",
+        "message",
+        "jobs_dir_status",
+        "job_name",
+        "trial_name",
+        "trial_status",
+        "requested_trial_name",
+        "trajectory_error",
+    ]
+    return {key: diagnostics[key] for key in keys if key in diagnostics}
 
 
 def _collected_artifact_refs(*, job_name: str, trial_name: str, trial_dir: Path) -> list[ArtifactRef]:
