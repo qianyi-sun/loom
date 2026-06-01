@@ -257,7 +257,10 @@ serializing dashboard payloads.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal
-  agent model provider path is available for API-model runs; a production
+  agent model provider path is available for API-model runs. #158 has started
+  an opt-in subprocess-isolated worker path where the parent worker claims the
+  run, launches `agentic_data_platform.worker.execution_child`, and reloads the
+  terminal state after the child persists the result. A production
   LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction

@@ -30,6 +30,8 @@ class ServiceSettings:
     harbor_task_upload_max_bytes: int = 10 * 1024 * 1024
     harbor_task_upload_max_files: int = 256
     harbor_task_upload_max_uncompressed_bytes: int = 50 * 1024 * 1024
+    worker_subprocess_isolation_enabled: bool = False
+    worker_subprocess_timeout_seconds: int = 7200
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -62,6 +64,8 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
             "HARBOR_TASK_UPLOAD_MAX_UNCOMPRESSED_BYTES",
             50 * 1024 * 1024,
         ),
+        worker_subprocess_isolation_enabled=_get_bool(values, "WORKER_SUBPROCESS_ISOLATION_ENABLED", False),
+        worker_subprocess_timeout_seconds=_get_int(values, "WORKER_SUBPROCESS_TIMEOUT_SECONDS", 7200),
     )
 
 
@@ -75,3 +79,10 @@ def _get_int(values: Mapping[str, str], key: str, default: int) -> int:
     if not value:
         return default
     return int(value)
+
+
+def _get_bool(values: Mapping[str, str], key: str, default: bool) -> bool:
+    value = _get(values, key, "")
+    if not value:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}

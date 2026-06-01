@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #158 worker subprocess-isolation slice. `SubprocessRunWorker`
+  can claim a DB-backed queued run, delegate execution to the short-lived
+  `agentic_data_platform.worker.execution_child` process, and reload terminal
+  state from Postgres; `WORKER_SUBPROCESS_ISOLATION_ENABLED` keeps the path
+  opt-in while #154 scheduler/event/storage work continues.
 - Added Harbor agent/model adaptation coverage for #150. Mainstream Harbor
   agents now expose model adapter metadata and required secret refs, the worker
   infers adapter env for agents such as `opencode` without relying on frontend

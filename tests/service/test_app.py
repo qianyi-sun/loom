@@ -39,6 +39,8 @@ class ServiceAppTest(unittest.TestCase):
                 "WEB_SESSION_TTL_SECONDS": "3600",
                 "SANDBOX_WORKSPACE_ROOT": "/workspace/.runtime/sandbox-workspaces",
                 "SANDBOX_HOST_WORKSPACE_ROOT": "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
+                "WORKER_SUBPROCESS_ISOLATION_ENABLED": "true",
+                "WORKER_SUBPROCESS_TIMEOUT_SECONDS": "1800",
             }
         )
 
@@ -65,6 +67,8 @@ class ServiceAppTest(unittest.TestCase):
             settings.sandbox_host_workspace_root,
             "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
         )
+        self.assertTrue(settings.worker_subprocess_isolation_enabled)
+        self.assertEqual(settings.worker_subprocess_timeout_seconds, 1800)
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))

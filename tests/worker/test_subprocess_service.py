@@ -1,0 +1,283 @@
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from sqlalchemy.pool import StaticPool
+
+from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
+from agentic_data_platform.domain.run_records import (
+    BenchmarkTaskInstance,
+    EvaluatorConfig,
+    JudgeConfig,
+    ModelConfig,
+    RunRecord,
+    RunStatus,
+    RunnerConfig,
+)
+from agentic_data_platform.persistence.database import create_database_engine, session_scope
+from agentic_data_platform.persistence.migrations import upgrade_database
+from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
+from agentic_data_platform.service.config import load_service_settings
+from agentic_data_platform.worker.executors import FixtureTerminalBenchmarkExecutor
+from agentic_data_platform.worker.service import (
+    SubprocessRunWorker,
+    build_configured_worker,
+    execute_claimed_run,
+)
+
+
+class SubprocessRunWorkerTest(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_database_engine(
+            "sqlite+pysqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        upgrade_database(self.engine)
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            IdentityRepository(session).create_user(
+                user_id="[REDACTED_OWNER]",
+                email="[REDACTED_OWNER]@example.com",
+                display_name="[REDACTED_OWNER]",
+                team_id="pilot-project",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+                created_by_user_id="[REDACTED_OWNER]",
+            )
+
+    def tearDown(self):
+        self.engine.dispose()
+
+    def test_subprocess_worker_claims_run_and_delegates_execution_to_child_command(self):
+        _create_run(self.engine, "run_subprocess_delegate_001")
+        command_runner = FakeWorkerSubprocessCommandRunner(self.engine, terminal_status=RunStatus.SUCCEEDED)
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-delegate-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(len(command_runner.calls), 1)
+        call = command_runner.calls[0]
+        args = call["args"]
+        self.assertEqual(call["timeout"], 123)
+        self.assertIn("-m", args)
+        self.assertIn("agentic_data_platform.worker.execution_child", args)
+        self.assertEqual(args[args.index("--run-id") + 1], "run_subprocess_delegate_001")
+        self.assertEqual(args[args.index("--worker-id") + 1], "worker-subprocess-test")
+        self.assertEqual(args[args.index("--request-id") + 1], "req-subprocess-delegate-001")
+
+    def test_subprocess_worker_marks_run_failed_when_child_exits_without_terminal_result(self):
+        _create_run(self.engine, "run_subprocess_child_crash_001")
+        command_runner = FakeWorkerSubprocessCommandRunner(self.engine, returncode=70, terminal_status=None)
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-crash-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-crash-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        with session_scope(self.engine) as session:
+            run = RunRepository(session).get_run("run_subprocess_child_crash_001")
+        self.assertIn("Worker subprocess exited with code 70", run.failure_reason)
+        self.assertEqual(run.metadata["failure"]["category"], "worker_subprocess_failed")
+
+    def test_subprocess_worker_marks_run_failed_when_child_returns_without_terminalizing(self):
+        _create_run(self.engine, "run_subprocess_child_incomplete_001")
+        command_runner = FakeWorkerSubprocessCommandRunner(self.engine, returncode=0, terminal_status=None)
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-incomplete-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-incomplete-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        with session_scope(self.engine) as session:
+            run = RunRepository(session).get_run("run_subprocess_child_incomplete_001")
+        self.assertIn("Worker subprocess exited without saving a terminal run result", run.failure_reason)
+        self.assertEqual(run.metadata["failure"]["category"], "worker_subprocess_failed")
+
+    def test_execute_claimed_run_saves_executor_result_in_child_boundary(self):
+        _create_run(self.engine, "run_subprocess_child_execute_001")
+        with session_scope(self.engine) as session:
+            RunRepository(session).claim_next_queued_run(
+                worker_id="worker-child-boundary-test",
+                request_id="req-child-claim-001",
+            )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = execute_claimed_run(
+                engine=self.engine,
+                worker_id="worker-child-boundary-test",
+                run_id="run_subprocess_child_execute_001",
+                request_id="req-child-execute-001",
+                executor=FixtureTerminalBenchmarkExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(Path(temp_dir))),
+                ),
+            )
+
+        self.assertEqual(result.status, "succeeded")
+        with session_scope(self.engine) as session:
+            loaded = RunRepository(session).get_run("run_subprocess_child_execute_001")
+        self.assertEqual(loaded.status, RunStatus.SUCCEEDED)
+        self.assertEqual(len(loaded.trajectory), 1)
+
+    def test_configured_subprocess_worker_does_not_build_parent_executor(self):
+        settings = load_service_settings(
+            {
+                "DATABASE_URL": "sqlite+pysqlite:///:memory:",
+                "WORKER_SUBPROCESS_ISOLATION_ENABLED": "true",
+                "WORKER_SUBPROCESS_TIMEOUT_SECONDS": "456",
+            }
+        )
+
+        with patch(
+            "agentic_data_platform.worker.service.build_configured_executor",
+            side_effect=AssertionError("parent should not build execution resources"),
+        ):
+            worker = build_configured_worker(
+                settings,
+                worker_id="worker-subprocess-configured-test",
+            )
+
+        self.assertIsInstance(worker, SubprocessRunWorker)
+        self.assertEqual(worker.timeout_seconds, 456)
+
+
+def _create_run(engine, run_id: str) -> None:
+    payload = _run_create_payload(run_id)
+    with session_scope(engine) as session:
+        RunRepository(session).create_run(
+            RunRecord.create(
+                run_id=run_id,
+                project_id=payload["project_id"],
+                owner_team=payload["owner_team"],
+                created_by_user_id=payload["created_by_user_id"],
+                task=BenchmarkTaskInstance(**payload["task"]),
+                model=ModelConfig(**payload["model"]),
+                runner=RunnerConfig(**payload["runner"]),
+                evaluator_configs=[
+                    EvaluatorConfig(
+                        evaluator_id=item["evaluator_id"],
+                        mode=item["mode"],
+                        judge=JudgeConfig(**item["judge"]) if item.get("judge") else None,
+                    )
+                    for item in payload["evaluators"]
+                ],
+                metadata=payload["metadata"],
+            )
+        )
+
+
+def _run_create_payload(run_id: str) -> dict:
+    return {
+        "run_id": run_id,
+        "project_id": "pilot-project",
+        "owner_team": "pilot group",
+        "created_by_user_id": "[REDACTED_OWNER]",
+        "task": {
+            "benchmark_suite": "SkillLearnBench",
+            "benchmark_version": "git:cxcscmu/SkillLearnBench@abc123",
+            "task_family": "spreadsheet-from-documents",
+            "instance_id": "conference-expense-03",
+            "source_uri": "https://github.com/cxcscmu/SkillLearnBench",
+            "input_artifact_refs": ["s3://agentic-data-shared dev/benchmarks/skilllearnbench/input.tar.zst"],
+            "required_artifacts": ["trajectory", "workspace_snapshot", "evaluator_report"],
+            "metadata": {"instruction": "Read receipts and create receipts.xlsx."},
+        },
+        "model": {
+            "provider": "mock-api",
+            "model_name": "scripted-terminal-agent",
+            "mode": "api",
+            "prompt_template_version": "terminal-agent-v0",
+        },
+        "runner": {
+            "kind": "original_benchmark",
+            "sandbox_backend": "docker_terminal",
+            "image": "python:3.12-slim",
+            "entrypoint": ["python", "-m", "agentic_data_platform.benchmark_wrappers.skilllearnbench"],
+            "internet_access": True,
+            "resource_limits": {"cpu": 2, "memory_gib": 8, "timeout_seconds": 3600},
+            "metadata": {"runner_contract": "skilllearnbench-original-wrapper-v0"},
+        },
+        "evaluators": [
+            {
+                "evaluator_id": "mock-judge-v0",
+                "mode": "llm_judge",
+                "judge": {
+                    "provider": "mock",
+                    "model_name": "deterministic-judge",
+                    "rubric_version": "latent-skill-v0",
+                },
+            }
+        ],
+        "metadata": {"worker_fixture_commands": ["python solve.py"]},
+    }
+
+
+class FakeWorkerSubprocessCommandRunner:
+    def __init__(
+        self,
+        engine,
+        *,
+        returncode: int = 0,
+        terminal_status: RunStatus | None = RunStatus.SUCCEEDED,
+    ) -> None:
+        self.engine = engine
+        self.returncode = returncode
+        self.terminal_status = terminal_status
+        self.calls: list[dict[str, object]] = []
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
+        if self.terminal_status is not None:
+            run_id = args[args.index("--run-id") + 1]
+            worker_id = args[args.index("--worker-id") + 1]
+            request_id = args[args.index("--request-id") + 1]
+            with session_scope(self.engine) as session:
+                repository = RunRepository(session)
+                run = repository.get_run(run_id)
+                run.transition_to(RunStatus.RUNNING)
+                if self.terminal_status is RunStatus.SUCCEEDED:
+                    run.transition_to(RunStatus.EVALUATING)
+                elif self.terminal_status is RunStatus.FAILED:
+                    run.failure_reason = "child failed"
+                run.transition_to(self.terminal_status)
+                repository.save_worker_result(run, worker_id=worker_id, request_id=request_id)
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=self.returncode,
+            stdout="child complete\n",
+            stderr="",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
