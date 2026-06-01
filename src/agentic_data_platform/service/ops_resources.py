@@ -42,6 +42,7 @@ def _example_response(example: dict[str, Any]) -> dict[int, dict[str, Any]]:
 _METRICS_EXAMPLE = {
     "runs_by_status": {
         "queued": 4,
+        "dispatched": 1,
         "provisioning": 1,
         "running": 2,
         "evaluating": 1,

@@ -453,6 +453,100 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[1].request_id, "req-claim-001")
         self.assertEqual(events[1].metadata["worker_id"], "worker-a")
 
+    def test_run_repository_dispatches_queued_runs_with_global_capacity(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+
+            for index in range(3):
+                runs.create_run(_queued_run(run_id=f"run_dispatch_global_{index}"))
+
+            first_batch = runs.dispatch_queued_runs(
+                scheduler_id="scheduler-a",
+                max_runs=2,
+                request_id="req-dispatch-global-001",
+            )
+            second_batch = runs.dispatch_queued_runs(
+                scheduler_id="scheduler-b",
+                max_runs=2,
+                request_id="req-dispatch-global-002",
+            )
+            events = runs.list_status_events("run_dispatch_global_0")
+            statuses = {
+                run.run_id: run.status
+                for run in runs.list_runs(project_id="pilot-project")
+                if run.run_id.startswith("run_dispatch_global_")
+            }
+
+        self.assertEqual([run.run_id for run in first_batch], ["run_dispatch_global_0", "run_dispatch_global_1"])
+        self.assertEqual(second_batch, [])
+        self.assertEqual(statuses["run_dispatch_global_0"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_dispatch_global_1"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_dispatch_global_2"], RunStatus.QUEUED)
+        self.assertEqual([event.event_type for event in events], ["run.created", "run.dispatched"])
+        self.assertEqual(events[1].from_status, RunStatus.QUEUED)
+        self.assertEqual(events[1].to_status, RunStatus.DISPATCHED)
+        self.assertEqual(events[1].request_id, "req-dispatch-global-001")
+        self.assertEqual(events[1].metadata["scheduler_id"], "scheduler-a")
+
+    def test_run_repository_dispatch_respects_backend_and_project_capacity(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            identities = IdentityRepository(session)
+            identities.create_team(team_id="foundation-model", name="pilot group")
+            ProjectRepository(session).create_project(
+                project_id="foundation-model",
+                name="Model Research",
+                owner_team_id="foundation-model",
+            )
+            runs = RunRepository(session)
+
+            latent_a = _queued_run(run_id="run_dispatch_latent_a")
+            latent_a.runner.metadata["harness_id"] = "harbor-local-docker"
+            latent_b = _queued_run(run_id="run_dispatch_latent_b")
+            latent_b.runner.metadata["harness_id"] = "harbor-local-docker"
+            foundation = _queued_run(run_id="run_dispatch_foundation")
+            foundation.project_id = "foundation-model"
+            foundation.owner_team = "pilot group"
+            foundation.runner.metadata["harness_id"] = "harbor-local-docker"
+
+            runs.create_run(latent_a)
+            runs.create_run(latent_b)
+            runs.create_run(foundation)
+
+            dispatched = runs.dispatch_queued_runs(
+                scheduler_id="scheduler-a",
+                max_runs=3,
+                backend_limits={"harbor-local-docker": 2},
+                project_limits={"pilot-project": 1, "foundation-model": 1},
+                request_id="req-dispatch-capacity-001",
+            )
+            statuses = {
+                run.run_id: run.status
+                for run in runs.list_runs()
+                if run.run_id.startswith("run_dispatch_")
+            }
+
+        self.assertEqual([run.run_id for run in dispatched], ["run_dispatch_latent_a", "run_dispatch_foundation"])
+        self.assertEqual(statuses["run_dispatch_latent_a"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_dispatch_latent_b"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_dispatch_foundation"], RunStatus.DISPATCHED)
+
+    def test_run_repository_dispatch_skips_canceled_runs(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            canceled = _queued_run(run_id="run_dispatch_canceled")
+            eligible = _queued_run(run_id="run_dispatch_eligible")
+
+            runs.create_run(canceled)
+            runs.create_run(eligible)
+            runs.cancel_run(canceled.run_id, reason="user canceled before dispatch")
+            dispatched = runs.dispatch_queued_runs(scheduler_id="scheduler-a", max_runs=2)
+
+        self.assertEqual([run.run_id for run in dispatched], ["run_dispatch_eligible"])
+        self.assertEqual(dispatched[0].status, RunStatus.DISPATCHED)
+
     def test_run_repository_does_not_overwrite_canceled_run_with_late_worker_result(self):
         run = _queued_run(run_id="run_cancel_after_claim_001")
 
@@ -651,6 +745,19 @@ def _log_artifact(artifact_id: str) -> ArtifactRef:
         sha256="4" * 64,
         size_bytes=256,
         metadata={"storage_key": f"runs/{artifact_id}.json"},
+    )
+
+
+def _seed_latent_project(session) -> None:
+    identities = IdentityRepository(session)
+    identities.create_team(
+        team_id="pilot-project",
+        name="pilot group",
+    )
+    ProjectRepository(session).create_project(
+        project_id="pilot-project",
+        name="pilot group",
+        owner_team_id="pilot-project",
     )
 
 

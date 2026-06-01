@@ -109,6 +109,7 @@ def _example_response(example: dict[str, Any]) -> dict[int, dict[str, Any]]:
 _TERMINAL_STATUSES = {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}
 _RUNS_BY_STATUS_EXAMPLE = {
     "queued": 4,
+    "dispatched": 1,
     "provisioning": 1,
     "running": 2,
     "evaluating": 1,

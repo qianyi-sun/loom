@@ -146,7 +146,7 @@ def _sysconf(name: str) -> int | None:
 
 
 def _worker_state(status: RunStatus) -> str:
-    if status in {RunStatus.QUEUED, RunStatus.PROVISIONING}:
+    if status in {RunStatus.QUEUED, RunStatus.DISPATCHED, RunStatus.PROVISIONING}:
         return "waiting"
     if status in {RunStatus.RUNNING, RunStatus.EVALUATING}:
         return "active"
@@ -154,7 +154,7 @@ def _worker_state(status: RunStatus) -> str:
 
 
 def _sandbox_status(status: RunStatus) -> str:
-    if status in {RunStatus.QUEUED, RunStatus.PROVISIONING}:
+    if status in {RunStatus.QUEUED, RunStatus.DISPATCHED, RunStatus.PROVISIONING}:
         return "pending"
     if status is RunStatus.RUNNING:
         return "running"

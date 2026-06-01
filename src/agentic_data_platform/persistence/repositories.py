@@ -494,16 +494,121 @@ class RunRepository:
         self.session.flush()
         return self.get_run(run_id)
 
+    def dispatch_queued_runs(
+        self,
+        *,
+        scheduler_id: str,
+        max_runs: int,
+        backend_limits: dict[str, int] | None = None,
+        project_limits: dict[str, int] | None = None,
+        request_id: str | None = None,
+    ) -> list[RunRecord]:
+        _require_non_empty("scheduler_id", scheduler_id)
+        if max_runs <= 0:
+            return []
+
+        backend_limits = _positive_limits(backend_limits or {})
+        project_limits = _positive_limits(project_limits or {})
+        active_statuses = {
+            RunStatus.DISPATCHED.value,
+            RunStatus.PROVISIONING.value,
+            RunStatus.RUNNING.value,
+            RunStatus.EVALUATING.value,
+        }
+        active_rows = list(self.session.scalars(select(RunRow).where(RunRow.status.in_(active_statuses))))
+        active_total = len(active_rows)
+        remaining_global_capacity = max_runs - active_total
+        if remaining_global_capacity <= 0:
+            return []
+
+        active_by_backend: dict[str, int] = {}
+        active_by_project: dict[str, int] = {}
+        for row in active_rows:
+            _increment(active_by_backend, _backend_capacity_key(row))
+            _increment(active_by_project, row.project_id)
+
+        candidates = self.session.scalars(
+            select(RunRow)
+            .where(RunRow.status == RunStatus.QUEUED.value)
+            .order_by(RunRow.created_at, RunRow.run_id)
+            .with_for_update(skip_locked=True)
+            .limit(max(max_runs * 5, 25))
+        )
+        dispatched_ids: list[str] = []
+        for row in candidates:
+            if len(dispatched_ids) >= remaining_global_capacity:
+                break
+            backend_key = _backend_capacity_key(row)
+            if _at_capacity(active_by_backend, backend_key, backend_limits):
+                continue
+            if _at_capacity(active_by_project, row.project_id, project_limits):
+                continue
+
+            previous_status = RunStatus(row.status)
+            run = self._run_record(row)
+            run.transition_to(RunStatus.DISPATCHED)
+            row.status = run.status.value
+            row.updated_at = run.updated_at
+
+            attempt = self._latest_attempt_row(run.run_id)
+            attempt.status = run.status.value
+            attempt.updated_at = utc_now()
+
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type="run.dispatched",
+                from_status=previous_status,
+                to_status=RunStatus.DISPATCHED,
+                request_id=request_id,
+                metadata={
+                    "scheduler_id": scheduler_id,
+                    "backend_key": backend_key,
+                    "project_id": row.project_id,
+                },
+            )
+            _increment(active_by_backend, backend_key)
+            _increment(active_by_project, row.project_id)
+            dispatched_ids.append(run.run_id)
+
+        self.session.flush()
+        return [self.get_run(run_id) for run_id in dispatched_ids]
+
     def claim_next_queued_run(
         self,
         *,
         worker_id: str,
         request_id: str | None = None,
     ) -> RunRecord | None:
+        return self._claim_next_run(
+            status=RunStatus.QUEUED,
+            worker_id=worker_id,
+            request_id=request_id,
+        )
+
+    def claim_next_dispatched_run(
+        self,
+        *,
+        worker_id: str,
+        request_id: str | None = None,
+    ) -> RunRecord | None:
+        return self._claim_next_run(
+            status=RunStatus.DISPATCHED,
+            worker_id=worker_id,
+            request_id=request_id,
+        )
+
+    def _claim_next_run(
+        self,
+        *,
+        status: RunStatus,
+        worker_id: str,
+        request_id: str | None,
+    ) -> RunRecord | None:
         _require_non_empty("worker_id", worker_id)
         row = self.session.scalar(
             select(RunRow)
-            .where(RunRow.status == RunStatus.QUEUED.value)
+            .where(RunRow.status == status.value)
             .order_by(RunRow.created_at, RunRow.run_id)
             .with_for_update(skip_locked=True)
             .limit(1)
@@ -934,6 +1039,35 @@ class AuditEventRepository:
         if run_id is not None:
             query = query.where(AuditEventRow.run_id == run_id)
         return [_audit_event_record(row) for row in self.session.scalars(query)]
+
+
+def _positive_limits(limits: dict[str, int]) -> dict[str, int]:
+    cleaned: dict[str, int] = {}
+    for key, value in limits.items():
+        if value > 0:
+            cleaned[key] = value
+    return cleaned
+
+
+def _increment(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _at_capacity(counts: dict[str, int], key: str, limits: dict[str, int]) -> bool:
+    limit = limits.get(key)
+    return limit is not None and counts.get(key, 0) >= limit
+
+
+def _backend_capacity_key(row: RunRow) -> str:
+    metadata = dict(row.runner_metadata or {})
+    for key in ("harness_id", "backend_id", "runner_backend"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    runner_contract = metadata.get("runner_contract")
+    if runner_contract == "harbor-local-docker-v0":
+        return "harbor-local-docker"
+    return row.sandbox_backend
 
 
 def _team_record(row: TeamRow) -> TeamRecord:

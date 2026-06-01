@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #156 scheduler/capacity-gate slice. Runs can now move through
+  `queued -> dispatched -> provisioning`, `RunRepository.dispatch_queued_runs`
+  gates dispatch by global, backend, and project active-run capacity,
+  `RunScheduler` reads those limits from service settings, workers prefer
+  dispatched runs while keeping the legacy queued-claim path for compatibility,
+  and dashboard/ops/telemetry status summaries include the `dispatched` state.
 - Added the first #157 durable run-event replay and SSE slice. Lifecycle
   events now expose monotonic `seq` watermarks, `GET /runs/{run_id}/events`
   supports `after_seq` replay, `GET /runs/{run_id}/stream` emits replayable SSE

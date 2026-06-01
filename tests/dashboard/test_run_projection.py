@@ -23,10 +23,13 @@ class RunDashboardProjectionTest(unittest.TestCase):
     def test_projection_exposes_all_mvp_run_statuses(self):
         for status in [
             RunStatus.QUEUED,
+            RunStatus.DISPATCHED,
+            RunStatus.PROVISIONING,
             RunStatus.RUNNING,
             RunStatus.EVALUATING,
             RunStatus.SUCCEEDED,
             RunStatus.FAILED,
+            RunStatus.CANCELED,
         ]:
             with self.subTest(status=status):
                 run = _minimal_run(status=status)
@@ -35,7 +38,10 @@ class RunDashboardProjectionTest(unittest.TestCase):
 
                 self.assertEqual(payload["status"], status.value)
                 self.assertEqual(payload["progress"]["status"], status.value)
-                self.assertEqual(payload["progress"]["is_terminal"], status in {RunStatus.SUCCEEDED, RunStatus.FAILED})
+                self.assertEqual(
+                    payload["progress"]["is_terminal"],
+                    status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED},
+                )
                 self.assertEqual(payload["project"]["project_id"], "pilot-project")
                 self.assertEqual(payload["task"]["instance_id"], "conference-expense-03")
                 self.assertIsInstance(json.dumps(payload), str)

@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository
+from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
@@ -92,6 +92,65 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
         )
         self.assertEqual(payload["lifecycle_events"][1]["metadata"]["worker_id"], "worker-test")
+
+    def test_worker_claims_scheduler_dispatched_run(self):
+        create_response = self.client.post(
+            "/runs",
+            json=_run_create_payload("run_worker_dispatched_001"),
+            headers={"X-Request-ID": "req-create-worker-dispatched-001"},
+        )
+        self.assertEqual(create_response.status_code, 201)
+        with session_scope(self.engine) as session:
+            dispatched = RunRepository(session).dispatch_queued_runs(
+                scheduler_id="scheduler-test",
+                max_runs=1,
+                request_id="req-dispatch-worker-001",
+            )
+        self.assertEqual([run.run_id for run in dispatched], ["run_worker_dispatched_001"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-test",
+                executor=FixtureTerminalBenchmarkExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(Path(temp_dir))),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-dispatched-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.run_id, "run_worker_dispatched_001")
+        self.assertEqual(result.status, "succeeded")
+        detail = self.client.get("/runs/run_worker_dispatched_001")
+        self.assertEqual(
+            [event["event_type"] for event in detail.json()["lifecycle_events"]],
+            ["run.created", "run.dispatched", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+        )
+        self.assertEqual(detail.json()["lifecycle_events"][2]["from_status"], "dispatched")
+
+    def test_worker_can_disable_legacy_queued_claim_fallback(self):
+        create_response = self.client.post(
+            "/runs",
+            json=_run_create_payload("run_worker_requires_dispatch_001"),
+        )
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-test",
+                executor=FixtureTerminalBenchmarkExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(Path(temp_dir))),
+                ),
+                allow_legacy_queue_claim=False,
+            )
+
+            result = worker.run_once(request_id="req-worker-no-legacy-001")
+
+        self.assertIsNone(result)
+        detail = self.client.get("/runs/run_worker_requires_dispatch_001")
+        self.assertEqual(detail.json()["run"]["status"], "queued")
 
     def test_worker_returns_none_when_no_queued_run_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -41,6 +41,10 @@ class ServiceAppTest(unittest.TestCase):
                 "SANDBOX_HOST_WORKSPACE_ROOT": "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
                 "WORKER_SUBPROCESS_ISOLATION_ENABLED": "true",
                 "WORKER_SUBPROCESS_TIMEOUT_SECONDS": "1800",
+                "WORKER_LEGACY_QUEUE_CLAIM_ENABLED": "true",
+                "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS": "8",
+                "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS": "harbor-local-docker=3,docker_terminal=2",
+                "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS": "pilot-project=2,foundation-model=1",
             }
         )
 
@@ -69,6 +73,16 @@ class ServiceAppTest(unittest.TestCase):
         )
         self.assertTrue(settings.worker_subprocess_isolation_enabled)
         self.assertEqual(settings.worker_subprocess_timeout_seconds, 1800)
+        self.assertTrue(settings.worker_legacy_queue_claim_enabled)
+        self.assertEqual(settings.scheduler_global_max_active_runs, 8)
+        self.assertEqual(
+            settings.scheduler_backend_max_active_runs,
+            {"harbor-local-docker": 3, "docker_terminal": 2},
+        )
+        self.assertEqual(
+            settings.scheduler_project_max_active_runs,
+            {"pilot-project": 2, "foundation-model": 1},
+        )
 
     def test_health_endpoint_returns_service_identity(self):
         client = TestClient(create_app(_settings()))

@@ -256,10 +256,14 @@ serializing dashboard payloads.
 
 ## Current Limits
 
-- Queue execution uses the Postgres `runs` table as the documented v0 queue.
-  `RunRepository.claim_next_queued_run(...)` lets a worker claim one queued run
-  and record lifecycle events. Redis remains available in the dev stack for a
-  later queue/cache backend, but it is not the current source of truth.
+- Queue execution uses the Postgres `runs` table as the documented durable v0
+  queue. `RunRepository.dispatch_queued_runs(...)` lets a scheduler move
+  eligible rows from `queued` to `dispatched` after checking global, backend,
+  and project active-run capacity, and records `run.dispatched` lifecycle
+  events. Workers then prefer `RunRepository.claim_next_dispatched_run(...)`
+  before the legacy queued-claim compatibility path. Redis remains available in
+  the dev stack for a later queue/cache backend, but it is not the current
+  source of truth.
 - #157 has started the durable live-event migration. The current slice reuses
   `run_status_events.id` as the replay sequence, exposes replay and SSE routes,
   and keeps telemetry polling available. It does not yet implement Redis

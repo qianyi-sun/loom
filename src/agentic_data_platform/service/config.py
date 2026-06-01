@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 
@@ -32,6 +32,10 @@ class ServiceSettings:
     harbor_task_upload_max_uncompressed_bytes: int = 50 * 1024 * 1024
     worker_subprocess_isolation_enabled: bool = False
     worker_subprocess_timeout_seconds: int = 7200
+    worker_legacy_queue_claim_enabled: bool = False
+    scheduler_global_max_active_runs: int = 1
+    scheduler_backend_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_project_max_active_runs: dict[str, int] = field(default_factory=dict)
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -66,6 +70,10 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         ),
         worker_subprocess_isolation_enabled=_get_bool(values, "WORKER_SUBPROCESS_ISOLATION_ENABLED", False),
         worker_subprocess_timeout_seconds=_get_int(values, "WORKER_SUBPROCESS_TIMEOUT_SECONDS", 7200),
+        worker_legacy_queue_claim_enabled=_get_bool(values, "WORKER_LEGACY_QUEUE_CLAIM_ENABLED", False),
+        scheduler_global_max_active_runs=_get_int(values, "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS", 1),
+        scheduler_backend_max_active_runs=_get_int_map(values, "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS"),
+        scheduler_project_max_active_runs=_get_int_map(values, "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS"),
     )
 
 
@@ -86,3 +94,22 @@ def _get_bool(values: Mapping[str, str], key: str, default: bool) -> bool:
     if not value:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _get_int_map(values: Mapping[str, str], key: str) -> dict[str, int]:
+    raw_value = _get(values, key, "")
+    if not raw_value:
+        return {}
+
+    parsed: dict[str, int] = {}
+    for item in raw_value.split(","):
+        if not item.strip():
+            continue
+        name, separator, value = item.partition("=")
+        if not separator:
+            raise ValueError(f"{key} entries must use name=value syntax")
+        name = name.strip()
+        if not name:
+            raise ValueError(f"{key} entries must include a non-empty name")
+        parsed[name] = int(value.strip())
+    return parsed

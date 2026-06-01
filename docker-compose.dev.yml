@@ -52,6 +52,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       SANDBOX_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}
       SANDBOX_HOST_WORKSPACE_ROOT: ${SANDBOX_HOST_WORKSPACE_ROOT:-}
+      WORKER_LEGACY_QUEUE_CLAIM_ENABLED: ${WORKER_LEGACY_QUEUE_CLAIM_ENABLED:-false}
     volumes:
       - .:/workspace
       - ${SANDBOX_HOST_WORKSPACE_ROOT:-./.runtime/sandbox-workspaces}:${SANDBOX_HOST_WORKSPACE_ROOT:-/workspace/.runtime/sandbox-workspaces}
@@ -64,6 +65,28 @@ services:
       minio:
         condition: service_started
     command: python -m agentic_data_platform.worker.service --worker-id worker-dev-1 --poll-interval-seconds 5
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file: *app-env-files
+    environment:
+      DATABASE_URL: postgresql://agentic:[REDACTED_DB_PASSWORD]@postgres:5432/agentic_data_platform
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS: ${SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS:-1}
+      SCHEDULER_BACKEND_MAX_ACTIVE_RUNS: ${SCHEDULER_BACKEND_MAX_ACTIVE_RUNS:-}
+      SCHEDULER_PROJECT_MAX_ACTIVE_RUNS: ${SCHEDULER_PROJECT_MAX_ACTIVE_RUNS:-}
+    volumes:
+      - .:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m agentic_data_platform.scheduler.service --scheduler-id scheduler-dev-1 --poll-interval-seconds 5
 
   app:
     build:
@@ -216,6 +239,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      scheduler:
+        condition: service_started
       worker:
         condition: service_started
     profiles:
@@ -241,6 +266,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      scheduler:
+        condition: service_started
       worker:
         condition: service_started
     profiles:
@@ -273,6 +300,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      scheduler:
+        condition: service_started
       worker:
         condition: service_started
     profiles:

@@ -49,16 +49,20 @@ class RunWorker:
         engine: Engine,
         worker_id: str,
         executor: WorkerRunExecutor,
+        allow_legacy_queue_claim: bool = True,
     ) -> None:
         _require_non_empty("worker_id", worker_id)
         self.engine = engine
         self.worker_id = worker_id
         self.executor = executor
+        self.allow_legacy_queue_claim = allow_legacy_queue_claim
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
         with session_scope(self.engine) as session:
             repository = RunRepository(session)
-            claimed = repository.claim_next_queued_run(worker_id=self.worker_id, request_id=request_id)
+            claimed = repository.claim_next_dispatched_run(worker_id=self.worker_id, request_id=request_id)
+            if claimed is None and self.allow_legacy_queue_claim:
+                claimed = repository.claim_next_queued_run(worker_id=self.worker_id, request_id=request_id)
 
         if claimed is None:
             return None
@@ -93,6 +97,7 @@ class SubprocessRunWorker:
         worker_id: str,
         command_runner: CommandRunner | None = None,
         timeout_seconds: int = 7200,
+        allow_legacy_queue_claim: bool = True,
     ) -> None:
         _require_non_empty("worker_id", worker_id)
         if timeout_seconds <= 0:
@@ -101,11 +106,14 @@ class SubprocessRunWorker:
         self.worker_id = worker_id
         self.command_runner = command_runner or SubprocessCommandRunner()
         self.timeout_seconds = timeout_seconds
+        self.allow_legacy_queue_claim = allow_legacy_queue_claim
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
         with session_scope(self.engine) as session:
             repository = RunRepository(session)
-            claimed = repository.claim_next_queued_run(worker_id=self.worker_id, request_id=request_id)
+            claimed = repository.claim_next_dispatched_run(worker_id=self.worker_id, request_id=request_id)
+            if claimed is None and self.allow_legacy_queue_claim:
+                claimed = repository.claim_next_queued_run(worker_id=self.worker_id, request_id=request_id)
 
         if claimed is None:
             return None
@@ -194,12 +202,14 @@ def build_configured_worker(
             engine=engine,
             worker_id=worker_id,
             timeout_seconds=service_settings.worker_subprocess_timeout_seconds,
+            allow_legacy_queue_claim=service_settings.worker_legacy_queue_claim_enabled,
         )
     executor = build_configured_executor(service_settings)
     return RunWorker(
         engine=engine,
         worker_id=worker_id,
         executor=executor,
+        allow_legacy_queue_claim=service_settings.worker_legacy_queue_claim_enabled,
     )
 
 
