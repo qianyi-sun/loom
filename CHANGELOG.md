@@ -4,10 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a platform-maintained SkillFlow upstream source patch for #117. The
+  upstream source lock records the applied patch id and SHA-256, and the patch
+  updates the pinned SkillFlow runner to Harbor's `Task.is_valid_dir` and
+  `await Job.create(...)` APIs. Real SkillFlow smoke now reaches Harbor job
+  execution and records Docker-environment failures as upstream artifacts.
+- Expanded SkillFlow JSON report normalization for real Harbor job `result.json`
+  stats, including completed/errored trial counts, evaluator error count, and
+  mean score.
 - Corrected the SkillFlow executable wrapper command for #22 so single-family
   runs pass `--dataset-path test_tasks/<task_family>` to the pinned upstream
-  runner. Real upstream smoke exposed broader SkillFlow/Harbor API drift now
-  tracked as #117 instead of adding temporary runtime wrapper shims.
+  runner. Real upstream smoke exposed broader SkillFlow/Harbor API drift, which
+  is handled through the tracked source patch above instead of temporary runtime
+  wrapper shims.
 - Added suite-specific upstream evaluator report normalization for #22.
   SkillFlow JSON reports and SkillLearnBench `report.csv` outputs are summarized
   into `artifacts/evaluator-report.json`, normalized wrapper `metrics`, and an

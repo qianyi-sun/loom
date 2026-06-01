@@ -107,6 +107,42 @@ class UpstreamSourceMaterializationTest(unittest.TestCase):
         self.assertEqual(lock["source_version"], revision)
         self.assertTrue(has_git_metadata)
 
+    def test_applies_skillflow_harbor_api_patch_and_records_lock_metadata(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_root = temp_path / "skillflow-source"
+            _write_skillflow_runner_sources(source_root)
+
+            materialized = materialize_upstream_source(
+                UpstreamSourceSpec(
+                    suite_name="SkillFlow",
+                    source_type="local-tree",
+                    source_uri=str(source_root),
+                    source_version="skillflow-test-snapshot",
+                ),
+                cache_root=temp_path / "cache",
+            )
+
+            lock = json.loads(materialized.lock_path.read_text(encoding="utf-8"))
+            family_runner = (materialized.root / "family_job_runner.py").read_text(encoding="utf-8")
+            iterative_runner = (materialized.root / "iterative_shared_skills_runner.py").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            materialized.applied_patches,
+            ["skillflow-harbor-api-compat-20260601"],
+        )
+        self.assertEqual(
+            [patch["id"] for patch in lock["applied_patches"]],
+            ["skillflow-harbor-api-compat-20260601"],
+        )
+        self.assertRegex(lock["applied_patches"][0]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn("from harbor.models.task.task import Task", family_runner)
+        self.assertIn("Task.is_valid_dir(path, disable_verification=disable_verification)", family_runner)
+        self.assertIn("job = await Job.create(group_config)", family_runner)
+        self.assertIn("from harbor.models.task.task import Task", iterative_runner)
+        self.assertIn("Task.is_valid_dir(path, disable_verification=disable_verification)", iterative_runner)
+        self.assertIn("job = await Job.create(group_config)", iterative_runner)
+
     def test_rejects_unknown_source_type(self):
         with TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "Unsupported upstream source type"):
@@ -124,6 +160,39 @@ class UpstreamSourceMaterializationTest(unittest.TestCase):
 def _write(path: Path, text: str = "fixture\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _write_skillflow_runner_sources(root: Path) -> None:
+    _write_numbered_file(
+        root / "family_job_runner.py",
+        line_count=420,
+        lines={
+            34: "from harbor.models.task.paths import TaskPaths\n",
+            123: "            if TaskPaths(path).is_valid(disable_verification=disable_verification)\n",
+            416: "        job = Job(config=group_config)\n",
+            417: "        job.on_trial_ended(on_trial_ended_hook)\n",
+            418: "        result = asyncio.run(job.run())\n",
+        },
+    )
+    _write_numbered_file(
+        root / "iterative_shared_skills_runner.py",
+        line_count=786,
+        lines={
+            40: "from harbor.models.task.paths import TaskPaths\n",
+            148: "            if TaskPaths(path).is_valid(disable_verification=disable_verification)\n",
+            781: "        job = Job(config=group_config)\n",
+            782: "        job.on_trial_ended(on_trial_ended_hook)\n",
+            784: "        # Harbor Job.run 是 async，需要在同步入口中执行\n",
+            785: "        result = asyncio.run(job.run())\n",
+        },
+    )
+
+
+def _write_numbered_file(path: Path, *, line_count: int, lines: dict[int, str]) -> None:
+    content = ["\n"] * line_count
+    for line_number, line in lines.items():
+        content[line_number - 1] = line
+    _write(path, "".join(content))
 
 
 def _init_git_repo(path: Path) -> None:

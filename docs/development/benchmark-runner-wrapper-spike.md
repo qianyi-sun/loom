@@ -259,6 +259,15 @@ task families and task instances, verifies each instance has `instruction.md`
 and `task.toml`, and returns the same `BenchmarkFixtureCatalog` shape used by
 checked-in seed fixtures.
 
+The upstream source materializer also owns source-level compatibility patches.
+For the pinned SkillFlow runner commit
+`7b49ff5a7e26cd7706e959bfa0dba4746d18440d`, it applies
+`skillflow-harbor-api-compat-20260601`, records the patch id and SHA-256 in
+`adp-upstream-source-lock.json`, and updates SkillFlow's runner code to use the
+current Harbor validation and async job-creation APIs. This keeps the
+compatibility fix at the upstream source boundary rather than hiding it in a
+runtime wrapper monkeypatch.
+
 ## Platform-Control And Sandbox Split
 
 Platform control plane owns:
@@ -292,15 +301,13 @@ just to run a supported suite.
 - Expand benchmark-specific config synthesis beyond the current redacted
   `artifacts/upstream-config.json` contract if upstream runners require
   suite-native YAML or environment files.
-- Refine suite-specific report parsing against real upstream output samples if
-  SkillFlow or SkillLearnBench emit stable report shapes beyond the current
-  JSON/CSV summary paths.
+- Continue refining suite-specific report parsing against real upstream output
+  samples as new stable shapes appear. The first real SkillFlow Harbor
+  `result.json` parser now extracts trial counts, evaluator error count, and
+  mean score.
 - Run the reusable wrapper smoke entrypoint against real pinned upstream roots
-  when those sources are available locally or on shared dev.
-- Resolve SkillFlow/Harbor API drift through a durable source-maintenance path
-  under #117, such as patching or forking SkillFlow or pinning a compatible
-  Harbor version. Do not add runtime monkeypatches or opaque wrapper shims just
-  to make a temporary smoke command pass.
+  on shared dev, where Docker is installed, after local source patch evidence
+  passes.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.
 - Decide how task-specific secrets such as `GH_TOKEN` are requested, scoped, and

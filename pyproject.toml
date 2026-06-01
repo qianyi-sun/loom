@@ -25,6 +25,7 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools.package-data]
+"agentic_data_platform.benchmarks" = ["patches/*.patch"]
 "agentic_data_platform.benchmarks.catalogs" = ["*.json"]
 "agentic_data_platform.frontend.static" = ["*.html", "*.css", "*.js"]
 "agentic_data_platform.persistence" = ["alembic/*.py", "alembic/versions/*.py"]

@@ -174,6 +174,77 @@ class ExecutableWrapperTest(unittest.TestCase):
             "artifacts/upstream-output/report.json",
         )
 
+    def test_skillflow_wrapper_normalizes_harbor_job_result_stats(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upstream_root = temp_path / "skillflow-upstream"
+            _write_executable_script(
+                upstream_root / "family_job_runner.py",
+                """
+                import argparse
+                import json
+                from pathlib import Path
+
+                parser = argparse.ArgumentParser()
+                parser.add_argument("--config")
+                parser.add_argument("--dataset-path")
+                parser.add_argument("--run-root-dir")
+                parser.add_argument("--only-group")
+                args = parser.parse_args()
+                output = Path(args.run_root_dir) / "job"
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "result.json").write_text(json.dumps({
+                    "n_total_trials": 8,
+                    "stats": {
+                        "n_completed_trials": 8,
+                        "n_errored_trials": 2,
+                        "n_cancelled_trials": 0,
+                        "evals": {
+                            "oracle__OCR-Data-Extraction": {
+                                "n_errors": 2,
+                                "metrics": [{"mean": 0.75}]
+                            }
+                        }
+                    }
+                }), encoding="utf-8")
+                """,
+            )
+            manifest = _task_manifest(
+                suite_name="SkillFlow",
+                task_family="OCR-Data-Extraction",
+                instance_id="task_family_invoice_images",
+                output_dir=str(temp_path / "upstream-output"),
+            )
+            manifest_path = temp_path / "task.json"
+            output_path = temp_path / "result.json"
+            artifacts_dir = temp_path / "artifacts"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            exit_code = skillflow_main(
+                [
+                    "--task-manifest",
+                    str(manifest_path),
+                    "--workspace",
+                    str(temp_path / "workspace"),
+                    "--output",
+                    str(output_path),
+                    "--artifacts-dir",
+                    str(artifacts_dir),
+                    "--upstream-root",
+                    str(upstream_root),
+                ]
+            )
+
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["metrics"]["upstream_n_total_trials"], 8)
+        self.assertEqual(result["metrics"]["upstream_n_completed_trials"], 8)
+        self.assertEqual(result["metrics"]["upstream_n_errored_trials"], 2)
+        self.assertEqual(result["metrics"]["upstream_n_cancelled_trials"], 0)
+        self.assertEqual(result["metrics"]["upstream_n_errors"], 2)
+        self.assertEqual(result["metrics"]["upstream_score_mean"], 0.75)
+
     def test_skilllearnbench_wrapper_executes_instance_scoped_upstream_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

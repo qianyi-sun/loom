@@ -470,6 +470,7 @@ def _parse_json_report(path: Path) -> tuple[dict[str, Any], list[str]]:
                 _store_scalar_metric(metrics, metric_key, metric_value)
             continue
         _store_scalar_metric(metrics, key, value)
+    _store_harbor_job_stats(metrics=metrics, payload=payload)
     return metrics, feedback
 
 
@@ -518,6 +519,43 @@ def _feedback_values(payload: dict[str, Any]) -> list[str]:
         if isinstance(value, str) and value.strip():
             values.append(value.strip())
     return values
+
+
+def _store_harbor_job_stats(*, metrics: dict[str, Any], payload: dict[str, Any]) -> None:
+    stats = payload.get("stats")
+    if not isinstance(stats, dict):
+        return
+
+    for key in (
+        "n_completed_trials",
+        "n_errored_trials",
+        "n_running_trials",
+        "n_pending_trials",
+        "n_cancelled_trials",
+        "n_retries",
+    ):
+        if key in stats:
+            _store_scalar_metric(metrics, key, stats[key])
+
+    score_means: list[float] = []
+    evals = stats.get("evals")
+    if isinstance(evals, dict):
+        for evaluator_result in evals.values():
+            if not isinstance(evaluator_result, dict):
+                continue
+            if "n_errors" in evaluator_result:
+                _store_scalar_metric(metrics, "n_errors", evaluator_result["n_errors"])
+            metric_rows = evaluator_result.get("metrics")
+            if isinstance(metric_rows, list):
+                for metric_row in metric_rows:
+                    if not isinstance(metric_row, dict):
+                        continue
+                    mean_value = _numeric_value(metric_row.get("mean"))
+                    if mean_value is not None:
+                        score_means.append(mean_value)
+
+    if score_means:
+        metrics["upstream_score_mean"] = sum(score_means) / len(score_means)
 
 
 def _store_scalar_metric(metrics: dict[str, Any], key: str, value: Any) -> None:

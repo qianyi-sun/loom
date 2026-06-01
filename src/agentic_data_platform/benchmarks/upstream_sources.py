@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.resources as resources
 import json
 import re
 import shutil
@@ -11,6 +12,13 @@ from typing import Any
 
 
 _LOCK_FILE = "adp-upstream-source-lock.json"
+_SKILLFLOW_HARBOR_PATCH_ID = "skillflow-harbor-api-compat-20260601"
+
+
+@dataclass(frozen=True)
+class UpstreamSourcePatch:
+    patch_id: str
+    resource_name: str
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,7 @@ class MaterializedUpstreamSource:
     root: Path
     lock_path: Path
     reused: bool
+    applied_patches: list[str]
 
 
 def materialize_upstream_source(
@@ -54,8 +63,16 @@ def materialize_upstream_source(
     cache_dir = _cache_dir(cache_root=cache_root, spec=spec)
     root = cache_dir / "tree"
     lock_path = cache_dir / _LOCK_FILE
+    patches = _patches_for_spec(spec)
+    patch_metadata = _patch_metadata(patches)
     if not force_refresh and _lock_matches(lock_path=lock_path, spec=spec, root=root):
-        return _materialized(spec=spec, root=root, lock_path=lock_path, reused=True)
+        return _materialized(
+            spec=spec,
+            root=root,
+            lock_path=lock_path,
+            reused=True,
+            applied_patches=[patch.patch_id for patch in patches],
+        )
 
     if spec.source_type == "local-tree":
         _replace_with_local_tree(source_uri=spec.source_uri, cache_dir=cache_dir, root=root)
@@ -64,8 +81,20 @@ def materialize_upstream_source(
     else:
         raise ValueError(f"Unsupported upstream source type: {spec.source_type}")
 
-    _write_lock(spec=spec, root=root, lock_path=lock_path)
-    return _materialized(spec=spec, root=root, lock_path=lock_path, reused=False)
+    _apply_patches(root=root, patches=patches)
+    _write_lock(
+        spec=spec,
+        root=root,
+        lock_path=lock_path,
+        applied_patches=patch_metadata,
+    )
+    return _materialized(
+        spec=spec,
+        root=root,
+        lock_path=lock_path,
+        reused=False,
+        applied_patches=[patch.patch_id for patch in patches],
+    )
 
 
 def _replace_with_local_tree(*, source_uri: str, cache_dir: Path, root: Path) -> None:
@@ -108,18 +137,39 @@ def _lock_matches(*, lock_path: Path, spec: UpstreamSourceSpec, root: Path) -> b
             lock.get("source_uri") == spec.source_uri,
             lock.get("source_version") == spec.source_version,
             lock.get("root") == str(root),
+            lock.get("applied_patches") == _patch_metadata(_patches_for_spec(spec)),
         ]
     )
 
 
-def _write_lock(*, spec: UpstreamSourceSpec, root: Path, lock_path: Path) -> None:
+def _write_lock(
+    *,
+    spec: UpstreamSourceSpec,
+    root: Path,
+    lock_path: Path,
+    applied_patches: list[dict[str, str]],
+) -> None:
     lock_path.write_text(
-        json.dumps(_lock_payload(spec=spec, root=root), indent=2, sort_keys=True) + "\n",
+        json.dumps(
+            _lock_payload(
+                spec=spec,
+                root=root,
+                applied_patches=applied_patches,
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
 
-def _lock_payload(*, spec: UpstreamSourceSpec, root: Path) -> dict[str, Any]:
+def _lock_payload(
+    *,
+    spec: UpstreamSourceSpec,
+    root: Path,
+    applied_patches: list[dict[str, str]],
+) -> dict[str, Any]:
     return {
         "suite_name": spec.suite_name,
         "source_type": spec.source_type,
@@ -127,6 +177,7 @@ def _lock_payload(*, spec: UpstreamSourceSpec, root: Path) -> dict[str, Any]:
         "source_version": spec.source_version,
         "root": str(root),
         "cache_key": _cache_key(spec),
+        "applied_patches": applied_patches,
     }
 
 
@@ -136,6 +187,7 @@ def _materialized(
     root: Path,
     lock_path: Path,
     reused: bool,
+    applied_patches: list[str],
 ) -> MaterializedUpstreamSource:
     return MaterializedUpstreamSource(
         suite_name=spec.suite_name,
@@ -145,6 +197,52 @@ def _materialized(
         root=root,
         lock_path=lock_path,
         reused=reused,
+        applied_patches=applied_patches,
+    )
+
+
+def _patches_for_spec(spec: UpstreamSourceSpec) -> list[UpstreamSourcePatch]:
+    if spec.suite_name == "SkillFlow":
+        return [
+            UpstreamSourcePatch(
+                patch_id=_SKILLFLOW_HARBOR_PATCH_ID,
+                resource_name=f"{_SKILLFLOW_HARBOR_PATCH_ID}.patch",
+            )
+        ]
+    return []
+
+
+def _patch_metadata(patches: list[UpstreamSourcePatch]) -> list[dict[str, str]]:
+    return [
+        {
+            "id": patch.patch_id,
+            "sha256": _patch_sha256(patch),
+        }
+        for patch in patches
+    ]
+
+
+def _apply_patches(*, root: Path, patches: list[UpstreamSourcePatch]) -> None:
+    for patch in patches:
+        patch_path = _patch_resource_path(patch)
+        subprocess.run(
+            ["git", "apply", "--unidiff-zero", "--whitespace=nowarn", str(patch_path)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+
+def _patch_sha256(patch: UpstreamSourcePatch) -> str:
+    return hashlib.sha256(_patch_resource_path(patch).read_bytes()).hexdigest()
+
+
+def _patch_resource_path(patch: UpstreamSourcePatch) -> Path:
+    return Path(
+        resources.files("agentic_data_platform.benchmarks")
+        .joinpath("patches")
+        .joinpath(patch.resource_name)
     )
 
 
