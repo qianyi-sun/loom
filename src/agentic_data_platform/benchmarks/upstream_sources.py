@@ -7,11 +7,13 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 _LOCK_FILE = "adp-upstream-source-lock.json"
+_SKILLFLOW_TASK_ASSETS_LOCK_FILE = "adp-skillflow-task-assets-lock.json"
 _SKILLFLOW_HARBOR_PATCH_ID = "skillflow-harbor-api-compat-20260601"
 
 
@@ -45,6 +47,36 @@ class MaterializedUpstreamSource:
     lock_path: Path
     reused: bool
     applied_patches: list[str]
+
+
+@dataclass(frozen=True)
+class SkillFlowTaskAssetsSpec:
+    repo_id: str
+    revision: str
+    allow_patterns: list[str]
+
+    def __post_init__(self) -> None:
+        _require_non_empty("repo_id", self.repo_id)
+        _require_non_empty("revision", self.revision)
+        _require_strings("allow_patterns", self.allow_patterns)
+
+
+@dataclass(frozen=True)
+class MaterializedSkillFlowTaskAssets:
+    repo_id: str
+    revision: str
+    allow_patterns: list[str]
+    local_dir: Path
+    lock_path: Path
+    file_count: int
+    reused: bool
+
+    @property
+    def source_type(self) -> str:
+        return "huggingface-dataset"
+
+
+HuggingFaceSnapshotDownloader = Callable[..., None]
 
 
 def materialize_upstream_source(
@@ -97,6 +129,77 @@ def materialize_upstream_source(
     )
 
 
+def materialize_skillflow_task_assets(
+    spec: SkillFlowTaskAssetsSpec,
+    *,
+    local_dir: Path,
+    downloader: HuggingFaceSnapshotDownloader | None = None,
+    force_refresh: bool = False,
+) -> MaterializedSkillFlowTaskAssets:
+    """Materialize pinned SkillFlow task assets into an upstream runner tree."""
+
+    lock_path = local_dir / _SKILLFLOW_TASK_ASSETS_LOCK_FILE
+    if not force_refresh and _skillflow_task_assets_lock_matches(lock_path=lock_path, spec=spec, local_dir=local_dir):
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        return MaterializedSkillFlowTaskAssets(
+            repo_id=spec.repo_id,
+            revision=spec.revision,
+            allow_patterns=list(spec.allow_patterns),
+            local_dir=local_dir,
+            lock_path=lock_path,
+            file_count=int(lock["file_count"]),
+            reused=True,
+        )
+
+    local_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_downloader = downloader or download_huggingface_snapshot
+    snapshot_downloader(
+        repo_id=spec.repo_id,
+        repo_type="dataset",
+        revision=spec.revision,
+        local_dir=local_dir,
+        allow_patterns=list(spec.allow_patterns),
+    )
+    file_count = _count_files_matching_patterns(root=local_dir, patterns=spec.allow_patterns)
+    _write_skillflow_task_assets_lock(
+        spec=spec,
+        local_dir=local_dir,
+        lock_path=lock_path,
+        file_count=file_count,
+    )
+    return MaterializedSkillFlowTaskAssets(
+        repo_id=spec.repo_id,
+        revision=spec.revision,
+        allow_patterns=list(spec.allow_patterns),
+        local_dir=local_dir,
+        lock_path=lock_path,
+        file_count=file_count,
+        reused=False,
+    )
+
+
+def download_huggingface_snapshot(
+    *,
+    repo_id: str,
+    repo_type: str,
+    revision: str,
+    local_dir: Path,
+    allow_patterns: list[str],
+) -> None:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub is required for SkillFlow dataset materialization") from exc
+
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        revision=revision,
+        local_dir=local_dir,
+        allow_patterns=allow_patterns,
+    )
+
+
 def _replace_with_local_tree(*, source_uri: str, cache_dir: Path, root: Path) -> None:
     source_root = Path(source_uri).expanduser().resolve()
     if not source_root.exists() or not source_root.is_dir():
@@ -108,6 +211,74 @@ def _replace_with_local_tree(*, source_uri: str, cache_dir: Path, root: Path) ->
         root,
         ignore=shutil.ignore_patterns(".git", "__pycache__", ".DS_Store"),
     )
+
+
+def _skillflow_task_assets_lock_matches(
+    *,
+    lock_path: Path,
+    spec: SkillFlowTaskAssetsSpec,
+    local_dir: Path,
+) -> bool:
+    if not lock_path.exists() or not local_dir.exists() or not local_dir.is_dir():
+        return False
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+
+    return all(
+        [
+            lock.get("source_type") == "huggingface-dataset",
+            lock.get("repo_id") == spec.repo_id,
+            lock.get("revision") == spec.revision,
+            lock.get("allow_patterns") == list(spec.allow_patterns),
+            lock.get("local_dir") == str(local_dir),
+            isinstance(lock.get("file_count"), int),
+        ]
+    )
+
+
+def _write_skillflow_task_assets_lock(
+    *,
+    spec: SkillFlowTaskAssetsSpec,
+    local_dir: Path,
+    lock_path: Path,
+    file_count: int,
+) -> None:
+    lock_path.write_text(
+        json.dumps(
+            {
+                "source_type": "huggingface-dataset",
+                "repo_id": spec.repo_id,
+                "revision": spec.revision,
+                "allow_patterns": list(spec.allow_patterns),
+                "local_dir": str(local_dir),
+                "file_count": file_count,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _count_files_matching_patterns(*, root: Path, patterns: list[str]) -> int:
+    return sum(
+        1
+        for path in root.rglob("*")
+        if path.is_file() and _matches_any_pattern(path.relative_to(root).as_posix(), patterns)
+    )
+
+
+def _matches_any_pattern(relative_path: str, patterns: list[str]) -> bool:
+    return any(fnmatch(relative_path, pattern) or _prefix_matches_globstar(relative_path, pattern) for pattern in patterns)
+
+
+def _prefix_matches_globstar(relative_path: str, pattern: str) -> bool:
+    if not pattern.endswith("/**"):
+        return False
+    return relative_path.startswith(pattern[:-3].rstrip("/") + "/")
 
 
 def _replace_with_git_checkout(*, source_uri: str, source_version: str, cache_dir: Path, root: Path) -> None:
@@ -275,3 +446,10 @@ def _run_git(args: list[str], *, cwd: Path | None) -> None:
 def _require_non_empty(name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
+
+
+def _require_strings(name: str, values: list[str]) -> None:
+    if isinstance(values, str) or not values:
+        raise ValueError(f"{name} must be a non-empty list of strings")
+    for value in values:
+        _require_non_empty(name, value)

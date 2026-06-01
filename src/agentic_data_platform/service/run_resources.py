@@ -490,7 +490,7 @@ _RUN_PAYLOAD_EXAMPLE: dict[str, Any] = {
     },
     "task": {
         "benchmark_suite": "SkillFlow",
-        "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@2026-05-28",
+        "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
         "task_family": "OCR-Data-Extraction",
         "instance_id": "task_family_invoice_images",
         "source_uri": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",

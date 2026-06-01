@@ -1,13 +1,19 @@
 {
   "suite_name": "SkillFlow",
-  "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@main-2026-05-28-placeholder",
+  "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
   "source_uri": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
-  "source_version": "main-2026-05-28-placeholder",
-  "source_version_type": "huggingface-dataset-snapshot",
+  "source_version": "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+  "source_version_type": "huggingface-dataset-commit",
   "metadata": {
     "upstream_runner_uri": "https://github.com/ZhangZi-a/SkillFlow",
     "upstream_runner_revision": "7b49ff5a7e26cd7706e959bfa0dba4746d18440d",
-    "note": "Small seed catalog for platform integration tests. Replace with a generated manifest pinned to an upstream dataset snapshot before production benchmark runs."
+    "task_asset_source_type": "huggingface-dataset",
+    "task_asset_repo_id": "zhang-ziao/SkillFlow-Task",
+    "task_asset_revision": "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+    "task_asset_default_allow_patterns": [
+      "test_tasks/{task_family}/**"
+    ],
+    "note": "Small seed catalog for platform integration tests. Production benchmark runs must materialize task assets from this pinned Hugging Face dataset commit and the pinned upstream runner revision."
   },
   "defaults": {
     "runner_image": "python:3.12-slim",

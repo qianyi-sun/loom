@@ -202,10 +202,10 @@ def _example_response(example: dict) -> dict:
 
 _BENCHMARK_PAYLOAD_EXAMPLE = {
     "suite_name": "SkillFlow",
-    "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@2026-05-28",
+    "benchmark_version": "hf:zhang-ziao/SkillFlow-Task@ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
     "source_uri": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
-    "source_version": "2026-05-28",
-    "source_version_type": "huggingface-dataset-snapshot",
+    "source_version": "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+    "source_version_type": "huggingface-dataset-commit",
     "task_family_count": 20,
     "task_instance_count": 120,
     "metadata": {"pilot_team": "pilot-project"},

@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentic_data_platform.benchmarks import UpstreamSourceSpec, materialize_upstream_source
+from agentic_data_platform.benchmarks import (
+    SkillFlowTaskAssetsSpec,
+    UpstreamSourceSpec,
+    materialize_skillflow_task_assets,
+    materialize_upstream_source,
+)
 from agentic_data_platform.benchmarks.manifests import catalog_from_local_tree
 
 
@@ -155,6 +160,85 @@ class UpstreamSourceMaterializationTest(unittest.TestCase):
                     ),
                     cache_root=Path(temp_dir) / "cache",
                 )
+
+
+class SkillFlowTaskAssetMaterializationTest(unittest.TestCase):
+    def test_materializes_pinned_huggingface_task_assets_with_lock_file(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            calls: list[dict[str, object]] = []
+
+            def download(**kwargs):
+                calls.append(kwargs)
+                _write(kwargs["local_dir"] / "test_tasks/OCR-Data-Extraction/task_family_invoice_images/instruction.md")
+                _write(kwargs["local_dir"] / "test_tasks/OCR-Data-Extraction/task_family_invoice_images/task.toml")
+
+            materialized = materialize_skillflow_task_assets(
+                SkillFlowTaskAssetsSpec(
+                    repo_id="zhang-ziao/SkillFlow-Task",
+                    revision="ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+                    allow_patterns=["test_tasks/OCR-Data-Extraction/**"],
+                ),
+                local_dir=temp_path / "skillflow-source",
+                downloader=download,
+            )
+            lock = json.loads(materialized.lock_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(materialized.reused)
+        self.assertEqual(materialized.repo_id, "zhang-ziao/SkillFlow-Task")
+        self.assertEqual(materialized.revision, "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc")
+        self.assertEqual(materialized.allow_patterns, ["test_tasks/OCR-Data-Extraction/**"])
+        self.assertEqual(materialized.file_count, 2)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "repo_id": "zhang-ziao/SkillFlow-Task",
+                    "repo_type": "dataset",
+                    "revision": "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+                    "local_dir": temp_path / "skillflow-source",
+                    "allow_patterns": ["test_tasks/OCR-Data-Extraction/**"],
+                }
+            ],
+        )
+        self.assertEqual(lock["source_type"], "huggingface-dataset")
+        self.assertEqual(lock["repo_id"], "zhang-ziao/SkillFlow-Task")
+        self.assertEqual(lock["revision"], "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc")
+        self.assertEqual(lock["allow_patterns"], ["test_tasks/OCR-Data-Extraction/**"])
+        self.assertEqual(lock["local_dir"], str(temp_path / "skillflow-source"))
+        self.assertEqual(lock["file_count"], 2)
+
+    def test_reuses_existing_pinned_task_assets_when_lock_matches(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            calls = 0
+
+            def download(**kwargs):
+                nonlocal calls
+                calls += 1
+                _write(kwargs["local_dir"] / "test_tasks/OCR-Data-Extraction/task_family_invoice_images/instruction.md")
+
+            spec = SkillFlowTaskAssetsSpec(
+                repo_id="zhang-ziao/SkillFlow-Task",
+                revision="ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+                allow_patterns=["test_tasks/OCR-Data-Extraction/**"],
+            )
+            first = materialize_skillflow_task_assets(
+                spec,
+                local_dir=temp_path / "skillflow-source",
+                downloader=download,
+            )
+            second = materialize_skillflow_task_assets(
+                spec,
+                local_dir=temp_path / "skillflow-source",
+                downloader=download,
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertFalse(first.reused)
+        self.assertTrue(second.reused)
+        self.assertEqual(second.local_dir, first.local_dir)
+        self.assertEqual(second.file_count, 1)
 
 
 def _write(path: Path, text: str = "fixture\n") -> None:

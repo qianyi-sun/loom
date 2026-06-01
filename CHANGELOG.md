@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Pinned the SkillFlow task dataset for #115. The checked-in SkillFlow catalog
+  now records Hugging Face dataset commit
+  `ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc`, the real-upstream smoke defaults
+  to that revision, and `agentic_data_platform.benchmarks.upstream_sources`
+  writes a separate `adp-skillflow-task-assets-lock.json` for hydrated
+  task-family assets.
 - Added an opt-in shared dev real-upstream wrapper smoke path for #114. The
   new `benchmark-real-upstream-smoke` Compose service materializes the pinned
   SkillFlow runner, hydrates the selected Hugging Face task-family subset, and

@@ -14,10 +14,16 @@ from agentic_data_platform.benchmark_wrappers.smoke import (
 )
 from agentic_data_platform.benchmarks.fixtures import BenchmarkFixtureCatalog, load_fixture_catalog
 from agentic_data_platform.benchmarks.upstream_sources import (
+    MaterializedSkillFlowTaskAssets,
     MaterializedUpstreamSource,
+    SkillFlowTaskAssetsSpec,
     UpstreamSourceSpec,
+    materialize_skillflow_task_assets as default_materialize_skillflow_task_assets,
     materialize_upstream_source,
 )
+
+_DEFAULT_SKILLFLOW_DATASET_REPO_ID = "zhang-ziao/SkillFlow-Task"
+_DEFAULT_SKILLFLOW_DATASET_REVISION = "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc"
 
 
 @dataclass(frozen=True)
@@ -33,12 +39,12 @@ class RealUpstreamSmokeConfig:
     run_id: str
     timeout_seconds: int = 3600
     force_refresh: bool = False
-    skillflow_dataset_repo_id: str = "zhang-ziao/SkillFlow-Task"
-    skillflow_dataset_revision: str = "main"
+    skillflow_dataset_repo_id: str = _DEFAULT_SKILLFLOW_DATASET_REPO_ID
+    skillflow_dataset_revision: str = _DEFAULT_SKILLFLOW_DATASET_REVISION
 
 
 MaterializeSource = Callable[..., MaterializedUpstreamSource]
-SkillFlowDatasetDownloader = Callable[..., dict[str, object]]
+MaterializeSkillFlowTaskAssets = Callable[..., MaterializedSkillFlowTaskAssets]
 WrapperSmokeRunner = Callable[[BenchmarkWrapperSmokeConfig], dict[str, Any]]
 
 
@@ -46,7 +52,7 @@ def run_real_upstream_smoke(
     config: RealUpstreamSmokeConfig,
     *,
     materialize_source: MaterializeSource = materialize_upstream_source,
-    skillflow_dataset_downloader: SkillFlowDatasetDownloader = None,
+    materialize_skillflow_task_assets: MaterializeSkillFlowTaskAssets = default_materialize_skillflow_task_assets,
     wrapper_smoke_runner: WrapperSmokeRunner = run_benchmark_wrapper_smoke,
 ) -> dict[str, Any]:
     suite_name = _canonical_suite(config.suite_name)
@@ -62,14 +68,16 @@ def run_real_upstream_smoke(
     )
     dataset_result = None
     if suite_name == "SkillFlow":
-        downloader = skillflow_dataset_downloader or download_skillflow_dataset_subset
-        dataset_result = downloader(
-            repo_id=config.skillflow_dataset_repo_id,
-            repo_type="dataset",
-            revision=config.skillflow_dataset_revision,
+        dataset_assets = materialize_skillflow_task_assets(
+            SkillFlowTaskAssetsSpec(
+                repo_id=config.skillflow_dataset_repo_id,
+                revision=config.skillflow_dataset_revision,
+                allow_patterns=[f"test_tasks/{config.task_family}/**"],
+            ),
             local_dir=materialized.root,
-            allow_patterns=[f"test_tasks/{config.task_family}/**"],
+            force_refresh=config.force_refresh,
         )
+        dataset_result = _skillflow_task_assets_payload(dataset_assets)
 
     wrapper_result = wrapper_smoke_runner(
         BenchmarkWrapperSmokeConfig(
@@ -92,37 +100,6 @@ def run_real_upstream_smoke(
         "source": _source_payload(materialized),
         "skillflow_dataset": dataset_result,
         "wrapper_smoke": wrapper_result,
-    }
-
-
-def download_skillflow_dataset_subset(
-    *,
-    repo_id: str,
-    repo_type: str,
-    revision: str,
-    local_dir: Path,
-    allow_patterns: list[str],
-) -> dict[str, object]:
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError as exc:
-        raise RuntimeError("huggingface_hub is required for SkillFlow dataset materialization") from exc
-
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        revision=revision,
-        local_dir=local_dir,
-        allow_patterns=allow_patterns,
-    )
-    file_count = sum(1 for path in local_dir.rglob("*") if path.is_file())
-    return {
-        "repo_id": repo_id,
-        "repo_type": repo_type,
-        "revision": revision,
-        "allow_patterns": list(allow_patterns),
-        "local_dir": str(local_dir),
-        "file_count": file_count,
     }
 
 
@@ -164,11 +141,11 @@ def _config_from_args(argv: list[str] | None = None) -> RealUpstreamSmokeConfig:
     )
     parser.add_argument(
         "--skillflow-dataset-repo-id",
-        default=os.environ.get("SKILLFLOW_DATASET_REPO_ID", "zhang-ziao/SkillFlow-Task"),
+        default=os.environ.get("SKILLFLOW_DATASET_REPO_ID", _DEFAULT_SKILLFLOW_DATASET_REPO_ID),
     )
     parser.add_argument(
         "--skillflow-dataset-revision",
-        default=os.environ.get("SKILLFLOW_DATASET_REVISION", "main"),
+        default=os.environ.get("SKILLFLOW_DATASET_REVISION", _DEFAULT_SKILLFLOW_DATASET_REVISION),
     )
     args = parser.parse_args(argv)
     return _config_from_env(vars(args))
@@ -207,8 +184,18 @@ def _config_from_env(values: Mapping[str, object] | None = None) -> RealUpstream
         run_id=_string(data, "run_id", "BENCHMARK_REAL_UPSTREAM_SMOKE_RUN_ID", f"real_upstream_smoke_{uuid4().hex}"),
         timeout_seconds=int(_string(data, "timeout_seconds", "BENCHMARK_REAL_UPSTREAM_SMOKE_TIMEOUT_SECONDS", "3600")),
         force_refresh=_bool(data, "force_refresh", "BENCHMARK_REAL_UPSTREAM_SMOKE_FORCE_REFRESH", False),
-        skillflow_dataset_repo_id=_string(data, "skillflow_dataset_repo_id", "SKILLFLOW_DATASET_REPO_ID", "zhang-ziao/SkillFlow-Task"),
-        skillflow_dataset_revision=_string(data, "skillflow_dataset_revision", "SKILLFLOW_DATASET_REVISION", "main"),
+        skillflow_dataset_repo_id=_string(
+            data,
+            "skillflow_dataset_repo_id",
+            "SKILLFLOW_DATASET_REPO_ID",
+            _default_skillflow_task_asset_repo_id(catalog),
+        ),
+        skillflow_dataset_revision=_string(
+            data,
+            "skillflow_dataset_revision",
+            "SKILLFLOW_DATASET_REVISION",
+            _default_skillflow_task_asset_revision(catalog),
+        ),
     )
 
 
@@ -222,6 +209,19 @@ def _source_payload(materialized: MaterializedUpstreamSource) -> dict[str, objec
         "lock_path": str(materialized.lock_path),
         "reused": materialized.reused,
         "applied_patches": materialized.applied_patches,
+    }
+
+
+def _skillflow_task_assets_payload(materialized: MaterializedSkillFlowTaskAssets) -> dict[str, object]:
+    return {
+        "source_type": materialized.source_type,
+        "repo_id": materialized.repo_id,
+        "revision": materialized.revision,
+        "allow_patterns": list(materialized.allow_patterns),
+        "local_dir": str(materialized.local_dir),
+        "lock_path": str(materialized.lock_path),
+        "file_count": materialized.file_count,
+        "reused": materialized.reused,
     }
 
 
@@ -240,6 +240,16 @@ def _default_runner_uri(catalog: BenchmarkFixtureCatalog) -> str:
 def _default_runner_revision(catalog: BenchmarkFixtureCatalog) -> str:
     value = catalog.metadata.get("upstream_runner_revision")
     return value if isinstance(value, str) and value.strip() else catalog.source_version
+
+
+def _default_skillflow_task_asset_repo_id(catalog: BenchmarkFixtureCatalog) -> str:
+    value = catalog.metadata.get("task_asset_repo_id")
+    return value if catalog.suite_name == "SkillFlow" and isinstance(value, str) and value.strip() else _DEFAULT_SKILLFLOW_DATASET_REPO_ID
+
+
+def _default_skillflow_task_asset_revision(catalog: BenchmarkFixtureCatalog) -> str:
+    value = catalog.metadata.get("task_asset_revision")
+    return value if catalog.suite_name == "SkillFlow" and isinstance(value, str) and value.strip() else _DEFAULT_SKILLFLOW_DATASET_REVISION
 
 
 def _canonical_suite(suite_name: str) -> str:

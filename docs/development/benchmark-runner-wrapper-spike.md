@@ -26,7 +26,7 @@ The first concrete wrappers now live in
 
 | Suite | Source | Version recorded here | Task layout |
 | --- | --- | --- | --- |
-| SkillFlow | `https://github.com/ZhangZi-a/SkillFlow` plus `https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task` | Runner commit `7b49ff5a7e26cd7706e959bfa0dba4746d18440d`; dataset placeholder `main-2026-05-28-placeholder` | `test_tasks/<workflow-family>/<task-name>/{instruction.md,task.toml,environment,tests,solution}` |
+| SkillFlow | `https://github.com/ZhangZi-a/SkillFlow` plus `https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task` | Runner commit `7b49ff5a7e26cd7706e959bfa0dba4746d18440d`; task dataset commit `ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc` | `test_tasks/<workflow-family>/<task-name>/{instruction.md,task.toml,environment,tests,solution}` |
 | SkillLearnBench | `https://github.com/cxcscmu/SkillLearnBench` | Commit `638284f5982f6be085a955435d2ec7a5258f5513` | `tasks/<task-id>/<task-id>-<n>/{instruction.md,task.toml,environment,tests,solution}` |
 
 The checked-in seed catalogs live under
@@ -286,6 +286,14 @@ current Harbor validation and async job-creation APIs. This keeps the
 compatibility fix at the upstream source boundary rather than hiding it in a
 runtime wrapper monkeypatch.
 
+SkillFlow task assets are materialized through the same source boundary, but
+with a separate lock because they come from Hugging Face rather than the runner
+Git repo. The checked-in catalog pins `zhang-ziao/SkillFlow-Task` to dataset
+commit `ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc`. The real-upstream smoke
+hydrates `test_tasks/<task_family>/**` into the materialized runner root and
+writes `adp-skillflow-task-assets-lock.json` with the dataset repo, revision,
+allow patterns, local materialization directory, and hydrated file count.
+
 ## Platform-Control And Sandbox Split
 
 Platform control plane owns:
@@ -311,11 +319,11 @@ just to run a supported suite.
 
 ## Follow-Ups
 
-- Replace the SkillFlow dataset version placeholder with a pinned Hugging Face
-  dataset snapshot or generated manifest hash.
-- Extend upstream checkout/download management beyond the current local-tree and
-  git cache/lock boundary if SkillFlow needs additional Hugging Face dataset or
-  Git LFS handling.
+- Generate a full SkillFlow manifest from the pinned Hugging Face dataset
+  commit once the v0 executable task subset expands beyond the checked-in seed
+  catalog.
+- Extend upstream checkout/download management if SkillFlow later needs
+  additional Hugging Face private assets or Git LFS credential handling.
 - Expand benchmark-specific config synthesis beyond the current redacted
   `artifacts/upstream-config.json` contract if upstream runners require
   suite-native YAML or environment files.

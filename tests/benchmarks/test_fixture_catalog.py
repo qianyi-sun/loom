@@ -68,3 +68,23 @@ class BenchmarkFixtureCatalogTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Unknown fixture instance"):
             catalog.to_task_spec(task_family="missing-family", instance_id="missing-instance")
+
+    def test_skillflow_catalog_uses_pinned_dataset_and_runner_sources(self):
+        catalog = load_fixture_catalog("SkillFlow")
+
+        self.assertEqual(catalog.source_uri, "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task")
+        self.assertEqual(catalog.source_version, "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc")
+        self.assertEqual(catalog.source_version_type, "huggingface-dataset-commit")
+        self.assertEqual(
+            catalog.benchmark_version,
+            "hf:zhang-ziao/SkillFlow-Task@ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+        )
+        self.assertEqual(catalog.metadata["task_asset_source_type"], "huggingface-dataset")
+        self.assertEqual(catalog.metadata["task_asset_repo_id"], "zhang-ziao/SkillFlow-Task")
+        self.assertEqual(catalog.metadata["task_asset_revision"], "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc")
+        self.assertEqual(catalog.metadata["task_asset_default_allow_patterns"], ["test_tasks/{task_family}/**"])
+        self.assertEqual(catalog.metadata["upstream_runner_uri"], "https://github.com/ZhangZi-a/SkillFlow")
+        self.assertEqual(
+            catalog.metadata["upstream_runner_revision"],
+            "7b49ff5a7e26cd7706e959bfa0dba4746d18440d",
+        )

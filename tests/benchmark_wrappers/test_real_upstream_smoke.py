@@ -7,7 +7,12 @@ from agentic_data_platform.benchmark_wrappers.real_upstream_smoke import (
     _config_from_env,
     run_real_upstream_smoke,
 )
-from agentic_data_platform.benchmarks import MaterializedUpstreamSource, UpstreamSourceSpec
+from agentic_data_platform.benchmarks import (
+    MaterializedSkillFlowTaskAssets,
+    MaterializedUpstreamSource,
+    SkillFlowTaskAssetsSpec,
+    UpstreamSourceSpec,
+)
 
 
 class RealUpstreamSmokeTest(unittest.TestCase):
@@ -32,7 +37,7 @@ class RealUpstreamSmokeTest(unittest.TestCase):
                     timeout_seconds=120,
                 ),
                 materialize_source=calls.materialize,
-                skillflow_dataset_downloader=calls.download_skillflow_dataset,
+                materialize_skillflow_task_assets=calls.materialize_skillflow_task_assets,
                 wrapper_smoke_runner=calls.run_wrapper_smoke,
             )
 
@@ -53,17 +58,17 @@ class RealUpstreamSmokeTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            calls.dataset_downloads,
+            calls.task_asset_specs,
             [
-                {
-                    "repo_id": "zhang-ziao/SkillFlow-Task",
-                    "repo_type": "dataset",
-                    "revision": "main",
-                    "local_dir": materialized_root,
-                    "allow_patterns": ["test_tasks/OCR-Data-Extraction/**"],
-                }
+                SkillFlowTaskAssetsSpec(
+                    repo_id="zhang-ziao/SkillFlow-Task",
+                    revision="ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc",
+                    allow_patterns=["test_tasks/OCR-Data-Extraction/**"],
+                )
             ],
         )
+        self.assertEqual(result["skillflow_dataset"]["source_type"], "huggingface-dataset")
+        self.assertEqual(result["skillflow_dataset"]["revision"], "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc")
         self.assertEqual(calls.wrapper_configs[0].suite_name, "SkillFlow")
         self.assertEqual(calls.wrapper_configs[0].upstream_root, materialized_root)
         self.assertEqual(calls.wrapper_configs[0].dry_run, False)
@@ -89,13 +94,13 @@ class RealUpstreamSmokeTest(unittest.TestCase):
                     timeout_seconds=120,
                 ),
                 materialize_source=calls.materialize,
-                skillflow_dataset_downloader=calls.download_skillflow_dataset,
+                materialize_skillflow_task_assets=calls.materialize_skillflow_task_assets,
                 wrapper_smoke_runner=calls.run_wrapper_smoke,
             )
 
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["suite_name"], "SkillLearnBench")
-        self.assertEqual(calls.dataset_downloads, [])
+        self.assertEqual(calls.task_asset_specs, [])
         self.assertEqual(calls.wrapper_configs[0].suite_name, "SkillLearnBench")
         self.assertEqual(calls.wrapper_configs[0].upstream_root, materialized_root)
 
@@ -116,13 +121,15 @@ class RealUpstreamSmokeTest(unittest.TestCase):
         self.assertEqual(config.task_family, "OCR-Data-Extraction")
         self.assertEqual(config.instance_id, "task_family_invoice_images")
         self.assertEqual(config.run_id, "real_upstream_smoke_unit")
+        self.assertEqual(config.skillflow_dataset_repo_id, "zhang-ziao/SkillFlow-Task")
+        self.assertEqual(config.skillflow_dataset_revision, "ecaadb0e25d5d5cfd87bd86d81e77b4abe3a00bc")
 
 
 class _FakeRealUpstreamSmokeCalls:
     def __init__(self, materialized_root: Path) -> None:
         self.materialized_root = materialized_root
         self.materialize_specs: list[UpstreamSourceSpec] = []
-        self.dataset_downloads: list[dict[str, object]] = []
+        self.task_asset_specs: list[SkillFlowTaskAssetsSpec] = []
         self.wrapper_configs = []
 
     def materialize(self, spec: UpstreamSourceSpec, *, cache_root: Path, force_refresh: bool = False):
@@ -138,25 +145,23 @@ class _FakeRealUpstreamSmokeCalls:
             applied_patches=["skillflow-test-patch"] if spec.suite_name == "SkillFlow" else [],
         )
 
-    def download_skillflow_dataset(
+    def materialize_skillflow_task_assets(
         self,
+        spec: SkillFlowTaskAssetsSpec,
         *,
-        repo_id: str,
-        repo_type: str,
-        revision: str,
         local_dir: Path,
-        allow_patterns: list[str],
-    ) -> dict[str, object]:
-        self.dataset_downloads.append(
-            {
-                "repo_id": repo_id,
-                "repo_type": repo_type,
-                "revision": revision,
-                "local_dir": local_dir,
-                "allow_patterns": allow_patterns,
-            }
+        force_refresh: bool = False,
+    ) -> MaterializedSkillFlowTaskAssets:
+        self.task_asset_specs.append(spec)
+        return MaterializedSkillFlowTaskAssets(
+            repo_id=spec.repo_id,
+            revision=spec.revision,
+            allow_patterns=spec.allow_patterns,
+            local_dir=local_dir,
+            lock_path=local_dir / "adp-skillflow-task-assets-lock.json",
+            file_count=3,
+            reused=False,
         )
-        return {"repo_id": repo_id, "revision": revision, "file_count": 3}
 
     def run_wrapper_smoke(self, config):
         self.wrapper_configs.append(config)
