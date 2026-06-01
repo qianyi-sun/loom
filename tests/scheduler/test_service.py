@@ -1,12 +1,13 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.models import RunRow
+from agentic_data_platform.persistence.models import RunAttemptRow, RunRow
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.scheduler.service import RunScheduler
 from agentic_data_platform.service.config import ServiceSettings
@@ -116,9 +117,55 @@ class SchedulerServiceTest(unittest.TestCase):
             }
 
         self.assertEqual(result.requeued_run_ids, ["run_scheduler_recover_0"])
+        self.assertEqual(result.failed_run_ids, [])
         self.assertEqual(result.requeued_count, 1)
+        self.assertEqual(result.failed_count, 0)
         self.assertEqual(statuses["run_scheduler_recover_0"], RunStatus.QUEUED)
         self.assertEqual(statuses["run_scheduler_recover_1"], RunStatus.DISPATCHED)
+
+    def test_scheduler_recovers_stale_active_worker_heartbeats_from_service_settings(self):
+        now = datetime.now(timezone.utc)
+        stale_heartbeat = (now - timedelta(minutes=10)).isoformat()
+
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_scheduler_active_recover"))
+            runs.claim_next_queued_run(worker_id="worker-stale")
+            session.get(RunRow, "run_scheduler_active_recover").updated_at = now - timedelta(minutes=10)
+            attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_scheduler_active_recover"))
+            metadata = dict(attempt.metadata_json or {})
+            worker = dict(metadata["worker"])
+            worker["last_heartbeat_at"] = stale_heartbeat
+            metadata["worker"] = worker
+            attempt.metadata_json = metadata
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_stale_active_heartbeat_timeout_seconds=300,
+                scheduler_recovery_batch_size=10,
+            ),
+        )
+
+        result = scheduler.recover_once(request_id="req-scheduler-active-recover-001")
+
+        with session_scope(self.engine) as session:
+            recovered = RunRepository(session).get_run("run_scheduler_active_recover")
+
+        self.assertEqual(result.requeued_run_ids, [])
+        self.assertEqual(result.failed_run_ids, ["run_scheduler_active_recover"])
+        self.assertEqual(result.failed_count, 1)
+        self.assertEqual(recovered.status, RunStatus.FAILED)
 
 
 if __name__ == "__main__":

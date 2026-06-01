@@ -76,9 +76,10 @@ read models:
 - `BenchmarkCatalogRepository`: fixture catalog upsert, suite-version listing,
   and task-instance detail/listing
 - `RunRepository`: `RunRecord` save/list/get, create queued runs,
-  scheduler dispatch, stale-dispatch recovery, worker claim, cancel/retry state
-  transitions, status-event history, terminal turns, artifacts, and latest
-  evaluator result hydration
+  scheduler dispatch, stale-dispatch recovery, worker heartbeat persistence,
+  stale active-run recovery, worker claim, cancel/retry state transitions,
+  status-event history, terminal turns, artifacts, and latest evaluator result
+  hydration
 - `AuditEventRepository`: structured event recording for later PM/operator views
 
 For v0, `RunRecord` has no public `attempt_id`, so `RunRepository.get_run()`
@@ -89,6 +90,14 @@ hydrates the latest internal attempt back into the existing dataclass shape.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.
+Claimed runs store worker lease metadata on the latest `run_attempts.metadata`
+payload, including worker id, claim time, latest heartbeat, heartbeat status,
+and completion time when available. `RunRepository.record_worker_heartbeat(...)`
+updates this metadata while execution is active, and
+`RunRepository.fail_stale_active_runs_by_heartbeat(...)` marks active runs with
+expired heartbeats as failed with a `run.recovered` event. Active recovery skips
+runs without heartbeat metadata so legacy or partially migrated rows are not
+failed solely because they predate worker lease tracking.
 Workers prefer `RunRepository.claim_next_dispatched_run(...)` and then retain
 `RunRepository.claim_next_queued_run(...)` as a compatibility path during
 scheduler rollout; both claim paths persist a `run.claimed` transition to

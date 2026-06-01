@@ -635,6 +635,119 @@ class RunRepository:
         self.session.flush()
         return [self.get_run(run_id) for run_id in requeued_ids]
 
+    def record_worker_heartbeat(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        status: RunStatus | str,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        del request_id
+        _require_non_empty("worker_id", worker_id)
+        row = self._run_row_for_update(run_id)
+        run_status = RunStatus(row.status)
+        if run_status not in {RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.EVALUATING}:
+            raise ValueError("worker heartbeats can only be recorded for active runs")
+        heartbeat_status = _coerce_run_status(status)
+        if heartbeat_status not in {RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.EVALUATING}:
+            raise ValueError("worker heartbeat status must be active")
+
+        now = utc_now()
+        attempt = self._latest_attempt_row(run_id)
+        attempt.metadata_json = _worker_attempt_metadata(
+            attempt.metadata_json,
+            worker_id=worker_id,
+            heartbeat_status=heartbeat_status,
+            now=now,
+            claimed_at=None,
+            completed_at=None,
+        )
+        attempt.updated_at = now
+        row.updated_at = now
+        self.session.flush()
+        return self.get_run(run_id)
+
+    def fail_stale_active_runs_by_heartbeat(
+        self,
+        *,
+        older_than: datetime,
+        scheduler_id: str,
+        max_runs: int,
+        reason: str = "stale worker heartbeat expired",
+        request_id: str | None = None,
+    ) -> list[RunRecord]:
+        _require_non_empty("scheduler_id", scheduler_id)
+        if max_runs <= 0:
+            return []
+        if older_than.tzinfo is None:
+            raise ValueError("older_than must be timezone-aware")
+
+        active_statuses = {
+            RunStatus.PROVISIONING.value,
+            RunStatus.RUNNING.value,
+            RunStatus.EVALUATING.value,
+        }
+        candidates = self.session.scalars(
+            select(RunRow)
+            .where(RunRow.status.in_(active_statuses))
+            .order_by(RunRow.updated_at, RunRow.run_id)
+            .with_for_update(skip_locked=True)
+            .limit(max(max_runs * 5, 25))
+        )
+        failed_ids: list[str] = []
+        for row in candidates:
+            if len(failed_ids) >= max_runs:
+                break
+            attempt = self._latest_attempt_row(row.run_id)
+            worker_metadata = _worker_metadata(attempt.metadata_json)
+            last_heartbeat_at = _parse_worker_datetime(worker_metadata.get("last_heartbeat_at"))
+            if last_heartbeat_at is None or last_heartbeat_at >= older_than:
+                continue
+
+            previous_status = RunStatus(row.status)
+            run = self._run_record(row)
+            run.transition_to(RunStatus.FAILED)
+            run.failure_reason = reason
+
+            row.status = run.status.value
+            row.failure_reason = run.failure_reason
+            row.updated_at = run.updated_at
+
+            attempt.status = run.status.value
+            attempt.failure_reason = run.failure_reason
+            attempt.completed_at = run.updated_at
+            attempt.metadata_json = _worker_attempt_metadata(
+                attempt.metadata_json,
+                worker_id=str(worker_metadata.get("worker_id") or ""),
+                heartbeat_status=previous_status,
+                now=run.updated_at,
+                claimed_at=None,
+                completed_at=run.updated_at,
+            )
+            attempt.updated_at = utc_now()
+
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type="run.recovered",
+                from_status=previous_status,
+                to_status=RunStatus.FAILED,
+                reason=reason,
+                request_id=request_id,
+                metadata={
+                    "scheduler_id": scheduler_id,
+                    "recovery": "stale_worker_heartbeat",
+                    "worker_id": worker_metadata.get("worker_id"),
+                    "stale_before": older_than.isoformat(),
+                    "last_heartbeat_at": worker_metadata.get("last_heartbeat_at"),
+                },
+            )
+            failed_ids.append(run.run_id)
+
+        self.session.flush()
+        return [self.get_run(run_id) for run_id in failed_ids]
+
     def claim_next_queued_run(
         self,
         *,
@@ -686,6 +799,14 @@ class RunRepository:
 
         attempt = self._latest_attempt_row(run.run_id)
         attempt.status = run.status.value
+        attempt.metadata_json = _worker_attempt_metadata(
+            attempt.metadata_json,
+            worker_id=worker_id,
+            heartbeat_status=run.status,
+            now=run.updated_at,
+            claimed_at=run.updated_at,
+            completed_at=None,
+        )
         attempt.updated_at = utc_now()
 
         self._append_status_event(
@@ -717,8 +838,17 @@ class RunRepository:
         if run.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
             raise ValueError("worker result must be terminal")
 
-        attempt = self._latest_attempt_row(run.run_id)
         self.save_run(run)
+        attempt = self._latest_attempt_row(run.run_id)
+        attempt.metadata_json = _worker_attempt_metadata(
+            attempt.metadata_json,
+            worker_id=worker_id,
+            heartbeat_status=run.status,
+            now=run.updated_at,
+            claimed_at=None,
+            completed_at=run.updated_at,
+        )
+        attempt.updated_at = utc_now()
         self._append_worker_lifecycle_events(
             run=run,
             attempt_id=attempt.attempt_id,
@@ -828,7 +958,7 @@ class RunRepository:
         row.started_at = run.trajectory[0].started_at if run.trajectory else None
         row.completed_at = run.updated_at if run.status.value in {"succeeded", "failed", "canceled"} else None
         row.failure_reason = run.failure_reason
-        row.metadata_json = {}
+        row.metadata_json = dict(row.metadata_json or {})
         row.updated_at = utc_now()
 
     def get_run(self, run_id: str) -> RunRecord:
@@ -1390,6 +1520,55 @@ def _attempt_number(attempt_id: str) -> int:
         return int(attempt_id.rsplit(":attempt:", 1)[1])
     except (IndexError, ValueError) as exc:
         raise ValueError(f"invalid attempt id: {attempt_id}") from exc
+
+
+def _worker_attempt_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    worker_id: str,
+    heartbeat_status: RunStatus,
+    now: datetime,
+    claimed_at: datetime | None,
+    completed_at: datetime | None,
+) -> dict[str, Any]:
+    updated = dict(metadata or {})
+    worker = dict(updated.get("worker") or {})
+    if worker_id:
+        worker["worker_id"] = worker_id
+    if claimed_at is not None:
+        worker["claimed_at"] = _datetime_json(claimed_at)
+    worker["heartbeat_status"] = heartbeat_status.value
+    worker["last_heartbeat_at"] = _datetime_json(now)
+    if completed_at is not None:
+        worker["completed_at"] = _datetime_json(completed_at)
+    updated["worker"] = worker
+    return updated
+
+
+def _worker_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    worker = (metadata or {}).get("worker")
+    return dict(worker) if isinstance(worker, dict) else {}
+
+
+def _parse_worker_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return _aware(parsed)
+
+
+def _datetime_json(value: datetime) -> str:
+    return _aware(value).isoformat()
+
+
+def _coerce_run_status(value: RunStatus | str) -> RunStatus:
+    if isinstance(value, RunStatus):
+        return value
+    return RunStatus(value)
 
 
 def _require_non_empty(name: str, value: str) -> None:

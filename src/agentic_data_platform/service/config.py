@@ -32,11 +32,13 @@ class ServiceSettings:
     harbor_task_upload_max_uncompressed_bytes: int = 50 * 1024 * 1024
     worker_subprocess_isolation_enabled: bool = False
     worker_subprocess_timeout_seconds: int = 7200
+    worker_heartbeat_interval_seconds: int = 30
     worker_legacy_queue_claim_enabled: bool = False
     scheduler_global_max_active_runs: int = 1
     scheduler_backend_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_project_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_stale_dispatched_timeout_seconds: int = 300
+    scheduler_stale_active_heartbeat_timeout_seconds: int = 900
     scheduler_recovery_batch_size: int = 50
 
 
@@ -72,6 +74,7 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         ),
         worker_subprocess_isolation_enabled=_get_bool(values, "WORKER_SUBPROCESS_ISOLATION_ENABLED", False),
         worker_subprocess_timeout_seconds=_get_int(values, "WORKER_SUBPROCESS_TIMEOUT_SECONDS", 7200),
+        worker_heartbeat_interval_seconds=_get_int(values, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 30),
         worker_legacy_queue_claim_enabled=_get_bool(values, "WORKER_LEGACY_QUEUE_CLAIM_ENABLED", False),
         scheduler_global_max_active_runs=_get_int(values, "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS", 1),
         scheduler_backend_max_active_runs=_get_int_map(values, "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS"),
@@ -80,6 +83,11 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
             values,
             "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS",
             300,
+        ),
+        scheduler_stale_active_heartbeat_timeout_seconds=_get_int(
+            values,
+            "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS",
+            900,
         ),
         scheduler_recovery_batch_size=_get_int(values, "SCHEDULER_RECOVERY_BATCH_SIZE", 50),
     )

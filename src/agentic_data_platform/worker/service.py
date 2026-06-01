@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,12 +51,14 @@ class RunWorker:
         worker_id: str,
         executor: WorkerRunExecutor,
         allow_legacy_queue_claim: bool = True,
+        heartbeat_interval_seconds: int = 30,
     ) -> None:
         _require_non_empty("worker_id", worker_id)
         self.engine = engine
         self.worker_id = worker_id
         self.executor = executor
         self.allow_legacy_queue_claim = allow_legacy_queue_claim
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
         with session_scope(self.engine) as session:
@@ -68,7 +71,14 @@ class RunWorker:
             return None
 
         try:
-            completed = self.executor.execute(claimed)
+            with WorkerHeartbeat(
+                engine=self.engine,
+                run_id=claimed.run_id,
+                worker_id=self.worker_id,
+                interval_seconds=self.heartbeat_interval_seconds,
+                request_id=request_id,
+            ):
+                completed = self.executor.execute(claimed)
         except Exception as exc:
             with session_scope(self.engine) as session:
                 failed = RunRepository(session).transition_run(
@@ -80,12 +90,12 @@ class RunWorker:
                 )
             return _worker_result(failed)
 
-        with session_scope(self.engine) as session:
-            saved = RunRepository(session).save_worker_result(
-                completed,
-                worker_id=self.worker_id,
-                request_id=request_id,
-            )
+        saved = _save_worker_result(
+            self.engine,
+            completed,
+            worker_id=self.worker_id,
+            request_id=request_id,
+        )
         return _worker_result(saved)
 
 
@@ -98,6 +108,7 @@ class SubprocessRunWorker:
         command_runner: CommandRunner | None = None,
         timeout_seconds: int = 7200,
         allow_legacy_queue_claim: bool = True,
+        heartbeat_interval_seconds: int = 30,
     ) -> None:
         _require_non_empty("worker_id", worker_id)
         if timeout_seconds <= 0:
@@ -107,6 +118,7 @@ class SubprocessRunWorker:
         self.command_runner = command_runner or SubprocessCommandRunner()
         self.timeout_seconds = timeout_seconds
         self.allow_legacy_queue_claim = allow_legacy_queue_claim
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
         with session_scope(self.engine) as session:
@@ -124,7 +136,14 @@ class SubprocessRunWorker:
             request_id=request_id,
         )
         try:
-            process = self.command_runner.run(args, timeout=self.timeout_seconds)
+            with WorkerHeartbeat(
+                engine=self.engine,
+                run_id=claimed.run_id,
+                worker_id=self.worker_id,
+                interval_seconds=self.heartbeat_interval_seconds,
+                request_id=request_id,
+            ):
+                process = self.command_runner.run(args, timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired:
             return _fail_active_subprocess_run(
                 self.engine,
@@ -178,12 +197,12 @@ def execute_claimed_run(
             )
         return _worker_result(failed)
 
-    with session_scope(engine) as session:
-        saved = RunRepository(session).save_worker_result(
-            completed,
-            worker_id=worker_id,
-            request_id=request_id,
-        )
+    saved = _save_worker_result(
+        engine,
+        completed,
+        worker_id=worker_id,
+        request_id=request_id,
+    )
     return _worker_result(saved)
 
 
@@ -203,6 +222,7 @@ def build_configured_worker(
             worker_id=worker_id,
             timeout_seconds=service_settings.worker_subprocess_timeout_seconds,
             allow_legacy_queue_claim=service_settings.worker_legacy_queue_claim_enabled,
+            heartbeat_interval_seconds=service_settings.worker_heartbeat_interval_seconds,
         )
     executor = build_configured_executor(service_settings)
     return RunWorker(
@@ -210,6 +230,7 @@ def build_configured_worker(
         worker_id=worker_id,
         executor=executor,
         allow_legacy_queue_claim=service_settings.worker_legacy_queue_claim_enabled,
+        heartbeat_interval_seconds=service_settings.worker_heartbeat_interval_seconds,
     )
 
 
@@ -265,6 +286,93 @@ def _worker_result(run) -> WorkerRunResult:
         turn_count=len(run.trajectory),
         evaluator_id=run.evaluator_result.evaluator_id if run.evaluator_result is not None else None,
     )
+
+
+def _save_worker_result(
+    engine: Engine,
+    run,
+    *,
+    worker_id: str,
+    request_id: str | None,
+):
+    with session_scope(engine) as session:
+        repository = RunRepository(session)
+        try:
+            return repository.save_worker_result(
+                run,
+                worker_id=worker_id,
+                request_id=request_id,
+            )
+        except ValueError:
+            current = repository.get_run(run.run_id)
+            if current.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
+                return current
+            raise
+
+
+class WorkerHeartbeat:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        run_id: str,
+        worker_id: str,
+        interval_seconds: int,
+        request_id: str | None,
+    ) -> None:
+        self.engine = engine
+        self.run_id = run_id
+        self.worker_id = worker_id
+        self.interval_seconds = interval_seconds
+        self.request_id = request_id
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> WorkerHeartbeat:
+        self._record(propagate=True)
+        if self.interval_seconds > 0:
+            self._thread = threading.Thread(
+                target=self._run,
+                name=f"worker-heartbeat-{self.run_id}",
+                daemon=True,
+            )
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(min(self.interval_seconds, 1), 0.1))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self._record(propagate=False)
+
+    def _record(self, *, propagate: bool) -> None:
+        try:
+            with session_scope(self.engine) as session:
+                RunRepository(session).record_worker_heartbeat(
+                    self.run_id,
+                    worker_id=self.worker_id,
+                    status=RunStatus.RUNNING,
+                    request_id=self.request_id,
+                )
+        except Exception as exc:
+            if propagate:
+                raise
+            print(
+                json.dumps(
+                    {
+                        "event": "worker_heartbeat_failed",
+                        "run_id": self.run_id,
+                        "worker_id": self.worker_id,
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _execution_child_args(

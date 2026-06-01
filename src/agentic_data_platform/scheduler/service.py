@@ -34,16 +34,23 @@ class SchedulerDispatchResult:
 class SchedulerRecoveryResult:
     scheduler_id: str
     requeued_run_ids: list[str]
+    failed_run_ids: list[str]
 
     @property
     def requeued_count(self) -> int:
         return len(self.requeued_run_ids)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failed_run_ids)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "scheduler_id": self.scheduler_id,
             "requeued_count": self.requeued_count,
             "requeued_run_ids": list(self.requeued_run_ids),
+            "failed_count": self.failed_count,
+            "failed_run_ids": list(self.failed_run_ids),
         }
 
 
@@ -75,19 +82,30 @@ class RunScheduler:
         )
 
     def recover_once(self, *, request_id: str | None = None) -> SchedulerRecoveryResult:
-        older_than = datetime.now(timezone.utc) - timedelta(
+        stale_dispatched_older_than = datetime.now(timezone.utc) - timedelta(
             seconds=self.settings.scheduler_stale_dispatched_timeout_seconds
         )
+        stale_active_older_than = datetime.now(timezone.utc) - timedelta(
+            seconds=self.settings.scheduler_stale_active_heartbeat_timeout_seconds
+        )
         with session_scope(self.engine) as session:
-            recovered = RunRepository(session).requeue_stale_dispatched_runs(
-                older_than=older_than,
+            repository = RunRepository(session)
+            requeued = repository.requeue_stale_dispatched_runs(
+                older_than=stale_dispatched_older_than,
+                scheduler_id=self.scheduler_id,
+                max_runs=self.settings.scheduler_recovery_batch_size,
+                request_id=request_id,
+            )
+            failed = repository.fail_stale_active_runs_by_heartbeat(
+                older_than=stale_active_older_than,
                 scheduler_id=self.scheduler_id,
                 max_runs=self.settings.scheduler_recovery_batch_size,
                 request_id=request_id,
             )
         return SchedulerRecoveryResult(
             scheduler_id=self.scheduler_id,
-            requeued_run_ids=[run.run_id for run in recovered],
+            requeued_run_ids=[run.run_id for run in requeued],
+            failed_run_ids=[run.run_id for run in failed],
         )
 
 
@@ -113,7 +131,7 @@ def run_scheduler_loop(
 ) -> None:
     while True:
         recovery_result = scheduler.recover_once()
-        if recovery_result.requeued_count:
+        if recovery_result.requeued_count or recovery_result.failed_count:
             print(json.dumps({"action": "recover", **recovery_result.to_dict()}, sort_keys=True), flush=True)
         result = scheduler.dispatch_once()
         if result.dispatched_count:

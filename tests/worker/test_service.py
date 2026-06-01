@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
+from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
@@ -165,6 +166,25 @@ class WorkerServiceTest(unittest.TestCase):
             result = worker.run_once(request_id="req-worker-empty-001")
 
         self.assertIsNone(result)
+
+    def test_worker_returns_existing_terminal_state_when_recovery_wins_race(self):
+        create_response = self.client.post(
+            "/runs",
+            json=_run_create_payload("run_worker_recovery_race_001"),
+        )
+        self.assertEqual(create_response.status_code, 201)
+
+        worker = RunWorker(
+            engine=self.engine,
+            worker_id="worker-race-test",
+            executor=FailRunBeforeSaveExecutor(self.engine),
+        )
+
+        result = worker.run_once(request_id="req-worker-recovery-race-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.run_id, "run_worker_recovery_race_001")
+        self.assertEqual(result.status, "failed")
 
     def test_fixture_worker_resolves_dev_provider_refs_without_exposing_secrets(self):
         payload = _run_create_payload("run_worker_provider_refs_001")
@@ -1421,6 +1441,21 @@ class FakeWrapperCommandRunner:
             stdout="wrapper ok\n" if self.returncode == 0 else "",
             stderr=self.failure_reason or "",
         )
+
+
+class FailRunBeforeSaveExecutor:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def execute(self, run):
+        with session_scope(self.engine) as session:
+            RunRepository(session).transition_run(
+                run.run_id,
+                RunStatus.FAILED,
+                event_type="run.recovered",
+                reason="scheduler recovery won the save race",
+            )
+        return run
 
 
 def _arg_value(args: list[str], name: str) -> str:

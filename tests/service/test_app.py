@@ -41,11 +41,13 @@ class ServiceAppTest(unittest.TestCase):
                 "SANDBOX_HOST_WORKSPACE_ROOT": "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces",
                 "WORKER_SUBPROCESS_ISOLATION_ENABLED": "true",
                 "WORKER_SUBPROCESS_TIMEOUT_SECONDS": "1800",
+                "WORKER_HEARTBEAT_INTERVAL_SECONDS": "15",
                 "WORKER_LEGACY_QUEUE_CLAIM_ENABLED": "true",
                 "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS": "8",
                 "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS": "harbor-local-docker=3,docker_terminal=2",
                 "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS": "pilot-project=2,foundation-model=1",
                 "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS": "420",
+                "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS": "900",
                 "SCHEDULER_RECOVERY_BATCH_SIZE": "25",
             }
         )
@@ -75,6 +77,7 @@ class ServiceAppTest(unittest.TestCase):
         )
         self.assertTrue(settings.worker_subprocess_isolation_enabled)
         self.assertEqual(settings.worker_subprocess_timeout_seconds, 1800)
+        self.assertEqual(settings.worker_heartbeat_interval_seconds, 15)
         self.assertTrue(settings.worker_legacy_queue_claim_enabled)
         self.assertEqual(settings.scheduler_global_max_active_runs, 8)
         self.assertEqual(
@@ -86,6 +89,7 @@ class ServiceAppTest(unittest.TestCase):
             {"pilot-project": 2, "foundation-model": 1},
         )
         self.assertEqual(settings.scheduler_stale_dispatched_timeout_seconds, 420)
+        self.assertEqual(settings.scheduler_stale_active_heartbeat_timeout_seconds, 900)
         self.assertEqual(settings.scheduler_recovery_batch_size, 25)
 
     def test_health_endpoint_returns_service_identity(self):
