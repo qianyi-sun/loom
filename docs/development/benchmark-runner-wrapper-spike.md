@@ -192,6 +192,28 @@ python -m agentic_data_platform.benchmark_wrappers.<suite> \
   --dry-run
 ```
 
+Queued platform worker execution uses the same wrapper command envelope. A run
+with an original wrapper contract, such as
+`skillflow-original-wrapper-v0` or `skilllearnbench-original-wrapper-v0`, and a
+`metadata.wrapper_run` object is claimed from the normal run queue. The worker
+writes `task.json` from the persisted run record, invokes the configured
+`RunnerConfig.entrypoint`, persists a platform trajectory turn, snapshots the
+final wrapper workspace, stores the wrapper `result.json` plus declared
+artifacts, and converts wrapper evaluator output into the existing
+`harbor_verifier` evaluator result shape.
+
+Example run metadata:
+
+```json
+{
+  "wrapper_run": {
+    "dry_run": false,
+    "upstream_root": "/opt/upstream/SkillLearnBench",
+    "timeout_seconds": 3600
+  }
+}
+```
+
 The reusable wrapper smoke entrypoint builds the fixture-derived manifest and
 invokes the same wrapper envelope:
 
@@ -281,6 +303,11 @@ Implemented wrapper behavior:
   #114 evidence path above that materializes the source root before invoking the
   wrapper smoke. It is opt-in because it can download benchmark assets and run
   upstream Docker jobs.
+- `DockerTerminalWorkerExecutor` now executes the same wrappers from queued
+  `RunRecord` objects when `metadata.wrapper_run` is present. This path does not
+  add a second lifecycle: wrapper status, metrics, failure reason, final
+  workspace snapshot, artifact refs, and evaluator feedback are attached to the
+  existing run model.
 
 The generated upstream manifest import path lives in
 `agentic_data_platform.benchmarks.manifests`. It accepts generated repository or

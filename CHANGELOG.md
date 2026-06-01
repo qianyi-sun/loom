@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added queued worker execution for original SkillFlow/SkillLearnBench wrapper
+  runs for #125. `DockerTerminalWorkerExecutor` now recognizes original wrapper
+  runner contracts with `metadata.wrapper_run`, writes the wrapper task
+  manifest from persisted run data, invokes the configured runner entrypoint,
+  captures a platform trajectory turn and final workspace snapshot, persists
+  wrapper result/artifact files, and converts wrapper evaluator output into the
+  existing run evaluator/dashboard model.
 - Mapped platform model provider refs into original upstream SkillFlow and
   SkillLearnBench runner shapes for #123. SkillFlow now writes a suite-native
   `artifacts/skillflow-job-config.json`, SkillLearnBench receives upstream

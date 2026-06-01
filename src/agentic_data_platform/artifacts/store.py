@@ -205,6 +205,9 @@ class ArtifactKeyFactory:
     def harbor_runner_report_key(self, run_id: str, task_instance_id: str) -> str:
         return self._key(run_id, task_instance_id, "logs", "harbor-runner.json")
 
+    def wrapper_artifact_key(self, run_id: str, task_instance_id: str, artifact_path: str) -> str:
+        return self._key(run_id, task_instance_id, "wrapper", *_safe_relative_parts(artifact_path))
+
     def _key(self, run_id: str, task_instance_id: str, *parts: str) -> str:
         return "/".join(
             [
@@ -373,6 +376,39 @@ class ArtifactPersistence:
             kind=ArtifactKind.LOG,
         )
 
+    def persist_wrapper_artifact(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        local_path: Path,
+        artifact_path: str,
+        kind: ArtifactKind,
+        media_type: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        if not local_path.is_file():
+            raise ValueError(f"artifact file does not exist: {local_path}")
+        relative_parts = _safe_relative_parts(artifact_path)
+        stored = self.store.put_bytes(
+            self.key_factory.wrapper_artifact_key(run_id, task_instance_id, artifact_path),
+            local_path.read_bytes(),
+            media_type=media_type,
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": "local_file_artifact",
+                "artifact_path": "/".join(relative_parts),
+                **dict(metadata or {}),
+            },
+        )
+
+        return _artifact_ref(
+            stored,
+            artifact_id=f"{_safe_component(run_id)}-{_safe_component('-'.join(relative_parts))}",
+            kind=kind,
+        )
+
 
 def _artifact_ref(stored: StoredArtifact, *, artifact_id: str, kind: ArtifactKind) -> ArtifactRef:
     return ArtifactRef(
@@ -438,6 +474,17 @@ def _validate_artifact_key(key: str) -> str:
         raise ValueError("unsafe artifact key: empty, current, or parent path segments are not allowed")
 
     return key
+
+
+def _safe_relative_parts(value: str) -> tuple[str, ...]:
+    _require_non_empty("artifact_path", value)
+    path = Path(value)
+    if path.is_absolute():
+        raise ValueError("artifact_path must be relative")
+    parts = path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("artifact_path must not contain empty, current, or parent segments")
+    return tuple(parts)
 
 
 def _validate_expiry(expires_in_seconds: int) -> None:

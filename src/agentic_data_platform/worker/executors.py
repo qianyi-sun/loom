@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import mimetypes
+import shlex
+import subprocess
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -12,10 +17,13 @@ from agentic_data_platform.benchmarks.adapters import BenchmarkRegistration
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
+    EvaluatorResult,
     JudgeConfig,
     ModelConfig,
     RunRecord,
     RunStatus,
+    RunnerKind,
+    TerminalTurn,
 )
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
 from agentic_data_platform.harbor.ingestion import HarborIngestionResult, HarborResultIngestor
@@ -36,14 +44,29 @@ from agentic_data_platform.sandbox.docker_terminal import (
     DockerTerminalSandbox,
     DockerTerminalSandboxConfig,
     SandboxCommandResult,
+    SubprocessCommandRunner,
     WorkspaceFile,
     WorkspaceSnapshot,
 )
 
 
+_ORIGINAL_WRAPPER_CONTRACTS = {
+    "skillflow-original-wrapper-v0",
+    "skilllearnbench-original-wrapper-v0",
+}
+
+
 class WorkerRunExecutor(Protocol):
     def execute(self, run: RunRecord) -> RunRecord:
         ...
+
+
+@dataclass(frozen=True)
+class OriginalWrapperRunSpec:
+    runner_contract: str
+    dry_run: bool
+    upstream_root: Path | None
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -57,12 +80,16 @@ class DockerTerminalWorkerExecutor:
     model_http_client: httpx.Client | None = None
     command_runner: CommandRunner | None = None
     harbor_command_runner: CommandRunner | None = None
+    wrapper_command_runner: CommandRunner | None = None
 
     def execute(self, run: RunRecord) -> RunRecord:
         self._resolve_provider_refs(run)
         harbor_spec = _harbor_run_spec_for_run(run, workspace_root=self.workspace_root)
         if harbor_spec is not None:
             return self._execute_harbor_run(run, harbor_spec)
+        wrapper_spec = _original_wrapper_run_spec_for_run(run)
+        if wrapper_spec is not None:
+            return self._execute_original_wrapper_run(run, wrapper_spec)
 
         judge = _judge_for_run(run)
         evaluator_id = _evaluator_id_for_run(run)
@@ -101,6 +128,164 @@ class DockerTerminalWorkerExecutor:
             ),
         )
         return result.run
+
+    def _execute_original_wrapper_run(self, run: RunRecord, spec: OriginalWrapperRunSpec) -> RunRecord:
+        if run.status is not RunStatus.PROVISIONING:
+            run.transition_to(RunStatus.PROVISIONING)
+        run.transition_to(RunStatus.RUNNING)
+
+        run_root = self.workspace_root / run.run_id / "original-wrapper"
+        workspace = run_root / "workspace"
+        output_dir = run_root / "output"
+        artifacts_dir = run_root / "artifacts"
+        manifest_path = run_root / "task-manifest.json"
+        result_path = run_root / "wrapper-result.json"
+        for path in (workspace, output_dir, artifacts_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        _write_original_wrapper_manifest(
+            run,
+            manifest_path=manifest_path,
+            workspace=workspace,
+            output_dir=output_dir,
+            artifacts_dir=artifacts_dir,
+            provider_registry=self.provider_registry,
+        )
+
+        args = [
+            *run.runner.entrypoint,
+            "--task-manifest",
+            str(manifest_path),
+            "--workspace",
+            str(workspace),
+            "--output",
+            str(result_path),
+            "--artifacts-dir",
+            str(artifacts_dir),
+            "--timeout-seconds",
+            str(spec.timeout_seconds),
+        ]
+        if spec.dry_run:
+            args.append("--dry-run")
+        elif spec.upstream_root is not None:
+            args.extend(["--upstream-root", str(spec.upstream_root)])
+
+        started_at = datetime.now(timezone.utc)
+        try:
+            process = (self.wrapper_command_runner or SubprocessCommandRunner()).run(
+                args,
+                timeout=spec.timeout_seconds,
+            )
+            completed_at = datetime.now(timezone.utc)
+        except subprocess.TimeoutExpired as exc:
+            completed_at = datetime.now(timezone.utc)
+            process = subprocess.CompletedProcess(
+                args=args,
+                returncode=124,
+                stdout=_process_output(exc.output),
+                stderr=(
+                    _process_output(exc.stderr)
+                    or f"Original benchmark wrapper timed out after {spec.timeout_seconds} seconds\n"
+                ),
+            )
+
+        run.add_turn(
+            TerminalTurn(
+                turn_index=len(run.trajectory),
+                command=shlex.join(args),
+                cwd=str(run_root),
+                started_at=started_at,
+                completed_at=completed_at,
+                exit_code=process.returncode,
+                stdout=_process_output(process.stdout),
+                stderr=_process_output(process.stderr),
+                changed_paths=_workspace_paths(workspace),
+                metadata={
+                    "runner_contract": spec.runner_contract,
+                    "dry_run": spec.dry_run,
+                    "timeout_seconds": spec.timeout_seconds,
+                },
+            )
+        )
+        run.attach_artifact(
+            self.artifact_persistence.persist_trajectory(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                turns=run.trajectory,
+            )
+        )
+        run.attach_artifact(
+            self.artifact_persistence.persist_workspace_snapshot(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                snapshot=_workspace_snapshot_from_path(run, workspace),
+            )
+        )
+
+        if not result_path.is_file():
+            run.failure_reason = _missing_original_wrapper_result_reason(process)
+            run.transition_to(RunStatus.FAILED)
+            return run
+
+        try:
+            wrapper_result = _read_json_object(result_path)
+        except ValueError as exc:
+            run.failure_reason = str(exc)
+            run.transition_to(RunStatus.FAILED)
+            return run
+
+        result_artifact = self.artifact_persistence.persist_wrapper_artifact(
+            run_id=run.run_id,
+            task_instance_id=run.task.instance_id,
+            local_path=result_path,
+            artifact_path="wrapper-result.json",
+            kind=ArtifactKind.LOG,
+            media_type="application/json",
+            metadata={
+                "content_type": "original_wrapper_result",
+                "runner_contract": spec.runner_contract,
+            },
+        )
+        run.attach_artifact(result_artifact)
+
+        try:
+            wrapper_artifacts = _persist_original_wrapper_artifacts(
+                run=run,
+                artifact_persistence=self.artifact_persistence,
+                wrapper_result=wrapper_result,
+                workspace=workspace,
+                output_dir=output_dir,
+                artifacts_dir=artifacts_dir,
+                runner_contract=spec.runner_contract,
+            )
+        except ValueError as exc:
+            run.failure_reason = str(exc)
+            run.transition_to(RunStatus.FAILED)
+            return run
+        for artifact in wrapper_artifacts:
+            run.attach_artifact(artifact)
+
+        if process.returncode != 0 or wrapper_result.get("status") != "completed":
+            run.failure_reason = _original_wrapper_failure_reason(process=process, wrapper_result=wrapper_result)
+            run.transition_to(RunStatus.FAILED)
+            return run
+
+        run.transition_to(RunStatus.EVALUATING)
+        run.attach_evaluator_result(
+            _original_wrapper_evaluator_result(
+                run,
+                wrapper_result=wrapper_result,
+                artifacts=wrapper_artifacts,
+                artifacts_dir=artifacts_dir,
+            )
+        )
+        run.metadata["original_wrapper"] = {
+            "runner_contract": spec.runner_contract,
+            "exit_code": process.returncode,
+            "dry_run": spec.dry_run,
+            "duration_seconds": (completed_at - started_at).total_seconds(),
+        }
+        run.transition_to(RunStatus.SUCCEEDED)
+        return run
 
     def _execute_harbor_run(self, run: RunRecord, spec: HarborRunSpec) -> RunRecord:
         if run.status is not RunStatus.PROVISIONING:
@@ -370,6 +555,252 @@ def _resolve_metadata_ref(registry: DevProviderConfigRegistry, metadata: dict[st
         registry.resolve_secret(secret_ref)
 
 
+def _original_wrapper_run_spec_for_run(run: RunRecord) -> OriginalWrapperRunSpec | None:
+    if run.runner.kind is not RunnerKind.ORIGINAL_BENCHMARK:
+        return None
+    runner_contract = _optional_str(run.runner.metadata.get("runner_contract"))
+    if runner_contract not in _ORIGINAL_WRAPPER_CONTRACTS:
+        return None
+    configured = run.metadata.get("wrapper_run")
+    if not isinstance(configured, dict):
+        return None
+
+    timeout_seconds = _int_or_default(
+        configured.get("timeout_seconds") or run.runner.resource_limits.get("timeout_seconds"),
+        3600,
+    )
+    if timeout_seconds <= 0:
+        raise ValueError("wrapper_run.timeout_seconds must be positive")
+
+    upstream_root_value = _optional_str(configured.get("upstream_root"))
+    return OriginalWrapperRunSpec(
+        runner_contract=runner_contract,
+        dry_run=bool(configured.get("dry_run", False)),
+        upstream_root=Path(upstream_root_value) if upstream_root_value is not None else None,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _write_original_wrapper_manifest(
+    run: RunRecord,
+    *,
+    manifest_path: Path,
+    workspace: Path,
+    output_dir: Path,
+    artifacts_dir: Path,
+    provider_registry: DevProviderConfigRegistry | None,
+) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": "adp.worker_wrapper_task.v1",
+        "run_id": run.run_id,
+        "suite_name": run.task.benchmark_suite,
+        "benchmark_version": run.task.benchmark_version,
+        "source_uri": run.task.source_uri,
+        "source_version": _optional_str(run.task.metadata.get("source_version")) or run.task.benchmark_version,
+        "task_family": run.task.task_family,
+        "instance_id": run.task.instance_id,
+        "instruction_ref": (
+            _optional_str(run.task.metadata.get("instruction_ref"))
+            or "inline:task.metadata.instruction"
+        ),
+        "input_files": list(run.task.input_artifact_refs),
+        "model": _original_wrapper_model_manifest(run, provider_registry=provider_registry),
+        "output_dir": str(output_dir),
+        "artifacts_dir": str(artifacts_dir),
+        "workspace": str(workspace),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _original_wrapper_model_manifest(
+    run: RunRecord,
+    *,
+    provider_registry: DevProviderConfigRegistry | None,
+) -> dict[str, Any]:
+    model = {
+        "provider": run.model.provider,
+        "model_name": run.model.model_name,
+        "mode": run.model.mode.value,
+        "prompt_template_version": run.model.prompt_template_version,
+        **dict(run.model.metadata),
+    }
+    if run.model.model_version is not None:
+        model["model_version"] = run.model.model_version
+
+    provider_config_id = _optional_str(model.get("provider_config_id"))
+    if provider_config_id is not None and provider_registry is not None:
+        ref = provider_registry.get(provider_config_id)
+        model.setdefault("secret_ref", ref.secret_ref)
+        if ref.base_url:
+            model.setdefault("base_url", ref.base_url)
+    return model
+
+
+def _persist_original_wrapper_artifacts(
+    *,
+    run: RunRecord,
+    artifact_persistence: ArtifactPersistence,
+    wrapper_result: dict[str, Any],
+    workspace: Path,
+    output_dir: Path,
+    artifacts_dir: Path,
+    runner_contract: str,
+) -> list[ArtifactRef]:
+    artifacts_payload = wrapper_result.get("artifacts", [])
+    if artifacts_payload is None:
+        return []
+    if not isinstance(artifacts_payload, list):
+        raise ValueError("original wrapper result artifacts must be a list")
+
+    artifacts: list[ArtifactRef] = []
+    for item in artifacts_payload:
+        if not isinstance(item, dict):
+            raise ValueError("original wrapper artifact entries must be objects")
+        artifact_path = _optional_str(item.get("path"))
+        if artifact_path is None:
+            raise ValueError("original wrapper artifact path must be a non-empty string")
+        local_path = _original_wrapper_artifact_path(
+            artifact_path,
+            workspace=workspace,
+            output_dir=output_dir,
+            artifacts_dir=artifacts_dir,
+        )
+        kind_name = _optional_str(item.get("kind")) or "log"
+        media_type = (
+            _optional_str(item.get("media_type"))
+            or mimetypes.guess_type(local_path.name)[0]
+            or "application/octet-stream"
+        )
+        artifacts.append(
+            artifact_persistence.persist_wrapper_artifact(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                local_path=local_path,
+                artifact_path=artifact_path,
+                kind=_original_wrapper_artifact_kind(kind_name),
+                media_type=media_type,
+                metadata={
+                    "content_type": "original_wrapper_artifact",
+                    "runner_contract": runner_contract,
+                    "wrapper_artifact_kind": kind_name,
+                },
+            )
+        )
+    return artifacts
+
+
+def _original_wrapper_artifact_path(
+    artifact_path: str,
+    *,
+    workspace: Path,
+    output_dir: Path,
+    artifacts_dir: Path,
+) -> Path:
+    relative = Path(artifact_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"unsafe original wrapper artifact path: {artifact_path}")
+    root_name = relative.parts[0]
+    remainder = relative.parts[1:]
+    if root_name == "artifacts":
+        return artifacts_dir.joinpath(*remainder)
+    if root_name == "workspace":
+        return workspace.joinpath(*remainder)
+    if root_name == "output":
+        return output_dir.joinpath(*remainder)
+    raise ValueError("original wrapper artifact path must start with artifacts/, workspace/, or output/")
+
+
+def _original_wrapper_artifact_kind(kind_name: str) -> ArtifactKind:
+    normalized = kind_name.strip().lower().replace("-", "_")
+    if normalized in {"log", "runner_config"}:
+        return ArtifactKind.LOG
+    if normalized == "evaluator_report":
+        return ArtifactKind.EVALUATOR_REPORT
+    if normalized in {"upstream_output", "generated_file"}:
+        return ArtifactKind.GENERATED_FILE
+    if normalized == "trajectory":
+        return ArtifactKind.TRAJECTORY
+    if normalized == "workspace_snapshot":
+        return ArtifactKind.WORKSPACE_SNAPSHOT
+    raise ValueError(f"unsupported original wrapper artifact kind: {kind_name}")
+
+
+def _original_wrapper_evaluator_result(
+    run: RunRecord,
+    *,
+    wrapper_result: dict[str, Any],
+    artifacts: list[ArtifactRef],
+    artifacts_dir: Path,
+) -> EvaluatorResult:
+    metrics = _dict_value(wrapper_result.get("metrics"))
+    feedback = _feedback_values(wrapper_result)
+    evaluator_report_ref = _optional_str(wrapper_result.get("evaluator_report_ref"))
+    if evaluator_report_ref is not None:
+        report_path = _original_wrapper_artifact_path(
+            evaluator_report_ref,
+            workspace=artifacts_dir,
+            output_dir=artifacts_dir,
+            artifacts_dir=artifacts_dir,
+        )
+        if report_path.is_file():
+            try:
+                report = _read_json_object(report_path)
+            except ValueError:
+                report = {}
+            metrics = {**_dict_value(report.get("metrics")), **metrics}
+            feedback.extend(_feedback_values(report))
+
+    report_artifact_refs = [
+        artifact.uri
+        for artifact in artifacts
+        if artifact.kind is ArtifactKind.EVALUATOR_REPORT
+    ]
+    return EvaluatorResult(
+        evaluator_id=_original_wrapper_evaluator_id(run),
+        mode="harbor_verifier",
+        status="completed",
+        score=_score_from_metrics(metrics),
+        metrics=metrics,
+        verbal_feedback="\n".join(dict.fromkeys(feedback)),
+        judge=None,
+        artifact_refs=report_artifact_refs,
+        metadata={
+            "runner_contract": _optional_str(run.runner.metadata.get("runner_contract")) or "unknown",
+            "wrapper_status": wrapper_result.get("status"),
+            "wrapper_exit_code": wrapper_result.get("exit_code"),
+        },
+    )
+
+
+def _original_wrapper_evaluator_id(run: RunRecord) -> str:
+    for config in run.evaluator_configs:
+        if config.mode == "harbor_verifier":
+            return config.evaluator_id
+    return "original-wrapper-verifier"
+
+
+def _original_wrapper_failure_reason(
+    *,
+    process: subprocess.CompletedProcess[str],
+    wrapper_result: dict[str, Any],
+) -> str:
+    configured_reason = _optional_str(wrapper_result.get("failure_reason"))
+    if configured_reason is not None:
+        return configured_reason
+    if process.returncode != 0:
+        return f"Original benchmark wrapper exited with code {process.returncode}"
+    return "Original benchmark wrapper reported a failed status"
+
+
+def _missing_original_wrapper_result_reason(process: subprocess.CompletedProcess[str]) -> str:
+    if process.returncode == 124:
+        return "Original benchmark wrapper timed out before writing a result file"
+    if process.returncode != 0:
+        return f"Original benchmark wrapper exited with code {process.returncode} before writing a result file"
+    return "Original benchmark wrapper did not write a result file"
+
+
 def _harbor_run_spec_for_run(run: RunRecord, *, workspace_root: Path) -> HarborRunSpec | None:
     configured = run.metadata.get("harbor_run")
     if not isinstance(configured, dict):
@@ -452,6 +883,99 @@ def _workspace_snapshot_from_harbor(run: RunRecord, ingested: HarborIngestionRes
         captured_at=datetime.now(timezone.utc),
         files=files,
     )
+
+
+def _workspace_snapshot_from_path(run: RunRecord, workspace: Path) -> WorkspaceSnapshot:
+    return WorkspaceSnapshot(
+        run_id=run.run_id,
+        workspace_path=str(workspace),
+        captured_at=datetime.now(timezone.utc),
+        files=[
+            WorkspaceFile(path=relative_path, size_bytes=size_bytes, sha256=sha256)
+            for relative_path, size_bytes, sha256 in _workspace_file_records(workspace)
+        ],
+    )
+
+
+def _workspace_paths(workspace: Path) -> list[str]:
+    return [relative_path for relative_path, _, _ in _workspace_file_records(workspace)]
+
+
+def _workspace_file_records(workspace: Path) -> list[tuple[str, int, str]]:
+    if not workspace.exists():
+        return []
+    records: list[tuple[str, int, str]] = []
+    for path in sorted(workspace.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative_path = path.relative_to(workspace).as_posix()
+        records.append((relative_path, path.stat().st_size, _sha256_file(path)))
+    return records
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"missing JSON file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON file: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON file must contain an object: {path}")
+    return payload
+
+
+def _dict_value(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _feedback_values(payload: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("verbal_feedback", "feedback", "summary", "message", "comment"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+        elif isinstance(value, list):
+            values.extend(str(item).strip() for item in value if str(item).strip())
+    return values
+
+
+def _score_from_metrics(metrics: dict[str, Any]) -> float | None:
+    for key in (
+        "score",
+        "reward",
+        "accuracy",
+        "upstream_score",
+        "upstream_score_mean",
+        "upstream_success_rate",
+        "task_success",
+    ):
+        if key not in metrics:
+            continue
+        value = metrics[key]
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        if isinstance(value, (int, float)):
+            score = float(value)
+            if 0 <= score <= 1:
+                return score
+    return None
+
+
+def _process_output(output: bytes | str | None) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output
 
 
 def _harbor_failure_reason(result) -> str:

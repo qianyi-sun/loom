@@ -587,6 +587,115 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.failed"],
         )
 
+    def test_worker_executes_original_wrapper_run_and_attaches_result_artifacts(self):
+        payload = _run_create_payload("run_worker_wrapper_001")
+        payload["task"]["metadata"]["instruction_ref"] = "inline:task.metadata.instruction"
+        payload["evaluators"] = [{"evaluator_id": "original-wrapper-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "wrapper_run": {
+                "dry_run": True,
+                "timeout_seconds": 45,
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeWrapperCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-wrapper-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    wrapper_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-wrapper-001")
+            wrapper_args = command_runner.calls[0]["args"]
+            manifest_path = Path(_arg_value(wrapper_args, "--task-manifest"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.turn_count, 1)
+        self.assertEqual(wrapper_args[:3], ["python", "-m", "agentic_data_platform.benchmark_wrappers.skilllearnbench"])
+        self.assertIn("--dry-run", wrapper_args)
+        self.assertEqual(command_runner.calls[0]["timeout"], 45)
+        self.assertEqual(manifest["run_id"], "run_worker_wrapper_001")
+        self.assertEqual(manifest["suite_name"], "SkillLearnBench")
+        self.assertEqual(manifest["task_family"], "spreadsheet-from-documents")
+        self.assertEqual(manifest["model"]["provider"], "mock-api")
+        self.assertEqual(manifest["instruction_ref"], "inline:task.metadata.instruction")
+
+        detail = self.client.get("/runs/run_worker_wrapper_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "succeeded")
+        self.assertEqual(payload["run"]["evaluator"]["mode"], "harbor_verifier")
+        self.assertEqual(payload["run"]["evaluator"]["score"], 0.91)
+        self.assertIn("Wrapper accepted the generated spreadsheet", payload["run"]["evaluator"]["verbal_feedback_summary"])
+        self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
+        artifact_kinds = {artifact["kind"] for artifact in payload["run"]["artifacts"]}
+        self.assertIn("trajectory", artifact_kinds)
+        self.assertIn("workspace_snapshot", artifact_kinds)
+        self.assertIn("evaluator_report", artifact_kinds)
+        self.assertIn("generated_file", artifact_kinds)
+        self.assertIn("log", artifact_kinds)
+        self.assertEqual(
+            [event["event_type"] for event in payload["lifecycle_events"]],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+        )
+
+    def test_worker_marks_original_wrapper_exit_failure(self):
+        payload = _run_create_payload("run_worker_wrapper_failed_001")
+        payload["metadata"] = {
+            "wrapper_run": {
+                "dry_run": True,
+                "timeout_seconds": 45,
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeWrapperCommandRunner(
+                returncode=7,
+                status="failed",
+                failure_reason="upstream wrapper exited with code 7",
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-wrapper-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    wrapper_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-wrapper-failed-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.turn_count, 1)
+
+        detail = self.client.get("/runs/run_worker_wrapper_failed_001")
+        payload = detail.json()
+        self.assertEqual(payload["run"]["status"], "failed")
+        self.assertIn("upstream wrapper exited with code 7", payload["run"]["failure_reason"])
+        self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
+        artifact_kinds = {artifact["kind"] for artifact in payload["run"]["artifacts"]}
+        self.assertIn("trajectory", artifact_kinds)
+        self.assertIn("workspace_snapshot", artifact_kinds)
+        self.assertIn("log", artifact_kinds)
+        self.assertEqual(
+            [event["event_type"] for event in payload["lifecycle_events"]],
+            ["run.created", "run.claimed", "run.started", "run.failed"],
+        )
+
 
 def _app(engine):
     return create_app(
@@ -632,7 +741,7 @@ def _run_create_payload(run_id: str) -> dict:
             "kind": "original_benchmark",
             "sandbox_backend": "docker_terminal",
             "image": "python:3.12-slim",
-            "entrypoint": ["python", "-m", "skilllearnbench.runner"],
+            "entrypoint": ["python", "-m", "agentic_data_platform.benchmark_wrappers.skilllearnbench"],
             "internet_access": True,
             "resource_limits": {"cpu": 2, "memory_gib": 8, "timeout_seconds": 3600},
             "metadata": {"runner_contract": "skilllearnbench-original-wrapper-v0"},
@@ -704,6 +813,107 @@ class FakeHarborCommandRunner:
             stdout=self.stdout,
             stderr=self.stderr,
         )
+
+
+class FakeWrapperCommandRunner:
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        status: str = "completed",
+        failure_reason: str | None = None,
+    ) -> None:
+        self.returncode = returncode
+        self.status = status
+        self.failure_reason = failure_reason
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout})
+        output_path = Path(_arg_value(args, "--output"))
+        artifacts_dir = Path(_arg_value(args, "--artifacts-dir"))
+        workspace = Path(_arg_value(args, "--workspace"))
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "receipts.xlsx").write_text("spreadsheet bytes\n", encoding="utf-8")
+        (artifacts_dir / "planned-command.json").write_text(
+            json.dumps({"planned_command": ["python", "evaluate_skills.py"]}),
+            encoding="utf-8",
+        )
+        (artifacts_dir / "stderr.log").write_text(self.failure_reason or "", encoding="utf-8")
+
+        artifacts = [
+            {
+                "kind": "log",
+                "path": "artifacts/planned-command.json",
+                "media_type": "application/json",
+            },
+            {
+                "kind": "log",
+                "path": "artifacts/stderr.log",
+                "media_type": "text/plain",
+            },
+        ]
+        evaluator_report_ref = None
+        metrics: dict[str, object] = {}
+        if self.status == "completed":
+            output_report = artifacts_dir / "upstream-output" / "result.json"
+            output_report.parent.mkdir(parents=True, exist_ok=True)
+            output_report.write_text(
+                json.dumps({"score": 0.91, "feedback": "Wrapper accepted the generated spreadsheet"}),
+                encoding="utf-8",
+            )
+            evaluator_report = artifacts_dir / "evaluator-report.json"
+            evaluator_report.write_text(
+                json.dumps(
+                    {
+                        "metrics": {"upstream_score": 0.91},
+                        "feedback": ["Wrapper accepted the generated spreadsheet"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            evaluator_report_ref = "artifacts/evaluator-report.json"
+            metrics = {"upstream_score": 0.91}
+            artifacts.extend(
+                [
+                    {
+                        "kind": "evaluator_report",
+                        "path": evaluator_report_ref,
+                        "media_type": "application/json",
+                    },
+                    {
+                        "kind": "upstream_output",
+                        "path": "artifacts/upstream-output/result.json",
+                        "media_type": "application/json",
+                    },
+                ]
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(
+                {
+                    "status": self.status,
+                    "exit_code": self.returncode,
+                    "metrics": metrics,
+                    "artifacts": artifacts,
+                    "evaluator_report_ref": evaluator_report_ref,
+                    "failure_reason": self.failure_reason,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=self.returncode,
+            stdout="wrapper ok\n" if self.returncode == 0 else "",
+            stderr=self.failure_reason or "",
+        )
+
+
+def _arg_value(args: list[str], name: str) -> str:
+    return args[args.index(name) + 1]
 
 
 def _write_harbor_job_fixture(root: Path) -> None:
