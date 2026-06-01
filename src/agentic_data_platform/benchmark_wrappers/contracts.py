@@ -107,14 +107,19 @@ def run_wrapper(
     paths: WrapperPaths,
     manifest: WrapperTaskManifest,
     planned_command: list[str],
+    provider_mapping: dict[str, Any] | None = None,
+    extra_env: dict[str, str] | None = None,
+    secret_values: list[str] | None = None,
+    runner_config_artifacts: list[dict[str, str]] | None = None,
 ) -> int:
     if manifest.suite_name != expected_suite:
         raise ValueError(f"{expected_suite} wrapper received {manifest.suite_name} manifest")
 
+    secrets_to_redact = [value for value in secret_values or [] if value]
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.output.parent.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
-    _write_upstream_config(paths=paths, manifest=manifest)
+    _write_upstream_config(paths=paths, manifest=manifest, provider_mapping=provider_mapping)
     _write_planned_command(paths=paths, manifest=manifest, planned_command=planned_command)
 
     if paths.dry_run:
@@ -128,6 +133,7 @@ def run_wrapper(
             stderr="",
             failure_reason=None,
             upstream_artifacts=[],
+            runner_config_artifacts=runner_config_artifacts or [],
         )
         return 0
 
@@ -140,17 +146,21 @@ def run_wrapper(
         completed = subprocess.run(
             planned_command,
             cwd=paths.upstream_root,
-            env=_execution_env(paths=paths, manifest=manifest),
+            env=_execution_env(paths=paths, manifest=manifest, extra_env=extra_env or {}),
             capture_output=True,
             text=True,
             timeout=paths.timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
-        stdout = _process_output(error.stdout)
-        stderr = _process_output(error.stderr)
+        stdout = _redact_secret_values(_process_output(error.stdout), secrets_to_redact)
+        stderr = _redact_secret_values(_process_output(error.stderr), secrets_to_redact)
         _write_process_logs(paths=paths, stdout=stdout, stderr=stderr)
-        upstream_artifacts = _collect_upstream_output_artifacts(paths=paths, manifest=manifest)
+        upstream_artifacts = _collect_upstream_output_artifacts(
+            paths=paths,
+            manifest=manifest,
+            secrets_to_redact=secrets_to_redact,
+        )
         _write_result(
             paths=paths,
             manifest=manifest,
@@ -161,13 +171,18 @@ def run_wrapper(
             stderr=stderr,
             failure_reason=f"upstream runner timed out after {paths.timeout_seconds} seconds",
             upstream_artifacts=upstream_artifacts,
+            runner_config_artifacts=runner_config_artifacts or [],
         )
         return 124
 
-    stdout = completed.stdout
-    stderr = completed.stderr
+    stdout = _redact_secret_values(completed.stdout, secrets_to_redact)
+    stderr = _redact_secret_values(completed.stderr, secrets_to_redact)
     _write_process_logs(paths=paths, stdout=stdout, stderr=stderr)
-    upstream_artifacts = _collect_upstream_output_artifacts(paths=paths, manifest=manifest)
+    upstream_artifacts = _collect_upstream_output_artifacts(
+        paths=paths,
+        manifest=manifest,
+        secrets_to_redact=secrets_to_redact,
+    )
 
     failure_reason = None
     if completed.returncode != 0:
@@ -183,6 +198,7 @@ def run_wrapper(
         stderr=stderr,
         failure_reason=failure_reason,
         upstream_artifacts=upstream_artifacts,
+        runner_config_artifacts=runner_config_artifacts or [],
     )
     return completed.returncode
 
@@ -196,6 +212,7 @@ def _collect_upstream_output_artifacts(
     *,
     paths: WrapperPaths,
     manifest: WrapperTaskManifest,
+    secrets_to_redact: list[str],
 ) -> list[dict[str, str]]:
     output_root = Path(manifest.output_dir)
     if not output_root.exists() or not output_root.is_dir():
@@ -215,7 +232,7 @@ def _collect_upstream_output_artifacts(
         relative_path = source_path.relative_to(output_root)
         target_path = upstream_artifacts_root / relative_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, target_path)
+        _copy_artifact(source_path=source_path, target_path=target_path, secrets_to_redact=secrets_to_redact)
         artifacts.append(
             {
                 "kind": "upstream_output",
@@ -231,7 +248,31 @@ def upstream_config_path(paths: WrapperPaths) -> Path:
     return paths.artifacts_dir / _UPSTREAM_CONFIG_ARTIFACT
 
 
-def _write_upstream_config(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> None:
+def _write_upstream_config(
+    *,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+    provider_mapping: dict[str, Any] | None,
+) -> None:
+    environment_contract = [
+        "ADP_RUN_ID",
+        "ADP_SUITE_NAME",
+        "ADP_TASK_FAMILY",
+        "ADP_INSTANCE_ID",
+        "ADP_WORKSPACE",
+        "ADP_OUTPUT_DIR",
+        "ADP_ARTIFACTS_DIR",
+        "ADP_MODEL_PROVIDER",
+        "ADP_MODEL_NAME",
+    ]
+    if provider_mapping is not None:
+        upstream_env_var = provider_mapping.get("upstream_env_var")
+        if isinstance(upstream_env_var, str) and upstream_env_var:
+            environment_contract.append(upstream_env_var)
+        upstream_base_url_env_var = provider_mapping.get("upstream_base_url_env_var")
+        if isinstance(upstream_base_url_env_var, str) and upstream_base_url_env_var:
+            environment_contract.append(upstream_base_url_env_var)
+
     config = {
         "schema_version": "adp.wrapper_config.v1",
         "run_id": manifest.run_id,
@@ -248,22 +289,42 @@ def _write_upstream_config(*, paths: WrapperPaths, manifest: WrapperTaskManifest
             "output_dir": manifest.output_dir,
             "artifacts_dir": manifest.artifacts_dir,
         },
-        "environment_contract": [
-            "ADP_RUN_ID",
-            "ADP_SUITE_NAME",
-            "ADP_TASK_FAMILY",
-            "ADP_INSTANCE_ID",
-            "ADP_WORKSPACE",
-            "ADP_OUTPUT_DIR",
-            "ADP_ARTIFACTS_DIR",
-            "ADP_MODEL_PROVIDER",
-            "ADP_MODEL_NAME",
-        ],
+        "environment_contract": environment_contract,
     }
+    if provider_mapping is not None:
+        config["provider_mapping"] = provider_mapping
     upstream_config_path(paths).write_text(
         json.dumps(config, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _copy_artifact(*, source_path: Path, target_path: Path, secrets_to_redact: list[str]) -> None:
+    if not secrets_to_redact or not _looks_text_like(source_path):
+        shutil.copy2(source_path, target_path)
+        return
+    try:
+        text = source_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        shutil.copy2(source_path, target_path)
+        return
+    target_path.write_text(_redact_secret_values(text, secrets_to_redact), encoding="utf-8")
+    shutil.copystat(source_path, target_path)
+
+
+def _looks_text_like(path: Path) -> bool:
+    media_type = mimetypes.guess_type(path.name)[0]
+    if media_type is not None and (media_type.startswith("text/") or media_type == "application/json"):
+        return True
+    return path.suffix.lower() in {".json", ".csv", ".txt", ".log", ".md", ".yaml", ".yml"}
+
+
+def _redact_secret_values(value: str, secrets_to_redact: list[str]) -> str:
+    redacted = value
+    for secret in secrets_to_redact:
+        if secret:
+            redacted = redacted.replace(secret, "[redacted]")
+    return redacted
 
 
 def _process_output(output: bytes | str | None) -> str:
@@ -308,6 +369,7 @@ def _write_result(
     stderr: str,
     failure_reason: str | None,
     upstream_artifacts: list[dict[str, str]],
+    runner_config_artifacts: list[dict[str, str]],
 ) -> None:
     metrics, evaluator_report_ref, evaluator_artifacts = _write_evaluator_report(
         paths=paths,
@@ -326,6 +388,7 @@ def _write_result(
             "media_type": "application/json",
         }
     ]
+    artifacts.extend(runner_config_artifacts)
     if not dry_run:
         artifacts.extend(
             [
@@ -357,7 +420,7 @@ def _write_result(
         "instance_id": manifest.instance_id,
         "instruction_ref": manifest.instruction_ref,
         "input_files": manifest.input_files,
-        "model": manifest.model,
+        "model": redact_sensitive_metadata(manifest.model),
         "metrics": metrics,
         "artifacts": artifacts,
         "planned_command": shlex.join(planned_command),
@@ -592,7 +655,12 @@ def _bool_value(value: str) -> bool | None:
     return None
 
 
-def _execution_env(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> dict[str, str]:
+def _execution_env(
+    *,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+    extra_env: dict[str, str],
+) -> dict[str, str]:
     env = dict(os.environ)
     provider = manifest.model.get("provider")
     model_name = manifest.model.get("model_name")
@@ -611,6 +679,7 @@ def _execution_env(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> dic
         env["ADP_MODEL_PROVIDER"] = provider
     if isinstance(model_name, str) and model_name.strip():
         env["ADP_MODEL_NAME"] = model_name
+    env.update(extra_env)
     return env
 
 

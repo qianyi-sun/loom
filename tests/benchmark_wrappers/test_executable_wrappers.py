@@ -1,8 +1,11 @@
 import json
+import os
 import tempfile
 import textwrap
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from agentic_data_platform.benchmark_wrappers.skillflow import main as skillflow_main
 from agentic_data_platform.benchmark_wrappers.skilllearnbench import main as skilllearnbench_main
@@ -28,14 +31,18 @@ class ExecutableWrapperTest(unittest.TestCase):
                 parser.add_argument("--run-root-dir")
                 parser.add_argument("--only-group")
                 args = parser.parse_args()
+                config = json.loads(Path(args.config).read_text(encoding="utf-8"))
                 output = Path(args.run_root_dir)
                 output.mkdir(parents=True, exist_ok=True)
                 (output / "report.json").write_text(json.dumps({
                     "group": args.only_group,
                     "dataset_path": args.dataset_path,
+                    "agent": config["agents"][0]["import_path"],
+                    "model_name": config["agents"][0]["model_name"],
+                    "secret_echo": os.environ["ANTHROPIC_API_KEY"],
                     "run_id": os.environ["ADP_RUN_ID"],
                 }), encoding="utf-8")
-                print(f"ran skillflow {args.only_group}")
+                print(f"ran skillflow {args.only_group} with {os.environ['ANTHROPIC_API_KEY']}")
                 """,
             )
             manifest = _task_manifest(
@@ -43,26 +50,32 @@ class ExecutableWrapperTest(unittest.TestCase):
                 task_family="OCR-Data-Extraction",
                 instance_id="task_family_invoice_images",
                 output_dir=str(temp_path / "upstream-output"),
+                model={
+                    "provider": "anthropic",
+                    "model_name": "claude-sonnet-4-6",
+                    "secret_ref": "env:MODEL_PROVIDER_API_KEY",
+                },
             )
             manifest_path = temp_path / "task.json"
             output_path = temp_path / "result.json"
             artifacts_dir = temp_path / "artifacts"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-            exit_code = skillflow_main(
-                [
-                    "--task-manifest",
-                    str(manifest_path),
-                    "--workspace",
-                    str(temp_path / "workspace"),
-                    "--output",
-                    str(output_path),
-                    "--artifacts-dir",
-                    str(artifacts_dir),
-                    "--upstream-root",
-                    str(upstream_root),
-                ]
-            )
+            with _temporary_env(MODEL_PROVIDER_API_KEY="sk-skillflow-secret"):
+                exit_code = skillflow_main(
+                    [
+                        "--task-manifest",
+                        str(manifest_path),
+                        "--workspace",
+                        str(temp_path / "workspace"),
+                        "--output",
+                        str(output_path),
+                        "--artifacts-dir",
+                        str(artifacts_dir),
+                        "--upstream-root",
+                        str(upstream_root),
+                    ]
+                )
 
             result = json.loads(output_path.read_text(encoding="utf-8"))
             copied_report = json.loads(
@@ -76,11 +89,19 @@ class ExecutableWrapperTest(unittest.TestCase):
         self.assertIn("family_job_runner.py", result["planned_command"])
         self.assertNotIn("--dry-run", result["planned_command"])
         self.assertIn("ran skillflow OCR-Data-Extraction", result["stdout"])
+        self.assertNotIn("sk-skillflow-secret", json.dumps(result))
         self.assertEqual(result["stderr"], "")
         self.assertEqual(copied_report["dataset_path"], "test_tasks/OCR-Data-Extraction")
+        self.assertEqual(
+            copied_report["agent"],
+            "libs.harbor_noinstall_agents.agents:NoInstallClaudeCode",
+        )
+        self.assertEqual(copied_report["model_name"], "anthropic/claude-sonnet-4-6")
+        self.assertEqual(copied_report["secret_echo"], "[redacted]")
         artifact_paths = {artifact["path"] for artifact in result["artifacts"]}
         self.assertIn("artifacts/planned-command.json", artifact_paths)
         self.assertIn("artifacts/upstream-config.json", artifact_paths)
+        self.assertIn("artifacts/skillflow-job-config.json", artifact_paths)
         self.assertIn("artifacts/stdout.log", artifact_paths)
         self.assertIn("artifacts/stderr.log", artifact_paths)
         self.assertIn("artifacts/upstream-output/report.json", artifact_paths)
@@ -93,6 +114,76 @@ class ExecutableWrapperTest(unittest.TestCase):
             },
             result["artifacts"],
         )
+
+    def test_skilllearnbench_wrapper_passes_provider_secret_through_process_env_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upstream_root = temp_path / "skilllearnbench-upstream"
+            _write_executable_script(
+                upstream_root / "evaluate_skills.py",
+                """
+                import argparse
+                import os
+                from pathlib import Path
+
+                parser = argparse.ArgumentParser()
+                parser.add_argument("task")
+                parser.add_argument("--agent")
+                parser.add_argument("--model")
+                parser.add_argument("--skill-path")
+                parser.add_argument("--trials-dir")
+                parser.add_argument("--subtask-range")
+                args = parser.parse_args()
+                Path(args.trials_dir).mkdir(parents=True, exist_ok=True)
+                print(
+                    f"agent={args.agent} model={args.model} "
+                    f"anthropic={os.environ['ANTHROPIC_API_KEY']}"
+                )
+                """,
+            )
+            manifest = _task_manifest(
+                suite_name="SkillLearnBench",
+                task_family="financial-analysis",
+                instance_id="financial-analysis-2",
+                output_dir=str(temp_path / "upstream-output"),
+                model={
+                    "provider": "anthropic",
+                    "model_name": "claude-sonnet-4-6",
+                    "secret_ref": "env:MODEL_PROVIDER_API_KEY",
+                },
+            )
+            manifest_path = temp_path / "task.json"
+            output_path = temp_path / "result.json"
+            artifacts_dir = temp_path / "artifacts"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with _temporary_env(MODEL_PROVIDER_API_KEY="sk-skilllearnbench-secret"):
+                exit_code = skilllearnbench_main(
+                    [
+                        "--task-manifest",
+                        str(manifest_path),
+                        "--workspace",
+                        str(temp_path / "workspace"),
+                        "--output",
+                        str(output_path),
+                        "--artifacts-dir",
+                        str(artifacts_dir),
+                        "--upstream-root",
+                        str(upstream_root),
+                    ]
+                )
+
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+            stdout_log = (artifacts_dir / "stdout.log").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("--agent claude-code", result["planned_command"])
+        self.assertIn("--model claude-sonnet-4-6", result["planned_command"])
+        self.assertIn("agent=claude-code model=claude-sonnet-4-6", result["stdout"])
+        self.assertIn("anthropic=[redacted]", result["stdout"])
+        self.assertIn("anthropic=[redacted]", stdout_log)
+        self.assertNotIn("sk-skilllearnbench-secret", json.dumps(result))
+        self.assertNotIn("sk-skilllearnbench-secret", stdout_log)
 
     def test_skillflow_wrapper_normalizes_json_evaluator_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -258,6 +349,8 @@ class ExecutableWrapperTest(unittest.TestCase):
 
                 parser = argparse.ArgumentParser()
                 parser.add_argument("task")
+                parser.add_argument("--agent")
+                parser.add_argument("--model")
                 parser.add_argument("--skill-path")
                 parser.add_argument("--trials-dir")
                 parser.add_argument("--subtask-range")
@@ -311,6 +404,8 @@ class ExecutableWrapperTest(unittest.TestCase):
 
                 parser = argparse.ArgumentParser()
                 parser.add_argument("task")
+                parser.add_argument("--agent")
+                parser.add_argument("--model")
                 parser.add_argument("--skill-path")
                 parser.add_argument("--trials-dir")
                 parser.add_argument("--subtask-range")
@@ -491,6 +586,7 @@ def _task_manifest(
     task_family: str,
     instance_id: str,
     output_dir: str,
+    model: dict[str, object] | None = None,
 ) -> dict[str, object]:
     catalog = load_fixture_catalog(suite_name)
     spec = catalog.to_task_spec(task_family=task_family, instance_id=instance_id)
@@ -504,7 +600,7 @@ def _task_manifest(
         "instance_id": instance_id,
         "instruction_ref": spec.metadata["instruction_ref"],
         "input_files": spec.metadata["input_files"],
-        "model": {
+        "model": model or {
             "provider": "mock-api",
             "model_name": "scripted-terminal-agent",
         },
@@ -516,3 +612,17 @@ def _task_manifest(
 def _write_executable_script(path: Path, source: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")
+
+
+@contextmanager
+def _temporary_env(**values: str) -> Iterator[None]:
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value

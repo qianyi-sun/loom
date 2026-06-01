@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Mapped platform model provider refs into original upstream SkillFlow and
+  SkillLearnBench runner shapes for #123. SkillFlow now writes a suite-native
+  `artifacts/skillflow-job-config.json`, SkillLearnBench receives upstream
+  `--agent`/`--model` arguments, provider secrets are copied from safe
+  `env:` refs into runner-specific API-key variables only at subprocess time,
+  and stdout/stderr plus copied text artifacts are redacted before persistence.
 - Added the first real OpenAI-compatible terminal-agent provider path for #116.
   Docker terminal workers can now resolve configured model refs through the dev
   provider registry, call `/chat/completions`, parse JSON terminal actions,

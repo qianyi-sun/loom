@@ -77,8 +77,9 @@ Environment assumptions:
   synthesize config from the platform run request rather than asking users to
   edit YAML by hand. Native terminal-agent runs now have an OpenAI-compatible
   `ModelProvider` path through `provider_config_id`; original upstream
-  SkillFlow config synthesis still needs to map that same safe provider ref into
-  the suite's expected YAML shape.
+  SkillFlow wrapper runs now map that same safe provider ref into a
+  suite-native `artifacts/skillflow-job-config.json` file without persisting raw
+  API keys.
 
 Generated outputs to normalize:
 
@@ -121,9 +122,9 @@ Environment assumptions:
 - Docker is required because each trial runs in a container.
 - API keys are read from `.env` and provider environment variables. Native
   terminal-agent runs now resolve the model API key server-side from
-  `provider_config_id`, but the SkillLearnBench wrapper still needs an explicit
-  mapping from the platform provider registry to upstream variables such as
-  `ANTHROPIC_API_KEY`.
+  `provider_config_id`; the wrapper maps the safe platform `secret_ref` into
+  upstream variables such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
+  `GEMINI_API_KEY` only for the subprocess environment.
 - Some tasks require extra variables such as `GH_TOKEN`.
 - The upstream task tree contains per-instance `instruction.md`, `task.toml`,
   `environment/`, `tests/`, and `solution/`.
@@ -238,30 +239,34 @@ Required output:
 }
 ```
 
-The wrapper should also preserve raw stdout/stderr logs and any upstream report
-files as artifacts. The platform run record remains the source of truth for
-status, model config, source version, task identity, and evaluator visibility.
+The wrapper should also preserve stdout/stderr logs and upstream report files
+as artifacts after redacting known provider secret values. The platform run
+record remains the source of truth for status, model config, source version,
+task identity, and evaluator visibility.
 
 Implemented wrapper behavior:
 
 - SkillFlow writes a normalized `result.json` and a
   `artifacts/planned-command.json` file for the upstream
-  `family_job_runner.py` command. It synthesizes
-  `artifacts/upstream-config.json` from platform model metadata and passes that
-  generated path to `--config` instead of relying on a committed upstream
-  baseline config. The executable planned command passes
-  `--dataset-path test_tasks/<task_family>` for the selected workflow family.
-  In executable mode it requires `--upstream-root`, invokes the upstream script
-  there, and writes `artifacts/stdout.log` and `artifacts/stderr.log`.
+  `family_job_runner.py` command. It synthesizes the redacted platform
+  `artifacts/upstream-config.json` plus a suite-native
+  `artifacts/skillflow-job-config.json` and passes the suite-native config to
+  `--config` instead of relying on a committed upstream baseline config. The
+  executable planned command passes `--dataset-path test_tasks/<task_family>`
+  for the selected workflow family. In executable mode it requires
+  `--upstream-root`, invokes the upstream script there, and writes redacted
+  `artifacts/stdout.log` and `artifacts/stderr.log`.
 - SkillLearnBench writes the same normalized output for
-  `evaluate_skills.py <task>`; when an instance id ends in a numeric suffix,
-  the wrapper emits `--subtask-range N-N` so the planned command is
+  `evaluate_skills.py <task>`; it maps the platform provider ref to upstream
+  `--agent` and `--model` arguments, and when an instance id ends in a numeric
+  suffix, the wrapper emits `--subtask-range N-N` so the planned command is
   instance-scoped.
 - Both wrappers validate the suite name in `/input/task.json`, write the
   redacted `artifacts/upstream-config.json` runner config artifact, expose
-  `ADP_*` environment variables to the upstream process, preserve stdout/stderr
-  logs, copy generated upstream output files into
-  `artifacts/upstream-output/` as `upstream_output` artifacts, summarize
+  `ADP_*` environment variables to the upstream process, copy safe provider
+  secret refs into runner-specific API-key variables only for the subprocess,
+  preserve redacted stdout/stderr logs, copy generated upstream output files
+  into `artifacts/upstream-output/` as `upstream_output` artifacts, summarize
   SkillFlow JSON reports and SkillLearnBench `report.csv` files into
   `artifacts/evaluator-report.json` plus normalized wrapper `metrics`, and map
   non-zero upstream exits or upstream timeouts to failed wrapper results.
@@ -331,17 +336,16 @@ just to run a supported suite.
   catalog.
 - Extend upstream checkout/download management if SkillFlow later needs
   additional Hugging Face private assets or Git LFS credential handling.
-- Expand benchmark-specific config synthesis beyond the current redacted
-  `artifacts/upstream-config.json` contract so upstream runners can consume the
-  same safe platform provider refs through suite-native YAML or environment
-  files.
+- Extend provider mapping as new upstream agents are added. The current durable
+  mapping supports SkillFlow Anthropic/Claude and OpenAI/Codex, plus
+  SkillLearnBench Anthropic/Claude, OpenAI/Codex, and Gemini.
 - Continue refining suite-specific report parsing against real upstream output
   samples as new stable shapes appear. The first real SkillFlow Harbor
   `result.json` parser now extracts trial counts, evaluator error count, and
   mean score.
 - Run the opt-in `benchmark-real-upstream-smoke` service on shared dev, where
-  Docker is installed, and record whether SkillFlow completes or now blocks on
-  model/provider configuration rather than local Docker availability.
+  Docker is installed, with a real API-backed provider manifest and record the
+  next blocker after upstream provider mapping.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.
 - Decide how task-specific secrets such as `GH_TOKEN` are requested, scoped, and

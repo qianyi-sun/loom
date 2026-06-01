@@ -79,7 +79,7 @@ class BenchmarkWrapperSmokeTest(unittest.TestCase):
         self.assertIn("smoke ran OCR-Data-Extraction", result["stdout"])
         self.assertIn("artifacts/upstream-output/report.json", result["artifact_paths"])
         self.assertEqual(report["group"], "OCR-Data-Extraction")
-        self.assertIn("upstream-config.json", report["config"])
+        self.assertIn("skillflow-job-config.json", report["config"])
 
 
 def _write_executable_script(path: Path, source: str) -> None:
