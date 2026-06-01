@@ -76,6 +76,22 @@ class HarborTaskUploadValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(HarborTaskArchiveError, "unsafe archive path"):
             validate_harbor_task_archive(payload, filename="absolute.zip")
 
+    def test_rejects_archives_with_too_many_files(self):
+        files = _harbor_task_files(root="many-files")
+        files.update({f"many-files/data/file-{index}.txt": "x" for index in range(4)})
+        payload = _zip_bytes(files)
+
+        with self.assertRaisesRegex(HarborTaskArchiveError, "too many files"):
+            validate_harbor_task_archive(payload, filename="many-files.zip", max_files=6)
+
+    def test_rejects_archives_with_too_much_uncompressed_content(self):
+        files = _harbor_task_files(root="large-task")
+        files["large-task/data/big.txt"] = "x" * 128
+        payload = _zip_bytes(files)
+
+        with self.assertRaisesRegex(HarborTaskArchiveError, "uncompressed"):
+            validate_harbor_task_archive(payload, filename="large-task.zip", max_uncompressed_bytes=96)
+
     def test_materializes_normalized_task_directory(self):
         payload = _harbor_task_zip(root="custom-task")
 
@@ -92,35 +108,37 @@ class HarborTaskUploadValidationTest(unittest.TestCase):
 
 
 def _harbor_task_zip(*, root: str = "", task_toml: str | None = None) -> bytes:
+    return _zip_bytes(_harbor_task_files(root=root, task_toml=task_toml))
+
+
+def _harbor_task_files(*, root: str = "", task_toml: str | None = None) -> dict[str, str]:
     prefix = f"{root.rstrip('/')}/" if root else ""
-    return _zip_bytes(
-        {
-            f"{prefix}instruction.md": "Create `/app/receipts.xlsx` from the provided receipts.\n",
-            f"{prefix}task.toml": task_toml
-            or "\n".join(
-                [
-                    'schema_version = "1.2"',
-                    'artifacts = ["/logs/artifacts/receipts.xlsx"]',
-                    "",
-                    "[task]",
-                    'name = "latent/custom-task"',
-                    "",
-                    "[verifier]",
-                    "timeout_sec = 120.0",
-                    "",
-                    "[agent]",
-                    "timeout_sec = 300.0",
-                    "",
-                    "[environment]",
-                    'os = "linux"',
-                    "allow_internet = true",
-                    "",
-                ]
-            ),
-            f"{prefix}environment/Dockerfile": "FROM ubuntu:24.04\nWORKDIR /app\n",
-            f"{prefix}tests/test.sh": "mkdir -p /logs/verifier\nprintf '1\\n' > /logs/verifier/reward.txt\n",
-        }
-    )
+    return {
+        f"{prefix}instruction.md": "Create `/app/receipts.xlsx` from the provided receipts.\n",
+        f"{prefix}task.toml": task_toml
+        or "\n".join(
+            [
+                'schema_version = "1.2"',
+                'artifacts = ["/logs/artifacts/receipts.xlsx"]',
+                "",
+                "[task]",
+                'name = "latent/custom-task"',
+                "",
+                "[verifier]",
+                "timeout_sec = 120.0",
+                "",
+                "[agent]",
+                "timeout_sec = 300.0",
+                "",
+                "[environment]",
+                'os = "linux"',
+                "allow_internet = true",
+                "",
+            ]
+        ),
+        f"{prefix}environment/Dockerfile": "FROM ubuntu:24.04\nWORKDIR /app\n",
+        f"{prefix}tests/test.sh": "mkdir -p /logs/verifier\nprintf '1\\n' > /logs/verifier/reward.txt\n",
+    }
 
 
 def _zip_bytes(files: dict[str, str]) -> bytes:

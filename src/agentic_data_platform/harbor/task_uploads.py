@@ -10,6 +10,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
+DEFAULT_MAX_ARCHIVE_FILES = 256
+DEFAULT_MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class HarborTaskArchiveValidationResult:
     filename: str
@@ -49,8 +53,19 @@ class _ArchiveFile:
     mode: int | None
 
 
-def validate_harbor_task_archive(payload: bytes, *, filename: str) -> HarborTaskArchiveValidationResult:
-    result, _ = _inspect_archive(payload, filename=filename)
+def validate_harbor_task_archive(
+    payload: bytes,
+    *,
+    filename: str,
+    max_files: int = DEFAULT_MAX_ARCHIVE_FILES,
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
+) -> HarborTaskArchiveValidationResult:
+    result, _ = _inspect_archive(
+        payload,
+        filename=filename,
+        max_files=max_files,
+        max_uncompressed_bytes=max_uncompressed_bytes,
+    )
     return result
 
 
@@ -59,8 +74,15 @@ def materialize_harbor_task_archive(
     *,
     filename: str,
     destination: Path,
+    max_files: int = DEFAULT_MAX_ARCHIVE_FILES,
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
 ) -> HarborTaskArchiveValidationResult:
-    result, files = _inspect_archive(payload, filename=filename)
+    result, files = _inspect_archive(
+        payload,
+        filename=filename,
+        max_files=max_files,
+        max_uncompressed_bytes=max_uncompressed_bytes,
+    )
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
@@ -79,6 +101,8 @@ def _inspect_archive(
     payload: bytes,
     *,
     filename: str,
+    max_files: int,
+    max_uncompressed_bytes: int,
 ) -> tuple[HarborTaskArchiveValidationResult, list[_ArchiveFile]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -93,7 +117,12 @@ def _inspect_archive(
         raise HarborTaskArchiveError(errors + ["archive is not a valid zip file"]) from exc
 
     with archive:
-        archive_files = _normalized_archive_files(archive, errors=errors)
+        archive_files = _normalized_archive_files(
+            archive,
+            errors=errors,
+            max_files=max_files,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+        )
         normalized_names = [item.normalized_path for item in archive_files]
         file_set = set(normalized_names)
 
@@ -138,9 +167,16 @@ def _inspect_archive(
     )
 
 
-def _normalized_archive_files(archive: zipfile.ZipFile, *, errors: list[str]) -> list[_ArchiveFile]:
+def _normalized_archive_files(
+    archive: zipfile.ZipFile,
+    *,
+    errors: list[str],
+    max_files: int,
+    max_uncompressed_bytes: int,
+) -> list[_ArchiveFile]:
     entries: list[tuple[str, str, int | None]] = []
     raw_paths: list[str] = []
+    uncompressed_size = 0
     for info in archive.infolist():
         if info.is_dir():
             continue
@@ -154,11 +190,19 @@ def _normalized_archive_files(archive: zipfile.ZipFile, *, errors: list[str]) ->
             errors.append(f"symlink entries are not allowed in Harbor task archives: {info.filename}")
             continue
         raw_paths.append(path)
+        uncompressed_size += info.file_size
         entries.append((info.filename, path, _file_mode(info)))
 
     if not entries:
         errors.append("archive does not contain any regular files")
         return []
+    if len(entries) > max_files:
+        errors.append(f"archive contains too many files: {len(entries)} > {max_files}")
+    if uncompressed_size > max_uncompressed_bytes:
+        errors.append(
+            "archive uncompressed content is too large: "
+            f"{uncompressed_size} bytes > {max_uncompressed_bytes} bytes"
+        )
 
     root = _common_single_root(raw_paths)
     normalized: list[_ArchiveFile] = []

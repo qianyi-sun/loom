@@ -6,11 +6,11 @@ ARG DOCKER_CLI_SHA256_AARCH64=2219f3ac48727d8c5546b13d5d271a58856188ecb8ff1f71f9
 ARG DOCKER_COMPOSE_VERSION=2.40.3
 ARG DOCKER_COMPOSE_SHA256_X86_64=dba9d98e1ba5bfe11d88c99b9bd32fc4a0624a30fafe68eea34d61a3e42fd372
 ARG DOCKER_COMPOSE_SHA256_AARCH64=d26373b19e89160546d15407516cc59f453030d9bc5b43ba7faf16f7b4980137
-ARG HARBOR_VERSION=0.9.0
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
+ENV PIP_CONSTRAINT=constraints/dev-runtime.txt
 
 WORKDIR /workspace
 
@@ -38,21 +38,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md VERSION ./
+COPY constraints ./constraints
 COPY src ./src
 COPY tests ./tests
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install "harbor==${HARBOR_VERSION}" \
-    && python -m pip install \
-        "huggingface_hub>=0.36,<1.0" \
-        "litellm>=1.70.0" \
-        "matplotlib>=3.9.0" \
-        "numpy>=2.0.0" \
-        "openpyxl>=3.1.0" \
-        "pyyaml>=6.0.0" \
-        "tenacity>=9.0.0" \
+    && python -m pip install -e . \
     && harbor --version \
     && harbor run --help >/dev/null \
-    && python -m pip install -e .
+    && python - <<'PY'
+import harbor
+assert harbor.__version__ == "0.9.0", harbor.__version__
+PY
 
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]

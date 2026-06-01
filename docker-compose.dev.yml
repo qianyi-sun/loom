@@ -25,7 +25,7 @@ services:
       minio:
         condition: service_started
     ports:
-      - "8000:8000"
+      - "${ADP_API_HOST_BIND:-127.0.0.1}:${ADP_API_PORT:-8000}:8000"
     command: python -m uvicorn agentic_data_platform.service.app:create_app --factory --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz >/dev/null"]
@@ -261,7 +261,7 @@ services:
       POSTGRES_USER: agentic
       POSTGRES_PASSWORD: [REDACTED_DB_PASSWORD]
     ports:
-      - "5432:5432"
+      - "${ADP_POSTGRES_HOST_BIND:-127.0.0.1}:${ADP_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -273,7 +273,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${ADP_REDIS_HOST_BIND:-127.0.0.1}:${ADP_REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -287,8 +287,8 @@ services:
       MINIO_ROOT_USER: loomdev
       MINIO_ROOT_PASSWORD: loomdev
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${ADP_MINIO_HOST_BIND:-127.0.0.1}:${ADP_MINIO_PORT:-9000}:9000"
+      - "${ADP_MINIO_CONSOLE_HOST_BIND:-127.0.0.1}:${ADP_MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
 volumes:

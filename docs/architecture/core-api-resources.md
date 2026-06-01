@@ -150,8 +150,9 @@ agent-selection UI is added.
 `POST /harbor/task-uploads` is the first user-facing custom benchmark intake
 path. A project member uploads a `.zip` Harbor task directory; the API validates
 `instruction.md`, `task.toml`, `environment/Dockerfile`, `tests/`, declared
-artifacts, and whether verifier tests mention `reward.txt`. The archive is
-stored in the configured object store and an audit event records task name,
+artifacts, whether verifier tests mention `reward.txt`, configured upload byte
+limits, file count limits, and uncompressed materialization limits. The archive
+is stored in the configured object store and an audit event records task name,
 source metadata, environment settings, resource timeouts, declared artifacts,
 size, checksum, and storage key. The response includes
 `launch_metadata.harbor_run.task_archive_storage_key`, which can be copied into

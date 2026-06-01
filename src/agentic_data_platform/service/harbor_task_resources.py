@@ -13,6 +13,9 @@ from agentic_data_platform.persistence.repositories import AuditEventRepository
 from agentic_data_platform.service.security import require_authenticated_user, require_project_role
 
 
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
 def register_harbor_task_routes(app: FastAPI, session_dependency: Callable) -> None:
     @app.post("/harbor/task-uploads", tags=["harbor"], status_code=201, response_model=None)
     async def upload_harbor_task_archive(
@@ -27,9 +30,23 @@ def register_harbor_task_routes(app: FastAPI, session_dependency: Callable) -> N
         require_project_role(session, auth, project_id, minimum_role="member")
 
         filename = archive.filename or "harbor-task.zip"
-        payload = await archive.read()
+        max_upload_bytes = request.app.state.settings.harbor_task_upload_max_bytes
         try:
-            validation = validate_harbor_task_archive(payload, filename=filename)
+            payload = await _read_upload_limited(archive, max_bytes=max_upload_bytes)
+        except ValueError as exc:
+            return _error_response(
+                request=request,
+                status_code=413,
+                code="payload_too_large",
+                message=str(exc),
+            )
+        try:
+            validation = validate_harbor_task_archive(
+                payload,
+                filename=filename,
+                max_files=request.app.state.settings.harbor_task_upload_max_files,
+                max_uncompressed_bytes=request.app.state.settings.harbor_task_upload_max_uncompressed_bytes,
+            )
         except HarborTaskArchiveError as exc:
             return _error_response(
                 request=request,
@@ -100,6 +117,21 @@ def register_harbor_task_routes(app: FastAPI, session_dependency: Callable) -> N
             "task_upload": upload_payload,
             "request_id": _request_id(request),
         }
+
+
+async def _read_upload_limited(archive: UploadFile, *, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        remaining = max_bytes - total + 1
+        chunk = await archive.read(min(UPLOAD_READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"Harbor task archive exceeds configured upload limit of {max_bytes} bytes")
+    return b"".join(chunks)
 
 
 def _task_upload_storage_key(*, project_id: str, task_upload_id: str, filename: str) -> str:

@@ -82,8 +82,8 @@ MVP constraints:
 - Internet access allowed inside the pilot sandbox for now.
 - No direct model-weight inference in v0.
 - Original benchmark runners are wrapped first.
-- A user-friendly runner/pipeline contract is still required so future teams can
-  bring their own workflows.
+- The user-friendly runner/pipeline contract is available as the shared path
+  for future teams to bring their own workflows.
 
 ## Architecture Sketch
 
@@ -147,7 +147,7 @@ User runner and pipeline contract:
 | Repository setup | In progress | Private GitHub repo, CI, branch protection, CODEOWNERS, labels, milestones, project board |
 | Infra discovery | In progress | `shared dev` selected for v0; Docker Engine and Compose installed; Compose smoke test passed |
 | Development workflow | Active | `dev` is the default integration branch; `main` is reserved for production releases |
-| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, API-created Docker sandbox smoke, frontend-driven Harbor launch smoke checks, and an opt-in shared dev real-upstream wrapper smoke for #114; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256 and installs Harbor 0.9.0 plus SkillFlow runner dependencies |
+| Docker dev environment | MVP backend ready | `Dockerfile.dev`, `docker-compose.dev.yml`, and `scripts/deploy-dev.sh` provide local and shared dev validation, including migration, object-storage, worker, Harbor CLI, API health, API-created Docker sandbox smoke, frontend-driven Harbor launch smoke checks, and an opt-in shared dev real-upstream wrapper smoke for #114; the dev image verifies static Docker CLI and Docker Compose plugin downloads by SHA-256, installs runtime-sensitive dependencies through `constraints/dev-runtime.txt`, and defaults service host ports to loopback bindings |
 | Production planning | Planning input captured | internal compute shared-cluster and batch scheduler-only possibilities documented, not finalized |
 | Requirements collection | In progress | First concrete pilot captured from pilot group; remaining teams still need intake |
 | MVP architecture | In progress | Terminal benchmark architecture, pilot group native workflow, unified backend contract, persistence, core API, and Harbor integration roadmap are documented |
@@ -164,7 +164,7 @@ User runner and pipeline contract:
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | MVP pilot slice merged | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, queued worker execution of original wrapper contracts, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only terminal-agent model provider, upstream runner provider env/config mapping, terminal benchmark run orchestrator, and latent native workflow target are merged. SkillFlow now has a pinned runner commit, pinned Hugging Face task dataset commit, task-asset lock file, recorded source patch for Harbor API compatibility, and opt-in shared dev real-upstream smoke evidence. |
-| User runner/pipeline contract | MVP backend slice merged | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and the first Harbor-compatible task-upload implementation |
+| User runner/pipeline contract | MVP backend slice merged | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and the first Harbor-compatible task-upload implementation with bounded archive size, file count, and uncompressed materialization limits |
 | Harbor integration | Started | Roadmap and native design define CLI fallback, native runner backend, Harbor benchmark provider, agent provider, result ingestion, and hybrid evaluation path; the code now names the current CLI path `HarborCliRunnerBackend`, keeps `HarborRunnerBackend` as a compatibility alias, records `backend: cli` in runner reports, adds a Harbor native capability probe, exposes the first `HarborBenchmarkProvider` read model for explicit Harbor dataset refs plus uploaded task archives, and exposes authenticated `GET /agents` metadata through `HarborAgentProvider` for Harbor built-in agents plus custom `--agent-import-path` entries. The frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor CLI runner/`jobs/` ingestion path is covered by shared dev smoke checks |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
@@ -209,6 +209,17 @@ User runner and pipeline contract:
 - Harbor integration roadmap:
   [docs/architecture/harbor-integration-roadmap.md](docs/architecture/harbor-integration-roadmap.md)
 
+Current executable child tasks for the broad startup workstreams:
+
+- Owner/RACI and PM progress metrics: [#133](https://github.com/carinrc/agentic-data-platform/issues/133)
+- Production topology and shared-dev exposure controls: [#134](https://github.com/carinrc/agentic-data-platform/issues/134)
+- Remaining research-team intake batch: [#135](https://github.com/carinrc/agentic-data-platform/issues/135)
+- v1 MVP architecture ADR: [#136](https://github.com/carinrc/agentic-data-platform/issues/136)
+- Dev-to-main release train and CI/deploy gates: [#137](https://github.com/carinrc/agentic-data-platform/issues/137)
+- Access, quotas, retention, and audit baseline: [#138](https://github.com/carinrc/agentic-data-platform/issues/138)
+- pilot group end-to-end acceptance plan: [#139](https://github.com/carinrc/agentic-data-platform/issues/139)
+- Org access audit and team mapping: [#140](https://github.com/carinrc/agentic-data-platform/issues/140)
+
 ## Repository Layout
 
 ```text
@@ -233,6 +244,14 @@ Run local checks from the repository root:
 ```bash
 python -m pip install -e .
 python -m unittest discover -s tests -v
+```
+
+CI and the Docker dev image install runtime-sensitive dependencies through
+`constraints/dev-runtime.txt`. Use the same constraints locally when validating
+dependency or Docker runtime changes:
+
+```bash
+python -m pip install -c constraints/dev-runtime.txt -e .
 ```
 
 Focused contract checks:
@@ -299,6 +318,10 @@ docker compose -f docker-compose.dev.yml run --rm --build migrate
 docker compose -f docker-compose.dev.yml up --build api worker
 curl http://localhost:8000/healthz
 ```
+
+By default, Compose binds API, Postgres, Redis, MinIO, and the MinIO console to
+`127.0.0.1`. Shared hosts should expose only the approved reverse proxy; direct
+service binds require an explicit `ADP_*_HOST_BIND` override.
 
 Open the frontend at `http://localhost:8000/app/`. The checked-in development
 login is `[REDACTED_OWNER]` / `[REDACTED_PASSWORD]`; it creates an HTTP-only web session cookie

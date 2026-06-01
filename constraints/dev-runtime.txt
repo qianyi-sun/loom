@@ -1,0 +1,25 @@
+# Direct runtime constraints for local dev, CI, and the Docker dev image.
+#
+# Keep this file aligned with pyproject.toml and Dockerfile.dev. It is not a
+# full transitive lock; it pins the runtime-sensitive direct dependencies that
+# affect Harbor execution and FastAPI/TestClient behavior.
+
+alembic>=1.13,<2.0
+boto3>=1.34,<2.0
+fastapi>=0.136,<0.137
+harbor==0.9.0
+httpx>=0.28,<0.29
+httpx2>=2.3,<3.0
+huggingface-hub>=0.36,<2.0
+litellm>=1.70,<2.0
+matplotlib>=3.9,<4.0
+numpy>=2.0,<3.0
+openpyxl>=3.1,<4.0
+psycopg>=3.2,<4.0
+psycopg-binary>=3.2,<4.0
+python-multipart>=0.0.9,<1.0
+pyyaml>=6.0,<7.0
+sqlalchemy>=2.0,<3.0
+starlette>=1.2,<1.3
+tenacity>=9.0,<10.0
+uvicorn>=0.32,<1.0

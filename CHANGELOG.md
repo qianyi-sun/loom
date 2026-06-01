@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Tightened shared dev exposure and Harbor upload limits. Compose service ports
+  now default to loopback host bindings, Harbor task uploads enforce configured
+  archive byte, file count, and uncompressed materialization limits, and the
+  deployment/docs now preserve the reverse-proxy-only shared-host assumption.
+- Added runtime dependency constraints and CI Docker runtime coverage. CI now
+  installs with `constraints/dev-runtime.txt`, builds `Dockerfile.dev`, and
+  validates the development Compose configuration; the dev image installs
+  Harbor 0.9.0 and related runtime dependencies through the same constraints,
+  including the `httpx2` TestClient runtime expected by current Starlette.
 - Added the first Harbor agent provider for #63. The platform now exposes
   `AgentProvider` / `HarborAgentProvider`, authenticated `GET /agents`,
   Harbor built-in agent metadata, custom `--agent-import-path` validation, safe

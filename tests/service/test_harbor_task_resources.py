@@ -114,6 +114,38 @@ class HarborTaskResourceTest(unittest.TestCase):
         self.assertIn("instruction.md", error["message"])
         self.assertEqual(error["request_id"], "req-harbor-upload-invalid-001")
 
+    def test_rejects_uploads_that_exceed_configured_archive_bytes(self):
+        client = TestClient(_app(self.engine, max_upload_bytes=64), headers={"Authorization": "Bearer [REDACTED_OWNER]-token"})
+
+        response = client.post(
+            "/harbor/task-uploads",
+            data={"project_id": "latent-skill-pilot"},
+            files={"archive": ("too-large.zip", b"x" * 65, "application/zip")},
+            headers={"X-Request-ID": "req-harbor-upload-large-001"},
+        )
+
+        self.assertEqual(response.status_code, 413)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], "payload_too_large")
+        self.assertIn("64 bytes", error["message"])
+        self.assertEqual(error["request_id"], "req-harbor-upload-large-001")
+
+    def test_rejects_uploads_that_exceed_configured_zip_limits(self):
+        client = TestClient(_app(self.engine, max_upload_files=3), headers={"Authorization": "Bearer [REDACTED_OWNER]-token"})
+
+        response = client.post(
+            "/harbor/task-uploads",
+            data={"project_id": "latent-skill-pilot"},
+            files={"archive": ("too-many-files.zip", _harbor_task_zip(), "application/zip")},
+            headers={"X-Request-ID": "req-harbor-upload-files-001"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        error = response.json()["error"]
+        self.assertEqual(error["code"], "validation_error")
+        self.assertIn("too many files", error["message"])
+        self.assertEqual(error["request_id"], "req-harbor-upload-files-001")
+
     def test_viewer_cannot_upload_harbor_task_archive(self):
         viewer_client = TestClient(_app(self.engine), headers={"Authorization": "Bearer viewer-token"})
 
@@ -126,7 +158,13 @@ class HarborTaskResourceTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-def _app(engine):
+def _app(
+    engine,
+    *,
+    max_upload_bytes: int = 10 * 1024 * 1024,
+    max_upload_files: int = 256,
+    max_uncompressed_bytes: int = 50 * 1024 * 1024,
+):
     return create_app(
         ServiceSettings(
             app_name="agentic-data-platform-test",
@@ -139,6 +177,9 @@ def _app(engine):
             object_storage_secret_key="",
             object_storage_region="us-east-1",
             internal_auth_tokens="[REDACTED_OWNER]=[REDACTED_OWNER]-token,viewer=viewer-token",
+            harbor_task_upload_max_bytes=max_upload_bytes,
+            harbor_task_upload_max_files=max_upload_files,
+            harbor_task_upload_max_uncompressed_bytes=max_uncompressed_bytes,
         ),
         database_engine=engine,
     )

@@ -27,6 +27,9 @@ class ServiceSettings:
     model_provider_models: str = ""
     sandbox_workspace_root: str = ".runtime/sandbox-workspaces"
     sandbox_host_workspace_root: str = ""
+    harbor_task_upload_max_bytes: int = 10 * 1024 * 1024
+    harbor_task_upload_max_files: int = 256
+    harbor_task_upload_max_uncompressed_bytes: int = 50 * 1024 * 1024
 
 
 def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSettings:
@@ -52,6 +55,13 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         model_provider_models=_get(values, "MODEL_PROVIDER_MODELS", ""),
         sandbox_workspace_root=_get(values, "SANDBOX_WORKSPACE_ROOT", ".runtime/sandbox-workspaces"),
         sandbox_host_workspace_root=_get(values, "SANDBOX_HOST_WORKSPACE_ROOT", ""),
+        harbor_task_upload_max_bytes=_get_int(values, "HARBOR_TASK_UPLOAD_MAX_BYTES", 10 * 1024 * 1024),
+        harbor_task_upload_max_files=_get_int(values, "HARBOR_TASK_UPLOAD_MAX_FILES", 256),
+        harbor_task_upload_max_uncompressed_bytes=_get_int(
+            values,
+            "HARBOR_TASK_UPLOAD_MAX_UNCOMPRESSED_BYTES",
+            50 * 1024 * 1024,
+        ),
     )
 
 
