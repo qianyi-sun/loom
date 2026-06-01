@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Documented the user runner and pipeline integration contract for #21,
+  including the task manifest, runner result schema, artifact path rules,
+  lifecycle mapping, registration metadata, local validation expectations, and
+  how #67 Harbor-compatible task uploads reuse the same run lifecycle.
 - Added queued worker execution for original SkillFlow/SkillLearnBench wrapper
   runs for #125. `DockerTerminalWorkerExecutor` now recognizes original wrapper
   runner contracts with `metadata.wrapper_run`, writes the wrapper task
