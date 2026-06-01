@@ -222,6 +222,36 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertEqual(messages[1], "Adapter blocked: A configured API model provider is required.")
         self.assertEqual(messages[2], "Adapter ready: no model key required.")
 
+    def test_run_event_stream_helpers_use_durable_watermark(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required for static frontend payload tests")
+
+        script = _node_harness(
+            """
+            const result = {
+              watermark: eventWatermarkFromDetail({
+                lifecycle_events: [
+                  { event_type: "run.created", seq: 2 },
+                  { event_type: "run.canceled", seq: 5 },
+                ],
+              }),
+              emptyWatermark: eventWatermarkFromDetail({ lifecycle_events: [] }),
+              streamUrl: runEventStreamUrl("run/live 001", 5),
+              eventTypes: runEventTypes(),
+            };
+            console.log(JSON.stringify(result));
+            """
+        )
+
+        result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
+        payload = json.loads(result.stdout)
+
+        self.assertEqual(payload["watermark"], 5)
+        self.assertEqual(payload["emptyWatermark"], 0)
+        self.assertEqual(payload["streamUrl"], "/runs/run%2Flive%20001/stream?after_seq=5")
+        self.assertIn("run.worker_subprocess_failed", payload["eventTypes"])
+
 
 def _node_harness(assertion_script: str) -> str:
     return textwrap.dedent(
@@ -245,6 +275,7 @@ def _node_harness(assertion_script: str) -> str:
           }},
           clearInterval: () => null,
           setInterval: () => null,
+          URLSearchParams,
           fetch: () => null,
         }};
         vm.createContext(context);

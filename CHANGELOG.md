@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #157 durable run-event replay and SSE slice. Lifecycle
+  events now expose monotonic `seq` watermarks, `GET /runs/{run_id}/events`
+  supports `after_seq` replay, `GET /runs/{run_id}/stream` emits replayable SSE
+  events from the same Postgres source, and the no-build frontend uses
+  `EventSource` with polling fallback for run monitor refresh.
 - Added the first #158 worker subprocess-isolation slice. `SubprocessRunWorker`
   can claim a DB-backed queued run, delegate execution to the short-lived
   `agentic_data_platform.worker.execution_child` process, and reload terminal

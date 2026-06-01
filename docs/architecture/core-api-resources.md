@@ -79,6 +79,8 @@ This is a dev-safe boundary, not the final production SSO design.
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
 | `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
+| `GET /runs/{run_id}/events` | Replay durable run lifecycle/progress events after an optional `after_seq` watermark | `RunRepository.list_status_events(after_seq=...)` |
+| `GET /runs/{run_id}/stream` | Stream replayable run events as SSE, using the same Postgres event source as `/events` | `RunRepository.list_status_events(after_seq=...)` |
 | `GET /runs/{run_id}/telemetry` | Inspect scoped run, worker, host, and sandbox health for live monitors | `RunRepository.get_run()` + stdlib host metrics |
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
@@ -214,8 +216,12 @@ serializing dashboard payloads.
 - PM progress responses are aggregate-only and do not expose model prompts,
   terminal stdout/stderr, artifact URIs, or provider metadata.
 - Run detail and lifecycle-mutating responses include `lifecycle_events` with
-  `event_type`, `from_status`, `to_status`, `attempt_id`, `reason`,
-  `actor_user_id`, `request_id`, and `created_at`.
+  a monotonic `seq` watermark plus `event_type`, `from_status`, `to_status`,
+  `attempt_id`, `reason`, `actor_user_id`, `request_id`, and `created_at`.
+  `GET /runs/{run_id}/events?after_seq=N` replays missed events from the same
+  durable source, and `GET /runs/{run_id}/stream` emits SSE frames with
+  `id: <seq>` so browser monitors can reconnect without losing status changes.
+  The stream also honors the browser `Last-Event-ID` header on reconnect.
 - Invalid cancel/retry transitions return structured `409 conflict` errors
   through the shared service error boundary.
 - Invalid nested create payloads and blank cancel/retry reasons return
@@ -254,6 +260,11 @@ serializing dashboard payloads.
   `RunRepository.claim_next_queued_run(...)` lets a worker claim one queued run
   and record lifecycle events. Redis remains available in the dev stack for a
   later queue/cache backend, but it is not the current source of truth.
+- #157 has started the durable live-event migration. The current slice reuses
+  `run_status_events.id` as the replay sequence, exposes replay and SSE routes,
+  and keeps telemetry polling available. It does not yet implement Redis
+  fanout, typed sandbox/resource sample events, or projection tables for every
+  summary.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal

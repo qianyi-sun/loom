@@ -381,6 +381,7 @@ class RunRecord:
 @dataclass(frozen=True)
 class RunStatusEvent:
     event_id: str
+    seq: int
     run_id: str
     attempt_id: str | None
     event_type: str
@@ -396,6 +397,8 @@ class RunStatusEvent:
         _require_non_empty("event_id", self.event_id)
         _require_non_empty("run_id", self.run_id)
         _require_non_empty("event_type", self.event_type)
+        if not isinstance(self.seq, int) or self.seq <= 0:
+            raise ValueError("seq must be a positive integer")
 
         if self.attempt_id is not None:
             _require_non_empty("attempt_id", self.attempt_id)

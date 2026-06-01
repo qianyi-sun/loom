@@ -700,13 +700,27 @@ class RunRepository:
             query = query.where(RunRow.created_at <= created_before)
         return [self._run_record(row) for row in self.session.scalars(query)]
 
-    def list_status_events(self, run_id: str) -> list[RunStatusEvent]:
+    def list_status_events(
+        self,
+        run_id: str,
+        *,
+        after_seq: int | None = None,
+        limit: int | None = None,
+    ) -> list[RunStatusEvent]:
         _required(self.session.get(RunRow, run_id), "run", run_id)
+        if after_seq is not None and after_seq < 0:
+            raise ValueError("after_seq must be non-negative")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
         query = (
             select(RunStatusEventRow)
             .where(RunStatusEventRow.run_id == run_id)
             .order_by(RunStatusEventRow.id)
         )
+        if after_seq is not None:
+            query = query.where(RunStatusEventRow.id > after_seq)
+        if limit is not None:
+            query = query.limit(limit)
         return [_status_event_record(row) for row in self.session.scalars(query)]
 
     def _run_record(self, row: RunRow) -> RunRecord:
@@ -1134,6 +1148,7 @@ def _audit_event_record(row: AuditEventRow) -> AuditEventRecord:
 def _status_event_record(row: RunStatusEventRow) -> RunStatusEvent:
     return RunStatusEvent(
         event_id=row.event_id,
+        seq=row.id,
         run_id=row.run_id,
         attempt_id=row.attempt_id,
         event_type=row.event_type,

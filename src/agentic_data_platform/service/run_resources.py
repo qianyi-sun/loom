@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -19,6 +22,7 @@ from agentic_data_platform.domain.run_records import (
     RunStatus,
     TerminalTurn,
 )
+from agentic_data_platform.persistence import session_scope
 from agentic_data_platform.persistence.repositories import (
     AuditEventRepository,
     IdentityRepository,
@@ -202,6 +206,67 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         run = _get_run_or_404(session, run_id)
         require_project_role(session, auth, run.project_id, minimum_role="viewer")
         return _run_detail_payload(request, session, run)
+
+    @app.get("/runs/{run_id}/events", tags=["runs"], responses=_example_response(_RUN_EVENTS_EXAMPLE))
+    def list_run_events(
+        run_id: str,
+        request: Request,
+        after_seq: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+        session: Session = Depends(session_dependency),
+    ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
+        run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
+        events = [
+            _status_event_payload(event)
+            for event in RunRepository(session).list_status_events(
+                run_id,
+                after_seq=after_seq,
+                limit=limit,
+            )
+        ]
+        return _with_request_id(
+            request,
+            {
+                "run_id": run_id,
+                "events": events,
+                "next_after_seq": _next_after_seq(events, after_seq),
+            },
+        )
+
+    @app.get("/runs/{run_id}/stream", tags=["runs"])
+    def stream_run_events(
+        run_id: str,
+        request: Request,
+        after_seq: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+        once: bool = False,
+        poll_interval_seconds: float = Query(1.0, gt=0, le=10),
+        timeout_seconds: float = Query(30.0, ge=0, le=300),
+        session: Session = Depends(session_dependency),
+    ) -> StreamingResponse:
+        auth = require_authenticated_user(request, session)
+        run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
+        engine = getattr(request.app.state, "database_engine", None)
+        if engine is None:
+            raise HTTPException(status_code=503, detail="Database is not configured")
+        effective_after_seq = max(after_seq, _last_event_id(request))
+
+        return StreamingResponse(
+            _run_event_stream(
+                engine=engine,
+                run_id=run_id,
+                after_seq=effective_after_seq,
+                limit=limit,
+                once=once,
+                poll_interval_seconds=poll_interval_seconds,
+                timeout_seconds=timeout_seconds,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.post("/runs/{run_id}/cancel", tags=["runs"], responses=_example_response(_RUN_CANCELED_EXAMPLE))
     def cancel_run(
@@ -443,6 +508,7 @@ def _terminal_turn_payload(turn: TerminalTurn) -> dict[str, Any]:
 def _status_event_payload(event) -> dict[str, Any]:
     return {
         "event_id": event.event_id,
+        "seq": event.seq,
         "run_id": event.run_id,
         "attempt_id": event.attempt_id,
         "event_type": event.event_type,
@@ -454,6 +520,60 @@ def _status_event_payload(event) -> dict[str, Any]:
         "metadata": dict(event.metadata),
         "created_at": _datetime(event.created_at),
     }
+
+
+def _next_after_seq(events: list[dict[str, Any]], fallback: int) -> int:
+    if not events:
+        return fallback
+    return int(events[-1]["seq"])
+
+
+def _run_event_stream(
+    *,
+    engine,
+    run_id: str,
+    after_seq: int,
+    limit: int,
+    once: bool,
+    poll_interval_seconds: float,
+    timeout_seconds: float,
+):
+    next_after_seq = after_seq
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        with session_scope(engine) as session:
+            events = RunRepository(session).list_status_events(
+                run_id,
+                after_seq=next_after_seq,
+                limit=limit,
+            )
+        for event in events:
+            payload = _status_event_payload(event)
+            next_after_seq = int(payload["seq"])
+            yield _sse_event(payload)
+        if once:
+            break
+        if time.monotonic() >= deadline:
+            yield ": stream timeout\n\n"
+            break
+        time.sleep(poll_interval_seconds)
+
+
+def _sse_event(payload: dict[str, Any]) -> str:
+    return (
+        f"id: {payload['seq']}\n"
+        f"event: {payload['event_type']}\n"
+        f"data: {json.dumps(payload, sort_keys=True)}\n\n"
+    )
+
+
+def _last_event_id(request: Request) -> int:
+    value = request.headers.get("last-event-id", "")
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 0
+    return max(parsed, 0)
 
 
 def _with_request_id(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
@@ -554,6 +674,7 @@ _RUN_PAYLOAD_EXAMPLE: dict[str, Any] = {
 _RUN_PAYLOAD_EXAMPLE["evaluator_results"] = [_RUN_PAYLOAD_EXAMPLE["evaluator"]]
 _LIFECYCLE_EVENT_EXAMPLE = {
     "event_id": "evt_001",
+    "seq": 1,
     "run_id": "run_001",
     "attempt_id": "run_001:attempt:1",
     "event_type": "run.created",
@@ -583,6 +704,12 @@ _RUN_EXAMPLE = {
     "run": _RUN_PAYLOAD_EXAMPLE,
     "trajectory": [_TRAJECTORY_TURN_EXAMPLE],
     "lifecycle_events": [_LIFECYCLE_EVENT_EXAMPLE],
+    "request_id": "req_123",
+}
+_RUN_EVENTS_EXAMPLE = {
+    "run_id": "run_001",
+    "events": [_LIFECYCLE_EVENT_EXAMPLE],
+    "next_after_seq": 1,
     "request_id": "req_123",
 }
 _RUN_CREATED_EXAMPLE = _RUN_EXAMPLE

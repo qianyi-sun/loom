@@ -9,6 +9,8 @@ const state = {
   tasks: [],
   selectedRunId: null,
   pollTimer: null,
+  eventSource: null,
+  eventSeq: 0,
 };
 
 const el = (id) => document.getElementById(id);
@@ -69,8 +71,10 @@ async function onLogout() {
   await api("/auth/logout", { method: "POST" }).catch(() => null);
   clearInterval(state.pollTimer);
   state.pollTimer = null;
+  closeRunStream();
   state.user = null;
   state.selectedRunId = null;
+  state.eventSeq = 0;
   showLogin();
 }
 
@@ -265,9 +269,11 @@ async function launchRun() {
       body: JSON.stringify(payload),
     });
     state.selectedRunId = created.run.run_id;
+    state.eventSeq = 0;
     el("download-button").disabled = true;
     await refreshRun(state.selectedRunId);
     startPolling(state.selectedRunId);
+    startRunStream(state.selectedRunId);
   } catch (error) {
     setText("launch-error", error.message);
   }
@@ -381,9 +387,72 @@ function startPolling(runId) {
   state.pollTimer = setInterval(() => refreshRun(runId).catch(showRunError), 3000);
 }
 
+function startRunStream(runId) {
+  closeRunStream();
+  if (typeof EventSource !== "function") {
+    return;
+  }
+  const source = new EventSource(runEventStreamUrl(runId, state.eventSeq));
+  state.eventSource = source;
+  for (const eventType of runEventTypes()) {
+    source.addEventListener(eventType, (event) => onRunStreamEvent(runId, event));
+  }
+  source.onerror = () => {
+    refreshRun(runId).catch(showRunError);
+  };
+}
+
+function closeRunStream() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+}
+
+function onRunStreamEvent(runId, event) {
+  try {
+    const payload = JSON.parse(event.data);
+    if (Number.isInteger(payload.seq) && payload.seq > state.eventSeq) {
+      state.eventSeq = payload.seq;
+    }
+  } catch (error) {
+    // Ignore malformed live events; polling remains the recovery path.
+  }
+  refreshRun(runId).catch(showRunError);
+}
+
+function runEventStreamUrl(runId, afterSeq) {
+  const query = new URLSearchParams({ after_seq: String(afterSeq || 0) });
+  return `/runs/${encodeURIComponent(runId)}/stream?${query.toString()}`;
+}
+
+function runEventTypes() {
+  return [
+    "run.created",
+    "run.claimed",
+    "run.started",
+    "run.evaluating",
+    "run.succeeded",
+    "run.failed",
+    "run.canceled",
+    "run.retried",
+    "run.worker_failed",
+    "run.worker_subprocess_failed",
+  ];
+}
+
 async function refreshRun(runId) {
   const [detail, telemetry] = await Promise.all([api(`/runs/${runId}`), api(`/runs/${runId}/telemetry`)]);
+  state.eventSeq = Math.max(state.eventSeq, eventWatermarkFromDetail(detail));
   renderRun(detail, telemetry);
+}
+
+function eventWatermarkFromDetail(detail) {
+  const events = Array.isArray(detail?.lifecycle_events) ? detail.lifecycle_events : [];
+  return events.reduce((watermark, event) => {
+    const seq = Number.isInteger(event?.seq) ? event.seq : 0;
+    return Math.max(watermark, seq);
+  }, 0);
 }
 
 function renderRun(detail, telemetry) {

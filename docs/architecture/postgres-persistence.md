@@ -88,7 +88,10 @@ calls update the latest internal attempt so worker code can persist terminal
 turns and artifacts after a retry without replacing attempt 1. Cancel and retry
 events record `from_status`, `to_status`, `reason`, `actor_user_id`, and
 `request_id` in `run_status_events` for dashboard and debugging use. Status
-events have a monotonic integer primary key and are rendered in insertion order.
+events have a monotonic integer primary key that is exposed as `seq` for
+durable replay. API clients can call `GET /runs/{run_id}/events?after_seq=N`
+or reconnect to `GET /runs/{run_id}/stream` to recover missed lifecycle events
+without hydrating full trajectories or artifact payloads.
 Evaluator results are stored as many rows per latest attempt. `RunRecord`
 hydrates the ordered `evaluator_results` collection and continues to expose the
 latest result through `RunRecord.evaluator_result` for existing worker,

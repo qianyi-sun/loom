@@ -233,6 +233,88 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(detail.json()["run"]["evaluators"][0]["evaluator_id"], "llm-judge-v0")
         self.assertEqual(detail.json()["lifecycle_events"][0]["event_type"], "run.created")
 
+    def test_list_run_events_replays_after_sequence(self):
+        self.assertEqual(
+            self.client.post("/runs", json=_run_create_payload(run_id="run_events_001")).status_code,
+            201,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/runs/run_events_001/cancel",
+                json={"reason": "stop for replay test"},
+                headers={"X-Request-ID": "req-events-cancel-001"},
+            ).status_code,
+            200,
+        )
+
+        response = self.client.get(
+            "/runs/run_events_001/events",
+            headers={"X-Request-ID": "req-events-list-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run_id"], "run_events_001")
+        self.assertEqual([event["event_type"] for event in payload["events"]], ["run.created", "run.canceled"])
+        self.assertEqual([event["seq"] for event in payload["events"]], sorted(event["seq"] for event in payload["events"]))
+        self.assertEqual(payload["next_after_seq"], payload["events"][-1]["seq"])
+        self.assertEqual(payload["request_id"], "req-events-list-001")
+        rendered = json.dumps(payload)
+        self.assertNotIn("stdout", rendered)
+        self.assertNotIn("stderr", rendered)
+
+        replay = self.client.get(
+            f"/runs/run_events_001/events?after_seq={payload['events'][0]['seq']}",
+            headers={"X-Request-ID": "req-events-replay-001"},
+        )
+
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual([event["event_type"] for event in replay.json()["events"]], ["run.canceled"])
+        self.assertEqual(replay.json()["next_after_seq"], payload["events"][-1]["seq"])
+
+    def test_run_event_stream_replays_durable_events_as_sse(self):
+        self.assertEqual(
+            self.client.post("/runs", json=_run_create_payload(run_id="run_stream_001")).status_code,
+            201,
+        )
+        cancel_response = self.client.post(
+            "/runs/run_stream_001/cancel",
+            json={"reason": "stop for stream test"},
+        )
+        self.assertEqual(cancel_response.status_code, 200)
+        first_seq = cancel_response.json()["lifecycle_events"][0]["seq"]
+
+        response = self.client.get(f"/runs/run_stream_001/stream?after_seq={first_seq}&once=true")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/event-stream", response.headers["content-type"])
+        self.assertIn("event: run.canceled", response.text)
+        self.assertIn('"event_type": "run.canceled"', response.text)
+        self.assertIn("id: ", response.text)
+        self.assertNotIn("stdout", response.text)
+        self.assertNotIn("stderr", response.text)
+
+    def test_run_event_stream_honors_last_event_id_on_reconnect(self):
+        self.assertEqual(
+            self.client.post("/runs", json=_run_create_payload(run_id="run_stream_reconnect_001")).status_code,
+            201,
+        )
+        cancel_response = self.client.post(
+            "/runs/run_stream_reconnect_001/cancel",
+            json={"reason": "stop for reconnect test"},
+        )
+        self.assertEqual(cancel_response.status_code, 200)
+        first_seq = cancel_response.json()["lifecycle_events"][0]["seq"]
+
+        response = self.client.get(
+            "/runs/run_stream_reconnect_001/stream?after_seq=0&once=true",
+            headers={"Last-Event-ID": str(first_seq)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("event: run.created", response.text)
+        self.assertIn("event: run.canceled", response.text)
+
     def test_create_run_uses_project_owner_team_instead_of_request_snapshot(self):
         payload = _run_create_payload(run_id="run_owner_team_001")
         payload["owner_team"] = "Forged Team Name"
