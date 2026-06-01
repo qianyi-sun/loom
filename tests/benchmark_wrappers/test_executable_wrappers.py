@@ -32,6 +32,7 @@ class ExecutableWrapperTest(unittest.TestCase):
                 output.mkdir(parents=True, exist_ok=True)
                 (output / "report.json").write_text(json.dumps({
                     "group": args.only_group,
+                    "dataset_path": args.dataset_path,
                     "run_id": os.environ["ADP_RUN_ID"],
                 }), encoding="utf-8")
                 print(f"ran skillflow {args.only_group}")
@@ -76,6 +77,7 @@ class ExecutableWrapperTest(unittest.TestCase):
         self.assertNotIn("--dry-run", result["planned_command"])
         self.assertIn("ran skillflow OCR-Data-Extraction", result["stdout"])
         self.assertEqual(result["stderr"], "")
+        self.assertEqual(copied_report["dataset_path"], "test_tasks/OCR-Data-Extraction")
         artifact_paths = {artifact["path"] for artifact in result["artifacts"]}
         self.assertIn("artifacts/planned-command.json", artifact_paths)
         self.assertIn("artifacts/upstream-config.json", artifact_paths)

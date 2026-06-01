@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Corrected the SkillFlow executable wrapper command for #22 so single-family
+  runs pass `--dataset-path test_tasks/<task_family>` to the pinned upstream
+  runner. Real upstream smoke exposed broader SkillFlow/Harbor API drift now
+  tracked as #117 instead of adding temporary runtime wrapper shims.
 - Added suite-specific upstream evaluator report normalization for #22.
   SkillFlow JSON reports and SkillLearnBench `report.csv` outputs are summarized
   into `artifacts/evaluator-report.json`, normalized wrapper `metrics`, and an

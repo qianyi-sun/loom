@@ -1,6 +1,6 @@
 # Original Benchmark Runner Wrapper Spike
 
-Last updated: 2026-05-28
+Last updated: 2026-06-01
 
 Related trackers:
 
@@ -41,7 +41,7 @@ Observed upstream commands:
 ```bash
 python family_job_runner.py \
   --config configs/baseline.yaml \
-  --dataset-path test_tasks \
+  --dataset-path test_tasks/<workflow-family> \
   --run-root-dir <output-dir> \
   --only-group <workflow-family>
 ```
@@ -49,10 +49,15 @@ python family_job_runner.py \
 ```bash
 python iterative_shared_skills_runner.py \
   --config configs/iter.yaml \
-  --dataset-path test_tasks \
+  --dataset-path test_tasks/<workflow-family> \
   --run-root-dir <output-dir> \
   --only-group <workflow-family>
 ```
+
+For the platform's single-family wrapper path, `--dataset-path` points at the
+workflow-family directory. Passing the broader `test_tasks` root causes the
+pinned runner to scan workflow-family directories as if they were task
+directories.
 
 Useful options:
 
@@ -223,9 +228,10 @@ Implemented wrapper behavior:
   `family_job_runner.py` command. It synthesizes
   `artifacts/upstream-config.json` from platform model metadata and passes that
   generated path to `--config` instead of relying on a committed upstream
-  baseline config. In executable mode it requires `--upstream-root`, invokes the
-  upstream script there, and writes `artifacts/stdout.log` and
-  `artifacts/stderr.log`.
+  baseline config. The executable planned command passes
+  `--dataset-path test_tasks/<task_family>` for the selected workflow family.
+  In executable mode it requires `--upstream-root`, invokes the upstream script
+  there, and writes `artifacts/stdout.log` and `artifacts/stderr.log`.
 - SkillLearnBench writes the same normalized output for
   `evaluate_skills.py <task>`; when an instance id ends in a numeric suffix,
   the wrapper emits `--subtask-range N-N` so the planned command is
@@ -291,6 +297,10 @@ just to run a supported suite.
   JSON/CSV summary paths.
 - Run the reusable wrapper smoke entrypoint against real pinned upstream roots
   when those sources are available locally or on shared dev.
+- Resolve SkillFlow/Harbor API drift through a durable source-maintenance path
+  under #117, such as patching or forking SkillFlow or pinning a compatible
+  Harbor version. Do not add runtime monkeypatches or opaque wrapper shims just
+  to make a temporary smoke command pass.
 - Add a user-facing custom runner contract under #21 using the same input and
   output envelope.
 - Decide how task-specific secrets such as `GH_TOKEN` are requested, scoped, and

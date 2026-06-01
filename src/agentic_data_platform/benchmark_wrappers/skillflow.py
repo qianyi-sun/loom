@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         str(upstream_config_path(paths)),
         "--dataset-path",
-        "test_tasks",
+        f"test_tasks/{manifest.task_family}",
         "--run-root-dir",
         manifest.output_dir,
         "--only-group",
