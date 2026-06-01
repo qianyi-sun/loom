@@ -4,6 +4,7 @@ const state = {
   models: [],
   harnesses: [],
   agents: [],
+  agentAdaptation: null,
   benchmarks: [],
   tasks: [],
   selectedRunId: null,
@@ -18,6 +19,12 @@ window.addEventListener("DOMContentLoaded", () => {
   el("refresh-button").addEventListener("click", refreshAll);
   el("launch-button").addEventListener("click", launchRun);
   el("download-button").addEventListener("click", downloadBundle);
+  el("model-select").addEventListener("change", () => {
+    refreshAgentAdaptation().catch(showRunError);
+  });
+  el("agent-select").addEventListener("change", () => {
+    refreshAgentAdaptation().catch(showRunError);
+  });
   el("project-select").addEventListener("change", () => {
     loadAgents().catch(showRunError);
     refreshDashboard().catch(showRunError);
@@ -136,6 +143,7 @@ async function loadAgents() {
       (agent) => agent.display_name,
     );
     select.disabled = true;
+    setText("agent-state", "");
     return;
   }
 
@@ -162,6 +170,32 @@ async function loadAgents() {
     select.value = defaultAgent;
   }
   select.disabled = false;
+  await refreshAgentAdaptation();
+}
+
+async function refreshAgentAdaptation() {
+  const project = selectedProject();
+  const model = selectedModel();
+  const harness = selectedHarness();
+  const agent = selectedAgent();
+  if (!project || !model || !harness?.metadata?.harbor_compatible || !agent) {
+    state.agentAdaptation = null;
+    setText("agent-state", "");
+    return null;
+  }
+  const query = new URLSearchParams({
+    project_id: project.project_id,
+    harness_id: harness.harness_id,
+    agent_id: agent.agent_id,
+    model_id: model.model_id,
+  });
+  if (model.provider_config_id) {
+    query.set("provider_config_id", model.provider_config_id);
+  }
+  const payload = await api(`/harbor/agent-adaptation?${query.toString()}`);
+  state.agentAdaptation = payload;
+  setText("agent-state", adaptationMessage(payload));
+  return payload;
 }
 
 async function loadBenchmarks() {
@@ -215,6 +249,13 @@ async function launchRun() {
   if (!project || !model || !harness || !benchmark || !task || (harness.metadata?.harbor_compatible && !agent)) {
     setText("launch-error", "Select a project, model, harness, agent, benchmark, and task.");
     return;
+  }
+  if (harness.metadata?.harbor_compatible) {
+    const adaptation = await refreshAgentAdaptation();
+    if (adaptation?.status === "blocked") {
+      setText("launch-error", adaptationMessage(adaptation));
+      return;
+    }
   }
   const runId = `frontend_${Date.now()}`;
   const payload = buildRunPayload({ runId, project, model, harness, benchmark, task, agent });
@@ -467,6 +508,23 @@ function modelCatalogMessage(payload) {
     return `Model catalog warning: ${firstError}`;
   }
   return "";
+}
+
+function adaptationMessage(payload) {
+  if (!payload) {
+    return "";
+  }
+  if (payload.status === "ready") {
+    if (!payload.adapter) {
+      return "Adapter ready: no model key required.";
+    }
+    const adapterName = payload.adapter.display_name || payload.adapter.adapter_id || "agent adapter";
+    return `Adapter ready: ${adapterName}.`;
+  }
+  const firstGap = Array.isArray(payload.gaps) && payload.gaps.length
+    ? String(payload.gaps[0].message || payload.gaps[0].code || "unknown gap")
+    : "unknown gap";
+  return `Adapter blocked: ${firstGap}`;
 }
 
 function setText(id, value) {

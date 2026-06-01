@@ -261,7 +261,7 @@ class WorkerServiceTest(unittest.TestCase):
                 object_storage_access_key="",
                 object_storage_secret_key="",
                 object_storage_region="us-east-1",
-                model_provider_base_url="https://models.example/v1",
+                model_provider_base_url="https://api.openai.com/v1",
                 model_provider_api_key="sk-model-secret",
             )
         )
@@ -321,7 +321,7 @@ class WorkerServiceTest(unittest.TestCase):
                 object_storage_access_key="",
                 object_storage_secret_key="",
                 object_storage_region="us-east-1",
-                model_provider_base_url="https://models.example/v1",
+                model_provider_base_url="https://api.openai.com/v1",
                 model_provider_api_key="sk-model-secret",
             )
         )
@@ -502,6 +502,59 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
         )
 
+    def test_harbor_worker_ingests_current_retry_job_when_previous_job_remains(self):
+        payload = _run_create_payload("run_worker_harbor_retry_job_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench/terminal-bench-2",
+                "agent": "codex",
+                "trial_name": "trial-hello",
+                "extra_args": ["--n-tasks", "1"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner(
+                job_names=["job-001", "job-002"],
+                write_rewards=[False, True],
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-retry-job-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            first = worker.run_once(request_id="req-worker-harbor-retry-job-001")
+            self.assertIsNotNone(first)
+            self.assertEqual(first.status, "failed")
+            first_detail = self.client.get("/runs/run_worker_harbor_retry_job_001").json()["run"]
+            self.assertIn("Missing Harbor verifier reward", first_detail["failure_reason"] or "")
+
+            retry_response = self.client.post(
+                "/runs/run_worker_harbor_retry_job_001/retry",
+                json={"reason": "retry after verifier output fix", "actor_user_id": "[REDACTED_OWNER]"},
+                headers={"X-Request-ID": "req-retry-harbor-job-001"},
+            )
+            self.assertEqual(retry_response.status_code, 200)
+
+            second = worker.run_once(request_id="req-worker-harbor-retry-job-002")
+
+        self.assertIsNotNone(second)
+        self.assertEqual(second.status, "succeeded")
+        detail = self.client.get("/runs/run_worker_harbor_retry_job_001")
+        run_payload = detail.json()["run"]
+        self.assertEqual(len(command_runner.calls), 2)
+        self.assertEqual(run_payload["evaluator"]["score"], 1.0)
+
     def test_harbor_worker_maps_selected_model_provider_secret_to_agent_env_without_leaking_it(self):
         payload = _run_create_payload("run_worker_harbor_selected_model_001")
         payload["model"]["provider"] = "dev-api-provider"
@@ -533,7 +586,7 @@ class WorkerServiceTest(unittest.TestCase):
                 object_storage_access_key="",
                 object_storage_secret_key="",
                 object_storage_region="us-east-1",
-                model_provider_base_url="https://models.example/v1",
+                model_provider_base_url="https://api.openai.com/v1",
                 model_provider_api_key="sk-model-secret",
             )
         )
@@ -563,7 +616,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(harbor_args[harbor_args.index("--model") + 1], "gpt-5-mini")
         self.assertIn("--agent-env", harbor_args)
         self.assertIn("OPENAI_API_KEY=sk-model-secret", harbor_args)
-        self.assertIn("OPENAI_BASE_URL=https://models.example/v1", harbor_args)
+        self.assertIn("OPENAI_BASE_URL=https://api.openai.com/v1", harbor_args)
 
         detail = self.client.get("/runs/run_worker_harbor_selected_model_001")
         rendered = json.dumps(detail.json())
@@ -571,6 +624,189 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertNotIn("sk-model-secret", runner_report_text)
         self.assertIn("OPENAI_API_KEY=[redacted]", runner_report_text)
         self.assertEqual(detail.json()["run"]["status"], "succeeded")
+
+    def test_harbor_worker_infers_mainstream_agent_adapter_env(self):
+        payload = _run_create_payload("run_worker_harbor_opencode_deepseek_001")
+        payload["model"]["provider"] = "dev-api-provider"
+        payload["model"]["model_name"] = "deepseek-v4-flash"
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench@2.0",
+                "agent": "opencode",
+                "model_name": "deepseek-v4-flash",
+                "environment": "docker",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="deepseek-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-opencode-adapter-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-opencode-adapter-001")
+            runner_report_text = (
+                temp_path
+                / "artifacts/runs/run_worker_harbor_opencode_deepseek_001/tasks/conference-expense-03/logs/harbor-runner.json"
+            ).read_text(encoding="utf-8")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        harbor_args = command_runner.calls[0]["args"]
+        harbor_env = command_runner.calls[0]["env"] or {}
+        self.assertEqual(harbor_args[harbor_args.index("--model") + 1], "openai/deepseek-v4-flash")
+        self.assertIn("OPENAI_API_KEY=deepseek-secret", harbor_args)
+        self.assertIn("OPENAI_BASE_URL=https://models.example/v1", harbor_args)
+        self.assertIn("OPENAI_API_BASE=https://models.example/v1", harbor_args)
+        self.assertEqual(harbor_env["OPENAI_API_KEY"], "deepseek-secret")
+        self.assertEqual(harbor_env["OPENAI_BASE_URL"], "https://models.example/v1")
+        self.assertNotIn("deepseek-secret", runner_report_text)
+        self.assertIn("OPENAI_API_KEY=[redacted]", runner_report_text)
+
+    def test_harbor_worker_fails_fast_for_unadapted_external_agent(self):
+        payload = _run_create_payload("run_worker_harbor_unadapted_agent_001")
+        payload["model"]["provider"] = "dev-api-provider"
+        payload["model"]["model_name"] = "deepseek-v4-flash"
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench@2.0",
+                "agent": "cline-cli",
+                "model_name": "deepseek-v4-flash",
+                "environment": "docker",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="deepseek-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-unadapted-agent-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-unadapted-agent-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(command_runner.calls, [])
+        detail = self.client.get("/runs/run_worker_harbor_unadapted_agent_001")
+        run_payload = detail.json()["run"]
+        self.assertIn("missing model-provider adapter", run_payload["failure_reason"])
+        self.assertIn("missing model-provider adapter", run_payload["failure"]["message"])
+
+    def test_harbor_worker_fails_fast_for_provider_dialect_mismatch(self):
+        payload = _run_create_payload("run_worker_harbor_codex_dialect_gap_001")
+        payload["model"]["provider"] = "dev-api-provider"
+        payload["model"]["model_name"] = "deepseek-v4-flash"
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench@2.0",
+                "agent": "codex",
+                "model_name": "deepseek-v4-flash",
+                "environment": "docker",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="deepseek-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-codex-dialect-gap-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-codex-dialect-gap-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(command_runner.calls, [])
+        detail = self.client.get("/runs/run_worker_harbor_codex_dialect_gap_001")
+        run_payload = detail.json()["run"]
+        self.assertIn("openai_responses", run_payload["failure_reason"])
+        self.assertIn("provider_dialect_mismatch", json.dumps(run_payload["failure"]))
 
     def test_worker_materializes_generated_harbor_smoke_task(self):
         payload = _run_create_payload("run_worker_harbor_smoke_001")
@@ -965,8 +1201,14 @@ class FakeDockerCommandRunner:
         self.write_files = write_files or {}
         self.calls: list[dict[str, object]] = []
 
-    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-        self.calls.append({"args": args, "timeout": timeout})
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
         workspace = _workspace_from_docker_args(args)
         for relative_path, content in self.write_files.items():
             target = workspace / relative_path
@@ -993,17 +1235,30 @@ class FakeHarborCommandRunner:
         stdout: str = "harbor complete\n",
         stderr: str = "",
         write_reward: bool = True,
+        write_rewards: list[bool] | None = None,
+        job_names: list[str] | None = None,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.write_reward = write_reward
+        self.write_rewards = write_rewards or []
+        self.job_names = job_names or []
         self.calls: list[dict[str, object]] = []
 
-    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-        self.calls.append({"args": args, "timeout": timeout})
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
         jobs_dir = Path(args[args.index("--jobs-dir") + 1])
-        _write_harbor_job_fixture(jobs_dir, write_reward=self.write_reward)
+        call_index = len(self.calls) - 1
+        write_reward = self.write_rewards[call_index] if call_index < len(self.write_rewards) else self.write_reward
+        job_name = self.job_names[call_index] if call_index < len(self.job_names) else "job-001"
+        _write_harbor_job_fixture(jobs_dir, write_reward=write_reward, job_name=job_name)
         return subprocess.CompletedProcess(
             args=args,
             returncode=self.returncode,
@@ -1113,8 +1368,8 @@ def _arg_value(args: list[str], name: str) -> str:
     return args[args.index(name) + 1]
 
 
-def _write_harbor_job_fixture(root: Path, *, write_reward: bool = True) -> None:
-    job_dir = root / "job-001"
+def _write_harbor_job_fixture(root: Path, *, write_reward: bool = True, job_name: str = "job-001") -> None:
+    job_dir = root / job_name
     trial_dir = job_dir / "trial-hello"
     (trial_dir / "agent").mkdir(parents=True)
     (trial_dir / "verifier").mkdir()

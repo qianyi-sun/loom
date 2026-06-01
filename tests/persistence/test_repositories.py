@@ -320,6 +320,43 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[2].to_status, RunStatus.QUEUED)
         self.assertEqual(events[2].attempt_id, "run_lifecycle_001:attempt:2")
 
+    def test_retry_attempt_can_save_reused_artifact_ids(self):
+        run = _queued_run(run_id="run_retry_artifacts_001")
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            runs = RunRepository(session)
+
+            runs.save_run(run)
+            first = runs.claim_next_queued_run(worker_id="worker-1")
+            first.transition_to(RunStatus.RUNNING)
+            first.attach_artifact(_log_artifact("run_retry_artifacts_001-harbor-runner-report"))
+            first.transition_to(RunStatus.FAILED)
+            runs.save_worker_result(first, worker_id="worker-1")
+
+            runs.retry_run(run.run_id, reason="retry after ingestion fix")
+            second = runs.claim_next_queued_run(worker_id="worker-2")
+            second.transition_to(RunStatus.RUNNING)
+            second.attach_artifact(_log_artifact("run_retry_artifacts_001-harbor-runner-report"))
+            second.transition_to(RunStatus.FAILED)
+            runs.save_worker_result(second, worker_id="worker-2")
+
+            loaded = runs.get_run(run.run_id)
+
+        self.assertEqual(loaded.status, RunStatus.FAILED)
+        self.assertEqual(len(loaded.artifacts), 1)
+        self.assertEqual(
+            loaded.artifacts[0].artifact_id,
+            "run_retry_artifacts_001-harbor-runner-report:attempt:2",
+        )
+
     def test_run_round_trip_preserves_multiple_evaluator_results_for_latest_attempt(self):
         run = _completed_run(run_id="run_multi_eval_001")
         run.status = RunStatus.EVALUATING
@@ -603,6 +640,18 @@ def _completed_run(run_id: str = "run_001") -> RunRecord:
     )
     run.transition_to(RunStatus.SUCCEEDED)
     return run
+
+
+def _log_artifact(artifact_id: str) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_id=artifact_id,
+        kind=ArtifactKind.LOG,
+        uri=f"minio://runs/{artifact_id}.json",
+        media_type="application/json",
+        sha256="4" * 64,
+        size_bytes=256,
+        metadata={"storage_key": f"runs/{artifact_id}.json"},
+    )
 
 
 def _queued_run(*, run_id: str) -> RunRecord:

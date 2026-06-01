@@ -247,6 +247,38 @@ services:
       - tools
     command: python -m agentic_data_platform.service.frontend_smoke
 
+  harbor-adapter-matrix-smoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: agentic-data-shared dev:latest
+    working_dir: /workspace
+    env_file: *app-env-files
+    environment:
+      HARBOR_ADAPTER_MATRIX_BASE_URL: http://api:8000
+      HARBOR_ADAPTER_MATRIX_USERNAME: ${HARBOR_ADAPTER_MATRIX_USERNAME:-[REDACTED_OWNER]}
+      HARBOR_ADAPTER_MATRIX_PASSWORD: ${HARBOR_ADAPTER_MATRIX_PASSWORD:-[REDACTED_PASSWORD]}
+      HARBOR_ADAPTER_MATRIX_PROJECT_ID: ${HARBOR_ADAPTER_MATRIX_PROJECT_ID:-}
+      HARBOR_ADAPTER_MATRIX_HARNESS_ID: ${HARBOR_ADAPTER_MATRIX_HARNESS_ID:-harbor-local-docker}
+      HARBOR_ADAPTER_MATRIX_AGENT_IDS: ${HARBOR_ADAPTER_MATRIX_AGENT_IDS:-}
+      HARBOR_ADAPTER_MATRIX_MODEL_IDS: ${HARBOR_ADAPTER_MATRIX_MODEL_IDS:-}
+      HARBOR_ADAPTER_MATRIX_MODEL_FAMILIES: ${HARBOR_ADAPTER_MATRIX_MODEL_FAMILIES:-openai,deepseek,claude,gemini,qwen,kimi,glm,grok,minimax}
+      HARBOR_ADAPTER_MATRIX_TIMEOUT_SECONDS: ${HARBOR_ADAPTER_MATRIX_TIMEOUT_SECONDS:-7200}
+      HARBOR_ADAPTER_MATRIX_PER_RUN_TIMEOUT_SECONDS: ${HARBOR_ADAPTER_MATRIX_PER_RUN_TIMEOUT_SECONDS:-900}
+      HARBOR_ADAPTER_MATRIX_AGENT_TIMEOUT_MULTIPLIER: ${HARBOR_ADAPTER_MATRIX_AGENT_TIMEOUT_MULTIPLIER:-1}
+      HARBOR_ADAPTER_MATRIX_POLL_INTERVAL_SECONDS: ${HARBOR_ADAPTER_MATRIX_POLL_INTERVAL_SECONDS:-5}
+      HARBOR_ADAPTER_MATRIX_REPORT_PATH: ${HARBOR_ADAPTER_MATRIX_REPORT_PATH:-/workspace/.runtime/harbor-adapter-matrix/latest.json}
+    volumes:
+      - .:/workspace
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    profiles:
+      - tools
+    command: python -m agentic_data_platform.service.harbor_adapter_matrix_smoke
+
   postgres:
     image: postgres:16-alpine
     environment:

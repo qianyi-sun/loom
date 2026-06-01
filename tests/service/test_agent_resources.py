@@ -88,8 +88,178 @@ class AgentResourcesTest(unittest.TestCase):
             ["--agent-import-path", "research_agents.skillflow:SkillFlowAgent"],
         )
 
+    def test_agent_model_adaptation_preflight_reports_ready_env_contract_without_secrets(self):
+        client = TestClient(
+            _app(
+                self.engine,
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="deepseek-secret",
+            )
+        )
 
-def _app(engine):
+        response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:opencode",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]", "X-Request-ID": "req-agent-adapt-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-agent-adapt-001")
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["adapter"]["adapter_id"], "opencode-openai-compatible")
+        self.assertEqual(payload["required_secret_refs"], ["env:OPENAI_API_KEY"])
+        env_sources = {item["name"]: item["source"] for item in payload["env_preview"]}
+        self.assertEqual(env_sources["OPENAI_API_KEY"], "env:MODEL_PROVIDER_API_KEY")
+        self.assertEqual(env_sources["OPENAI_BASE_URL"], "provider_base_url")
+        self.assertEqual(env_sources["OPENAI_API_BASE"], "provider_base_url")
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("deepseek-secret", rendered)
+
+    def test_agent_model_adaptation_preflight_reports_missing_provider_config(self):
+        response = self.client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:opencode",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["gaps"][0]["code"], "missing_provider_config")
+
+    def test_agent_model_adaptation_preflight_blocks_unadapted_external_agent(self):
+        client = TestClient(
+            _app(
+                self.engine,
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="model-secret",
+            )
+        )
+
+        response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:cline-cli",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["gaps"][0]["code"], "missing_agent_model_adapter")
+
+    def test_agent_model_adaptation_preflight_rejects_non_agent_model_provider_role(self):
+        client = TestClient(
+            _app(
+                self.engine,
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="model-secret",
+                evaluator_provider_base_url="https://judge.example/v1",
+                evaluator_provider_api_key="judge-secret",
+            )
+        )
+
+        response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:opencode",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-evaluator-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["gaps"][0]["code"], "invalid_provider_role")
+
+    def test_agent_model_adaptation_preflight_blocks_provider_dialect_mismatch(self):
+        client = TestClient(
+            _app(
+                self.engine,
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="model-secret",
+            )
+        )
+
+        response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:codex",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["gaps"][0]["code"], "provider_dialect_mismatch")
+        self.assertIn("openai_responses", payload["gaps"][0]["message"])
+
+    def test_agent_model_adaptation_preflight_reports_adapted_model_and_process_env(self):
+        client = TestClient(
+            _app(
+                self.engine,
+                model_provider_base_url="https://anthropic.example/v1",
+                model_provider_api_key="deepseek-secret",
+            )
+        )
+
+        response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:claude-code",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["harbor_model_name"], "deepseek-v4-flash")
+        process_env = {item["name"]: item["source"] for item in payload["process_env_preview"]}
+        self.assertEqual(process_env["ANTHROPIC_API_KEY"], "env:MODEL_PROVIDER_API_KEY")
+        self.assertEqual(process_env["ANTHROPIC_BASE_URL"], "provider_base_url")
+        self.assertNotIn("deepseek-secret", json.dumps(payload, sort_keys=True))
+
+
+def _app(
+    engine,
+    *,
+    model_provider_base_url: str = "",
+    model_provider_api_key: str = "",
+    evaluator_provider_base_url: str = "",
+    evaluator_provider_api_key: str = "",
+):
     return create_app(
         ServiceSettings(
             app_name="agentic-data-platform-test",
@@ -101,6 +271,10 @@ def _app(engine):
             object_storage_access_key="",
             object_storage_secret_key="",
             object_storage_region="us-east-1",
+            model_provider_base_url=model_provider_base_url,
+            model_provider_api_key=model_provider_api_key,
+            evaluator_provider_base_url=evaluator_provider_base_url,
+            evaluator_provider_api_key=evaluator_provider_api_key,
             model_provider_models="gpt-5,gpt-5-mini",
             internal_auth_tokens="[REDACTED_OWNER]=[REDACTED_TOKEN]",
             web_login_credentials="[REDACTED_OWNER]=[REDACTED_PASSWORD]:[REDACTED_OWNER]",

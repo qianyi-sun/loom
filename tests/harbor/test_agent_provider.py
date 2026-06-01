@@ -22,8 +22,22 @@ class HarborAgentProviderTest(unittest.TestCase):
         codex = agents["harbor:codex"]
         self.assertEqual(codex.execution_mode, "external_cli")
         self.assertEqual(codex.required_secret_refs, ["env:OPENAI_API_KEY"])
+        self.assertEqual(codex.metadata["model_adapter"]["adapter_id"], "codex-openai-compatible")
         self.assertIn("terminal-agent", codex.capabilities)
         self.assertIn("harbor-trial-events", codex.capabilities)
+
+        opencode = agents["harbor:opencode"]
+        self.assertEqual(opencode.required_secret_refs, ["env:OPENAI_API_KEY"])
+        self.assertEqual(opencode.metadata["model_adapter"]["adapter_id"], "opencode-openai-compatible")
+
+        claude_code = agents["harbor:claude-code"]
+        self.assertEqual(claude_code.required_secret_refs, ["env:ANTHROPIC_API_KEY"])
+        self.assertEqual(claude_code.metadata["model_adapter"]["adapter_id"], "anthropic-cli")
+
+        gemini_cli = agents["harbor:gemini-cli"]
+        self.assertEqual(gemini_cli.required_secret_refs, ["env:GOOGLE_API_KEY", "env:GEMINI_API_KEY"])
+        self.assertEqual(gemini_cli.metadata["model_adapter"]["adapter_id"], "gemini-cli")
+
         rendered = json.dumps([agent.to_payload() for agent in agents.values()], sort_keys=True)
         self.assertNotIn("sk-", rendered)
         self.assertNotIn("OPENAI_API_KEY=", rendered)

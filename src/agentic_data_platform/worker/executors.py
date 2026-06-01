@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
-import re
 import shlex
 import subprocess
 from dataclasses import dataclass, replace
@@ -27,6 +26,12 @@ from agentic_data_platform.domain.run_records import (
     TerminalTurn,
 )
 from agentic_data_platform.evaluation.mock import MockEvaluatorAdapter
+from agentic_data_platform.harbor.agent_adapters import (
+    HarborAgentModelInvocation,
+    adapter_for_agent,
+    build_agent_model_invocation,
+    provider_dialect_gap,
+)
 from agentic_data_platform.harbor.ingestion import (
     HarborIngestionFailureDiagnostics,
     HarborIngestionResult,
@@ -42,7 +47,7 @@ from agentic_data_platform.models.providers import (
     OpenAICompatibleModelProvider,
     ScriptedModelProvider,
 )
-from agentic_data_platform.providers.config import DevProviderConfigRegistry
+from agentic_data_platform.providers.config import DevProviderConfigRegistry, ProviderRole
 from agentic_data_platform.providers.errors import ProviderBoundaryError, ProviderErrorCode
 from agentic_data_platform.runs.terminal_benchmark import TerminalBenchmarkRunner, TerminalBenchmarkRunRequest
 from agentic_data_platform.sandbox.docker_terminal import (
@@ -60,9 +65,6 @@ _ORIGINAL_WRAPPER_CONTRACTS = {
     "skillflow-original-wrapper-v0",
     "skilllearnbench-original-wrapper-v0",
 }
-_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 class WorkerRunExecutor(Protocol):
     def execute(self, run: RunRecord) -> RunRecord:
         ...
@@ -91,12 +93,20 @@ class DockerTerminalWorkerExecutor:
 
     def execute(self, run: RunRecord) -> RunRecord:
         self._resolve_provider_refs(run)
-        harbor_spec = _harbor_run_spec_for_run(
-            run,
-            workspace_root=self.workspace_root,
-            artifact_store=self.artifact_persistence.store,
-            provider_registry=self.provider_registry,
-        )
+        try:
+            harbor_spec = _harbor_run_spec_for_run(
+                run,
+                workspace_root=self.workspace_root,
+                artifact_store=self.artifact_persistence.store,
+                provider_registry=self.provider_registry,
+            )
+        except ValueError as exc:
+            if isinstance(run.metadata.get("harbor_run"), dict):
+                run.failure_reason = str(exc)
+                run.metadata["failure"] = _harbor_launch_failure_payload(str(exc))
+                run.transition_to(RunStatus.FAILED)
+                return run
+            raise
         if harbor_spec is not None:
             return self._execute_harbor_run(run, harbor_spec)
         wrapper_spec = _original_wrapper_run_spec_for_run(run)
@@ -322,14 +332,14 @@ class DockerTerminalWorkerExecutor:
             ingested = ingestor.ingest(
                 run_id=run.run_id,
                 task_instance_id=run.task.instance_id,
-                jobs_dir=result.jobs_dir,
+                jobs_dir=result.job_dir or result.jobs_dir,
                 trial_name=spec.trial_name,
             )
         except ValueError as exc:
             diagnostics = ingestor.failure_diagnostics(
                 run_id=run.run_id,
                 task_instance_id=run.task.instance_id,
-                jobs_dir=result.jobs_dir,
+                jobs_dir=result.job_dir or result.jobs_dir,
                 error=exc,
                 trial_name=spec.trial_name,
             )
@@ -338,6 +348,7 @@ class DockerTerminalWorkerExecutor:
             run.metadata["failure"] = diagnostics.failure_payload()
             run.metadata["harbor_runner"] = {
                 "jobs_dir": result.jobs_dir.name,
+                "job_dir": result.job_dir.name if result.job_dir is not None else None,
                 "exit_code": result.exit_code,
                 "timed_out": result.timed_out,
                 "duration_seconds": result.duration_seconds,
@@ -354,6 +365,7 @@ class DockerTerminalWorkerExecutor:
         )
         run.metadata["harbor_runner"] = {
             "jobs_dir": result.jobs_dir.name,
+            "job_dir": result.job_dir.name if result.job_dir is not None else None,
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
             "duration_seconds": result.duration_seconds,
@@ -834,6 +846,23 @@ def _missing_original_wrapper_result_reason(process: subprocess.CompletedProcess
     return "Original benchmark wrapper did not write a result file"
 
 
+def _harbor_launch_failure_payload(message: str) -> dict[str, str]:
+    return {
+        "category": _harbor_launch_failure_category(message),
+        "message": message,
+    }
+
+
+def _harbor_launch_failure_category(message: str) -> str:
+    if "requires provider endpoint dialect" in message:
+        return "provider_dialect_mismatch"
+    if "missing model-provider adapter" in message:
+        return "missing_agent_model_adapter"
+    if "role=agent_model" in message:
+        return "invalid_provider_role"
+    return "harbor_launch_configuration_failed"
+
+
 def _harbor_run_spec_for_run(
     run: RunRecord,
     *,
@@ -861,23 +890,28 @@ def _harbor_run_spec_for_run(
     jobs_dir_value = _optional_str(configured.get("jobs_dir"))
     jobs_dir = Path(jobs_dir_value) if jobs_dir_value is not None else workspace_root / run.run_id / "harbor-jobs"
     agent_env = _string_list(configured.get("agent_env", []), field_name="harbor_run.agent_env")
-    agent_env.extend(
-        _harbor_model_provider_agent_env(
-            run,
-            configured=configured,
-            provider_registry=provider_registry,
-            existing_agent_env=agent_env,
-        )
+    agent_name = _optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "oracle"
+    requested_model_name = _optional_str(configured.get("model_name")) or run.model.model_name
+    invocation = _harbor_model_provider_invocation(
+        run,
+        configured=configured,
+        provider_registry=provider_registry,
+        existing_agent_env=agent_env,
+        agent_name=agent_name,
+        model_name=requested_model_name,
     )
+    agent_env.extend(invocation.agent_env)
+    agent_kwargs = _string_list(configured.get("agent_kwargs", []), field_name="harbor_run.agent_kwargs")
+    agent_kwargs.extend(invocation.agent_kwargs)
     return HarborRunSpec(
         run_id=run.run_id,
         task_instance_id=run.task.instance_id,
         backend=_optional_str(configured.get("backend")) or "cli",
         dataset_ref=dataset_ref,
         task_path=task_path,
-        agent=_optional_str(configured.get("agent")) or _optional_str(configured.get("agent_id")) or "oracle",
+        agent=agent_name,
         agent_import_path=agent_import_path,
-        model_name=_optional_str(configured.get("model_name")) or run.model.model_name,
+        model_name=invocation.harbor_model_name,
         environment=(
             _optional_str(configured.get("environment"))
             or _optional_str(configured.get("env"))
@@ -889,57 +923,71 @@ def _harbor_run_spec_for_run(
         timeout_seconds=timeout_seconds,
         auto_confirm=bool(configured.get("auto_confirm", True)),
         agent_env=agent_env,
+        agent_kwargs=agent_kwargs,
+        process_env=invocation.process_env,
         verifier_env=_string_list(configured.get("verifier_env", []), field_name="harbor_run.verifier_env"),
         extra_args=_string_list(configured.get("extra_args", []), field_name="harbor_run.extra_args"),
     )
 
 
-def _harbor_model_provider_agent_env(
+def _harbor_model_provider_invocation(
     run: RunRecord,
     *,
     configured: dict[str, object],
     provider_registry: DevProviderConfigRegistry | None,
     existing_agent_env: list[str],
-) -> list[str]:
+    agent_name: str,
+    model_name: str,
+) -> HarborAgentModelInvocation:
+    adapter = adapter_for_agent(agent_name)
     if provider_registry is None:
-        return []
+        return HarborAgentModelInvocation(
+            adapter=adapter,
+            harbor_model_name=model_name,
+            agent_env=[],
+            process_env=[],
+            agent_kwargs=[],
+        )
     agent_required_secret_refs = _string_list(
         configured.get("agent_required_secret_refs", []),
         field_name="harbor_run.agent_required_secret_refs",
     )
-    if not agent_required_secret_refs:
-        return []
+    if not agent_required_secret_refs and adapter is None:
+        if agent_name not in {"oracle", "nop"}:
+            raise ValueError(
+                f"Harbor agent '{agent_name}' is missing model-provider adapter coverage for model-backed runs"
+            )
+        return HarborAgentModelInvocation(
+            adapter=None,
+            harbor_model_name=model_name,
+            agent_env=[],
+            process_env=[],
+            agent_kwargs=[],
+        )
 
     provider_config_id = _optional_str(run.model.metadata.get("provider_config_id"))
     if provider_config_id is None:
-        return []
+        return HarborAgentModelInvocation(
+            adapter=adapter,
+            harbor_model_name=model_name,
+            agent_env=[],
+            process_env=[],
+            agent_kwargs=[],
+        )
     ref = provider_registry.get(provider_config_id)
+    if ref.role is not ProviderRole.AGENT_MODEL:
+        raise ValueError("Harbor model provider config must have role=agent_model")
+    if gap := provider_dialect_gap(adapter=adapter, provider_ref=ref):
+        raise ValueError(gap)
     secret = provider_registry.resolve_secret(_optional_str(run.model.metadata.get("secret_ref")) or ref.secret_ref)
-    existing_names = {item.split("=", 1)[0] for item in existing_agent_env if "=" in item}
-
-    env_values: list[str] = []
-    for secret_ref in agent_required_secret_refs:
-        env_name = _env_name_from_secret_ref(secret_ref)
-        if env_name in existing_names:
-            continue
-        env_values.append(f"{env_name}={secret.value}")
-        existing_names.add(env_name)
-
-    if ref.base_url:
-        for env_name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
-            if env_name not in existing_names:
-                env_values.append(f"{env_name}={ref.base_url}")
-                existing_names.add(env_name)
-    return env_values
-
-
-def _env_name_from_secret_ref(secret_ref: str) -> str:
-    if not isinstance(secret_ref, str) or not secret_ref.startswith("env:"):
-        raise ValueError("harbor_run.agent_required_secret_refs must contain env:<VARIABLE_NAME> values")
-    env_name = secret_ref.removeprefix("env:").strip()
-    if not _ENV_NAME_PATTERN.match(env_name):
-        raise ValueError("harbor_run.agent_required_secret_refs must contain env:<VARIABLE_NAME> values")
-    return env_name
+    return build_agent_model_invocation(
+        agent_name=agent_name,
+        model_id=model_name,
+        provider_ref=ref,
+        provider_secret=secret,
+        existing_agent_env=existing_agent_env,
+        explicit_required_secret_refs=agent_required_secret_refs,
+    )
 
 
 def _harbor_task_path_for_run(

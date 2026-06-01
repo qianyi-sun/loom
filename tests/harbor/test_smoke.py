@@ -58,8 +58,14 @@ class FakeHarborCommandRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-        self.calls.append({"args": args, "timeout": timeout})
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
         jobs_dir = Path(args[args.index("--jobs-dir") + 1])
         _write_harbor_job_fixture(jobs_dir)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="harbor smoke ok\n", stderr="")

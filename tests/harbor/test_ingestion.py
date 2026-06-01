@@ -94,6 +94,108 @@ class HarborResultIngestorTest(unittest.TestCase):
             self.assertEqual(result.evaluator_results[0].metrics["reward"], 1.0)
             self.assertEqual(result.evaluator_results[0].metrics["smoke_metric"], 0.75)
 
+    def test_ingests_codex_atif_trajectory_objects(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            jobs_dir = _write_harbor_job_fixture(temp_path / "jobs")
+            trial_dir = jobs_dir / "job-001" / "trial-hello"
+            (trial_dir / "agent" / "trajectory.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ATIF-v1.5",
+                        "session_id": "session-001",
+                        "agent": {"name": "codex", "model_name": "gpt-5-nano"},
+                        "steps": [
+                            {
+                                "step_id": 0,
+                                "timestamp": "2026-06-01T18:37:14.000Z",
+                                "source": "agent",
+                                "model_name": "gpt-5-nano",
+                                "message": "I will create the smoke output file.",
+                            },
+                            {
+                                "step_id": 1,
+                                "timestamp": "2026-06-01T18:37:15.288Z",
+                                "source": "agent",
+                                "model_name": "gpt-5-nano",
+                                "message": "Executed exec_command call_001",
+                                "tool_calls": [
+                                    {
+                                        "tool_call_id": "call_001",
+                                        "function_name": "exec_command",
+                                        "arguments": {"cmd": "bash -lc 'echo harbor-smoke-ok > /app/smoke-output.txt'"},
+                                    }
+                                ],
+                                "observation": {
+                                    "results": [
+                                        {
+                                            "source_call_id": "call_001",
+                                            "content": "Chunk ID: abc\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 0\nOutput:\nharbor-smoke-ok\n",
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "final_metrics": {"n_output_tokens": 12},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ingestor = HarborResultIngestor(
+                artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "store"))
+            )
+
+            result = ingestor.ingest(
+                run_id="run_harbor_codex_atif",
+                task_instance_id="terminal-bench-hello",
+                jobs_dir=jobs_dir,
+            )
+
+            self.assertEqual(len(result.turns), 2)
+            self.assertEqual(result.turns[0].command, "agent_message")
+            self.assertIn("I will create", result.turns[0].stdout)
+            self.assertEqual(result.turns[1].command, "bash -lc 'echo harbor-smoke-ok > /app/smoke-output.txt'")
+            self.assertEqual(result.turns[1].exit_code, 0)
+            self.assertIn("harbor-smoke-ok", result.turns[1].stdout)
+            self.assertEqual(result.turns[1].model_call_id, "call_001")
+            self.assertEqual(result.turns[0].metadata["trajectory_schema"], "ATIF-v1.5")
+            self.assertEqual(result.evaluator_results[0].score, 1.0)
+
+    def test_failure_diagnostics_promote_trial_exception_over_missing_reward(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            jobs_dir = _write_harbor_job_fixture(temp_path / "jobs")
+            trial_dir = jobs_dir / "job-001" / "trial-hello"
+            (trial_dir / "verifier" / "reward.txt").unlink()
+            trial_result_path = trial_dir / "result.json"
+            trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+            trial_result["exception_info"] = {
+                "exception_type": "NonZeroAgentExitCodeError",
+                "exception_message": "Command failed while installing codex",
+            }
+            trial_result_path.write_text(json.dumps(trial_result), encoding="utf-8")
+            ingestor = HarborResultIngestor(
+                artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "store"))
+            )
+
+            with self.assertRaisesRegex(ValueError, "Missing Harbor verifier reward") as error:
+                ingestor.ingest(
+                    run_id="run_harbor_exception_diagnostics",
+                    task_instance_id="terminal-bench-hello",
+                    jobs_dir=jobs_dir,
+                )
+            diagnostics = ingestor.failure_diagnostics(
+                run_id="run_harbor_exception_diagnostics",
+                task_instance_id="terminal-bench-hello",
+                jobs_dir=jobs_dir,
+                error=error.exception,
+            )
+
+            self.assertEqual(diagnostics.category, "harbor_agent_runtime_failed")
+            self.assertIn("NonZeroAgentExitCodeError", diagnostics.message)
+            self.assertIn("installing codex", diagnostics.message)
+            self.assertEqual(diagnostics.metadata["trial_exception_type"], "NonZeroAgentExitCodeError")
+
 
 def _write_harbor_job_fixture(root: Path) -> Path:
     job_dir = root / "job-001"

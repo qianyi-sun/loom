@@ -193,15 +193,23 @@ class HarborResultIngestor:
         trial_dir = _optional_trial_dir(job_dir, trial_name=trial_name)
         if trial_dir is not None:
             diagnostics["trial_name"] = trial_dir.name
+            trial_result = _optional_json_object(trial_dir / "result.json")
             diagnostics["trial_config"] = redact_sensitive_metadata(
                 _optional_json_object(trial_dir / "config.json")
             )
             diagnostics["trial_result"] = redact_sensitive_metadata(
-                _optional_json_object(trial_dir / "result.json")
+                trial_result
             )
             diagnostics["artifact_manifest"] = redact_sensitive_metadata(
                 _optional_json_value(trial_dir / "artifacts" / "manifest.json")
             )
+            runtime_failure = _trial_runtime_failure(message=message, trial_result=trial_result)
+            if runtime_failure is not None:
+                category = runtime_failure["category"]
+                message = runtime_failure["message"]
+                diagnostics["category"] = category
+                diagnostics["message"] = message
+                diagnostics.update(runtime_failure["metadata"])
             try:
                 turns = _read_trajectory(trial_dir / "agent" / "trajectory.json")
             except ValueError as exc:
@@ -313,6 +321,8 @@ def _read_trajectory(path: Path) -> list[TerminalTurn]:
     if not path.exists():
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("steps"), list):
+        return _read_atif_trajectory(payload)
     if not isinstance(payload, list):
         raise ValueError("Harbor trajectory.json must contain a list")
 
@@ -336,6 +346,144 @@ def _read_trajectory(path: Path) -> list[TerminalTurn]:
             )
         )
     return turns
+
+
+def _read_atif_trajectory(payload: dict[str, Any]) -> list[TerminalTurn]:
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        raise ValueError("Harbor ATIF trajectory steps must contain a list")
+    schema_version = str(payload.get("schema_version") or "ATIF")
+    session_id = _optional_str(payload.get("session_id"))
+    agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+    cwd = "/workspace"
+    if isinstance(agent.get("extra"), dict):
+        cwd = str(agent["extra"].get("cwd") or cwd)
+
+    turns: list[TerminalTurn] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            raise ValueError("Harbor ATIF trajectory steps must be objects")
+        tool_calls = step.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            if _is_atif_agent_message(step):
+                turns.append(
+                    _atif_message_turn(
+                        step,
+                        turn_index=len(turns),
+                        cwd=cwd,
+                        schema_version=schema_version,
+                        session_id=session_id,
+                    )
+                )
+            continue
+        observation_by_call_id = _atif_observations_by_call_id(step.get("observation"))
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                raise ValueError("Harbor ATIF trajectory tool calls must be objects")
+            call_id = _optional_str(tool_call.get("tool_call_id"))
+            observation = observation_by_call_id.get(call_id or "", "")
+            turns.append(
+                TerminalTurn(
+                    turn_index=len(turns),
+                    command=_atif_command(tool_call),
+                    cwd=cwd,
+                    started_at=_parse_datetime(step.get("timestamp")),
+                    completed_at=_parse_datetime(step.get("timestamp")),
+                    exit_code=_parse_atif_exit_code(observation),
+                    stdout=_parse_atif_stdout(observation),
+                    stderr="",
+                    changed_paths=[],
+                    model_call_id=call_id,
+                    metadata={
+                        "trajectory_schema": schema_version,
+                        "session_id": session_id,
+                        "source": step.get("source"),
+                        "message": step.get("message"),
+                        "function_name": tool_call.get("function_name"),
+                    },
+                )
+            )
+    return turns
+
+
+def _is_atif_agent_message(step: dict[str, Any]) -> bool:
+    return (
+        step.get("source") == "agent"
+        and isinstance(step.get("message"), str)
+        and bool(str(step.get("message")).strip())
+    )
+
+
+def _atif_message_turn(
+    step: dict[str, Any],
+    *,
+    turn_index: int,
+    cwd: str,
+    schema_version: str,
+    session_id: str | None,
+) -> TerminalTurn:
+    return TerminalTurn(
+        turn_index=turn_index,
+        command="agent_message",
+        cwd=cwd,
+        started_at=_parse_datetime(step.get("timestamp")),
+        completed_at=_parse_datetime(step.get("timestamp")),
+        exit_code=0,
+        stdout=str(step.get("message") or ""),
+        stderr="",
+        changed_paths=[],
+        model_call_id=None,
+        metadata={
+            "trajectory_schema": schema_version,
+            "session_id": session_id,
+            "source": step.get("source"),
+            "model_name": step.get("model_name"),
+            "event_type": "agent_message",
+        },
+    )
+
+
+def _atif_observations_by_call_id(observation: Any) -> dict[str, str]:
+    if not isinstance(observation, dict):
+        return {}
+    results = observation.get("results")
+    if not isinstance(results, list):
+        return {}
+    observations: dict[str, str] = {}
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        call_id = _optional_str(result.get("source_call_id"))
+        if call_id:
+            observations[call_id] = str(result.get("content") or "")
+    return observations
+
+
+def _atif_command(tool_call: dict[str, Any]) -> str:
+    arguments = tool_call.get("arguments")
+    if isinstance(arguments, dict):
+        command = arguments.get("cmd") or arguments.get("command")
+        if isinstance(command, str) and command.strip():
+            return command
+        return json.dumps(arguments, sort_keys=True)
+    function_name = tool_call.get("function_name")
+    if isinstance(function_name, str) and function_name.strip():
+        return function_name
+    return "atif_tool_call"
+
+
+def _parse_atif_exit_code(observation: str) -> int:
+    match = re.search(r"Process exited with code (-?\d+)", observation)
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
+def _parse_atif_stdout(observation: str) -> str:
+    marker = "\nOutput:\n"
+    if marker not in observation:
+        return observation
+    return observation.split(marker, 1)[1]
 
 
 def _verifier_result(
@@ -421,6 +569,38 @@ def _failure_category(message: str) -> str:
     return "harbor_ingestion_failed"
 
 
+def _trial_runtime_failure(*, message: str, trial_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if "Missing Harbor verifier reward" not in message:
+        return None
+    if not isinstance(trial_result, dict):
+        return None
+    exception_info = trial_result.get("exception_info")
+    if not isinstance(exception_info, dict):
+        return None
+    exception_type = _optional_str(exception_info.get("exception_type")) or "HarborTrialException"
+    exception_message = _clean_exception_message(
+        _optional_str(exception_info.get("exception_message")) or "Harbor trial failed before verifier"
+    )
+    return {
+        "category": "harbor_agent_runtime_failed",
+        "message": f"Harbor trial failed before verifier: {exception_type}: {exception_message}",
+        "metadata": {
+            "trial_exception_type": exception_type,
+            "trial_exception_message": exception_message,
+        },
+    }
+
+
+def _clean_exception_message(message: str) -> str:
+    redacted = re.sub(
+        r"(?i)\\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION)[A-Z0-9_]*=)[^\\s,;]+",
+        r"\\1[redacted]",
+        message,
+    )
+    redacted = re.sub(r"(?i)Bearer\\s+[^\\s,;]+", "Bearer [redacted]", redacted)
+    return redacted[:1000] + (" ... [truncated]" if len(redacted) > 1000 else "")
+
+
 def _failure_metadata(diagnostics: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "schema_version",
@@ -433,6 +613,8 @@ def _failure_metadata(diagnostics: dict[str, Any]) -> dict[str, Any]:
         "trial_status",
         "requested_trial_name",
         "trajectory_error",
+        "trial_exception_type",
+        "trial_exception_message",
     ]
     return {key: diagnostics[key] for key in keys if key in diagnostics}
 

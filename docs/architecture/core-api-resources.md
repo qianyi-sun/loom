@@ -74,6 +74,8 @@ This is a dev-safe boundary, not the final production SSO design.
 | `POST /harbor/task-uploads` | Upload and validate a zipped Harbor-compatible task directory for a project | `Artifacpilot groupjectStore` + `AuditEventRepository` |
 | `GET /models` | List frontend-selectable API models from configured provider discovery or static allowlist | `ServiceSettings` + provider config refs |
 | `GET /harnesses` | List frontend-selectable launch harnesses including Docker terminal and Harbor-compatible local Docker smoke | static launch catalog |
+| `GET /agents` | List Harbor built-in and custom import-path agents with safe adapter metadata | `HarborAgentProvider` |
+| `GET /harbor/agent-adaptation` | Preflight one selected Harbor agent/model/backend combination and report required env contract or actionable gaps | `HarborAgentProvider` + `DevProviderConfigRegistry` |
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
 | `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
@@ -120,13 +122,13 @@ counts, queue depth, terminal run count, artifact count, turn count, evaluator
 completion count, average evaluator score, and latest update timestamp.
 
 `GET /models` returns only safe model selection metadata: provider id, provider
-config id, display/model name, API mode, source, disabled/error state, and
-freshness timestamp. It never returns raw API keys or secret refs. When a
-provider base URL and API key are present, it calls the provider's
-OpenAI-compatible `/models` endpoint by default. `MODEL_PROVIDER_MODELS` is an
-optional allowlist after discovery or a static fallback when discovery fails or
-a provider does not support `/models`. With no provider configured, it returns a
-local scripted dev model.
+config id, display/model name, API mode, source, disabled/error state, basic
+model-family metadata, endpoint dialect hints, and freshness timestamp. It
+never returns raw API keys or secret refs. When a provider base URL and API key
+are present, it calls the provider's OpenAI-compatible `/models` endpoint by
+default. `MODEL_PROVIDER_MODELS` is an optional allowlist after discovery or a
+static fallback when discovery fails or a provider does not support `/models`.
+With no provider configured, it returns a local scripted dev model.
 
 `GET /harnesses` returns the v0 launch harness catalog. `docker-terminal` is
 the platform-native Docker terminal path. `harbor-local-docker` is a
@@ -145,10 +147,19 @@ implementation is `HarborAgentProvider`: it lists Harbor built-in agents,
 supports custom Harbor `--agent-import-path` entries, reports whether an agent
 is Harbor built-in, external CLI, or custom import mode, and exposes supported
 `harness_id`, sandbox backend, trajectory support, and required secret
-references. Required secrets are safe references such as `env:OPENAI_API_KEY`;
-raw key values are not accepted or returned. This lets launch and dashboard
-consumers distinguish Harbor agents from native platform runners before a full
-agent-selection UI is added.
+references. Mainstream built-ins also expose `model_adapter` metadata that
+records the adapter id, endpoint dialects, API-key env names, and base-URL env
+names the worker will synthesize. Required secrets are safe references such as
+`env:OPENAI_API_KEY`; raw key values are not accepted or returned. This lets
+launch and dashboard consumers distinguish Harbor agents from native platform
+runners before a full agent-selection UI is added.
+
+`GET /harbor/agent-adaptation` is a launch preflight surface for #150. It
+accepts the selected project, harness, Harbor agent, model id, and provider
+config id, then returns `ready` or `blocked`, the adapter metadata, env names
+that will be populated from safe provider refs, and actionable gaps such as a
+missing model provider config or provider endpoint dialect mismatch. It never
+returns raw provider secret values.
 
 `POST /harbor/task-uploads` is the first user-facing custom benchmark intake
 path. A project member uploads a `.zip` Harbor task directory; the API validates

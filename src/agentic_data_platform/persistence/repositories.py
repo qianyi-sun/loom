@@ -589,7 +589,15 @@ class RunRepository:
             self.session.add(_turn_row(run_id=run.run_id, attempt_id=attempt_id, turn=turn))
 
         for index, artifact in enumerate(run.artifacts):
-            self.session.add(_artifact_row(run_id=run.run_id, attempt_id=attempt_id, artifact=artifact, index=index))
+            self.session.add(
+                _artifact_row(
+                    run_id=run.run_id,
+                    attempt_id=attempt_id,
+                    artifact=artifact,
+                    index=index,
+                    artifact_id=self._artifact_id_for_attempt(artifact.artifact_id, attempt_id=attempt_id),
+                )
+            )
 
         for evaluator_result in run.all_evaluator_results():
             self.session.add(_evaluator_result_row(run_id=run.run_id, attempt_id=attempt_id, result=evaluator_result))
@@ -788,6 +796,13 @@ class RunRepository:
         )
         return _required(row, "run attempt", run_id)
 
+    def _artifact_id_for_attempt(self, artifact_id: str, *, attempt_id: str) -> str:
+        existing = self.session.get(ArtifactRow, artifact_id)
+        if existing is None or existing.attempt_id == attempt_id:
+            return artifact_id
+        suffix = f":attempt:{_attempt_number(attempt_id)}"
+        return f"{artifact_id[:255 - len(suffix)]}{suffix}"
+
     def _run_row_for_update(self, run_id: str) -> RunRow:
         row = self.session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
         return _required(row, "run", run_id)
@@ -983,9 +998,16 @@ def _terminal_turn(row: RunTerminalTurnRow) -> TerminalTurn:
     )
 
 
-def _artifact_row(*, run_id: str, attempt_id: str, artifact: ArtifactRef, index: int) -> ArtifactRow:
+def _artifact_row(
+    *,
+    run_id: str,
+    attempt_id: str,
+    artifact: ArtifactRef,
+    index: int,
+    artifact_id: str | None = None,
+) -> ArtifactRow:
     return ArtifactRow(
-        artifact_id=artifact.artifact_id,
+        artifact_id=artifact_id or artifact.artifact_id,
         run_id=run_id,
         attempt_id=attempt_id,
         artifact_index=index,
@@ -1127,6 +1149,13 @@ def _status_event_record(row: RunStatusEventRow) -> RunStatusEvent:
 
 def _attempt_id(run_id: str, attempt_number: int) -> str:
     return f"{run_id}:attempt:{attempt_number}"
+
+
+def _attempt_number(attempt_id: str) -> int:
+    try:
+        return int(attempt_id.rsplit(":attempt:", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"invalid attempt id: {attempt_id}") from exc
 
 
 def _require_non_empty(name: str, value: str) -> None:

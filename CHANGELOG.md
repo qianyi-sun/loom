@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added Harbor agent/model adaptation coverage for #150. Mainstream Harbor
+  agents now expose model adapter metadata and required secret refs, the worker
+  infers adapter env for agents such as `opencode` without relying on frontend
+  one-off fields, `/models` returns basic model-family metadata,
+  Codex/Responses-API provider dialect mismatches fail before Harbor launch,
+  and `/harbor/agent-adaptation` reports ready/blocked launch preflight state
+  without exposing raw provider secrets.
 - Preserved Harbor diagnostics when verifier/result ingestion fails for #151.
   Worker failures caused by malformed or incomplete Harbor `jobs/` output now
   keep the Harbor runner report, raw `jobs/` archive, partial trajectory when

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,18 +43,31 @@ class DockerTerminalSandboxConfig:
 
 
 class CommandRunner(Protocol):
-    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         ...
 
 
 class SubprocessCommandRunner:
-    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             args,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+            env={**os.environ, **env} if env else None,
         )
 
 

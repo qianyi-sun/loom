@@ -187,6 +187,41 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertEqual(messages[1], "Using static model fallback; provider discovery failed: provider unavailable")
         self.assertEqual(messages[2], "Model discovery failed: 401 unauthorized")
 
+    def test_agent_adaptation_status_message_reports_ready_and_blocked(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required for static frontend payload tests")
+
+        script = _node_harness(
+            """
+            const messages = [
+              adaptationMessage({
+                status: "ready",
+                adapter: { display_name: "OpenAI-compatible CLI adapter" },
+                gaps: [],
+              }),
+              adaptationMessage({
+                status: "blocked",
+                adapter: { adapter_id: "openai-compatible-cli" },
+                gaps: [{ code: "missing_provider_config", message: "A configured API model provider is required." }],
+              }),
+              adaptationMessage({
+                status: "ready",
+                adapter: null,
+                gaps: [],
+              }),
+            ];
+            console.log(JSON.stringify(messages));
+            """
+        )
+
+        result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
+        messages = json.loads(result.stdout)
+
+        self.assertEqual(messages[0], "Adapter ready: OpenAI-compatible CLI adapter.")
+        self.assertEqual(messages[1], "Adapter blocked: A configured API model provider is required.")
+        self.assertEqual(messages[2], "Adapter ready: no model key required.")
+
 
 def _node_harness(assertion_script: str) -> str:
     return textwrap.dedent(

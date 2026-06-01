@@ -235,6 +235,7 @@ def _model_payload(
         "display_name": model_id,
         "mode": "api",
         "capabilities": ["terminal-agent"],
+        "metadata": _model_metadata(model_id=model_id, source=source),
         "source": source,
         "disabled": disabled,
     }
@@ -243,6 +244,36 @@ def _model_payload(
     if error:
         payload["error"] = error
     return payload
+
+
+def _model_metadata(*, model_id: str, source: str) -> dict[str, Any]:
+    family = _infer_model_family(model_id)
+    return {
+        "family": family,
+        "endpoint_dialects": ["openai_compatible"],
+        "agent_capable": True,
+        "mainstream": family != "other",
+        "source": source,
+    }
+
+
+def _infer_model_family(model_id: str) -> str:
+    normalized = model_id.lower()
+    family_markers = [
+        ("deepseek", ("deepseek",)),
+        ("claude", ("claude", "anthropic")),
+        ("gemini", ("gemini", "google")),
+        ("qwen", ("qwen", "qwq")),
+        ("kimi", ("kimi", "moonshot")),
+        ("glm", ("glm", "zhipu")),
+        ("grok", ("grok", "xai")),
+        ("minimax", ("minimax", "abab")),
+        ("openai", ("gpt", "o1", "o3", "o4", "chatgpt")),
+    ]
+    for family, markers in family_markers:
+        if any(marker in normalized for marker in markers):
+            return family
+    return "other"
 
 
 def _catalog_payload(*, status: str, source: str, provider_config_id: str, message: str) -> dict[str, Any]:

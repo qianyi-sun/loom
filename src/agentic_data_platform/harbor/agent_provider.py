@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 
 from agentic_data_platform.agents.providers import AgentCatalogEntry
+from agentic_data_platform.harbor.agent_adapters import adapter_for_agent
 from agentic_data_platform.harbor.capabilities import probe_harbor_native_capabilities
 
 
@@ -106,6 +107,22 @@ class HarborAgentProvider:
         raise ValueError(f"Unknown Harbor agent: {agent_id}")
 
     def _entry_for_builtin(self, spec: HarborBuiltInAgentSpec) -> AgentCatalogEntry:
+        adapter = adapter_for_agent(spec.name)
+        required_secret_refs = list(spec.required_secret_refs)
+        if adapter is not None:
+            for secret_ref in adapter.required_secret_refs:
+                if secret_ref not in required_secret_refs:
+                    required_secret_refs.append(secret_ref)
+        metadata: dict[str, object] = {
+            "provider": "harbor",
+            "harbor_agent_name": spec.name,
+            "harbor_cli_args": ["--agent", spec.name],
+            "backend_modes": ["cli", "native"],
+            "native_runner_available": self.native_capabilities.native_runner_available,
+            "harbor_package_version": self.native_capabilities.package_version,
+        }
+        if adapter is not None:
+            metadata["model_adapter"] = adapter.to_metadata()
         return AgentCatalogEntry(
             agent_id=f"harbor:{spec.name}",
             display_name=spec.display_name,
@@ -115,17 +132,10 @@ class HarborAgentProvider:
             execution_mode=spec.execution_mode,
             supported_harness_ids=list(HARBOR_HARNESS_IDS),
             supported_sandbox_backends=list(HARBOR_SANDBOX_BACKENDS),
-            required_secret_refs=list(spec.required_secret_refs),
+            required_secret_refs=required_secret_refs,
             supports_trajectory=True,
             capabilities=list(HARBOR_AGENT_CAPABILITIES),
-            metadata={
-                "provider": "harbor",
-                "harbor_agent_name": spec.name,
-                "harbor_cli_args": ["--agent", spec.name],
-                "backend_modes": ["cli", "native"],
-                "native_runner_available": self.native_capabilities.native_runner_available,
-                "harbor_package_version": self.native_capabilities.package_version,
-            },
+            metadata=metadata,
         )
 
 

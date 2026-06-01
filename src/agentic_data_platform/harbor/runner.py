@@ -25,6 +25,8 @@ class HarborRunSpec:
     timeout_seconds: int = 3600
     auto_confirm: bool = True
     agent_env: list[str] = field(default_factory=list)
+    agent_kwargs: list[str] = field(default_factory=list)
+    process_env: list[str] = field(default_factory=list)
     verifier_env: list[str] = field(default_factory=list)
     extra_args: list[str] = field(default_factory=list)
 
@@ -45,6 +47,8 @@ class HarborRunSpec:
         if self.dataset_ref is not None:
             _require_non_empty("dataset_ref", self.dataset_ref)
         _validate_key_value_args(self.agent_env, field_name="agent_env")
+        _validate_key_value_args(self.agent_kwargs, field_name="agent_kwargs")
+        _validate_key_value_args(self.process_env, field_name="process_env")
         _validate_key_value_args(self.verifier_env, field_name="verifier_env")
         if self.extra_args and any(not isinstance(arg, str) or not arg.strip() for arg in self.extra_args):
             raise ValueError("extra_args must contain non-empty strings")
@@ -56,6 +60,7 @@ class HarborRunnerResult:
     backend: str
     command: list[str]
     jobs_dir: Path
+    job_dir: Path | None
     started_at: datetime
     completed_at: datetime
     exit_code: int
@@ -73,6 +78,7 @@ class HarborRunnerResult:
             "backend": self.backend,
             "command": _redacted_command(self.command),
             "jobs_dir": self.jobs_dir.name,
+            "job_dir": self.job_dir.name if self.job_dir is not None else None,
             "started_at": _datetime(self.started_at),
             "completed_at": _datetime(self.completed_at),
             "duration_seconds": self.duration_seconds,
@@ -98,11 +104,16 @@ class HarborCliRunnerBackend:
         if spec.backend != "cli":
             raise ValueError("HarborCliRunnerBackend only supports backend='cli'")
         spec.jobs_dir.mkdir(parents=True, exist_ok=True)
+        existing_job_names = _harbor_job_names(spec.jobs_dir)
         command = self.command_for(spec)
         started_at = datetime.now(timezone.utc)
         timed_out = False
         try:
-            process = self.command_runner.run(command, timeout=spec.timeout_seconds)
+            process = self.command_runner.run(
+                command,
+                timeout=spec.timeout_seconds,
+                env=_env_dict(spec.process_env),
+            )
             exit_code = process.returncode
             stdout = _coerce_output(process.stdout)
             stderr = _coerce_output(process.stderr)
@@ -114,11 +125,13 @@ class HarborCliRunnerBackend:
             timeout_message = f"Harbor run timed out after {spec.timeout_seconds} seconds"
             stderr = f"{stderr.rstrip()}\n{timeout_message}\n" if stderr else f"{timeout_message}\n"
         completed_at = datetime.now(timezone.utc)
+        job_dir = _resolve_current_job_dir(spec.jobs_dir, existing_job_names=existing_job_names)
         return HarborRunnerResult(
             run_id=spec.run_id,
             backend="cli",
             command=command,
             jobs_dir=spec.jobs_dir,
+            job_dir=job_dir,
             started_at=started_at,
             completed_at=completed_at,
             exit_code=exit_code,
@@ -151,6 +164,8 @@ class HarborCliRunnerBackend:
             command.extend(["--agent-import-path", str(spec.agent_import_path)])
         for env_value in spec.agent_env:
             command.extend(["--agent-env", env_value])
+        for kwarg_value in spec.agent_kwargs:
+            command.extend(["--agent-kwarg", kwarg_value])
         for env_value in spec.verifier_env:
             command.extend(["--verifier-env", env_value])
         command.extend(spec.extra_args)
@@ -158,6 +173,42 @@ class HarborCliRunnerBackend:
 
 
 HarborRunnerBackend = HarborCliRunnerBackend
+
+
+def _resolve_current_job_dir(jobs_dir: Path, *, existing_job_names: set[str]) -> Path | None:
+    job_dirs = _harbor_job_dirs(jobs_dir)
+    if not job_dirs:
+        return None
+
+    new_job_dirs = [path for path in job_dirs if path.name not in existing_job_names]
+    if len(new_job_dirs) == 1:
+        return new_job_dirs[0]
+    if len(new_job_dirs) > 1:
+        return max(new_job_dirs, key=_path_mtime_ns)
+    if len(job_dirs) == 1:
+        return job_dirs[0]
+    return max(job_dirs, key=_path_mtime_ns)
+
+
+def _harbor_job_names(jobs_dir: Path) -> set[str]:
+    return {path.name for path in _harbor_job_dirs(jobs_dir)}
+
+
+def _harbor_job_dirs(jobs_dir: Path) -> list[Path]:
+    if not jobs_dir.is_dir():
+        return []
+    return [path for path in sorted(jobs_dir.iterdir()) if _is_harbor_job_dir(path)]
+
+
+def _is_harbor_job_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "config.json").is_file() and (path / "result.json").is_file()
+
+
+def _path_mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return 0
 
 
 def _coerce_output(value: str | bytes | None) -> str:
@@ -189,7 +240,7 @@ def _redacted_command(command: list[str]) -> list[str]:
         redacted.append(value)
         if value in {"-p", "--path", "--jobs-dir", "--agent-import-path", "--env-file", "-c", "--config"}:
             redact_path_next = True
-        elif value in {"--agent-env", "--verifier-env", "--ae", "--ve"}:
+        elif value in {"--agent-env", "--verifier-env", "--ae", "--ve", "--agent-kwarg", "--ak"}:
             redact_env_next = True
     return redacted
 
@@ -216,3 +267,9 @@ def _validate_key_value_args(values: list[str], *, field_name: str) -> None:
         not isinstance(item, str) or "=" not in item or not item.split("=", 1)[0].strip() for item in values
     ):
         raise ValueError(f"{field_name} must contain KEY=VALUE strings")
+
+
+def _env_dict(values: list[str]) -> dict[str, str] | None:
+    if not values:
+        return None
+    return dict(value.split("=", 1) for value in values)

@@ -102,6 +102,26 @@ class HarborRunnerBackendTest(unittest.TestCase):
             self.assertGreaterEqual(result.duration_seconds, 0)
             self.assertTrue(jobs_dir.is_dir())
 
+    def test_cli_runner_records_job_directory_created_by_current_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            _write_minimal_harbor_job(jobs_dir / "job-001")
+            command_runner = FakeCommandRunner(stdout="harbor ok\n", created_job_name="job-002")
+            spec = HarborRunSpec(
+                run_id="run_harbor_runner_current_job",
+                task_instance_id="terminal-bench-hello",
+                dataset_ref="terminal-bench/terminal-bench-2",
+                agent="codex",
+                model_name="gpt-5-mini",
+                jobs_dir=jobs_dir,
+            )
+
+            result = HarborRunnerBackend(command_runner=command_runner).run(spec)
+
+            self.assertEqual(result.jobs_dir, jobs_dir)
+            self.assertEqual(result.job_dir, jobs_dir / "job-002")
+            self.assertEqual(result.to_report()["job_dir"], "job-002")
+
     def test_builds_task_path_command_with_custom_environment_and_env_args(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -192,15 +212,38 @@ class HarborRunnerBackendTest(unittest.TestCase):
 
 
 class FakeCommandRunner:
-    def __init__(self, *, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        created_job_name: str | None = None,
+    ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+        self.created_job_name = created_job_name
         self.calls: list[dict[str, object]] = []
 
-    def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-        self.calls.append({"args": args, "timeout": timeout})
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
+        if self.created_job_name is not None:
+            jobs_dir = Path(args[args.index("--jobs-dir") + 1])
+            _write_minimal_harbor_job(jobs_dir / self.created_job_name)
         return subprocess.CompletedProcess(args=args, returncode=self.returncode, stdout=self.stdout, stderr=self.stderr)
+
+
+def _write_minimal_harbor_job(job_dir: Path) -> None:
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "config.json").write_text(json.dumps({"agent": "codex"}), encoding="utf-8")
+    (job_dir / "result.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
 
 
 def json_string(value) -> str:
