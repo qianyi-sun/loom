@@ -16,6 +16,7 @@ from agentic_data_platform.artifacts.store import (
     LocalArtifactStore,
     build_s3_artifact_store,
 )
+from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence import create_database_engine, session_scope
 from agentic_data_platform.persistence.repositories import RunRepository
@@ -84,7 +85,7 @@ class RunWorker:
                 failed = RunRepository(session).transition_run(
                     claimed.run_id,
                     "failed",
-                    event_type="run.worker_failed",
+                    event_type=RunEventType.WORKER_FAILED,
                     reason=str(exc),
                     request_id=request_id,
                 )
@@ -202,7 +203,7 @@ def execute_claimed_run(
             failed = RunRepository(session).transition_run(
                 run_id,
                 "failed",
-                event_type="run.worker_failed",
+                event_type=RunEventType.WORKER_FAILED,
                 reason=str(exc),
                 request_id=request_id,
             )
@@ -492,7 +493,7 @@ def _fail_active_subprocess_run(
         failed = repository.transition_run(
             run_id,
             "failed",
-            event_type="run.worker_subprocess_failed",
+            event_type=RunEventType.WORKER_SUBPROCESS_FAILED,
             reason=reason,
             request_id=request_id,
         )

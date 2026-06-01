@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import inspect, select
 
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
+from agentic_data_platform.domain.execution_events import RecoveryReasonCode, RunEventType
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
@@ -629,13 +630,13 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(statuses["run_recover_stale"], RunStatus.QUEUED)
         self.assertEqual(statuses["run_recover_fresh"], RunStatus.DISPATCHED)
         self.assertEqual(statuses["run_recover_queued"], RunStatus.QUEUED)
-        self.assertEqual(events[-1].event_type, "run.recovered")
+        self.assertEqual(events[-1].event_type, RunEventType.RECOVERED.value)
         self.assertEqual(events[-1].from_status, RunStatus.DISPATCHED)
         self.assertEqual(events[-1].to_status, RunStatus.QUEUED)
         self.assertEqual(events[-1].request_id, "req-recover-dispatched-001")
         self.assertEqual(events[-1].reason, "stale dispatched run expired")
         self.assertEqual(events[-1].metadata["scheduler_id"], "scheduler-a")
-        self.assertEqual(events[-1].metadata["recovery"], "stale_dispatched")
+        self.assertEqual(events[-1].metadata["recovery"], RecoveryReasonCode.STALE_DISPATCHED.value)
         self.assertEqual(events[-1].metadata["stale_before"], stale_before.isoformat())
 
     def test_run_repository_requeue_stale_dispatched_respects_batch_limit(self):
@@ -722,12 +723,12 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(statuses["run_active_stale"], RunStatus.FAILED)
         self.assertEqual(statuses["run_active_fresh"], RunStatus.PROVISIONING)
         self.assertEqual(statuses["run_active_no_heartbeat"], RunStatus.PROVISIONING)
-        self.assertEqual(events[-1].event_type, "run.recovered")
+        self.assertEqual(events[-1].event_type, RunEventType.RECOVERED.value)
         self.assertEqual(events[-1].from_status, RunStatus.PROVISIONING)
         self.assertEqual(events[-1].to_status, RunStatus.FAILED)
         self.assertEqual(events[-1].reason, "stale worker heartbeat expired")
         self.assertEqual(events[-1].metadata["scheduler_id"], "scheduler-a")
-        self.assertEqual(events[-1].metadata["recovery"], "stale_worker_heartbeat")
+        self.assertEqual(events[-1].metadata["recovery"], RecoveryReasonCode.STALE_WORKER_HEARTBEAT.value)
         self.assertEqual(events[-1].metadata["worker_id"], "worker-run_active_stale")
         self.assertEqual(events[-1].metadata["last_heartbeat_at"], stale_heartbeat)
 

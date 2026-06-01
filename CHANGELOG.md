@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first shared execution event contract slice for #157/#160. The
+  backend now centralizes current run lifecycle event names and Phase 1 recovery
+  reason codes in `agentic_data_platform.domain.execution_events`, and
+  repository, worker, subprocess-failure, recovery, and run-audit paths use the
+  shared contract while preserving existing string values in Postgres and API
+  responses.
 - Added local browser-control tooling for owner-visible frontend validation.
   `scripts/setup-browser-tools.sh` installs the `browser` development extra and
   Chromium for Playwright, while

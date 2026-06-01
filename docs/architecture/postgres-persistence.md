@@ -90,6 +90,15 @@ hydrates the latest internal attempt back into the existing dataclass shape.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.
+Run lifecycle writers share the v1 execution-event contract in
+`agentic_data_platform.domain.execution_events`; Postgres still stores string
+values, but repository, worker, subprocess-failure, recovery, and run-audit
+paths now use the same `RunEventType` enum before persistence. Recovery events
+store their canonical reason in `metadata_json.recovery` using
+`RecoveryReasonCode`; implemented reasons are `stale_dispatched` and
+`stale_worker_heartbeat`, and reserved Phase 1 follow-up reasons are
+`terminal_result_mismatch`, `canceled_resource_cleanup`,
+`artifact_upload_expired`, and `projection_refresh_failed`.
 Claimed runs store worker lease metadata on the latest `run_attempts.metadata`
 payload, including worker id, claim time, latest heartbeat, heartbeat status,
 and completion time when available. `RunRepository.record_worker_heartbeat(...)`

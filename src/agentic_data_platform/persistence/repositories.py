@@ -13,6 +13,12 @@ from agentic_data_platform.benchmarks.fixtures import (
     BenchmarkFixtureFamily,
     BenchmarkFixtureInstance,
 )
+from agentic_data_platform.domain.execution_events import (
+    RecoveryReasonCode,
+    RunEventType,
+    event_type_value,
+    recovery_event_metadata,
+)
 from agentic_data_platform.domain.run_records import (
     ArtifactRef,
     BenchmarkTaskInstance,
@@ -385,7 +391,7 @@ class RunRepository:
         self._append_status_event(
             run_id=run.run_id,
             attempt_id=_attempt_id(run.run_id, 1),
-            event_type="run.created",
+            event_type=RunEventType.CREATED,
             from_status=None,
             to_status=RunStatus.QUEUED,
             actor_user_id=created_by_user_id,
@@ -405,7 +411,7 @@ class RunRepository:
         return self.transition_run(
             run_id,
             RunStatus.CANCELED,
-            event_type="run.canceled",
+            event_type=RunEventType.CANCELED,
             reason=reason,
             actor_user_id=actor_user_id,
             request_id=request_id,
@@ -416,7 +422,7 @@ class RunRepository:
         run_id: str,
         next_status: RunStatus | str,
         *,
-        event_type: str = "run.status_changed",
+        event_type: RunEventType | str = RunEventType.STATUS_CHANGED,
         reason: str | None = None,
         actor_user_id: str | None = None,
         request_id: str | None = None,
@@ -487,7 +493,7 @@ class RunRepository:
         self._append_status_event(
             run_id=run_id,
             attempt_id=attempt_id,
-            event_type="run.retried",
+            event_type=RunEventType.RETRIED,
             from_status=previous_status,
             to_status=RunStatus.QUEUED,
             reason=reason,
@@ -560,7 +566,7 @@ class RunRepository:
             self._append_status_event(
                 run_id=run.run_id,
                 attempt_id=attempt.attempt_id,
-                event_type="run.dispatched",
+                event_type=RunEventType.DISPATCHED,
                 from_status=previous_status,
                 to_status=RunStatus.DISPATCHED,
                 request_id=request_id,
@@ -619,16 +625,16 @@ class RunRepository:
             self._append_status_event(
                 run_id=run.run_id,
                 attempt_id=attempt.attempt_id,
-                event_type="run.recovered",
+                event_type=RunEventType.RECOVERED,
                 from_status=previous_status,
                 to_status=RunStatus.QUEUED,
                 reason=reason,
                 request_id=request_id,
-                metadata={
-                    "scheduler_id": scheduler_id,
-                    "recovery": "stale_dispatched",
-                    "stale_before": older_than.isoformat(),
-                },
+                metadata=recovery_event_metadata(
+                    RecoveryReasonCode.STALE_DISPATCHED,
+                    scheduler_id=scheduler_id,
+                    stale_before=older_than.isoformat(),
+                ),
             )
             requeued_ids.append(run.run_id)
 
@@ -730,18 +736,18 @@ class RunRepository:
             self._append_status_event(
                 run_id=run.run_id,
                 attempt_id=attempt.attempt_id,
-                event_type="run.recovered",
+                event_type=RunEventType.RECOVERED,
                 from_status=previous_status,
                 to_status=RunStatus.FAILED,
                 reason=reason,
                 request_id=request_id,
-                metadata={
-                    "scheduler_id": scheduler_id,
-                    "recovery": "stale_worker_heartbeat",
-                    "worker_id": worker_metadata.get("worker_id"),
-                    "stale_before": older_than.isoformat(),
-                    "last_heartbeat_at": worker_metadata.get("last_heartbeat_at"),
-                },
+                metadata=recovery_event_metadata(
+                    RecoveryReasonCode.STALE_WORKER_HEARTBEAT,
+                    scheduler_id=scheduler_id,
+                    worker_id=worker_metadata.get("worker_id"),
+                    stale_before=older_than.isoformat(),
+                    last_heartbeat_at=worker_metadata.get("last_heartbeat_at"),
+                ),
             )
             failed_ids.append(run.run_id)
 
@@ -812,7 +818,7 @@ class RunRepository:
         self._append_status_event(
             run_id=run.run_id,
             attempt_id=attempt.attempt_id,
-            event_type="run.claimed",
+            event_type=RunEventType.CLAIMED,
             from_status=previous_status,
             to_status=RunStatus.PROVISIONING,
             request_id=request_id,
@@ -1122,7 +1128,7 @@ class RunRepository:
         *,
         run_id: str,
         attempt_id: str,
-        event_type: str,
+        event_type: RunEventType | str,
         from_status: RunStatus | None,
         to_status: RunStatus,
         reason: str | None = None,
@@ -1135,7 +1141,7 @@ class RunRepository:
                 event_id=uuid4().hex,
                 run_id=run_id,
                 attempt_id=attempt_id,
-                event_type=event_type,
+                event_type=event_type_value(event_type),
                 from_status=from_status.value if from_status is not None else None,
                 to_status=to_status.value,
                 reason=reason,
@@ -1155,18 +1161,18 @@ class RunRepository:
         worker_id: str,
         request_id: str | None,
     ) -> None:
-        transitions: list[tuple[str, RunStatus, RunStatus, str | None]] = []
+        transitions: list[tuple[RunEventType, RunStatus, RunStatus, str | None]] = []
         if from_status is RunStatus.PROVISIONING:
-            transitions.append(("run.started", RunStatus.PROVISIONING, RunStatus.RUNNING, None))
+            transitions.append((RunEventType.STARTED, RunStatus.PROVISIONING, RunStatus.RUNNING, None))
             from_status = RunStatus.RUNNING
         if from_status is RunStatus.RUNNING and run.evaluator_result is not None:
-            transitions.append(("run.evaluating", RunStatus.RUNNING, RunStatus.EVALUATING, None))
+            transitions.append((RunEventType.EVALUATING, RunStatus.RUNNING, RunStatus.EVALUATING, None))
             from_status = RunStatus.EVALUATING
 
         terminal_event = {
-            RunStatus.SUCCEEDED: "run.succeeded",
-            RunStatus.FAILED: "run.failed",
-            RunStatus.CANCELED: "run.canceled",
+            RunStatus.SUCCEEDED: RunEventType.SUCCEEDED,
+            RunStatus.FAILED: RunEventType.FAILED,
+            RunStatus.CANCELED: RunEventType.CANCELED,
         }[run.status]
         transitions.append((terminal_event, from_status, run.status, run.failure_reason))
 

@@ -225,6 +225,17 @@ serializing dashboard payloads.
   durable source, and `GET /runs/{run_id}/stream` emits SSE frames with
   `id: <seq>` so browser monitors can reconnect without losing status changes.
   The stream also honors the browser `Last-Event-ID` header on reconnect.
+- Backend writers use `agentic_data_platform.domain.execution_events` as the
+  v1 execution-event contract. Current run events cover `run.created`,
+  `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
+  `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
+  `run.recovered`, `run.worker_failed`, and `run.worker_subprocess_failed`.
+  Recovery metadata currently uses canonical reason codes for
+  `stale_dispatched`, `stale_worker_heartbeat`, `terminal_result_mismatch`,
+  `canceled_resource_cleanup`, `artifact_upload_expired`, and
+  `projection_refresh_failed`; not every listed recovery path is implemented
+  yet, but later #160 slices should reuse these codes instead of minting local
+  strings.
 - Invalid cancel/retry transitions return structured `409 conflict` errors
   through the shared service error boundary.
 - Invalid nested create payloads and blank cancel/retry reasons return

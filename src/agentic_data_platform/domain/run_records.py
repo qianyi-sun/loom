@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterable
 
+from agentic_data_platform.domain.execution_events import RunEventType, event_type_value
+
 
 class ModelMode(str, Enum):
     API = "api"
@@ -385,7 +387,7 @@ class RunStatusEvent:
     seq: int
     run_id: str
     attempt_id: str | None
-    event_type: str
+    event_type: RunEventType | str
     from_status: RunStatus | str | None
     to_status: RunStatus | str
     created_at: datetime
@@ -397,7 +399,7 @@ class RunStatusEvent:
     def __post_init__(self) -> None:
         _require_non_empty("event_id", self.event_id)
         _require_non_empty("run_id", self.run_id)
-        _require_non_empty("event_type", self.event_type)
+        object.__setattr__(self, "event_type", event_type_value(self.event_type))
         if not isinstance(self.seq, int) or self.seq <= 0:
             raise ValueError("seq must be a positive integer")
 

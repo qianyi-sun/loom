@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
+from agentic_data_platform.domain.execution_events import RunEventType, event_type_value
 from agentic_data_platform.domain.run_records import (
     BenchmarkTaskInstance,
     EvaluatorConfig,
@@ -150,7 +151,7 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
 
         _audit_run_event(
             session,
-            event_type="run.created",
+            event_type=RunEventType.CREATED,
             run=created,
             actor_user_id=actor_user_id,
             request_id=_request_id(request),
@@ -292,7 +293,7 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _audit_run_event(
             session,
-            event_type="run.canceled",
+            event_type=RunEventType.CANCELED,
             run=run,
             actor_user_id=actor_user_id,
             request_id=_request_id(request),
@@ -324,7 +325,7 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _audit_run_event(
             session,
-            event_type="run.retried",
+            event_type=RunEventType.RETRIED,
             run=run,
             actor_user_id=actor_user_id,
             request_id=_request_id(request),
@@ -456,14 +457,14 @@ def _provider_metadata(
 def _audit_run_event(
     session: Session,
     *,
-    event_type: str,
+    event_type: RunEventType | str,
     run: RunRecord,
     actor_user_id: str,
     request_id: str | None,
     payload: dict[str, Any],
 ) -> None:
     AuditEventRepository(session).record_event(
-        event_type=event_type,
+        event_type=event_type_value(event_type),
         actor_user_id=actor_user_id,
         project_id=run.project_id,
         run_id=run.run_id,
