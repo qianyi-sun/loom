@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added suite-specific upstream evaluator report normalization for #22.
+  SkillFlow JSON reports and SkillLearnBench `report.csv` outputs are summarized
+  into `artifacts/evaluator-report.json`, normalized wrapper `metrics`, and an
+  `evaluator_report` artifact ref.
 - Added a reusable SkillFlow/SkillLearnBench wrapper smoke entrypoint for #22.
   `python -m agentic_data_platform.benchmark_wrappers.smoke` can run fixture
   dry-runs in CI or executable local-upstream checks when an upstream root is

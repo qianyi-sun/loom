@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import mimetypes
 import os
@@ -15,6 +16,7 @@ from agentic_data_platform.providers.config import redact_sensitive_metadata
 
 _UPSTREAM_CONFIG_ARTIFACT = "upstream-config.json"
 _UPSTREAM_OUTPUT_DIR = "upstream-output"
+_EVALUATOR_REPORT_ARTIFACT = "evaluator-report.json"
 
 
 @dataclass(frozen=True)
@@ -307,6 +309,11 @@ def _write_result(
     failure_reason: str | None,
     upstream_artifacts: list[dict[str, str]],
 ) -> None:
+    metrics, evaluator_report_ref, evaluator_artifacts = _write_evaluator_report(
+        paths=paths,
+        manifest=manifest,
+        upstream_artifacts=upstream_artifacts,
+    )
     artifacts = [
         {
             "kind": "log",
@@ -335,6 +342,7 @@ def _write_result(
             ]
         )
 
+    artifacts.extend(evaluator_artifacts)
     artifacts.extend(upstream_artifacts)
 
     result = {
@@ -350,17 +358,200 @@ def _write_result(
         "instruction_ref": manifest.instruction_ref,
         "input_files": manifest.input_files,
         "model": manifest.model,
-        "metrics": {},
+        "metrics": metrics,
         "artifacts": artifacts,
         "planned_command": shlex.join(planned_command),
         "stdout": stdout,
         "stderr": stderr,
         "trajectory_ref": None,
         "workspace_ref": None,
-        "evaluator_report_ref": None,
+        "evaluator_report_ref": evaluator_report_ref,
         "failure_reason": failure_reason,
     }
     paths.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_evaluator_report(
+    *,
+    paths: WrapperPaths,
+    manifest: WrapperTaskManifest,
+    upstream_artifacts: list[dict[str, str]],
+) -> tuple[dict[str, Any], str | None, list[dict[str, str]]]:
+    source_reports: list[dict[str, str]] = []
+    feedback: list[str] = []
+    metrics: dict[str, Any] = {}
+
+    for artifact in upstream_artifacts:
+        source_path = artifact.get("path")
+        if artifact.get("kind") != "upstream_output" or not source_path:
+            continue
+        local_path = _local_artifact_path(paths=paths, artifact_path=source_path)
+        if local_path is None or not _is_report_path(local_path):
+            continue
+
+        report_metrics, report_feedback = _parse_report_file(local_path)
+        if not report_metrics and not report_feedback:
+            continue
+
+        source_reports.append(
+            {
+                "path": source_path,
+                "media_type": artifact.get("media_type") or "application/octet-stream",
+            }
+        )
+        feedback.extend(report_feedback)
+        metrics.update(report_metrics)
+
+    if not source_reports:
+        return {}, None, []
+
+    metrics["upstream_report_count"] = len(source_reports)
+    evaluator_report_ref = f"artifacts/{_EVALUATOR_REPORT_ARTIFACT}"
+    report = {
+        "schema_version": "adp.wrapper_evaluator_report.v1",
+        "run_id": manifest.run_id,
+        "suite_name": manifest.suite_name,
+        "benchmark_version": manifest.benchmark_version,
+        "source_uri": manifest.source_uri,
+        "source_version": manifest.source_version,
+        "task_family": manifest.task_family,
+        "instance_id": manifest.instance_id,
+        "metrics": metrics,
+        "feedback": feedback[:20],
+        "source_reports": source_reports,
+    }
+    (paths.artifacts_dir / _EVALUATOR_REPORT_ARTIFACT).write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metrics, evaluator_report_ref, [
+        {
+            "kind": "evaluator_report",
+            "path": evaluator_report_ref,
+            "media_type": "application/json",
+        }
+    ]
+
+
+def _local_artifact_path(*, paths: WrapperPaths, artifact_path: str) -> Path | None:
+    prefix = "artifacts/"
+    if not artifact_path.startswith(prefix):
+        return None
+    return paths.artifacts_dir / artifact_path.removeprefix(prefix)
+
+
+def _is_report_path(path: Path) -> bool:
+    report_names = {"report.json", "result.json", "results.json", "summary.json", "report.csv"}
+    return path.name in report_names
+
+
+def _parse_report_file(path: Path) -> tuple[dict[str, Any], list[str]]:
+    if path.suffix == ".json":
+        return _parse_json_report(path)
+    if path.suffix == ".csv":
+        return _parse_csv_report(path)
+    return {}, []
+
+
+def _parse_json_report(path: Path) -> tuple[dict[str, Any], list[str]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}, []
+
+    if not isinstance(payload, dict):
+        return {}, []
+
+    metrics: dict[str, Any] = {}
+    feedback = _feedback_values(payload)
+    for key, value in payload.items():
+        if key == "metrics" and isinstance(value, dict):
+            for metric_key, metric_value in value.items():
+                _store_scalar_metric(metrics, metric_key, metric_value)
+            continue
+        _store_scalar_metric(metrics, key, value)
+    return metrics, feedback
+
+
+def _parse_csv_report(path: Path) -> tuple[dict[str, Any], list[str]]:
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError:
+        return {}, []
+
+    if not rows:
+        return {}, []
+
+    metrics: dict[str, Any] = {"upstream_trial_count": len(rows)}
+    feedback: list[str] = []
+    score_values: list[float] = []
+    success_values: list[bool] = []
+    for row in rows:
+        for key, value in row.items():
+            normalized_key = (key or "").strip().lower()
+            normalized_value = (value or "").strip()
+            if not normalized_value:
+                continue
+            if normalized_key in {"score", "reward", "accuracy"}:
+                numeric_value = _numeric_value(normalized_value)
+                if numeric_value is not None:
+                    score_values.append(numeric_value)
+            if normalized_key in {"success", "passed", "pass", "task_success"}:
+                bool_value = _bool_value(normalized_value)
+                if bool_value is not None:
+                    success_values.append(bool_value)
+            if normalized_key in {"feedback", "verbal_feedback", "comment", "message"}:
+                feedback.append(normalized_value)
+
+    if score_values:
+        metrics["upstream_score_mean"] = sum(score_values) / len(score_values)
+    if success_values:
+        metrics["upstream_success_rate"] = sum(1 for value in success_values if value) / len(success_values)
+    return metrics, feedback
+
+
+def _feedback_values(payload: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("feedback", "verbal_feedback", "comment", "message", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return values
+
+
+def _store_scalar_metric(metrics: dict[str, Any], key: str, value: Any) -> None:
+    normalized_key = key.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized_key in {"feedback", "verbal_feedback", "comment", "message", "summary", "status"}:
+        return
+    if isinstance(value, bool):
+        metrics[f"upstream_{normalized_key}"] = value
+        return
+    numeric_value = _numeric_value(value)
+    if numeric_value is not None:
+        metrics[f"upstream_{normalized_key}"] = numeric_value
+
+
+def _numeric_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _bool_value(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "passed", "pass", "success", "succeeded"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "failed", "fail", "failure"}:
+        return False
+    return None
 
 
 def _execution_env(*, paths: WrapperPaths, manifest: WrapperTaskManifest) -> dict[str, str]:

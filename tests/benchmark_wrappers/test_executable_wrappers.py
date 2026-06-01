@@ -92,6 +92,86 @@ class ExecutableWrapperTest(unittest.TestCase):
             result["artifacts"],
         )
 
+    def test_skillflow_wrapper_normalizes_json_evaluator_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upstream_root = temp_path / "skillflow-upstream"
+            _write_executable_script(
+                upstream_root / "family_job_runner.py",
+                """
+                import argparse
+                import json
+                from pathlib import Path
+
+                parser = argparse.ArgumentParser()
+                parser.add_argument("--config")
+                parser.add_argument("--dataset-path")
+                parser.add_argument("--run-root-dir")
+                parser.add_argument("--only-group")
+                args = parser.parse_args()
+                output = Path(args.run_root_dir)
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "report.json").write_text(json.dumps({
+                    "status": "completed",
+                    "score": 0.875,
+                    "success": True,
+                    "feedback": "all invoice cells match",
+                    "metrics": {"exact_match": 0.8}
+                }), encoding="utf-8")
+                """,
+            )
+            manifest = _task_manifest(
+                suite_name="SkillFlow",
+                task_family="OCR-Data-Extraction",
+                instance_id="task_family_invoice_images",
+                output_dir=str(temp_path / "upstream-output"),
+            )
+            manifest_path = temp_path / "task.json"
+            output_path = temp_path / "result.json"
+            artifacts_dir = temp_path / "artifacts"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            exit_code = skillflow_main(
+                [
+                    "--task-manifest",
+                    str(manifest_path),
+                    "--workspace",
+                    str(temp_path / "workspace"),
+                    "--output",
+                    str(output_path),
+                    "--artifacts-dir",
+                    str(artifacts_dir),
+                    "--upstream-root",
+                    str(upstream_root),
+                ]
+            )
+
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+            evaluator_report = json.loads(
+                (artifacts_dir / "evaluator-report.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["evaluator_report_ref"], "artifacts/evaluator-report.json")
+        self.assertEqual(result["metrics"]["upstream_report_count"], 1)
+        self.assertEqual(result["metrics"]["upstream_score"], 0.875)
+        self.assertTrue(result["metrics"]["upstream_success"])
+        self.assertEqual(result["metrics"]["upstream_exact_match"], 0.8)
+        self.assertIn(
+            {
+                "kind": "evaluator_report",
+                "path": "artifacts/evaluator-report.json",
+                "media_type": "application/json",
+            },
+            result["artifacts"],
+        )
+        self.assertEqual(evaluator_report["schema_version"], "adp.wrapper_evaluator_report.v1")
+        self.assertEqual(evaluator_report["feedback"], ["all invoice cells match"])
+        self.assertEqual(
+            evaluator_report["source_reports"][0]["path"],
+            "artifacts/upstream-output/report.json",
+        )
+
     def test_skilllearnbench_wrapper_executes_instance_scoped_upstream_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -145,6 +225,75 @@ class ExecutableWrapperTest(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertIn("--subtask-range 2-2", result["planned_command"])
         self.assertIn("task=financial-analysis subtask=2-2", result["stdout"])
+
+    def test_skilllearnbench_wrapper_normalizes_csv_evaluator_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            upstream_root = temp_path / "skilllearnbench-upstream"
+            _write_executable_script(
+                upstream_root / "evaluate_skills.py",
+                """
+                import argparse
+                from pathlib import Path
+
+                parser = argparse.ArgumentParser()
+                parser.add_argument("task")
+                parser.add_argument("--skill-path")
+                parser.add_argument("--trials-dir")
+                parser.add_argument("--subtask-range")
+                args = parser.parse_args()
+                report = Path(args.trials_dir).parent / "evaluation_reports" / "baseline" / args.task / "report.csv"
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(
+                    "instance_id,success,score,feedback\\n"
+                    "financial-analysis-1,true,1.0,ok\\n"
+                    "financial-analysis-2,false,0.5,missing formula\\n",
+                    encoding="utf-8",
+                )
+                """,
+            )
+            manifest = _task_manifest(
+                suite_name="SkillLearnBench",
+                task_family="financial-analysis",
+                instance_id="financial-analysis-2",
+                output_dir=str(temp_path / "upstream-output"),
+            )
+            manifest_path = temp_path / "task.json"
+            output_path = temp_path / "result.json"
+            artifacts_dir = temp_path / "artifacts"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            exit_code = skilllearnbench_main(
+                [
+                    "--task-manifest",
+                    str(manifest_path),
+                    "--workspace",
+                    str(temp_path / "workspace"),
+                    "--output",
+                    str(output_path),
+                    "--artifacts-dir",
+                    str(artifacts_dir),
+                    "--upstream-root",
+                    str(upstream_root),
+                ]
+            )
+
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+            evaluator_report = json.loads(
+                (artifacts_dir / "evaluator-report.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["evaluator_report_ref"], "artifacts/evaluator-report.json")
+        self.assertEqual(result["metrics"]["upstream_report_count"], 1)
+        self.assertEqual(result["metrics"]["upstream_trial_count"], 2)
+        self.assertEqual(result["metrics"]["upstream_score_mean"], 0.75)
+        self.assertEqual(result["metrics"]["upstream_success_rate"], 0.5)
+        self.assertEqual(evaluator_report["feedback"], ["ok", "missing formula"])
+        self.assertEqual(
+            evaluator_report["source_reports"][0]["path"],
+            "artifacts/upstream-output/evaluation_reports/baseline/financial-analysis/report.csv",
+        )
 
     def test_wrapper_maps_nonzero_upstream_exit_to_failed_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:

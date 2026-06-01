@@ -234,8 +234,10 @@ Implemented wrapper behavior:
   redacted `artifacts/upstream-config.json` runner config artifact, expose
   `ADP_*` environment variables to the upstream process, preserve stdout/stderr
   logs, copy generated upstream output files into
-  `artifacts/upstream-output/` as `upstream_output` artifacts, and map non-zero
-  upstream exits or upstream timeouts to failed wrapper results.
+  `artifacts/upstream-output/` as `upstream_output` artifacts, summarize
+  SkillFlow JSON reports and SkillLearnBench `report.csv` files into
+  `artifacts/evaluator-report.json` plus normalized wrapper `metrics`, and map
+  non-zero upstream exits or upstream timeouts to failed wrapper results.
 - `--dry-run` still writes planned-command artifacts without invoking upstream
   code or requiring model API keys.
 - `agentic_data_platform.benchmark_wrappers.smoke` creates a temporary
@@ -284,9 +286,9 @@ just to run a supported suite.
 - Expand benchmark-specific config synthesis beyond the current redacted
   `artifacts/upstream-config.json` contract if upstream runners require
   suite-native YAML or environment files.
-- Deepen suite-specific parsing of upstream report directories once real
-  upstream output shapes are stable; the current wrapper already preserves
-  generated files as first-class `upstream_output` artifacts.
+- Refine suite-specific report parsing against real upstream output samples if
+  SkillFlow or SkillLearnBench emit stable report shapes beyond the current
+  JSON/CSV summary paths.
 - Run the reusable wrapper smoke entrypoint against real pinned upstream roots
   when those sources are available locally or on shared dev.
 - Add a user-facing custom runner contract under #21 using the same input and
