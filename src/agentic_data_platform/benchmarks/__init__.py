@@ -12,6 +12,7 @@ from agentic_data_platform.benchmarks.fixtures import (
     load_fixture_catalogs,
 )
 from agentic_data_platform.benchmarks.manifests import catalog_from_local_tree, catalog_from_path_manifest
+from agentic_data_platform.benchmarks.providers import BenchmarkProvider
 from agentic_data_platform.benchmarks.upstream_sources import (
     MaterializedSkillFlowTaskAssets,
     MaterializedUpstreamSource,
@@ -25,6 +26,7 @@ __all__ = [
     "BenchmarkFixtureCatalog",
     "BenchmarkFixtureFamily",
     "BenchmarkFixtureInstance",
+    "BenchmarkProvider",
     "BenchmarkRegistration",
     "BenchmarkTaskSpec",
     "SkillFlowBenchmarkAdapter",

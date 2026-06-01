@@ -117,7 +117,14 @@ def load_fixture_catalogs() -> list[BenchmarkFixtureCatalog]:
     return [
         _catalog_from_dict(json.loads(catalog_package.joinpath("skillflow.json").read_text())),
         _catalog_from_dict(json.loads(catalog_package.joinpath("skilllearnbench.json").read_text())),
+        *_harbor_fixture_catalogs(),
     ]
+
+
+def _harbor_fixture_catalogs() -> list[BenchmarkFixtureCatalog]:
+    from agentic_data_platform.harbor.benchmark_provider import HarborBenchmarkProvider
+
+    return HarborBenchmarkProvider().list_catalogs()
 
 
 def _catalog_from_dict(data: dict[str, Any]) -> BenchmarkFixtureCatalog:

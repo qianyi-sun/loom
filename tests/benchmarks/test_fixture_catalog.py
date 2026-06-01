@@ -11,19 +11,35 @@ class BenchmarkFixtureCatalogTest(unittest.TestCase):
     def test_loads_checked_in_fixture_catalogs_offline(self):
         catalogs = load_fixture_catalogs()
 
-        self.assertEqual({catalog.suite_name for catalog in catalogs}, {"SkillFlow", "SkillLearnBench"})
+        self.assertEqual(
+            {catalog.suite_name for catalog in catalogs},
+            {"SkillFlow", "SkillLearnBench", "HarborTerminalBench"},
+        )
         for catalog in catalogs:
-            self.assertTrue(catalog.source_uri.startswith("https://"))
+            self.assertTrue(catalog.source_uri.startswith(("https://", "harbor://")))
             self.assertTrue(catalog.source_version)
-            self.assertGreaterEqual(len(catalog.task_families), 2)
-            self.assertGreaterEqual(len(catalog.task_instances()), 2)
+            expected_min_count = 1 if catalog.suite_name == "HarborTerminalBench" else 2
+            self.assertGreaterEqual(len(catalog.task_families), expected_min_count)
+            self.assertGreaterEqual(len(catalog.task_instances()), expected_min_count)
 
             for instance in catalog.task_instances():
-                self.assertEqual(instance.required_artifacts, ["trajectory", "workspace_snapshot", "evaluator_report"])
+                self.assertIn("trajectory", instance.required_artifacts)
+                self.assertIn("workspace_snapshot", instance.required_artifacts)
+                self.assertIn("evaluator_report", instance.required_artifacts)
                 self.assertTrue(instance.instruction_ref)
                 self.assertTrue(instance.input_files)
-                self.assertTrue(instance.input_artifact_refs)
-                self.assertIn(instance.task_family, {family.name for family in catalog.task_families})
+            self.assertTrue(instance.input_artifact_refs)
+            self.assertIn(instance.task_family, {family.name for family in catalog.task_families})
+
+    def test_harbor_catalog_uses_explicit_dataset_ref_without_latest(self):
+        catalog = load_fixture_catalog("HarborTerminalBench")
+
+        self.assertEqual(catalog.source_version_type, "harbor-dataset-ref")
+        self.assertEqual(catalog.metadata["provider"], "harbor")
+        self.assertEqual(catalog.metadata["source_type"], "harbor_dataset")
+        self.assertEqual(catalog.metadata["harbor_dataset_ref"], "terminal-bench/terminal-bench-2")
+        self.assertNotIn("latest", catalog.benchmark_version.lower())
+        self.assertNotIn("latest", catalog.source_version.lower())
 
     def test_fixture_instances_convert_to_adapter_registrations(self):
         skillflow = load_fixture_catalog("SkillFlow")

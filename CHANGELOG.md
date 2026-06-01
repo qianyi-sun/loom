@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first Harbor benchmark catalog provider for #62. The provider
+  exposes a versioned `HarborTerminalBench` dataset catalog using the explicit
+  `terminal-bench/terminal-bench-2` Harbor dataset ref, maps Harbor uploaded
+  task archives into checksum-versioned catalog entries, and keeps source type,
+  environment, verifier, artifact convention, and `harbor_run` launch metadata
+  in the shared benchmark read model.
 - Documented the Harbor native integration design for #102, including the
   recommended CLI fallback/native backend split, Harbor capability probe,
   programmatic `JobConfig`/trial-hook candidate path, file-based `jobs/`

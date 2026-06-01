@@ -45,4 +45,7 @@ class WorkerSmokeTest(unittest.TestCase):
 
         self.assertEqual(user.team_id, "pilot-project")
         self.assertEqual(project.created_by_user_id, "[REDACTED_OWNER]")
-        self.assertEqual({catalog.suite_name for catalog in catalogs}, {"SkillFlow", "SkillLearnBench"})
+        self.assertEqual(
+            {catalog.suite_name for catalog in catalogs},
+            {"SkillFlow", "SkillLearnBench", "HarborTerminalBench"},
+        )

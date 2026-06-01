@@ -1,6 +1,6 @@
 # Core API Resources
 
-Last updated: 2026-05-29
+Last updated: 2026-06-01
 
 Related trackers:
 
@@ -132,8 +132,11 @@ frontend-visible Harbor local-Docker smoke surface that submits real
 `metadata.harbor_run`. For the MVP smoke it uses a generated
 `harbor-cli-smoke` task template with the Harbor Oracle agent and deterministic
 `smoke/noop` model while still recording the selected API model in the platform
-run envelope. Published Harbor benchmark catalog discovery and built-in agent
-catalog discovery remain follow-up work.
+run envelope. The first Harbor benchmark provider now exposes a versioned
+`HarborTerminalBench` catalog using the explicit
+`terminal-bench/terminal-bench-2` dataset ref and can map uploaded Harbor task
+archives into checksum-versioned catalog entries. Built-in/custom Harbor agent
+catalog discovery remains follow-up #63.
 
 `POST /harbor/task-uploads` is the first user-facing custom benchmark intake
 path. A project member uploads a `.zip` Harbor task directory; the API validates
@@ -243,9 +246,9 @@ serializing dashboard payloads.
   launches; production provider discovery needs provider-specific filtering,
   caching policy, and capability detection.
 - The `harbor-local-docker` harness is a frontend-to-Harbor launch smoke
-  surface, not the final Harbor catalog/provider interface. It deliberately
-  keeps #62/#63 follow-ups open for published Harbor benchmark discovery and
-  built-in agent discovery.
+  surface. The first #62 provider slice now gives the API a Harbor benchmark
+  read model, but frontend launch still uses the smoke harness until #63 agent
+  discovery and a full Harbor launch UX are available.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

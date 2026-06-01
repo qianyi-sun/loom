@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.benchmarks.fixtures import BenchmarkFixtureCatalog, load_fixture_catalog
+from agentic_data_platform.harbor.benchmark_provider import HarborBenchmarkProvider
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.persistence.repositories import BenchmarkCatalogRepository
@@ -141,6 +142,32 @@ class BenchmarkResourceTest(unittest.TestCase):
                 "request_id": "req-task-001",
             },
         )
+
+    def test_api_can_read_harbor_dataset_catalog_without_execution(self):
+        harbor_catalog = HarborBenchmarkProvider().list_catalogs()[0]
+        with session_scope(self.engine) as session:
+            BenchmarkCatalogRepository(session).upsert_fixture_catalog(harbor_catalog)
+
+        benchmark_response = self.client.get(
+            f"/benchmarks/{harbor_catalog.suite_name}",
+            params={"benchmark_version": harbor_catalog.benchmark_version},
+            headers={"X-Request-ID": "req-harbor-benchmark-001"},
+        )
+        tasks_response = self.client.get(
+            "/tasks",
+            params={
+                "benchmark_suite": harbor_catalog.suite_name,
+                "benchmark_version": harbor_catalog.benchmark_version,
+            },
+            headers={"X-Request-ID": "req-harbor-tasks-001"},
+        )
+
+        self.assertEqual(benchmark_response.status_code, 200)
+        self.assertEqual(benchmark_response.json()["benchmark"]["metadata"]["source_type"], "harbor_dataset")
+        self.assertEqual(benchmark_response.json()["benchmark"]["metadata"]["environment_types"], ["docker"])
+        self.assertEqual(tasks_response.status_code, 200)
+        self.assertEqual(tasks_response.json()["tasks"][0]["metadata"]["harbor_run"]["dataset_ref"], "terminal-bench/terminal-bench-2")
+        self.assertEqual(tasks_response.json()["tasks"][0]["metadata"]["verifier_type"], "harbor_verifier")
 
     def test_missing_benchmark_maps_to_404(self):
         response = self.client.get(
