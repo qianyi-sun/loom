@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the Harbor E2E manual test runbook for #139. The owner checklist now
+  covers frontend login, model/harness/benchmark/task selection, Harbor
+  local-Docker launch, live queue/CPU/RAM/sandbox telemetry, Harbor verifier
+  feedback, and artifact bundle inspection, while documenting #142, #143, and
+  #144 as the remaining product gaps for selected model/agent execution,
+  browser task upload, and first non-smoke Harbor acceptance.
 - Tightened shared dev exposure and Harbor upload limits. Compose service ports
   now default to loopback host bindings, Harbor task uploads enforce configured
   archive byte, file count, and uncompressed materialization limits, and the

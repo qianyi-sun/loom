@@ -85,6 +85,26 @@ MVP constraints:
 - The user-friendly runner/pipeline contract is available as the shared path
   for future teams to bring their own workflows.
 
+Current owner-testable Harbor path:
+
+```mermaid
+flowchart LR
+    Owner["Owner in /app/"] --> Login["Web login"]
+    Login --> Select["Select project, model, Harbor harness, benchmark, task"]
+    Select --> Run["POST /runs with metadata.harbor_run"]
+    Run --> Worker["Worker"]
+    Worker --> Harbor["Harbor CLI local Docker"]
+    Harbor --> Jobs["Harbor jobs/ output"]
+    Jobs --> Ingest["HarborResultIngestor"]
+    Ingest --> DB[("Postgres run state")]
+    Ingest --> Store[("MinIO artifacts")]
+    DB --> Monitor["Live dashboard telemetry"]
+    Store --> Bundle["Artifact bundle download"]
+
+    Select -.-> Gap142["#142 selected real model/agent"]
+    Select -.-> Gap143["#143 uploaded task launch"]
+```
+
 ## Architecture Sketch
 
 ```mermaid
@@ -134,6 +154,8 @@ Harbor integration roadmap:
 [harbor-integration-roadmap.md](docs/architecture/harbor-integration-roadmap.md).
 Harbor native integration design:
 [harbor-native-integration-design.md](docs/architecture/harbor-native-integration-design.md).
+Harbor frontend E2E manual test:
+[harbor-e2e-manual-test.md](docs/development/harbor-e2e-manual-test.md).
 API resource design: [core-api-resources.md](docs/architecture/core-api-resources.md).
 Original runner wrapper research:
 [benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
@@ -165,7 +187,7 @@ User runner and pipeline contract:
 | Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | MVP pilot slice merged | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, queued worker execution of original wrapper contracts, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only terminal-agent model provider, upstream runner provider env/config mapping, terminal benchmark run orchestrator, and latent native workflow target are merged. SkillFlow now has a pinned runner commit, pinned Hugging Face task dataset commit, task-asset lock file, recorded source patch for Harbor API compatibility, and opt-in shared dev real-upstream smoke evidence. |
 | User runner/pipeline contract | MVP backend slice merged | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and the first Harbor-compatible task-upload implementation with bounded archive size, file count, and uncompressed materialization limits |
-| Harbor integration | Started | Roadmap and native design define CLI fallback, native runner backend, Harbor benchmark provider, agent provider, result ingestion, and hybrid evaluation path; the code now names the current CLI path `HarborCliRunnerBackend`, keeps `HarborRunnerBackend` as a compatibility alias, records `backend: cli` in runner reports, adds a Harbor native capability probe, exposes the first `HarborBenchmarkProvider` read model for explicit Harbor dataset refs plus uploaded task archives, and exposes authenticated `GET /agents` metadata through `HarborAgentProvider` for Harbor built-in agents plus custom `--agent-import-path` entries. The frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor CLI runner/`jobs/` ingestion path is covered by shared dev smoke checks |
+| Harbor integration | Started | Roadmap and native design define CLI fallback, native runner backend, Harbor benchmark provider, agent provider, result ingestion, and hybrid evaluation path; the code now names the current CLI path `HarborCliRunnerBackend`, keeps `HarborRunnerBackend` as a compatibility alias, records `backend: cli` in runner reports, adds a Harbor native capability probe, exposes the first `HarborBenchmarkProvider` read model for explicit Harbor dataset refs plus uploaded task archives, and exposes authenticated `GET /agents` metadata through `HarborAgentProvider` for Harbor built-in agents plus custom `--agent-import-path` entries. The frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor CLI runner/`jobs/` ingestion path is covered by shared dev smoke checks. The current owner-testable frontend Harbor path is a deterministic `oracle` + `smoke/noop` smoke; selected API model/agent launch, frontend task upload, and the first non-smoke acceptance task are tracked by #142, #143, and #144 |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -219,6 +241,12 @@ Current executable child tasks for the broad startup workstreams:
 - Access, quotas, retention, and audit baseline: [#138](https://github.com/carinrc/agentic-data-platform/issues/138)
 - pilot group end-to-end acceptance plan: [#139](https://github.com/carinrc/agentic-data-platform/issues/139)
 - Org access audit and team mapping: [#140](https://github.com/carinrc/agentic-data-platform/issues/140)
+- Frontend selected API model and Harbor agent launch:
+  [#142](https://github.com/carinrc/agentic-data-platform/issues/142)
+- Frontend Harbor task upload launch:
+  [#143](https://github.com/carinrc/agentic-data-platform/issues/143)
+- First non-smoke Harbor benchmark acceptance target:
+  [#144](https://github.com/carinrc/agentic-data-platform/issues/144)
 
 ## Repository Layout
 
@@ -341,6 +369,11 @@ artifact bundle download path with API and worker running:
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke
 ```
+
+Run the manual Harbor E2E browser checklist when owner-visible acceptance is
+needed:
+
+[docs/development/harbor-e2e-manual-test.md](docs/development/harbor-e2e-manual-test.md)
 
 The checked-in development token is `[REDACTED_TOKEN]` for user `[REDACTED_OWNER]`.
 Health, readiness, OpenAPI docs, and static frontend files are public;

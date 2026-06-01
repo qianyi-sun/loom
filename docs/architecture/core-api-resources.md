@@ -217,7 +217,9 @@ serializing dashboard payloads.
   lifecycle events, and any artifact payload files available from the configured
   `Artifacpilot groupjectStore`. Missing object payloads are reported as generic bundle
   manifest errors without leaking host paths or backend exception strings. Raw
-  Harbor `jobs/` payload preservation remains part of #65.
+  Harbor `jobs/` payload preservation is implemented through the #65 ingestor
+  path and appears as object-store-backed payload files when the worker and API
+  share the same artifact store.
 - Telemetry responses expose run status, queue/worker state, host CPU/RAM/disk
   saturation indicators, and sandbox status without command output, env vars,
   host paths, or secret refs.
@@ -240,9 +242,9 @@ serializing dashboard payloads.
   later queue/cache backend, but it is not the current source of truth.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
-  deterministic deployment validation. Provider-backed live model/evaluator
-  calls remain follow-up work before real pilot workloads run through this
-  service.
+  deterministic deployment validation. The first OpenAI-compatible terminal
+  agent model provider path is available for API-model runs; a production
+  LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace
@@ -255,11 +257,13 @@ serializing dashboard payloads.
   `MODEL_PROVIDER_MODELS` allowlist should be used for controlled dev/pilot
   launches; production provider discovery needs provider-specific filtering,
   caching policy, and capability detection.
-- The `harbor-local-docker` harness is a frontend-to-Harbor launch smoke
-  surface. The first #62 provider slice gives the API a Harbor benchmark read
-  model and #63 adds authenticated Harbor agent discovery, but frontend launch
-  still uses the smoke harness until a full Harbor launch UX wires agent
-  selection into run creation.
+- The `harbor-local-docker` harness is currently a frontend-to-Harbor launch
+  smoke surface. The #62 provider slice gives the API a Harbor benchmark read
+  model and #63 adds authenticated Harbor agent discovery. The owner-testable
+  frontend path still uses the deterministic `oracle` + `smoke/noop` Harbor
+  smoke mode until #142 wires selected API models and Harbor agents into run
+  creation. Frontend Harbor task upload is tracked by #143, and the first
+  non-smoke benchmark acceptance target is tracked by #144.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and
