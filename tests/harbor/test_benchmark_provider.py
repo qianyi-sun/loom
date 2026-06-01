@@ -9,13 +9,14 @@ class HarborBenchmarkProviderTest(unittest.TestCase):
         catalog = HarborBenchmarkProvider().list_catalogs()[0]
 
         self.assertEqual(catalog.suite_name, "HarborTerminalBench")
-        self.assertEqual(catalog.benchmark_version, "harbor:terminal-bench/terminal-bench-2")
-        self.assertEqual(catalog.source_uri, "harbor://datasets/terminal-bench/terminal-bench-2")
-        self.assertEqual(catalog.source_version, "terminal-bench-2")
-        self.assertEqual(catalog.source_version_type, "harbor-dataset-ref")
+        self.assertEqual(catalog.benchmark_version, "harbor:terminal-bench@2.0")
+        self.assertEqual(catalog.source_uri, "harbor://datasets/terminal-bench@2.0")
+        self.assertEqual(catalog.source_version, "2.0")
+        self.assertEqual(catalog.source_version_type, "harbor-registry-version")
         self.assertEqual(catalog.metadata["provider"], "harbor")
         self.assertEqual(catalog.metadata["source_type"], "harbor_dataset")
-        self.assertEqual(catalog.metadata["harbor_dataset_ref"], "terminal-bench/terminal-bench-2")
+        self.assertEqual(catalog.metadata["harbor_dataset_ref"], "terminal-bench@2.0")
+        self.assertEqual(catalog.metadata["acceptance_target_issue"], "#144")
         self.assertEqual(catalog.metadata["environment_types"], ["docker"])
         self.assertEqual(catalog.metadata["verifier_type"], "harbor_verifier")
         self.assertEqual(catalog.metadata["artifact_conventions"]["raw_jobs"], "jobs/")
@@ -25,8 +26,9 @@ class HarborBenchmarkProviderTest(unittest.TestCase):
         self.assertEqual(tasks[0].task_family, "terminal-bench-2")
         self.assertEqual(tasks[0].instance_id, "dataset-ref")
         self.assertEqual(tasks[0].runner_contract, "harbor-local-docker-v0")
-        self.assertEqual(tasks[0].metadata["harbor_run"]["dataset_ref"], "terminal-bench/terminal-bench-2")
+        self.assertEqual(tasks[0].metadata["harbor_run"]["dataset_ref"], "terminal-bench@2.0")
         self.assertEqual(tasks[0].metadata["harbor_run"]["backend"], "cli")
+        self.assertEqual(tasks[0].metadata["harbor_run"]["extra_args"], ["--n-tasks", "1", "--quiet"])
 
     def test_builds_catalog_for_uploaded_harbor_task_archive(self):
         validation = HarborTaskArchiveValidationResult(

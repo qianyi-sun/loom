@@ -3,6 +3,7 @@ const state = {
   projects: [],
   models: [],
   harnesses: [],
+  agents: [],
   benchmarks: [],
   tasks: [],
   selectedRunId: null,
@@ -17,7 +18,13 @@ window.addEventListener("DOMContentLoaded", () => {
   el("refresh-button").addEventListener("click", refreshAll);
   el("launch-button").addEventListener("click", launchRun);
   el("download-button").addEventListener("click", downloadBundle);
-  el("project-select").addEventListener("change", refreshDashboard);
+  el("project-select").addEventListener("change", () => {
+    loadAgents().catch(showRunError);
+    refreshDashboard().catch(showRunError);
+  });
+  el("harness-select").addEventListener("change", () => {
+    loadAgents().catch(showRunError);
+  });
   el("benchmark-select").addEventListener("change", loadTasksForSelectedBenchmark);
   restoreSession();
 });
@@ -74,6 +81,7 @@ function showApp() {
 async function refreshAll() {
   setText("catalog-state", "Loading");
   await Promise.all([loadProjects(), loadModels(), loadHarnesses(), loadBenchmarks()]);
+  await loadAgents();
   await loadTasksForSelectedBenchmark();
   await refreshDashboard();
   if (state.selectedRunId) {
@@ -96,6 +104,7 @@ async function loadProjects() {
 async function loadModels() {
   const payload = await api("/models");
   state.models = (payload.models || []).filter((model) => !model.disabled);
+  setText("model-state", modelCatalogMessage(payload));
   fillSelect(
     el("model-select"),
     state.models,
@@ -115,6 +124,46 @@ async function loadHarnesses() {
   );
 }
 
+async function loadAgents() {
+  const select = el("agent-select");
+  const harness = selectedHarness();
+  if (!harness?.metadata?.harbor_compatible) {
+    state.agents = [];
+    fillSelect(
+      select,
+      [{ agent_id: "platform-default", display_name: "Platform default" }],
+      (agent) => agent.agent_id,
+      (agent) => agent.display_name,
+    );
+    select.disabled = true;
+    return;
+  }
+
+  const query = new URLSearchParams({ harness_id: harness.harness_id });
+  const project = selectedProject();
+  if (project) {
+    query.set("project_id", project.project_id);
+  }
+  const payload = await api(`/agents?${query.toString()}`);
+  state.agents = payload.agents || [];
+  fillSelect(
+    select,
+    state.agents,
+    (agent) => agent.agent_id,
+    (agent) => {
+      const required = Array.isArray(agent.required_secret_refs) && agent.required_secret_refs.length
+        ? `; requires ${agent.required_secret_refs.join(", ")}`
+        : "";
+      return `${agent.display_name || agent.agent_id}${required}`;
+    },
+  );
+  const defaultAgent = harness.metadata?.default_agent_id;
+  if (defaultAgent && state.agents.some((agent) => agent.agent_id === defaultAgent)) {
+    select.value = defaultAgent;
+  }
+  select.disabled = false;
+}
+
 async function loadBenchmarks() {
   const payload = await api("/benchmarks");
   state.benchmarks = payload.benchmarks || [];
@@ -122,7 +171,7 @@ async function loadBenchmarks() {
     el("benchmark-select"),
     state.benchmarks,
     (benchmark) => `${benchmark.suite_name}::${benchmark.benchmark_version}`,
-    (benchmark) => `${benchmark.suite_name}`,
+    (benchmark) => `${benchmark.suite_name} (${benchmark.source_version || benchmark.benchmark_version})`,
   );
 }
 
@@ -160,14 +209,15 @@ async function launchRun() {
   const project = selectedProject();
   const model = selectedModel();
   const harness = selectedHarness();
+  const agent = selectedAgent();
   const benchmark = selectedBenchmark();
   const task = selectedTask();
-  if (!project || !model || !harness || !benchmark || !task) {
-    setText("launch-error", "Select a project, model, harness, benchmark, and task.");
+  if (!project || !model || !harness || !benchmark || !task || (harness.metadata?.harbor_compatible && !agent)) {
+    setText("launch-error", "Select a project, model, harness, agent, benchmark, and task.");
     return;
   }
   const runId = `frontend_${Date.now()}`;
-  const payload = buildRunPayload({ runId, project, model, harness, benchmark, task });
+  const payload = buildRunPayload({ runId, project, model, harness, benchmark, task, agent });
   try {
     const created = await api("/runs", {
       method: "POST",
@@ -182,7 +232,7 @@ async function launchRun() {
   }
 }
 
-function buildRunPayload({ runId, project, model, harness, benchmark, task }) {
+function buildRunPayload({ runId, project, model, harness, benchmark, task, agent = null }) {
   const instruction =
     task.metadata?.instruction ||
     `Follow ${benchmark.suite_name} task ${task.task_family}/${task.instance_id} from ${task.instruction_ref}.`;
@@ -192,7 +242,7 @@ function buildRunPayload({ runId, project, model, harness, benchmark, task }) {
   };
   let evaluators;
   if (harness.metadata?.harbor_compatible) {
-    launchMetadata.harbor_run = harborRunConfig(harness);
+    launchMetadata.harbor_run = harborRunConfig({ harness, model, task, agent });
     evaluators = [{ evaluator_id: "harbor-verifier", mode: "harbor_verifier" }];
   } else {
     const command = [
@@ -254,18 +304,33 @@ function buildRunPayload({ runId, project, model, harness, benchmark, task }) {
   };
 }
 
-function harborRunConfig(harness) {
+function harborRunConfig({ harness, model, task, agent }) {
   const metadata = harness.metadata || {};
   const resourceLimits = harness.resource_limits || {};
-  const config = {
-    task_template: nonEmptyString(metadata.harbor_task_template, "harbor-cli-smoke"),
-    agent: nonEmptyString(metadata.harbor_agent, "oracle"),
-    environment: nonEmptyString(metadata.harbor_environment, "docker"),
-    timeout_seconds: positiveInteger(metadata.harbor_timeout_seconds || resourceLimits.timeout_seconds, 600),
-    extra_args: stringList(metadata.harbor_extra_args, ["--n-tasks", "1", "--quiet"]),
-  };
-  if (typeof metadata.harbor_model_name === "string" && metadata.harbor_model_name.trim()) {
-    config.model_name = metadata.harbor_model_name.trim();
+  const taskHarborRun = objectValue(task?.metadata?.harbor_run);
+  const config = taskHarborRun
+    ? { ...taskHarborRun }
+    : {
+        task_template: nonEmptyString(metadata.harbor_task_template, "harbor-cli-smoke"),
+        model_name: nonEmptyString(metadata.harbor_model_name, "smoke/noop"),
+      };
+
+  config.agent = harborAgentName(agent) || nonEmptyString(config.agent, nonEmptyString(metadata.harbor_agent, "oracle"));
+  config.environment = nonEmptyString(config.environment, nonEmptyString(metadata.harbor_environment, "docker"));
+  config.timeout_seconds = positiveInteger(config.timeout_seconds || metadata.harbor_timeout_seconds || resourceLimits.timeout_seconds, 600);
+  config.extra_args = stringList(config.extra_args || metadata.harbor_extra_args, ["--n-tasks", "1", "--quiet"]);
+
+  const requiredSecretRefs = stringList(agent?.required_secret_refs, []);
+  if (requiredSecretRefs.length) {
+    config.agent_required_secret_refs = requiredSecretRefs;
+  }
+  if (agent?.metadata?.harbor_agent_import_path) {
+    config.agent_import_path = agent.metadata.harbor_agent_import_path;
+  }
+  if (harborAgentNeedsModel(config.agent)) {
+    config.model_name = model.model_id;
+  } else if (!config.model_name) {
+    config.model_name = nonEmptyString(metadata.harbor_model_name, "smoke/noop");
   }
   return config;
 }
@@ -361,6 +426,10 @@ function selectedHarness() {
   return state.harnesses.find((harness) => harness.harness_id === el("harness-select").value);
 }
 
+function selectedAgent() {
+  return state.agents.find((agent) => agent.agent_id === el("agent-select").value);
+}
+
 function selectedBenchmark() {
   const value = el("benchmark-select").value;
   return state.benchmarks.find((benchmark) => `${benchmark.suite_name}::${benchmark.benchmark_version}` === value);
@@ -369,6 +438,35 @@ function selectedBenchmark() {
 function selectedTask() {
   const value = el("task-select").value;
   return state.tasks.find((task) => `${task.task_family}::${task.instance_id}` === value);
+}
+
+function modelCatalogMessage(payload) {
+  const status = payload?.catalog?.status || "";
+  const firstError = Array.isArray(payload?.errors) && payload.errors.length
+    ? String(payload.errors[0].message || "unknown error")
+    : "";
+  if (status === "discovered") {
+    return "Models discovered from provider /models.";
+  }
+  if (status === "discovered_allowlisted") {
+    return "Models discovered from provider /models and filtered by allowlist.";
+  }
+  if (status === "fallback_static_config") {
+    return `Using static model fallback; provider discovery failed: ${firstError || "unknown error"}`;
+  }
+  if (status === "discovery_failed") {
+    return `Model discovery failed: ${firstError || "unknown error"}`;
+  }
+  if (status === "static_config") {
+    return "Using static model list from configuration.";
+  }
+  if (status === "dev_fallback") {
+    return "Using local scripted model fallback.";
+  }
+  if (firstError) {
+    return `Model catalog warning: ${firstError}`;
+  }
+  return "";
 }
 
 function setText(id, value) {
@@ -395,6 +493,24 @@ function stringList(value, fallback) {
   return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim())
     ? value.map((item) => item.trim())
     : [...fallback];
+}
+
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function harborAgentName(agent) {
+  if (typeof agent?.metadata?.harbor_agent_name === "string" && agent.metadata.harbor_agent_name.trim()) {
+    return agent.metadata.harbor_agent_name.trim();
+  }
+  if (typeof agent?.agent_id === "string" && agent.agent_id.startsWith("harbor:")) {
+    return agent.agent_id.slice("harbor:".length);
+  }
+  return "";
+}
+
+function harborAgentNeedsModel(agentName) {
+  return !["oracle", "nop"].includes(nonEmptyString(agentName, "oracle"));
 }
 
 function escapeHtml(value) {

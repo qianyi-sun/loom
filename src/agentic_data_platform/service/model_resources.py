@@ -32,28 +32,33 @@ def discover_model_catalog(settings) -> dict[str, Any]:
     include_provider_config = bool(refs)
 
     static_models = _parse_static_models(settings.model_provider_models)
-    if static_models:
-        return {
-            "models": [
-                _model_payload(
-                    default_ref,
-                    model_id=model_id,
-                    source="static_config",
-                    include_provider_config=include_provider_config,
-                )
-                for model_id in static_models
-            ],
-            "errors": [],
-            "checked_at": _now(),
-        }
-
     if settings.model_provider_base_url and settings.model_provider_api_key:
         try:
-            model_ids = _fetch_openai_compatible_models(
+            discovered_model_ids = _fetch_openai_compatible_models(
                 base_url=settings.model_provider_base_url,
                 api_key=settings.model_provider_api_key,
             )
         except Exception as exc:  # pragma: no cover - concrete failure type depends on provider/httpx
+            if static_models:
+                return {
+                    "models": [
+                        _model_payload(
+                            default_ref,
+                            model_id=model_id,
+                            source="static_config_fallback",
+                            include_provider_config=include_provider_config,
+                        )
+                        for model_id in static_models
+                    ],
+                    "errors": [{"provider_config_id": default_ref.config_id, "message": str(exc)}],
+                    "catalog": _catalog_payload(
+                        status="fallback_static_config",
+                        source="static_config_fallback",
+                        provider_config_id=default_ref.config_id,
+                        message="Provider model discovery failed; using MODEL_PROVIDER_MODELS fallback.",
+                    ),
+                    "checked_at": _now(),
+                }
             return {
                 "models": [
                     _model_payload(
@@ -66,14 +71,99 @@ def discover_model_catalog(settings) -> dict[str, Any]:
                     )
                 ],
                 "errors": [{"provider_config_id": default_ref.config_id, "message": str(exc)}],
+                "catalog": _catalog_payload(
+                    status="discovery_failed",
+                    source="openai_compatible_discovery",
+                    provider_config_id=default_ref.config_id,
+                    message="Provider model discovery failed and no static fallback is configured.",
+                ),
                 "checked_at": _now(),
             }
+
+        if static_models:
+            discovered_set = set(discovered_model_ids)
+            allowlisted_model_ids = [model_id for model_id in static_models if model_id in discovered_set]
+            if allowlisted_model_ids:
+                return {
+                    "models": [
+                        _model_payload(
+                            default_ref,
+                            model_id=model_id,
+                            source="openai_compatible_discovery_allowlist",
+                        )
+                        for model_id in allowlisted_model_ids
+                    ],
+                    "errors": [],
+                    "catalog": _catalog_payload(
+                        status="discovered_allowlisted",
+                        source="openai_compatible_discovery",
+                        provider_config_id=default_ref.config_id,
+                        message="Provider models discovered and filtered by MODEL_PROVIDER_MODELS allowlist.",
+                    ),
+                    "checked_at": _now(),
+                }
+            return {
+                "models": [
+                    _model_payload(
+                        default_ref,
+                        model_id=model_id,
+                        source="static_config_fallback",
+                        include_provider_config=include_provider_config,
+                    )
+                    for model_id in static_models
+                ],
+                "errors": [
+                    {
+                        "provider_config_id": default_ref.config_id,
+                        "message": "Provider discovery returned no models matching MODEL_PROVIDER_MODELS; using static fallback.",
+                    }
+                ],
+                "catalog": _catalog_payload(
+                    status="fallback_static_config",
+                    source="static_config_fallback",
+                    provider_config_id=default_ref.config_id,
+                    message="Provider discovery returned no allowlisted models; using MODEL_PROVIDER_MODELS fallback.",
+                ),
+                "checked_at": _now(),
+            }
+
         return {
             "models": [
-                _model_payload(default_ref, model_id=model_id, source="openai_compatible_discovery")
-                for model_id in model_ids
+                _model_payload(
+                    default_ref,
+                    model_id=model_id,
+                    source="openai_compatible_discovery",
+                )
+                for model_id in discovered_model_ids
             ],
             "errors": [],
+            "catalog": _catalog_payload(
+                status="discovered",
+                source="openai_compatible_discovery",
+                provider_config_id=default_ref.config_id,
+                message="Provider models discovered from OpenAI-compatible /models.",
+            ),
+            "checked_at": _now(),
+        }
+
+    if static_models:
+        return {
+            "models": [
+                _model_payload(
+                    default_ref,
+                    model_id=model_id,
+                    source="static_config",
+                    include_provider_config=include_provider_config,
+                )
+                for model_id in static_models
+            ],
+            "errors": [],
+            "catalog": _catalog_payload(
+                status="static_config",
+                source="static_config",
+                provider_config_id=default_ref.config_id,
+                message="Using MODEL_PROVIDER_MODELS static model list.",
+            ),
             "checked_at": _now(),
         }
 
@@ -88,6 +178,12 @@ def discover_model_catalog(settings) -> dict[str, Any]:
             )
         ],
         "errors": [{"message": "No API model provider is configured; using dev scripted model fallback."}],
+        "catalog": _catalog_payload(
+            status="dev_fallback",
+            source="dev_fallback",
+            provider_config_id=default_ref.config_id,
+            message="No API model provider configured; using dev scripted model fallback.",
+        ),
         "checked_at": _now(),
     }
 
@@ -149,6 +245,15 @@ def _model_payload(
     return payload
 
 
+def _catalog_payload(*, status: str, source: str, provider_config_id: str, message: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "source": source,
+        "provider_config_id": provider_config_id,
+        "message": message,
+    }
+
+
 def _with_request_id(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
     request_id = getattr(request.state, "request_id", None)
     if request_id:
@@ -175,11 +280,17 @@ _MODELS_EXAMPLE = {
             "display_name": "gpt-5",
             "mode": "api",
             "capabilities": ["terminal-agent"],
-            "source": "static_config",
+            "source": "openai_compatible_discovery",
             "disabled": False,
         }
     ],
     "errors": [],
+    "catalog": {
+        "status": "discovered",
+        "source": "openai_compatible_discovery",
+        "provider_config_id": "default-agent-model",
+        "message": "Provider models discovered from OpenAI-compatible /models.",
+    },
     "checked_at": "2026-05-29T12:00:00Z",
     "request_id": "req_123",
 }

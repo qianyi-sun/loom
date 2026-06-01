@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agentic_data_platform.benchmarks.fixtures import (
     BenchmarkFixtureCatalog,
@@ -30,6 +30,14 @@ class HarborDatasetCatalogSpec:
     display_family: str
     source_version: str
     task_selector: str = "all"
+    instance_id: str = "dataset-ref"
+    source_type: str = "harbor_dataset"
+    source_version_type: str = "harbor-registry-version"
+    description: str = ""
+    task_count: int | None = None
+    extra_args: list[str] = field(default_factory=lambda: ["--n-tasks", "1", "--quiet"])
+    acceptance_target_issue: str | None = None
+    registry_sync: dict[str, object] | None = None
 
     @property
     def benchmark_version(self) -> str:
@@ -45,9 +53,15 @@ class HarborBenchmarkProvider:
         self.dataset_specs = dataset_specs or [
             HarborDatasetCatalogSpec(
                 suite_name="HarborTerminalBench",
-                dataset_ref="terminal-bench/terminal-bench-2",
+                dataset_ref="terminal-bench@2.0",
                 display_family="terminal-bench-2",
-                source_version="terminal-bench-2",
+                source_version="2.0",
+                description=(
+                    "Version 2.0 of Terminal-Bench, a benchmark for testing "
+                    "agents in terminal environments."
+                ),
+                task_count=89,
+                acceptance_target_issue="#144",
             )
         ]
 
@@ -124,12 +138,21 @@ class HarborBenchmarkProvider:
 
     def _catalog_for_dataset(self, spec: HarborDatasetCatalogSpec) -> BenchmarkFixtureCatalog:
         metadata = {
-            **_base_metadata(source_type="harbor_dataset"),
+            **_base_metadata(source_type=spec.source_type),
             "harbor_dataset_ref": spec.dataset_ref,
             "task_selector": spec.task_selector,
+            "source_version": spec.source_version,
         }
+        if spec.description:
+            metadata["description"] = spec.description
+        if spec.task_count is not None:
+            metadata["registry_task_count"] = spec.task_count
+        if spec.acceptance_target_issue is not None:
+            metadata["acceptance_target_issue"] = spec.acceptance_target_issue
+        if spec.registry_sync is not None:
+            metadata["registry_sync"] = dict(spec.registry_sync)
         task_metadata = {
-            "source_type": "harbor_dataset",
+            "source_type": spec.source_type,
             "harbor_dataset_ref": spec.dataset_ref,
             "task_selector": spec.task_selector,
             "environment_types": ["docker"],
@@ -139,21 +162,26 @@ class HarborBenchmarkProvider:
                 "backend": "cli",
                 "dataset_ref": spec.dataset_ref,
                 "environment": "docker",
+                "extra_args": list(spec.extra_args),
             },
         }
+        if spec.acceptance_target_issue is not None:
+            task_metadata["acceptance_target_issue"] = spec.acceptance_target_issue
+        if spec.registry_sync is not None:
+            task_metadata["registry_sync"] = dict(spec.registry_sync)
         return BenchmarkFixtureCatalog(
             suite_name=spec.suite_name,
             benchmark_version=spec.benchmark_version,
             source_uri=spec.source_uri,
             source_version=spec.source_version,
-            source_version_type="harbor-dataset-ref",
+            source_version_type=spec.source_version_type,
             task_families=[
                 BenchmarkFixtureFamily(
                     name=spec.display_family,
                     instances=[
                         BenchmarkFixtureInstance(
                             task_family=spec.display_family,
-                            instance_id="dataset-ref",
+                            instance_id=spec.instance_id,
                             instruction_ref=spec.source_uri,
                             input_files=[spec.source_uri],
                             input_artifact_refs=[spec.source_uri],

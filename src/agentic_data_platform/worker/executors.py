@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, replace
@@ -55,6 +56,7 @@ _ORIGINAL_WRAPPER_CONTRACTS = {
     "skillflow-original-wrapper-v0",
     "skilllearnbench-original-wrapper-v0",
 }
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class WorkerRunExecutor(Protocol):
@@ -89,6 +91,7 @@ class DockerTerminalWorkerExecutor:
             run,
             workspace_root=self.workspace_root,
             artifact_store=self.artifact_persistence.store,
+            provider_registry=self.provider_registry,
         )
         if harbor_spec is not None:
             return self._execute_harbor_run(run, harbor_spec)
@@ -811,6 +814,7 @@ def _harbor_run_spec_for_run(
     *,
     workspace_root: Path,
     artifact_store: Artifacpilot groupjectStore,
+    provider_registry: DevProviderConfigRegistry | None = None,
 ) -> HarborRunSpec | None:
     configured = run.metadata.get("harbor_run")
     if not isinstance(configured, dict):
@@ -831,6 +835,15 @@ def _harbor_run_spec_for_run(
     )
     jobs_dir_value = _optional_str(configured.get("jobs_dir"))
     jobs_dir = Path(jobs_dir_value) if jobs_dir_value is not None else workspace_root / run.run_id / "harbor-jobs"
+    agent_env = _string_list(configured.get("agent_env", []), field_name="harbor_run.agent_env")
+    agent_env.extend(
+        _harbor_model_provider_agent_env(
+            run,
+            configured=configured,
+            provider_registry=provider_registry,
+            existing_agent_env=agent_env,
+        )
+    )
     return HarborRunSpec(
         run_id=run.run_id,
         task_instance_id=run.task.instance_id,
@@ -850,10 +863,58 @@ def _harbor_run_spec_for_run(
         trial_name=_optional_str(configured.get("trial_name")),
         timeout_seconds=timeout_seconds,
         auto_confirm=bool(configured.get("auto_confirm", True)),
-        agent_env=_string_list(configured.get("agent_env", []), field_name="harbor_run.agent_env"),
+        agent_env=agent_env,
         verifier_env=_string_list(configured.get("verifier_env", []), field_name="harbor_run.verifier_env"),
         extra_args=_string_list(configured.get("extra_args", []), field_name="harbor_run.extra_args"),
     )
+
+
+def _harbor_model_provider_agent_env(
+    run: RunRecord,
+    *,
+    configured: dict[str, object],
+    provider_registry: DevProviderConfigRegistry | None,
+    existing_agent_env: list[str],
+) -> list[str]:
+    if provider_registry is None:
+        return []
+    agent_required_secret_refs = _string_list(
+        configured.get("agent_required_secret_refs", []),
+        field_name="harbor_run.agent_required_secret_refs",
+    )
+    if not agent_required_secret_refs:
+        return []
+
+    provider_config_id = _optional_str(run.model.metadata.get("provider_config_id"))
+    if provider_config_id is None:
+        return []
+    ref = provider_registry.get(provider_config_id)
+    secret = provider_registry.resolve_secret(_optional_str(run.model.metadata.get("secret_ref")) or ref.secret_ref)
+    existing_names = {item.split("=", 1)[0] for item in existing_agent_env if "=" in item}
+
+    env_values: list[str] = []
+    for secret_ref in agent_required_secret_refs:
+        env_name = _env_name_from_secret_ref(secret_ref)
+        if env_name in existing_names:
+            continue
+        env_values.append(f"{env_name}={secret.value}")
+        existing_names.add(env_name)
+
+    if ref.base_url:
+        for env_name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            if env_name not in existing_names:
+                env_values.append(f"{env_name}={ref.base_url}")
+                existing_names.add(env_name)
+    return env_values
+
+
+def _env_name_from_secret_ref(secret_ref: str) -> str:
+    if not isinstance(secret_ref, str) or not secret_ref.startswith("env:"):
+        raise ValueError("harbor_run.agent_required_secret_refs must contain env:<VARIABLE_NAME> values")
+    env_name = secret_ref.removeprefix("env:").strip()
+    if not _ENV_NAME_PATTERN.match(env_name):
+        raise ValueError("harbor_run.agent_required_secret_refs must contain env:<VARIABLE_NAME> values")
+    return env_name
 
 
 def _harbor_task_path_for_run(

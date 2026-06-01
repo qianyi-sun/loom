@@ -120,6 +120,7 @@ PY
 deploy_local() {
   require_command docker
   cd "$ROOT_DIR"
+  "$ROOT_DIR/scripts/setup-dev-env.sh"
   run_compose_smoke
 }
 
@@ -176,6 +177,7 @@ deploy_remote() {
   remote_script=$(cat <<EOF
 set -euo pipefail
 cd "$DEPLOY_PATH"
+./scripts/setup-dev-env.sh
 export SANDBOX_HOST_WORKSPACE_ROOT="\${SANDBOX_HOST_WORKSPACE_ROOT:-$DEPLOY_PATH/.runtime/sandbox-workspaces}"
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT

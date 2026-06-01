@@ -121,21 +121,24 @@ completion count, average evaluator score, and latest update timestamp.
 
 `GET /models` returns only safe model selection metadata: provider id, provider
 config id, display/model name, API mode, source, disabled/error state, and
-freshness timestamp. It never returns raw API keys or secret refs. It uses
-`MODEL_PROVIDER_MODELS` as a static allowlist when configured, falls back to
-OpenAI-compatible `/models` discovery when a provider base URL and API key are
-present, and returns a local scripted dev model when no provider is configured.
+freshness timestamp. It never returns raw API keys or secret refs. When a
+provider base URL and API key are present, it calls the provider's
+OpenAI-compatible `/models` endpoint by default. `MODEL_PROVIDER_MODELS` is an
+optional allowlist after discovery or a static fallback when discovery fails or
+a provider does not support `/models`. With no provider configured, it returns a
+local scripted dev model.
 
 `GET /harnesses` returns the v0 launch harness catalog. `docker-terminal` is
 the platform-native Docker terminal path. `harbor-local-docker` is a
-frontend-visible Harbor local-Docker smoke surface that submits real
-`metadata.harbor_run`. For the MVP smoke it uses a generated
-`harbor-cli-smoke` task template with the Harbor Oracle agent and deterministic
-`smoke/noop` model while still recording the selected API model in the platform
-run envelope. The first Harbor benchmark provider now exposes a versioned
-`HarborTerminalBench` catalog using the explicit
-`terminal-bench/terminal-bench-2` dataset ref and can map uploaded Harbor task
-archives into checksum-versioned catalog entries.
+frontend-visible Harbor local-Docker surface that submits real
+`metadata.harbor_run`. For no-key smoke it uses a generated `harbor-cli-smoke`
+task template with the Harbor Oracle agent and deterministic `smoke/noop`
+model. For catalog-backed Harbor benchmarks, the frontend uses the selected
+API model plus selected Harbor agent, and the worker resolves the model
+provider secret into the Harbor agent environment only at execution time. The
+first Harbor benchmark provider exposes a versioned `HarborTerminalBench`
+catalog using `terminal-bench@2.0` and can map uploaded Harbor task archives
+into checksum-versioned catalog entries for admin/custom benchmark onboarding.
 
 `GET /agents` returns authenticated launch agent metadata. The first
 implementation is `HarborAgentProvider`: it lists Harbor built-in agents,
@@ -253,17 +256,19 @@ serializing dashboard payloads.
   `WEB_LOGIN_CREDENTIALS` should be replaced by the selected internal SSO or
   GitHub-org login flow before production use. Quota and retention policy are
   documented placeholders; enforcement is not in this slice.
-- Frontend model discovery is provider-config driven but minimal. The static
-  `MODEL_PROVIDER_MODELS` allowlist should be used for controlled dev/pilot
-  launches; production provider discovery needs provider-specific filtering,
-  caching policy, and capability detection.
-- The `harbor-local-docker` harness is currently a frontend-to-Harbor launch
-  smoke surface. The #62 provider slice gives the API a Harbor benchmark read
-  model and #63 adds authenticated Harbor agent discovery. The owner-testable
-  frontend path still uses the deterministic `oracle` + `smoke/noop` Harbor
-  smoke mode until #142 wires selected API models and Harbor agents into run
-  creation. Frontend Harbor task upload is tracked by #143, and the first
-  non-smoke benchmark acceptance target is tracked by #144.
+- Frontend model discovery is provider-config driven but minimal. Credentialed
+  environments discover provider models by default. The static
+  `MODEL_PROVIDER_MODELS` list should be reserved for allowlisting, fallback, or
+  controlled pilots; production provider discovery still needs provider-specific
+  filtering, caching policy, and capability detection.
+- The `harbor-local-docker` harness is now a frontend-to-Harbor launch surface
+  for both no-key smoke runs and catalog-backed benchmark runs. The #62
+  provider slice gives the API a Harbor benchmark read model, #63 adds
+  authenticated Harbor agent discovery, #131 adds registry dataset sync, #142
+  wires selected API models and Harbor agents into run creation, and #144
+  selects `terminal-bench@2.0` as the first non-smoke acceptance target.
+  Frontend Harbor task upload remains #143 for admin/custom benchmark
+  onboarding rather than the ordinary evaluation flow.
 - Retry creates a new internal `run_attempts` row for the same `run_id`, while
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and

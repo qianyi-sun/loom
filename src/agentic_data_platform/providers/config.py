@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 REDACTED = "[redacted]"
-_SAFE_REFERENCE_KEYS = {"provider_config_id", "secret_ref"}
+_SAFE_REFERENCE_KEYS = {"agent_required_secret_refs", "provider_config_id", "secret_ref"}
 _SENSITIVE_MARKERS = ("api_key", "apikey", "access_token", "authorization", "credential", "password", "secret", "token")
 
 

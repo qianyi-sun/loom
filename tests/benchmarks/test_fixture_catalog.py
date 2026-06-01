@@ -31,13 +31,15 @@ class BenchmarkFixtureCatalogTest(unittest.TestCase):
             self.assertTrue(instance.input_artifact_refs)
             self.assertIn(instance.task_family, {family.name for family in catalog.task_families})
 
-    def test_harbor_catalog_uses_explicit_dataset_ref_without_latest(self):
+    def test_harbor_catalog_uses_registry_versioned_dataset_ref_without_latest(self):
         catalog = load_fixture_catalog("HarborTerminalBench")
 
-        self.assertEqual(catalog.source_version_type, "harbor-dataset-ref")
+        self.assertEqual(catalog.source_version_type, "harbor-registry-version")
+        self.assertEqual(catalog.source_version, "2.0")
         self.assertEqual(catalog.metadata["provider"], "harbor")
         self.assertEqual(catalog.metadata["source_type"], "harbor_dataset")
-        self.assertEqual(catalog.metadata["harbor_dataset_ref"], "terminal-bench/terminal-bench-2")
+        self.assertEqual(catalog.metadata["harbor_dataset_ref"], "terminal-bench@2.0")
+        self.assertEqual(catalog.metadata["acceptance_target_issue"], "#144")
         self.assertNotIn("latest", catalog.benchmark_version.lower())
         self.assertNotIn("latest", catalog.source_version.lower())
 

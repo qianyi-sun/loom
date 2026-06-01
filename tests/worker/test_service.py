@@ -502,6 +502,76 @@ class WorkerServiceTest(unittest.TestCase):
             ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
         )
 
+    def test_harbor_worker_maps_selected_model_provider_secret_to_agent_env_without_leaking_it(self):
+        payload = _run_create_payload("run_worker_harbor_selected_model_001")
+        payload["model"]["provider"] = "dev-api-provider"
+        payload["model"]["model_name"] = "gpt-5-mini"
+        payload["model"]["provider_config_id"] = "default-agent-model"
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "dataset_ref": "terminal-bench@2.0",
+                "agent": "codex",
+                "model_name": "gpt-5-mini",
+                "environment": "docker",
+                "agent_required_secret_refs": ["env:OPENAI_API_KEY"],
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        registry = DevProviderConfigRegistry.from_settings(
+            ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="sk-model-secret",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeHarborCommandRunner()
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-selected-model-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    provider_registry=registry,
+                    harbor_command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-selected-model-001")
+            runner_report_text = (
+                temp_path
+                / "artifacts/runs/run_worker_harbor_selected_model_001/tasks/conference-expense-03/logs/harbor-runner.json"
+            ).read_text(encoding="utf-8")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        harbor_args = command_runner.calls[0]["args"]
+        self.assertEqual(harbor_args[harbor_args.index("--model") + 1], "gpt-5-mini")
+        self.assertIn("--agent-env", harbor_args)
+        self.assertIn("OPENAI_API_KEY=sk-model-secret", harbor_args)
+        self.assertIn("OPENAI_BASE_URL=https://models.example/v1", harbor_args)
+
+        detail = self.client.get("/runs/run_worker_harbor_selected_model_001")
+        rendered = json.dumps(detail.json())
+        self.assertNotIn("sk-model-secret", rendered)
+        self.assertNotIn("sk-model-secret", runner_report_text)
+        self.assertIn("OPENAI_API_KEY=[redacted]", runner_report_text)
+        self.assertEqual(detail.json()["run"]["status"], "succeeded")
+
     def test_worker_materializes_generated_harbor_smoke_task(self):
         payload = _run_create_payload("run_worker_harbor_smoke_001")
         payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}

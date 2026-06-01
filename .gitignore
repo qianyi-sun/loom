@@ -22,6 +22,7 @@ build/
 .env.*
 !.env.example
 *.local
+.env.local
 
 # Owner-local Codex context
 AGENTS.md

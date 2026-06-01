@@ -166,7 +166,9 @@ class BenchmarkResourceTest(unittest.TestCase):
         self.assertEqual(benchmark_response.json()["benchmark"]["metadata"]["source_type"], "harbor_dataset")
         self.assertEqual(benchmark_response.json()["benchmark"]["metadata"]["environment_types"], ["docker"])
         self.assertEqual(tasks_response.status_code, 200)
-        self.assertEqual(tasks_response.json()["tasks"][0]["metadata"]["harbor_run"]["dataset_ref"], "terminal-bench/terminal-bench-2")
+        harbor_run = tasks_response.json()["tasks"][0]["metadata"]["harbor_run"]
+        self.assertEqual(harbor_run["dataset_ref"], "terminal-bench@2.0")
+        self.assertEqual(harbor_run["extra_args"], ["--n-tasks", "1", "--quiet"])
         self.assertEqual(tasks_response.json()["tasks"][0]["metadata"]["verifier_type"], "harbor_verifier")
 
     def test_missing_benchmark_maps_to_404(self):

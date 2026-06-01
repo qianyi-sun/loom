@@ -4,12 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added catalog-backed Harbor launch support for #131, #142, and #144. The
+  frontend can now select a Harbor agent and use the selected API model for
+  catalog-backed Harbor runs, while preserving the deterministic `oracle` +
+  `smoke/noop` no-key smoke path. The default Harbor catalog target is now
+  registry-versioned `terminal-bench@2.0`, the worker maps selected model
+  provider secrets into Harbor agent env only at execution time, and
+  `agentic_data_platform.harbor.registry_sync` can list or sync Harbor registry
+  datasets into the benchmark catalog with freshness metadata.
+- Added `scripts/setup-dev-env.sh` and made `.env.local` the single Compose env
+  file. The setup script creates `.env.local` from `.env.example` when missing,
+  so real local model-provider base URLs, optional model allowlists, and API
+  keys can be used for manual Harbor acceptance without committing secrets.
+- Made provider model discovery the default frontend catalog path for #147.
+  With `MODEL_PROVIDER_BASE_URL` and `MODEL_PROVIDER_API_KEY` configured,
+  `/models` calls the provider `/models` endpoint first; `MODEL_PROVIDER_MODELS`
+  is now an optional allowlist or static fallback, and the frontend shows
+  discovery/fallback/error status without exposing secrets.
 - Added the Harbor E2E manual test runbook for #139. The owner checklist now
   covers frontend login, model/harness/benchmark/task selection, Harbor
   local-Docker launch, live queue/CPU/RAM/sandbox telemetry, Harbor verifier
-  feedback, and artifact bundle inspection, while documenting #142, #143, and
-  #144 as the remaining product gaps for selected model/agent execution,
-  browser task upload, and first non-smoke Harbor acceptance.
+  feedback, and artifact bundle inspection. Browser task upload remains #143
+  as an admin/custom benchmark onboarding path rather than the ordinary
+  evaluation path.
 - Tightened shared dev exposure and Harbor upload limits. Compose service ports
   now default to loopback host bindings, Harbor task uploads enforce configured
   archive byte, file count, and uncompressed materialization limits, and the
@@ -25,11 +42,10 @@ All notable changes to this project will be documented in this file.
   required-secret references, supported harness/sandbox metadata, and
   Harbor-vs-native runner distinctions for launch/dashboard consumers.
 - Added the first Harbor benchmark catalog provider for #62. The provider
-  exposes a versioned `HarborTerminalBench` dataset catalog using the explicit
-  `terminal-bench/terminal-bench-2` Harbor dataset ref, maps Harbor uploaded
-  task archives into checksum-versioned catalog entries, and keeps source type,
-  environment, verifier, artifact convention, and `harbor_run` launch metadata
-  in the shared benchmark read model.
+  exposes a versioned `HarborTerminalBench` dataset catalog, maps Harbor
+  uploaded task archives into checksum-versioned catalog entries, and keeps
+  source type, environment, verifier, artifact convention, and `harbor_run`
+  launch metadata in the shared benchmark read model.
 - Documented the Harbor native integration design for #102, including the
   recommended CLI fallback/native backend split, Harbor capability probe,
   programmatic `JobConfig`/trial-hook candidate path, file-based `jobs/`

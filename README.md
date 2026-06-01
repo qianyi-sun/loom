@@ -85,13 +85,17 @@ MVP constraints:
 - The user-friendly runner/pipeline contract is available as the shared path
   for future teams to bring their own workflows.
 
-Current owner-testable Harbor path:
+Current owner-testable Harbor paths:
 
 ```mermaid
 flowchart LR
     Owner["Owner in /app/"] --> Login["Web login"]
-    Login --> Select["Select project, model, Harbor harness, benchmark, task"]
-    Select --> Run["POST /runs with metadata.harbor_run"]
+    Login --> Select["Select project, model, Harbor agent, harness, benchmark, task"]
+    Select --> Choice{"Benchmark source"}
+    Choice --> Catalog["Platform catalog\nterminal-bench@2.0"]
+    Choice --> Smoke["No-key smoke\noracle + smoke/noop"]
+    Catalog --> Run["POST /runs with selected model/agent metadata.harbor_run"]
+    Smoke --> Run
     Run --> Worker["Worker"]
     Worker --> Harbor["Harbor CLI local Docker"]
     Harbor --> Jobs["Harbor jobs/ output"]
@@ -101,8 +105,7 @@ flowchart LR
     DB --> Monitor["Live dashboard telemetry"]
     Store --> Bundle["Artifact bundle download"]
 
-    Select -.-> Gap142["#142 selected real model/agent"]
-    Select -.-> Gap143["#143 uploaded task launch"]
+    Choice -.-> Custom["#143 admin/custom benchmark upload"]
 ```
 
 ## Architecture Sketch
@@ -181,13 +184,13 @@ User runner and pipeline contract:
 | Core API resources | MVP backend slice merged | FastAPI now exposes Postgres-backed teams, projects, benchmark suite versions, task instances, run summaries, run detail trajectories, sanitized artifacts, evaluator feedback, and PM progress summaries with OpenAPI examples |
 | Run lifecycle API | MVP backend slice merged | Run creation now creates durable queued records with creator and evaluator config metadata; run detail includes lifecycle events; cancel/retry endpoints enforce state transitions and preserve retry attempts |
 | Queue and worker orchestration | MVP slice merged | DB-backed v0 queue claim path, fixture terminal benchmark worker, worker smoke command, and Compose worker service are available |
-| Provider config and secrets | MVP slice merged | Dev provider config refs, env secret refs, sensitive metadata redaction, normalized provider errors, and the first OpenAI-compatible terminal-agent API provider path are available |
+| Provider config and secrets | MVP slice merged | Dev provider config refs, env secret refs, sensitive metadata redaction, normalized provider errors, provider `/models` discovery by default for credentialed environments, optional static model allowlist/fallback, and the first OpenAI-compatible terminal-agent API provider path are available |
 | Internal auth/RBAC/ops | MVP slice merged | Dev token auth, project-scoped role checks, lifecycle audit records, structured request logs, readiness auth checks, and scoped `/ops/metrics` are available |
 | Dashboard/API projection | MVP contract merged | Run visibility payloads expose status, progress, full trajectory on detail, artifacts, evaluator score/feedback, failure reasons, and `/dashboard/progress` PM summaries |
-| Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/benchmark launch controls, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
+| Frontend MVP | First control-plane slice active | FastAPI serves `/app/` as a no-build web UI with cookie login, project/model/harness/agent/benchmark launch controls, model discovery/fallback status, live run telemetry, evaluator feedback, trajectory inspection, and object-store-backed artifact bundle download |
 | Benchmark run integration | MVP pilot slice merged | SkillFlow/SkillLearnBench adapter contract, offline seed fixture catalogs, upstream source cache/lock manager, local upstream tree importer, executable original runner wrappers, reusable wrapper smoke entrypoint, queued worker execution of original wrapper contracts, redacted upstream config synthesis, upstream output artifact preservation, suite-specific evaluator report normalization, API-only terminal-agent model provider, upstream runner provider env/config mapping, terminal benchmark run orchestrator, and latent native workflow target are merged. SkillFlow now has a pinned runner commit, pinned Hugging Face task dataset commit, task-asset lock file, recorded source patch for Harbor API compatibility, and opt-in shared dev real-upstream smoke evidence. |
 | User runner/pipeline contract | MVP backend slice merged | Runner envelope defines task manifest, result JSON, artifact path rules, lifecycle mapping, local validation expectations, and the first Harbor-compatible task-upload implementation with bounded archive size, file count, and uncompressed materialization limits |
-| Harbor integration | Started | Roadmap and native design define CLI fallback, native runner backend, Harbor benchmark provider, agent provider, result ingestion, and hybrid evaluation path; the code now names the current CLI path `HarborCliRunnerBackend`, keeps `HarborRunnerBackend` as a compatibility alias, records `backend: cli` in runner reports, adds a Harbor native capability probe, exposes the first `HarborBenchmarkProvider` read model for explicit Harbor dataset refs plus uploaded task archives, and exposes authenticated `GET /agents` metadata through `HarborAgentProvider` for Harbor built-in agents plus custom `--agent-import-path` entries. The frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, the worker materializes generated or uploaded Harbor task directories, `POST /harbor/task-uploads` validates and stores zipped custom Harbor tasks, and the Harbor CLI runner/`jobs/` ingestion path is covered by shared dev smoke checks. The current owner-testable frontend Harbor path is a deterministic `oracle` + `smoke/noop` smoke; selected API model/agent launch, frontend task upload, and the first non-smoke acceptance task are tracked by #142, #143, and #144 |
+| Harbor integration | MVP pilot slice active | Roadmap and native design define CLI fallback, native runner backend, Harbor benchmark provider, agent provider, result ingestion, and hybrid evaluation path; the code now names the current CLI path `HarborCliRunnerBackend`, keeps `HarborRunnerBackend` as a compatibility alias, records `backend: cli` in runner reports, adds a Harbor native capability probe, exposes the first `HarborBenchmarkProvider` read model for the registry-versioned `terminal-bench@2.0` catalog plus uploaded task archives, exposes authenticated `GET /agents` metadata through `HarborAgentProvider` for Harbor built-in agents plus custom `--agent-import-path` entries, and can sync Harbor registry datasets into platform benchmark catalogs. The frontend now submits `harbor-local-docker` runs with real `metadata.harbor_run`, uses selected API model plus Harbor agent for catalog-backed Harbor runs, preserves deterministic `oracle` + `smoke/noop` for no-key smoke runs, and the worker maps selected model provider secrets into Harbor agent env only at execution time. `POST /harbor/task-uploads` remains available for admin/custom benchmark onboarding, not the ordinary evaluation path, and the Harbor CLI runner/`jobs/` ingestion path is covered by shared dev smoke checks. |
 | pilot group contributor | Active invite accepted | `[REDACTED_CONTRIBUTOR]` is active in `pilot-team` |
 
 ## Tracking
@@ -226,6 +229,12 @@ User runner and pipeline contract:
   [#62](https://github.com/carinrc/agentic-data-platform/issues/62)
 - Harbor agent provider:
   [#63](https://github.com/carinrc/agentic-data-platform/issues/63)
+- Harbor registry dataset sync:
+  [#131](https://github.com/carinrc/agentic-data-platform/issues/131)
+- Frontend selected API model and Harbor agent launch:
+  [#142](https://github.com/carinrc/agentic-data-platform/issues/142)
+- First non-smoke Harbor benchmark acceptance target:
+  [#144](https://github.com/carinrc/agentic-data-platform/issues/144)
 - Unified evaluation backend contract:
   [#72](https://github.com/carinrc/agentic-data-platform/issues/72)
 - Harbor integration roadmap:
@@ -241,12 +250,8 @@ Current executable child tasks for the broad startup workstreams:
 - Access, quotas, retention, and audit baseline: [#138](https://github.com/carinrc/agentic-data-platform/issues/138)
 - pilot group end-to-end acceptance plan: [#139](https://github.com/carinrc/agentic-data-platform/issues/139)
 - Org access audit and team mapping: [#140](https://github.com/carinrc/agentic-data-platform/issues/140)
-- Frontend selected API model and Harbor agent launch:
-  [#142](https://github.com/carinrc/agentic-data-platform/issues/142)
 - Frontend Harbor task upload launch:
   [#143](https://github.com/carinrc/agentic-data-platform/issues/143)
-- First non-smoke Harbor benchmark acceptance target:
-  [#144](https://github.com/carinrc/agentic-data-platform/issues/144)
 
 ## Repository Layout
 
@@ -299,6 +304,7 @@ PYTHONPATH=src python -m unittest \
 Run the Docker development checks:
 
 ```bash
+scripts/setup-dev-env.sh
 docker compose -f docker-compose.dev.yml up --build app
 ```
 
