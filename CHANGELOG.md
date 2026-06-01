@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
   lifecycle events with scheduler metadata, expose timeout and batch-size
   settings, and run recovery before dispatch in the long-running scheduler
   loop. Workers now persist attempt-level heartbeat metadata while executing.
+- Added the first #158/#160 subprocess cancel-cleanup slice. Managed subprocess
+  workers can now monitor active run cancellation, terminate the child process,
+  and return the existing `canceled` terminal state instead of waiting for the
+  child process to exit naturally.
 - Added the first #159 object-first log/artifact slice. Terminal stdout/stderr
   stored in Postgres trajectory rows are now bounded previews with truncation
   metadata, while full trajectory/log payloads remain available through

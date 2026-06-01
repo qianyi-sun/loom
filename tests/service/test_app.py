@@ -42,6 +42,7 @@ class ServiceAppTest(unittest.TestCase):
                 "WORKER_SUBPROCESS_ISOLATION_ENABLED": "true",
                 "WORKER_SUBPROCESS_TIMEOUT_SECONDS": "1800",
                 "WORKER_HEARTBEAT_INTERVAL_SECONDS": "15",
+                "WORKER_CANCEL_POLL_INTERVAL_SECONDS": "0.5",
                 "WORKER_LEGACY_QUEUE_CLAIM_ENABLED": "true",
                 "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS": "8",
                 "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS": "harbor-local-docker=3,docker_terminal=2",
@@ -78,6 +79,7 @@ class ServiceAppTest(unittest.TestCase):
         self.assertTrue(settings.worker_subprocess_isolation_enabled)
         self.assertEqual(settings.worker_subprocess_timeout_seconds, 1800)
         self.assertEqual(settings.worker_heartbeat_interval_seconds, 15)
+        self.assertEqual(settings.worker_cancel_poll_interval_seconds, 0.5)
         self.assertTrue(settings.worker_legacy_queue_claim_enabled)
         self.assertEqual(settings.scheduler_global_max_active_runs, 8)
         self.assertEqual(

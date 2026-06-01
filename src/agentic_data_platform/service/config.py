@@ -33,6 +33,7 @@ class ServiceSettings:
     worker_subprocess_isolation_enabled: bool = False
     worker_subprocess_timeout_seconds: int = 7200
     worker_heartbeat_interval_seconds: int = 30
+    worker_cancel_poll_interval_seconds: float = 5.0
     worker_legacy_queue_claim_enabled: bool = False
     scheduler_global_max_active_runs: int = 1
     scheduler_backend_max_active_runs: dict[str, int] = field(default_factory=dict)
@@ -75,6 +76,7 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         worker_subprocess_isolation_enabled=_get_bool(values, "WORKER_SUBPROCESS_ISOLATION_ENABLED", False),
         worker_subprocess_timeout_seconds=_get_int(values, "WORKER_SUBPROCESS_TIMEOUT_SECONDS", 7200),
         worker_heartbeat_interval_seconds=_get_int(values, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 30),
+        worker_cancel_poll_interval_seconds=_get_float(values, "WORKER_CANCEL_POLL_INTERVAL_SECONDS", 5.0),
         worker_legacy_queue_claim_enabled=_get_bool(values, "WORKER_LEGACY_QUEUE_CLAIM_ENABLED", False),
         scheduler_global_max_active_runs=_get_int(values, "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS", 1),
         scheduler_backend_max_active_runs=_get_int_map(values, "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS"),
@@ -110,6 +112,13 @@ def _get_bool(values: Mapping[str, str], key: str, default: bool) -> bool:
     if not value:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _get_float(values: Mapping[str, str], key: str, default: float) -> float:
+    value = _get(values, key, "")
+    if not value:
+        return default
+    return float(value)
 
 
 def _get_int_map(values: Mapping[str, str], key: str) -> dict[str, int]:

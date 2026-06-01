@@ -119,6 +119,27 @@ class SubprocessRunWorkerTest(unittest.TestCase):
         self.assertIn("Worker subprocess exited without saving a terminal run result", run.failure_reason)
         self.assertEqual(run.metadata["failure"]["category"], "worker_subprocess_failed")
 
+    def test_subprocess_worker_terminates_child_when_run_is_canceled(self):
+        _create_run(self.engine, "run_subprocess_cancel_001")
+        command_runner = CancelingManagedCommandRunner(self.engine)
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-cancel-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+            cancel_poll_interval_seconds=0.001,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-cancel-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "canceled")
+        self.assertEqual(command_runner.process.terminated, True)
+        self.assertEqual(command_runner.process.killed, False)
+        with session_scope(self.engine) as session:
+            run = RunRepository(session).get_run("run_subprocess_cancel_001")
+        self.assertEqual(run.status, RunStatus.CANCELED)
+
     def test_execute_claimed_run_saves_executor_result_in_child_boundary(self):
         _create_run(self.engine, "run_subprocess_child_execute_001")
         with session_scope(self.engine) as session:
@@ -277,6 +298,62 @@ class FakeWorkerSubprocessCommandRunner:
             stdout="child complete\n",
             stderr="",
         )
+
+
+class CancelingManagedCommandRunner:
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.process = CancelingManagedProcess(engine)
+
+    def start(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+    ):
+        self.process.args = args
+        return self.process
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("managed runner should use start for cancellation monitoring")
+
+
+class CancelingManagedProcess:
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.args: list[str] = []
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self._canceled = False
+
+    def poll(self) -> int | None:
+        if not self._canceled:
+            self._canceled = True
+            run_id = self.args[self.args.index("--run-id") + 1]
+            with session_scope(self.engine) as session:
+                RunRepository(session).cancel_run(
+                    run_id,
+                    reason="user canceled while child was running",
+                )
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    def communicate(self, timeout: float | None = None):
+        return "", ""
 
 
 if __name__ == "__main__":

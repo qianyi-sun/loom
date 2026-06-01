@@ -54,6 +54,20 @@ class CommandRunner(Protocol):
 
 
 class SubprocessCommandRunner:
+    def start(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, **env} if env else None,
+        )
+
     def run(
         self,
         args: list[str],
@@ -61,13 +75,23 @@ class SubprocessCommandRunner:
         timeout: int,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env={**os.environ, **env} if env else None,
+        process = self.start(args, env=env)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(
+                cmd=args,
+                timeout=timeout,
+                output=stdout,
+                stderr=stderr,
+            ) from exc
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=process.returncode or 0,
+            stdout=stdout,
+            stderr=stderr,
         )
 
 

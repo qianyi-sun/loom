@@ -109,16 +109,20 @@ class SubprocessRunWorker:
         timeout_seconds: int = 7200,
         allow_legacy_queue_claim: bool = True,
         heartbeat_interval_seconds: int = 30,
+        cancel_poll_interval_seconds: float = 5.0,
     ) -> None:
         _require_non_empty("worker_id", worker_id)
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if cancel_poll_interval_seconds <= 0:
+            raise ValueError("cancel_poll_interval_seconds must be positive")
         self.engine = engine
         self.worker_id = worker_id
         self.command_runner = command_runner or SubprocessCommandRunner()
         self.timeout_seconds = timeout_seconds
         self.allow_legacy_queue_claim = allow_legacy_queue_claim
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.cancel_poll_interval_seconds = cancel_poll_interval_seconds
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
         with session_scope(self.engine) as session:
@@ -143,7 +147,14 @@ class SubprocessRunWorker:
                 interval_seconds=self.heartbeat_interval_seconds,
                 request_id=request_id,
             ):
-                process = self.command_runner.run(args, timeout=self.timeout_seconds)
+                process = _run_child_command_with_cancel_monitor(
+                    self.command_runner,
+                    args,
+                    timeout_seconds=self.timeout_seconds,
+                    engine=self.engine,
+                    run_id=claimed.run_id,
+                    poll_interval_seconds=self.cancel_poll_interval_seconds,
+                )
         except subprocess.TimeoutExpired:
             return _fail_active_subprocess_run(
                 self.engine,
@@ -223,6 +234,7 @@ def build_configured_worker(
             timeout_seconds=service_settings.worker_subprocess_timeout_seconds,
             allow_legacy_queue_claim=service_settings.worker_legacy_queue_claim_enabled,
             heartbeat_interval_seconds=service_settings.worker_heartbeat_interval_seconds,
+            cancel_poll_interval_seconds=service_settings.worker_cancel_poll_interval_seconds,
         )
     executor = build_configured_executor(service_settings)
     return RunWorker(
@@ -308,6 +320,76 @@ def _save_worker_result(
             if current.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
                 return current
             raise
+
+
+def _run_child_command_with_cancel_monitor(
+    command_runner: CommandRunner,
+    args: list[str],
+    *,
+    timeout_seconds: int,
+    engine: Engine,
+    run_id: str,
+    poll_interval_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    start = getattr(command_runner, "start", None)
+    if start is None:
+        return command_runner.run(args, timeout=timeout_seconds)
+
+    process = start(args)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if _run_is_canceled(engine, run_id=run_id):
+            stdout, stderr = _terminate_process(process)
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=process.returncode if process.returncode is not None else -15,
+                stdout=_coerce_process_output(stdout),
+                stderr=_coerce_process_output(stderr),
+            )
+
+        returncode = process.poll()
+        if returncode is not None:
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=returncode,
+                stdout=_coerce_process_output(stdout),
+                stderr=_coerce_process_output(stderr),
+            )
+
+        if time.monotonic() >= deadline:
+            stdout, stderr = _terminate_process(process)
+            raise subprocess.TimeoutExpired(
+                cmd=args,
+                timeout=timeout_seconds,
+                output=_coerce_process_output(stdout),
+                stderr=_coerce_process_output(stderr),
+            )
+
+        time.sleep(min(poll_interval_seconds, max(deadline - time.monotonic(), 0.001)))
+
+
+def _run_is_canceled(engine: Engine, *, run_id: str) -> bool:
+    with session_scope(engine) as session:
+        return RunRepository(session).get_run(run_id).status is RunStatus.CANCELED
+
+
+def _terminate_process(process) -> tuple[str, str]:
+    process.terminate()
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+    return _coerce_process_output(stdout), _coerce_process_output(stderr)
+
+
+def _coerce_process_output(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 class WorkerHeartbeat:
