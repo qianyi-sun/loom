@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
   writable `/logs/verifier` and `/logs/artifacts` directories, preventing
   Harbor verifier stdout redirection from failing before `tests/test.sh` can
   write `reward.txt`.
+- Updated `scripts/setup-dev-env.sh` to populate a blank
+  `SANDBOX_HOST_WORKSPACE_ROOT` in `.env.local` with an absolute repo-local
+  runtime path while preserving existing non-empty values and provider secrets.
+  This keeps Docker-socket-backed Harbor/worker child containers pointed at a
+  host-visible sandbox workspace.
 - Extended `frontend-smoke` deployment validation to read
   `/runs/{run_id}/events` and one-shot `/runs/{run_id}/stream` after a
   terminal Harbor run and require ordered durable lifecycle replay through

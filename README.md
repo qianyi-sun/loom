@@ -310,41 +310,45 @@ Run the Docker development checks:
 
 ```bash
 scripts/setup-dev-env.sh
-docker compose -f docker-compose.dev.yml up --build app
+docker compose --env-file .env.local -f docker-compose.dev.yml up --build app
 ```
 
 Run database migrations against the local Compose Postgres service:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build migrate
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build migrate
 ```
 
 Verify local MinIO bucket bootstrap and upload/download:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build object-storage-smoke
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build object-storage-smoke
 ```
 
 Verify legacy queue claim plus fixture worker execution:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build worker-smoke
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build worker-smoke
 ```
 
-Verify the real Harbor CLI local Docker path without external model keys. The
-generated smoke task pre-creates writable verifier and artifact log directories
-inside its Docker environment so Harbor can capture verifier output before it
-ingests `reward.txt`:
+Verify the real Harbor CLI local Docker path without external model keys. Run
+`scripts/setup-dev-env.sh` first so `.env.local` contains an absolute
+`SANDBOX_HOST_WORKSPACE_ROOT`; Harbor runs inside the dev image but asks the host
+Docker daemon to bind-mount the sandbox workspace. The generated smoke task
+pre-creates writable verifier and artifact log directories inside its Docker
+environment so Harbor can capture verifier output before it ingests
+`reward.txt`:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build harbor-smoke
+scripts/setup-dev-env.sh
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build harbor-smoke
 ```
 
 Verify the heavier real-upstream SkillFlow wrapper path on a Docker-ready host:
 
 ```bash
-export SANDBOX_HOST_WORKSPACE_ROOT="$(pwd)/.runtime/sandbox-workspaces"
-docker compose -f docker-compose.dev.yml run --rm --build benchmark-real-upstream-smoke
+scripts/setup-dev-env.sh
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build benchmark-real-upstream-smoke
 ```
 
 This materializes the pinned SkillFlow runner, downloads the selected Hugging
@@ -356,8 +360,8 @@ containers.
 Start the long-running development API, scheduler, and worker services:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build migrate
-docker compose -f docker-compose.dev.yml up --build api scheduler worker
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build migrate
+docker compose --env-file .env.local -f docker-compose.dev.yml up --build api scheduler worker
 curl http://localhost:8000/healthz
 ```
 
@@ -373,7 +377,7 @@ Verify the authenticated API-created Docker sandbox run path with API,
 scheduler, and worker running:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build api-smoke
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build api-smoke
 ```
 
 `scripts/deploy-dev.sh` runs one scheduler recovery preflight before the API and
@@ -390,7 +394,7 @@ download path with API, scheduler, and worker running. The smoke JSON includes
 carry a matching `lifecycle-events.json` file:
 
 ```bash
-docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke
+docker compose --env-file .env.local -f docker-compose.dev.yml run --rm --build frontend-smoke
 ```
 
 Install local browser-control tools when validating the actual `/app/` UI in a
