@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a main developer platform guide for repo admins and primary developers,
+  covering the current architecture, API surface, runtime topology, progress,
+  priority issues, and maintainer responsibilities.
 - Added the first #159 persisted artifact chunk index slice.
   `artifact_chunks` now records ordered stdout/stderr/trajectory/artifact chunk
   metadata with run, attempt, artifact, chunk kind, sequence, object key, size,

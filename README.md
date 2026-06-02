@@ -169,6 +169,8 @@ Original runner wrapper research:
 [benchmark-runner-wrapper-spike.md](docs/development/benchmark-runner-wrapper-spike.md).
 User runner and pipeline contract:
 [user-runner-pipeline-contract.md](docs/architecture/user-runner-pipeline-contract.md).
+Main developer platform handoff:
+[main-developer-platform-guide.md](docs/development/main-developer-platform-guide.md).
 
 ## Current Progress
 
@@ -276,6 +278,9 @@ tests/                    Unit tests for package behavior and data contracts.
 
 New contributors should start with
 [contributor-onboarding.md](docs/development/contributor-onboarding.md).
+Repo admins and primary developers should also read
+[main-developer-platform-guide.md](docs/development/main-developer-platform-guide.md)
+for the current architecture, API surface, progress, and priority map.
 
 Run local checks from the repository root:
 
