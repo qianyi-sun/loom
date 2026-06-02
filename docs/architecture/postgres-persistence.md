@@ -175,9 +175,9 @@ reason, previous projection state, and source event sequence metadata so
 projection-only recovery is visible through durable event replay and artifact
 bundles. Non-terminal transitions mark an existing projection dirty so a
 retried or redispatched run is not mistaken for a fresh terminal projection by
-projection-backed readers. The dashboard progress API now reads clean
-projection rows for terminal aggregate counts and falls back to hydrated run
-records when the projection is missing or dirty.
+projection-backed readers. `GET /runs` and the dashboard progress API now read
+clean projection rows for list and aggregate counts, then fall back to hydrated
+run records when the projection is missing or dirty.
 Terminal turn stdout/stderr columns are bounded previews, not canonical log
 storage. When a stream exceeds the inline limit, persistence stores truncation
 metadata such as original byte count and inline byte count, while full
@@ -197,7 +197,7 @@ The #53 lifecycle migration adds indexes for dashboard filters:
 The #157/#160 projection refresh migration adds
 `run_dashboard_projections(project_id, status, updated_at)` and
 `run_dashboard_projections(dirty, is_terminal, updated_at)` indexes for
-projection refresh and dashboard progress queries. List/detail projection
+projection refresh, run-list, and dashboard progress queries. Detail projection
 queries remain a later #157 migration.
 The #159 artifact chunk migration adds
 `artifact_chunks(run_id, attempt_id, chunk_kind, chunk_sequence)` for ordered

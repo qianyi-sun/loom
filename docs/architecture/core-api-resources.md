@@ -78,7 +78,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /agents` | List Harbor built-in and custom import-path agents with safe adapter metadata | `HarborAgentProvider` |
 | `GET /harbor/agent-adaptation` | Preflight one selected Harbor agent/model/backend combination and report required env contract or actionable gaps | `HarborAgentProvider` + `DevProviderConfigRegistry` |
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
-| `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_runs()` + `RunDashboardProjection` |
+| `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_run_dashboard_summaries()` + `run_dashboard_projections` fallback |
 | `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run()` + `RunRepository.list_status_events()` |
 | `GET /runs/{run_id}/events` | Replay durable run lifecycle/progress events after an optional `after_seq` watermark | `RunRepository.list_status_events(after_seq=...)` |
 | `GET /runs/{run_id}/stream` | Stream replayable run events as SSE, using the same Postgres event source as `/events` | `RunRepository.list_status_events(after_seq=...)` |
@@ -105,7 +105,10 @@ task routes because current versions can contain slashes, such as
 `benchmark_suite`, `task_family`, `task_instance_id`, `created_by_user_id`,
 `created_after`, and `created_before`.
 When `project_id` is omitted, the route only returns runs whose projects belong
-to teams where the authenticated user has membership.
+to teams where the authenticated user has membership. Clean
+`run_dashboard_projections` rows are the preferred read source for list
+summaries; missing or dirty rows fall back to hydrated `RunRecord` projection so
+legacy and in-flight runs keep the same response shape.
 
 `GET /runs/{run_id}` is the heavier researcher detail payload. It includes the
 same `run` projection used by lists, a bounded `trajectory` preview array with
@@ -138,11 +141,12 @@ bounded projection refresh sweep for terminal runs whose projection is
 missing, dirty, or older than the run row and records same-status
 `projection.refreshed` events with scheduler id, execution task id, refresh
 reason, prior projection state, and source event sequence metadata. `GET
-/dashboard/progress` now uses clean projection rows for status, artifact, turn,
-evaluator, and score counts, and falls back to hydrated `RunRecord` values only
-when a row is missing or dirty. Current `GET /runs` and `GET /runs/{run_id}` still hydrate current
-`RunRecord` values for compatibility; moving list/detail reads fully onto
-durable projection rows remains a later #157 dashboard migration slice.
+/runs` and `GET /dashboard/progress` now use clean projection rows for list and
+aggregate status, artifact, turn, evaluator, and score data, and fall back to
+hydrated `RunRecord` values only when a row is missing or dirty. Current `GET
+/runs/{run_id}` still hydrates current `RunRecord` values for compatibility;
+moving detail reads fully onto durable projection rows remains a later #157
+dashboard migration slice.
 
 `GET /models` returns only safe model selection metadata: provider id, provider
 config id, display/model name, API mode, source, disabled/error state, basic
@@ -366,13 +370,13 @@ serializing dashboard payloads.
   slices reuse `run_status_events.id` as the replay sequence, expose replay and
   SSE routes, keep telemetry polling available, persist terminal dashboard
   projection rows that scheduler recovery can refresh in bounded batches, and
-  make `/dashboard/progress` prefer clean projection rows before falling back to
-  hydrated run records. The first typed artifact/log/upload/evaluator/projection
+  make `/runs` and `/dashboard/progress` prefer clean projection rows before
+  falling back to hydrated run records. The first typed
+  artifact/log/upload/evaluator/projection
   event slices record chunk, upload-expiry, upload-status-change, evaluator
   completion/failure, and projection refresh metadata without embedding
   payloads. The remaining #157 work is Redis fanout, broader typed
-  sandbox/resource events, and list/detail routes fully backed by projection
-  rows.
+  sandbox/resource events, and detail routes fully backed by projection rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal
@@ -430,8 +434,8 @@ serializing dashboard payloads.
   implemented.
 - List endpoints do not yet include pagination or quota-aware filtering. Add
   these before broad internal rollout.
-- `GET /runs` currently hydrates complete `RunRecord` objects before projecting
-  summaries. Replace this with a lightweight summary query before storing large
-  trajectories or exposing high-volume run lists.
+- `GET /runs/{run_id}` still hydrates a complete `RunRecord` for detail
+  responses. Replace the summary part with projection-row reads before storing
+  larger future detail payloads.
 - The first service tests use SQLite-backed migrations for speed. Shared dev
   Postgres validation happens through the GitHub Actions deployment path.

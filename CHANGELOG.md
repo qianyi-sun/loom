@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Moved `GET /runs` onto the #157 durable projection read path where clean
+  `run_dashboard_projections` rows are available. Run lists now return the
+  stored dashboard-safe payload for clean projections and fall back to hydrated
+  `RunRecord` projection only when a row is missing or dirty.
 - Added a #157/#159 artifact upload transition event slice. Artifact chunk
   status changes and stale upload expiry now append metadata-only
   `artifact.upload_status_changed` events with previous/current upload status

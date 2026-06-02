@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import LocalArtifactStore
@@ -31,6 +32,7 @@ from agentic_data_platform.domain.run_records import (
 )
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
+from agentic_data_platform.persistence.models import ArtifactRow, EvaluatorResultRow, RunTerminalTurnRow
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
@@ -90,6 +92,33 @@ class RunResourcesTest(unittest.TestCase):
                 "request_id": "req-runs-001",
             },
         )
+
+    def test_list_runs_reads_clean_dashboard_projection_without_child_hydration(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            projection = runs.refresh_dashboard_projection(
+                "run_001",
+                refresh_reason="test_projection_snapshot",
+            )
+            projected_completed = dict(projection.payload)
+            self.assertEqual(projected_completed["progress"]["turn_count"], 1)
+            self.assertEqual(projected_completed["progress"]["artifact_count"], 3)
+            self.assertEqual(projected_completed["evaluator"]["status"], "completed")
+
+            session.execute(delete(RunTerminalTurnRow).where(RunTerminalTurnRow.run_id == "run_001"))
+            session.execute(delete(ArtifactRow).where(ArtifactRow.run_id == "run_001"))
+            session.execute(delete(EvaluatorResultRow).where(EvaluatorResultRow.run_id == "run_001"))
+
+        response = self.client.get("/runs", headers={"X-Request-ID": "req-runs-projection-001"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-runs-projection-001")
+        completed = next(run for run in payload["runs"] if run["run_id"] == "run_001")
+        self.assertEqual(completed, projected_completed)
+        self.assertEqual(completed["progress"]["turn_count"], 1)
+        self.assertEqual(completed["progress"]["artifact_count"], 3)
+        self.assertEqual(completed["evaluator"]["score"], 0.91)
 
     def test_list_runs_filters_by_project_and_status(self):
         response = self.client.get(

@@ -182,7 +182,8 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         else:
             allowed_project_ids = accessible_project_ids(session, auth)
 
-        runs = repository.list_runs(
+        projections = repository.list_run_dashboard_summaries(
+            project_ids=allowed_project_ids,
             project_id=project_id,
             status=status,
             benchmark_suite=benchmark_suite,
@@ -192,11 +193,6 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
             created_after=created_after,
             created_before=created_before,
         )
-        projections = [
-            RunDashboardProjection.from_run(run).to_dict()
-            for run in runs
-            if run.project_id in allowed_project_ids
-        ]
         return _with_request_id(request, {"runs": projections})
 
     @app.get("/runs/{run_id}", tags=["runs"], responses=_example_response(_RUN_EXAMPLE))

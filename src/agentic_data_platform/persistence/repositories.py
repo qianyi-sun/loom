@@ -1453,24 +1453,58 @@ class RunRepository:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[RunRecord]:
-        query = select(RunRow).order_by(RunRow.created_at, RunRow.run_id)
-        if project_id is not None:
-            query = query.where(RunRow.project_id == project_id)
-        if status is not None:
-            query = query.where(RunRow.status == status)
-        if benchmark_suite is not None:
-            query = query.where(RunRow.benchmark_suite == benchmark_suite)
-        if task_family is not None:
-            query = query.where(RunRow.task_family == task_family)
-        if task_instance_id is not None:
-            query = query.where(RunRow.task_instance_id == task_instance_id)
-        if created_by_user_id is not None:
-            query = query.where(RunRow.created_by_user_id == created_by_user_id)
-        if created_after is not None:
-            query = query.where(RunRow.created_at >= created_after)
-        if created_before is not None:
-            query = query.where(RunRow.created_at <= created_before)
+        query = _apply_run_list_filters(
+            select(RunRow).order_by(RunRow.created_at, RunRow.run_id),
+            project_id=project_id,
+            status=status,
+            benchmark_suite=benchmark_suite,
+            task_family=task_family,
+            task_instance_id=task_instance_id,
+            created_by_user_id=created_by_user_id,
+            created_after=created_after,
+            created_before=created_before,
+        )
         return [self._run_record(row) for row in self.session.scalars(query)]
+
+    def list_run_dashboard_summaries(
+        self,
+        *,
+        project_ids: set[str] | None = None,
+        project_id: str | None = None,
+        status: str | None = None,
+        benchmark_suite: str | None = None,
+        task_family: str | None = None,
+        task_instance_id: str | None = None,
+        created_by_user_id: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if project_ids is not None and not project_ids:
+            return []
+
+        query = _apply_run_list_filters(
+            select(RunRow, RunDashboardProjectionRow)
+            .outerjoin(RunDashboardProjectionRow, RunDashboardProjectionRow.run_id == RunRow.run_id)
+            .order_by(RunRow.created_at, RunRow.run_id),
+            project_ids=project_ids,
+            project_id=project_id,
+            status=status,
+            benchmark_suite=benchmark_suite,
+            task_family=task_family,
+            task_instance_id=task_instance_id,
+            created_by_user_id=created_by_user_id,
+            created_after=created_after,
+            created_before=created_before,
+        )
+
+        summaries: list[dict[str, Any]] = []
+        for row, projection in self.session.execute(query):
+            payload = _dashboard_summary_payload_from_projection(projection)
+            if payload is not None:
+                summaries.append(payload)
+            else:
+                summaries.append(RunDashboardProjection.from_run(self._run_record(row)).to_dict())
+        return summaries
 
     def list_dashboard_progress_records(
         self,
@@ -2778,6 +2812,48 @@ def _dashboard_progress_record_from_run(run: RunRecord) -> RunDashboardProgressR
         evaluator_score=run.evaluator_result.score if run.evaluator_result is not None else None,
         updated_at=run.updated_at,
     )
+
+
+def _dashboard_summary_payload_from_projection(projection: RunDashboardProjectionRow | None) -> dict[str, Any] | None:
+    if projection is None or projection.dirty:
+        return None
+    if not isinstance(projection.payload, dict) or not projection.payload:
+        return None
+    return dict(projection.payload)
+
+
+def _apply_run_list_filters(
+    query: Any,
+    *,
+    project_ids: set[str] | None = None,
+    project_id: str | None = None,
+    status: str | None = None,
+    benchmark_suite: str | None = None,
+    task_family: str | None = None,
+    task_instance_id: str | None = None,
+    created_by_user_id: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+) -> Any:
+    if project_ids is not None:
+        query = query.where(RunRow.project_id.in_(project_ids))
+    if project_id is not None:
+        query = query.where(RunRow.project_id == project_id)
+    if status is not None:
+        query = query.where(RunRow.status == status)
+    if benchmark_suite is not None:
+        query = query.where(RunRow.benchmark_suite == benchmark_suite)
+    if task_family is not None:
+        query = query.where(RunRow.task_family == task_family)
+    if task_instance_id is not None:
+        query = query.where(RunRow.task_instance_id == task_instance_id)
+    if created_by_user_id is not None:
+        query = query.where(RunRow.created_by_user_id == created_by_user_id)
+    if created_after is not None:
+        query = query.where(RunRow.created_at >= created_after)
+    if created_before is not None:
+        query = query.where(RunRow.created_at <= created_before)
+    return query
 
 
 def _string_or_default(value: object, default: str) -> str:
