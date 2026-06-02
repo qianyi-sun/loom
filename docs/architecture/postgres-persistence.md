@@ -176,7 +176,9 @@ persist completed payload metadata with `artifact_metadata_schema`,
 SHA-256, size, media type, and metadata JSON. The contract also reserves upload
 states (`pending`, `started`, `completed`, `failed`, `expired`) and
 `artifact-chunk-metadata-v1` for future stdout/stderr, trajectory, and artifact
-chunk rows. Dedicated upload-state transitions, chunk tables, and recovery
+chunk rows. Artifact bundles already treat non-`completed` upload states as
+unavailable and surface `upload_status` / `upload_error_reason` in
+`manifest.json`; dedicated upload-state transitions, chunk tables, and recovery
 queries are still #159/#160 follow-up work.
 
 Detailed endpoint notes live in

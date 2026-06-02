@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #159/#160 artifact bundle upload-state reporting. Bundle generation now
+  treats artifact metadata with non-`completed` `upload_status` as unavailable
+  DB truth, skips object-store reads for those artifacts, and records
+  `upload_status` plus `upload_error_reason` in `manifest.json`
+  `artifact_content_errors`.
 - Added #156 expanded scheduler capacity gates. `RunScheduler` and
   `RunRepository.dispatch_queued_runs(...)` now support env-configured
   provider, model, agent, and benchmark active-run caps in addition to global,

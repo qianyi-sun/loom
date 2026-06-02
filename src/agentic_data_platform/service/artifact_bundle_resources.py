@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from agentic_data_platform.artifacts.store import Artifacpilot groupjectStore, LocalArtifactStore, build_s3_artifact_store
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
+from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
 from agentic_data_platform.domain.run_records import ArtifactRef
 from agentic_data_platform.domain.run_records import RunStatus, TerminalTurn
 from agentic_data_platform.persistence.repositories import RunRepository
@@ -120,13 +121,16 @@ def build_artifact_bundle(
 def _artifact_contents(
     artifacts: list[ArtifactRef],
     object_store: Artifacpilot groupjectStore | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    if object_store is None:
-        return [], []
-
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contents: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     for artifact in artifacts:
+        upload_state_error = _artifact_upload_state_error(artifact)
+        if upload_state_error is not None:
+            errors.append(upload_state_error)
+            continue
+        if object_store is None:
+            continue
         storage_key = _safe_storage_key(artifact)
         if storage_key is None:
             errors.append(_artifact_content_error(artifact, "artifact storage key is missing or unsafe"))
@@ -146,6 +150,22 @@ def _artifact_contents(
             }
         )
     return contents, errors
+
+
+def _artifact_upload_state_error(artifact: ArtifactRef) -> dict[str, Any] | None:
+    raw_status = artifact.metadata.get("upload_status")
+    if not isinstance(raw_status, str) or not raw_status.strip():
+        return None
+    upload_status = raw_status.strip()
+    if upload_status == ArtifactUploadStatus.COMPLETED.value:
+        return None
+
+    error = _artifact_content_error(artifact, f"artifact upload is {upload_status}; payload is unavailable")
+    error["upload_status"] = upload_status
+    raw_reason = artifact.metadata.get("upload_error_reason")
+    if isinstance(raw_reason, str) and raw_reason.strip():
+        error["upload_error_reason"] = raw_reason.strip()
+    return error
 
 
 def _safe_storage_key(artifact: ArtifactRef) -> str | None:
@@ -187,7 +207,7 @@ def _safe_path_component(value: str) -> str:
     return safe or "artifact"
 
 
-def _artifact_content_error(artifact: ArtifactRef, message: str) -> dict[str, str]:
+def _artifact_content_error(artifact: ArtifactRef, message: str) -> dict[str, Any]:
     return {"artifact_id": artifact.artifact_id, "kind": artifact.kind.value, "message": message}
 
 

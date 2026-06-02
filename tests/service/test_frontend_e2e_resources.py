@@ -7,9 +7,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import LocalArtifactStore
+from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
 from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
@@ -34,6 +36,7 @@ from agentic_data_platform.persistence import (
     session_scope,
 )
 from agentic_data_platform.persistence.migrations import upgrade_database
+from agentic_data_platform.persistence.models import ArtifactRow
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
 
@@ -316,6 +319,59 @@ class FrontendE2EResourcesTest(unittest.TestCase):
         self.assertTrue(
             all("not available" in item["message"] for item in manifest["artifact_content_errors"])
         )
+
+    def test_artifact_bundle_reports_failed_upload_state_without_fetching_payload(self):
+        with session_scope(self.engine) as session:
+            artifact = session.scalar(
+                select(ArtifactRow).where(ArtifactRow.artifact_id == "run_frontend_001-workspace")
+            )
+            metadata = dict(artifact.metadata_json or {})
+            metadata["upload_status"] = ArtifactUploadStatus.FAILED.value
+            metadata["upload_error_reason"] = "object store write failed"
+            artifact.metadata_json = metadata
+
+        with TemporaryDirectory() as temp_dir:
+            store = LocalArtifactStore(Path(temp_dir))
+            store.put_bytes(
+                "runs/run_frontend_001/tasks/task/trajectory/trajectory.jsonl",
+                b'{"turn_index": 0, "stdout": "stored trajectory"}\n',
+                media_type="application/x-ndjson",
+            )
+            store.put_bytes(
+                "runs/run_frontend_001/tasks/task/workspace/snapshot.json",
+                b'{"files": [{"path": "should-not-be-downloaded.txt"}]}\n',
+                media_type="application/json",
+            )
+            store.put_bytes(
+                "runs/run_frontend_001/tasks/task/evaluation/report.json",
+                b'{"verbal_feedback": "stored evaluator report"}\n',
+                media_type="application/json",
+            )
+            self.client.app.state.artifact_store = store
+
+            response = self.client.get(
+                "/runs/run_frontend_001/artifact-bundle",
+                headers={"Authorization": "Bearer [REDACTED_TOKEN]", "X-Request-ID": "req-bundle-upload-state-001"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+            rendered_bundle = "\n".join(
+                archive.read(name).decode("utf-8") for name in sorted(names) if name.endswith((".json", ".jsonl"))
+            )
+
+        self.assertNotIn("artifacts/workspace_snapshot/run_frontend_001-workspace.json", names)
+        self.assertEqual(len(manifest["artifact_contents"]), 2)
+        upload_errors = [
+            item for item in manifest["artifact_content_errors"] if item["artifact_id"] == "run_frontend_001-workspace"
+        ]
+        self.assertEqual(len(upload_errors), 1)
+        self.assertEqual(upload_errors[0]["upload_status"], ArtifactUploadStatus.FAILED.value)
+        self.assertEqual(upload_errors[0]["upload_error_reason"], "object store write failed")
+        self.assertIn("upload is failed", upload_errors[0]["message"])
+        self.assertNotIn("should-not-be-downloaded.txt", rendered_bundle)
 
     def test_frontend_static_app_is_served_without_bearer_token(self):
         response = self.client.get("/app/", headers={"X-Request-ID": "req-app-001"})
