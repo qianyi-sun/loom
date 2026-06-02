@@ -163,18 +163,21 @@ supports custom Harbor `--agent-import-path` entries, reports whether an agent
 is Harbor built-in, external CLI, or custom import mode, and exposes supported
 `harness_id`, sandbox backend, trajectory support, and required secret
 references. Mainstream built-ins also expose `model_adapter` metadata that
-records the adapter id, endpoint dialects, API-key env names, and base-URL env
-names the worker will synthesize. Required secrets are safe references such as
-`env:OPENAI_API_KEY`; raw key values are not accepted or returned. This lets
-launch and dashboard consumers distinguish Harbor agents from native platform
-runners before a full agent-selection UI is added.
+records the adapter id, endpoint dialects, API-key env names, base-URL env
+names the worker will synthesize, and safe default agent kwargs when the runner
+needs a durable compatibility pin such as the OpenHands CLI `openhands-ai`
+version supported by the current Harbor package. Required secrets are safe
+references such as `env:OPENAI_API_KEY`; raw key values are not accepted or
+returned. This lets launch and dashboard consumers distinguish Harbor agents
+from native platform runners before a full agent-selection UI is added.
 
 `GET /harbor/agent-adaptation` is a launch preflight surface for #150. It
 accepts the selected project, harness, Harbor agent, model id, and provider
 config id, then returns `ready` or `blocked`, the adapter metadata, env names
-that will be populated from safe provider refs, and actionable gaps such as a
-missing model provider config or provider endpoint dialect mismatch. It never
-returns raw provider secret values.
+that will be populated from safe provider refs, adapter default kwargs that
+will be passed to Harbor, and actionable gaps such as a missing model provider
+config or provider endpoint dialect mismatch. It never returns raw provider
+secret values.
 
 `POST /harbor/task-uploads` is the first user-facing custom benchmark intake
 path. A project member uploads a `.zip` Harbor task directory; the API validates

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Split the #150 OpenHands adapter contract into separate OpenHands CLI and
+  OpenHands SDK specs. The CLI path now passes a Harbor-compatible
+  `openhands-ai` version through `--agent-kwarg version=1.6.0` so Harbor 0.9.0
+  does not resolve to the incompatible latest `openhands-ai` package, while the
+  SDK path keeps its existing runtime contract.
 - Added #156 scheduler capacity-blocked diagnostics. Capacity-saturated queued
   runs now retain current `execution.scheduler.capacity_blocked` metadata,
   emit `scheduler.capacity_blocked` only when the blocker signature changes,

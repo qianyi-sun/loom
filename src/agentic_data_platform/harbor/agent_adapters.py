@@ -32,6 +32,7 @@ class HarborAgentModelAdapterSpec:
     base_url_surface: str = "openai"
     process_env: bool = True
     base_url_agent_kwarg: str | None = None
+    default_agent_kwargs: tuple[str, ...] = ()
     mainstream: bool = True
 
     @property
@@ -50,6 +51,7 @@ class HarborAgentModelAdapterSpec:
             "base_url_surface": self.base_url_surface,
             "process_env": self.process_env,
             "base_url_agent_kwarg": self.base_url_agent_kwarg,
+            "default_agent_kwargs": list(self.default_agent_kwargs),
             "mainstream": self.mainstream,
         }
 
@@ -91,7 +93,16 @@ _ADAPTER_SPECS = [
     HarborAgentModelAdapterSpec(
         adapter_id="openhands-openai-compatible",
         display_name="OpenHands OpenAI-compatible adapter",
-        agent_names=("openhands", "openhands-sdk"),
+        agent_names=("openhands",),
+        api_key_env_names=("LLM_API_KEY", "OPENAI_API_KEY"),
+        base_url_env_names=("LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE"),
+        model_name_template="openai/{model_id}",
+        default_agent_kwargs=("version=1.6.0",),
+    ),
+    HarborAgentModelAdapterSpec(
+        adapter_id="openhands-sdk-openai-compatible",
+        display_name="OpenHands SDK OpenAI-compatible adapter",
+        agent_names=("openhands-sdk",),
         api_key_env_names=("LLM_API_KEY", "OPENAI_API_KEY"),
         base_url_env_names=("LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE"),
         model_name_template="openai/{model_id}",
@@ -273,7 +284,7 @@ def build_agent_model_invocation(
             existing_names.add(env_name)
 
     process_env = list(env_values) if spec is None or spec.process_env else []
-    agent_kwargs = []
+    agent_kwargs = list(spec.default_agent_kwargs) if spec is not None else []
     if spec is not None and spec.base_url_agent_kwarg and base_url:
         agent_kwargs.append(f"{spec.base_url_agent_kwarg}={base_url}")
 

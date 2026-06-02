@@ -122,6 +122,51 @@ class AgentResourcesTest(unittest.TestCase):
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("deepseek-secret", rendered)
 
+    def test_openhands_cli_preflight_reports_adapter_default_version_kwarg(self):
+        client = TestClient(
+            _app(
+                self.engine,
+                model_provider_base_url="https://models.example/v1",
+                model_provider_api_key="deepseek-secret",
+            )
+        )
+
+        response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:openhands",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["adapter"]["adapter_id"], "openhands-openai-compatible")
+        self.assertIn("version=1.6.0", payload["adapter"]["default_agent_kwargs"])
+        self.assertIn({"name": "version", "source": "adapter_default"}, payload["agent_kwargs_preview"])
+
+        sdk_response = client.get(
+            "/harbor/agent-adaptation",
+            params={
+                "project_id": "latent-skill-pilot",
+                "harness_id": "harbor-local-docker",
+                "agent_id": "harbor:openhands-sdk",
+                "model_id": "deepseek-v4-flash",
+                "provider_config_id": "default-agent-model",
+            },
+            headers={"Authorization": "Bearer [REDACTED_TOKEN]"},
+        )
+
+        self.assertEqual(sdk_response.status_code, 200)
+        sdk_payload = sdk_response.json()
+        self.assertEqual(sdk_payload["adapter"]["adapter_id"], "openhands-sdk-openai-compatible")
+        self.assertEqual(sdk_payload["agent_kwargs_preview"], [])
+
     def test_agent_model_adaptation_preflight_reports_missing_provider_config(self):
         response = self.client.get(
             "/harbor/agent-adaptation",

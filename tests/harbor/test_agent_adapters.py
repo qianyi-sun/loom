@@ -146,6 +146,25 @@ class HarborAgentAdapterTest(unittest.TestCase):
         self.assertEqual(gemini.harbor_model_name, "google/deepseek-v4-flash")
         self.assertIn("GOOGLE_GEMINI_BASE_URL=https://models.example/v1beta", gemini.process_env)
 
+    def test_openhands_cli_pins_harbor_compatible_openhands_ai_version(self):
+        openhands = build_agent_model_invocation(
+            agent_name="openhands",
+            model_id="deepseek-v4-flash",
+            provider_ref=_provider_ref(base_url="https://models.example/v1"),
+            provider_secret=ProviderSecret("model-secret"),
+            existing_agent_env=[],
+        )
+        openhands_sdk = build_agent_model_invocation(
+            agent_name="openhands-sdk",
+            model_id="deepseek-v4-flash",
+            provider_ref=_provider_ref(base_url="https://models.example/v1"),
+            provider_secret=ProviderSecret("model-secret"),
+            existing_agent_env=[],
+        )
+
+        self.assertIn("version=1.6.0", openhands.agent_kwargs)
+        self.assertNotIn("version=1.6.0", openhands_sdk.agent_kwargs)
+
 
 def _provider_ref(*, base_url: str) -> ProviderConfigRef:
     return ProviderConfigRef(

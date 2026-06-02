@@ -220,7 +220,8 @@ def _agent_kwargs_preview(values: list[str]) -> list[dict[str, str]]:
     for value in values:
         name, _, _ = value.partition("=")
         if name:
-            previews.append({"name": name, "source": "provider_base_url"})
+            source = "provider_base_url" if name in {"base_url", "api_base"} else "adapter_default"
+            previews.append({"name": name, "source": source})
     return previews
 
 
