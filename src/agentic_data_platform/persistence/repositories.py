@@ -61,6 +61,10 @@ _MAX_INLINE_TERMINAL_STREAM_BYTES = 64 * 1024
 _TRUNCATED_STREAM_MARKER = "\n[truncated: full stream is available in object-store artifacts]\n"
 
 
+class StaleExecutionTaskError(ValueError):
+    """Raised when a worker acts on an execution task that is no longer current."""
+
+
 @dataclass(frozen=True)
 class TeamRecord:
     team_id: str
@@ -673,11 +677,19 @@ class RunRepository:
         *,
         worker_id: str,
         status: RunStatus | str,
+        execution_task_id: str | None = None,
         request_id: str | None = None,
     ) -> RunRecord:
         del request_id
         _require_non_empty("worker_id", worker_id)
         row = self._run_row_for_update(run_id)
+        attempt = self._latest_attempt_row(run_id)
+        self._validate_execution_task_row(
+            row,
+            attempt,
+            execution_task_id=execution_task_id,
+            worker_id=worker_id,
+        )
         run_status = RunStatus(row.status)
         if run_status not in {RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.EVALUATING}:
             raise ValueError("worker heartbeats can only be recorded for active runs")
@@ -686,7 +698,6 @@ class RunRepository:
             raise ValueError("worker heartbeat status must be active")
 
         now = utc_now()
-        attempt = self._latest_attempt_row(run_id)
         attempt.metadata_json = _worker_attempt_metadata(
             attempt.metadata_json,
             worker_id=worker_id,
@@ -700,6 +711,31 @@ class RunRepository:
         row.updated_at = now
         self.session.flush()
         return self.get_run(run_id)
+
+    def current_execution_task_id(self, run_id: str) -> str:
+        return self._latest_attempt_row(run_id).attempt_id
+
+    def validate_current_execution_task(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        execution_task_id: str,
+    ) -> RunRecord:
+        _require_non_empty("worker_id", worker_id)
+        row = self._run_row_for_update(run_id)
+        attempt = self._latest_attempt_row(run_id)
+        self._validate_execution_task_row(
+            row,
+            attempt,
+            execution_task_id=execution_task_id,
+            worker_id=worker_id,
+        )
+        if RunStatus(row.status) not in {RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.EVALUATING}:
+            raise StaleExecutionTaskError(
+                f"stale execution task {execution_task_id}: run {run_id} is {row.status}"
+            )
+        return self._run_record(row)
 
     def fail_stale_active_runs_by_heartbeat(
         self,
@@ -862,10 +898,18 @@ class RunRepository:
         run: RunRecord,
         *,
         worker_id: str,
+        execution_task_id: str | None = None,
         request_id: str | None = None,
     ) -> RunRecord:
         _require_non_empty("worker_id", worker_id)
         row = self._run_row_for_update(run.run_id)
+        attempt = self._latest_attempt_row(run.run_id)
+        self._validate_execution_task_row(
+            row,
+            attempt,
+            execution_task_id=execution_task_id,
+            worker_id=worker_id,
+        )
         previous_status = RunStatus(row.status)
         if previous_status is RunStatus.CANCELED:
             return self.get_run(run.run_id)
@@ -1153,6 +1197,30 @@ class RunRepository:
     def _run_row_for_update(self, run_id: str) -> RunRow:
         row = self.session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
         return _required(row, "run", run_id)
+
+    def _validate_execution_task_row(
+        self,
+        row: RunRow,
+        attempt: RunAttemptRow,
+        *,
+        execution_task_id: str | None,
+        worker_id: str | None,
+    ) -> None:
+        if execution_task_id is None:
+            return
+        _require_non_empty("execution_task_id", execution_task_id)
+        if attempt.attempt_id != execution_task_id:
+            raise StaleExecutionTaskError(
+                f"stale execution task {execution_task_id}: current task is {attempt.attempt_id}"
+            )
+        if worker_id is None:
+            return
+        worker_metadata = _worker_metadata(attempt.metadata_json)
+        claimed_worker_id = worker_metadata.get("worker_id")
+        if claimed_worker_id and claimed_worker_id != worker_id:
+            raise StaleExecutionTaskError(
+                f"stale execution task {execution_task_id}: claimed by worker {claimed_worker_id}"
+            )
 
     def _append_status_event(
         self,

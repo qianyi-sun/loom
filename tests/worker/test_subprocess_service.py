@@ -147,11 +147,15 @@ class SubprocessRunWorkerTest(unittest.TestCase):
                 worker_id="worker-child-boundary-test",
                 request_id="req-child-claim-001",
             )
+            execution_task_id = RunRepository(session).current_execution_task_id(
+                "run_subprocess_child_execute_001"
+            )
         with tempfile.TemporaryDirectory() as temp_dir:
             result = execute_claimed_run(
                 engine=self.engine,
                 worker_id="worker-child-boundary-test",
                 run_id="run_subprocess_child_execute_001",
+                execution_task_id=execution_task_id,
                 request_id="req-child-execute-001",
                 executor=FixtureTerminalBenchmarkExecutor(
                     artifact_persistence=ArtifactPersistence(LocalArtifactStore(Path(temp_dir))),
@@ -163,6 +167,81 @@ class SubprocessRunWorkerTest(unittest.TestCase):
             loaded = RunRepository(session).get_run("run_subprocess_child_execute_001")
         self.assertEqual(loaded.status, RunStatus.SUCCEEDED)
         self.assertEqual(len(loaded.trajectory), 1)
+
+    def test_execute_claimed_run_skips_executor_when_execution_task_is_stale(self):
+        _create_run(self.engine, "run_subprocess_child_stale_001")
+        with session_scope(self.engine) as session:
+            repository = RunRepository(session)
+            repository.claim_next_queued_run(
+                worker_id="worker-child-stale-test",
+                request_id="req-child-stale-claim-001",
+            )
+            stale_execution_task_id = repository.current_execution_task_id(
+                "run_subprocess_child_stale_001"
+            )
+            repository.cancel_run(
+                "run_subprocess_child_stale_001",
+                reason="operator canceled stale child",
+                request_id="req-child-stale-cancel-001",
+            )
+            repository.retry_run(
+                "run_subprocess_child_stale_001",
+                reason="retry after stale child",
+                request_id="req-child-stale-retry-001",
+            )
+
+        result = execute_claimed_run(
+            engine=self.engine,
+            worker_id="worker-child-stale-test",
+            run_id="run_subprocess_child_stale_001",
+            execution_task_id=stale_execution_task_id,
+            request_id="req-child-stale-execute-001",
+            executor=ExecutorThatMustNotRun(),
+        )
+
+        self.assertEqual(result.status, "queued")
+        with session_scope(self.engine) as session:
+            loaded = RunRepository(session).get_run("run_subprocess_child_stale_001")
+            events = RunRepository(session).list_status_events("run_subprocess_child_stale_001")
+        self.assertEqual(loaded.status, RunStatus.QUEUED)
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["run.created", "run.claimed", "run.canceled", "run.retried"],
+        )
+
+    def test_subprocess_worker_does_not_fail_new_attempt_when_child_task_is_stale(self):
+        _create_run(self.engine, "run_subprocess_parent_stale_001")
+        command_runner = StaleExecutionTaskCommandRunner(self.engine)
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-stale-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-stale-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "queued")
+        self.assertEqual(len(command_runner.calls), 1)
+        args = command_runner.calls[0]["args"]
+        self.assertIn("--execution-task-id", args)
+        self.assertEqual(
+            args[args.index("--execution-task-id") + 1],
+            "run_subprocess_parent_stale_001:attempt:1",
+        )
+        with session_scope(self.engine) as session:
+            loaded = RunRepository(session).get_run("run_subprocess_parent_stale_001")
+            events = RunRepository(session).list_status_events("run_subprocess_parent_stale_001")
+            current_execution_task_id = RunRepository(session).current_execution_task_id(
+                "run_subprocess_parent_stale_001"
+            )
+        self.assertEqual(loaded.status, RunStatus.QUEUED)
+        self.assertEqual(current_execution_task_id, "run_subprocess_parent_stale_001:attempt:2")
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["run.created", "run.claimed", "run.canceled", "run.retried"],
+        )
 
     def test_configured_subprocess_worker_does_not_build_parent_executor(self):
         settings = load_service_settings(
@@ -298,6 +377,45 @@ class FakeWorkerSubprocessCommandRunner:
             stdout="child complete\n",
             stderr="",
         )
+
+
+class StaleExecutionTaskCommandRunner:
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.calls: list[dict[str, object]] = []
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
+        run_id = args[args.index("--run-id") + 1]
+        with session_scope(self.engine) as session:
+            repository = RunRepository(session)
+            repository.cancel_run(
+                run_id,
+                reason="operator canceled stale child",
+                request_id="req-stale-child-cancel-001",
+            )
+            repository.retry_run(
+                run_id,
+                reason="retry after stale child",
+                request_id="req-stale-child-retry-001",
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="stale child skipped\n",
+            stderr="",
+        )
+
+
+class ExecutorThatMustNotRun:
+    def execute(self, run):
+        raise AssertionError("stale execution task should not execute")
 
 
 class CancelingManagedCommandRunner:

@@ -118,6 +118,12 @@ Workers prefer `RunRepository.claim_next_dispatched_run(...)` and then retain
 `RunRepository.claim_next_queued_run(...)` as a compatibility path during
 scheduler rollout; both claim paths persist a `run.claimed` transition to
 `provisioning` with the current `execution_task_id`.
+`RunRepository.current_execution_task_id(...)` and
+`RunRepository.validate_current_execution_task(...)` let worker parents and
+subprocess children validate that the latest attempt still matches the claimed
+execution task before heartbeat or terminal result persistence. If retry has
+created a newer attempt, stale worker results are rejected instead of mutating
+the current run state.
 Retry creates a new `run_attempts` row for the same `run_id`, moves the run back
 to `queued`, and records a `run.retried` status event. Follow-on `save_run()`
 calls update the latest internal attempt so worker code can persist terminal

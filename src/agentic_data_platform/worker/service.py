@@ -19,7 +19,7 @@ from agentic_data_platform.artifacts.store import (
 from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence import create_database_engine, session_scope
-from agentic_data_platform.persistence.repositories import RunRepository
+from agentic_data_platform.persistence.repositories import RunRepository, StaleExecutionTaskError
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.sandbox.docker_terminal import CommandRunner, SubprocessCommandRunner
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
@@ -62,11 +62,14 @@ class RunWorker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
+        execution_task_id: str | None = None
         with session_scope(self.engine) as session:
             repository = RunRepository(session)
             claimed = repository.claim_next_dispatched_run(worker_id=self.worker_id, request_id=request_id)
             if claimed is None and self.allow_legacy_queue_claim:
                 claimed = repository.claim_next_queued_run(worker_id=self.worker_id, request_id=request_id)
+            if claimed is not None:
+                execution_task_id = repository.current_execution_task_id(claimed.run_id)
 
         if claimed is None:
             return None
@@ -76,6 +79,7 @@ class RunWorker:
                 engine=self.engine,
                 run_id=claimed.run_id,
                 worker_id=self.worker_id,
+                execution_task_id=execution_task_id,
                 interval_seconds=self.heartbeat_interval_seconds,
                 request_id=request_id,
             ):
@@ -95,6 +99,7 @@ class RunWorker:
             self.engine,
             completed,
             worker_id=self.worker_id,
+            execution_task_id=execution_task_id,
             request_id=request_id,
         )
         return _worker_result(saved)
@@ -126,18 +131,24 @@ class SubprocessRunWorker:
         self.cancel_poll_interval_seconds = cancel_poll_interval_seconds
 
     def run_once(self, *, request_id: str | None = None) -> WorkerRunResult | None:
+        execution_task_id: str | None = None
         with session_scope(self.engine) as session:
             repository = RunRepository(session)
             claimed = repository.claim_next_dispatched_run(worker_id=self.worker_id, request_id=request_id)
             if claimed is None and self.allow_legacy_queue_claim:
                 claimed = repository.claim_next_queued_run(worker_id=self.worker_id, request_id=request_id)
+            if claimed is not None:
+                execution_task_id = repository.current_execution_task_id(claimed.run_id)
 
         if claimed is None:
             return None
+        if execution_task_id is None:
+            raise RuntimeError("claimed run is missing execution_task_id")
 
         args = _execution_child_args(
             run_id=claimed.run_id,
             worker_id=self.worker_id,
+            execution_task_id=execution_task_id,
             request_id=request_id,
         )
         try:
@@ -145,6 +156,7 @@ class SubprocessRunWorker:
                 engine=self.engine,
                 run_id=claimed.run_id,
                 worker_id=self.worker_id,
+                execution_task_id=execution_task_id,
                 interval_seconds=self.heartbeat_interval_seconds,
                 request_id=request_id,
             ):
@@ -157,6 +169,13 @@ class SubprocessRunWorker:
                     poll_interval_seconds=self.cancel_poll_interval_seconds,
                 )
         except subprocess.TimeoutExpired:
+            stale = _current_run_if_execution_task_is_stale(
+                self.engine,
+                run_id=claimed.run_id,
+                execution_task_id=execution_task_id,
+            )
+            if stale is not None:
+                return _worker_result(stale)
             return _fail_active_subprocess_run(
                 self.engine,
                 run_id=claimed.run_id,
@@ -164,6 +183,13 @@ class SubprocessRunWorker:
                 request_id=request_id,
             )
         if process.returncode != 0:
+            stale = _current_run_if_execution_task_is_stale(
+                self.engine,
+                run_id=claimed.run_id,
+                execution_task_id=execution_task_id,
+            )
+            if stale is not None:
+                return _worker_result(stale)
             return _fail_active_subprocess_run(
                 self.engine,
                 run_id=claimed.run_id,
@@ -173,6 +199,9 @@ class SubprocessRunWorker:
 
         with session_scope(self.engine) as session:
             completed = RunRepository(session).get_run(claimed.run_id)
+            current_execution_task_id = RunRepository(session).current_execution_task_id(claimed.run_id)
+        if current_execution_task_id != execution_task_id:
+            return _worker_result(completed)
         if completed.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
             return _fail_active_subprocess_run(
                 self.engine,
@@ -188,13 +217,23 @@ def execute_claimed_run(
     engine: Engine,
     worker_id: str,
     run_id: str,
+    execution_task_id: str,
     executor: WorkerRunExecutor,
     request_id: str | None = None,
 ) -> WorkerRunResult:
     _require_non_empty("worker_id", worker_id)
     _require_non_empty("run_id", run_id)
+    _require_non_empty("execution_task_id", execution_task_id)
     with session_scope(engine) as session:
-        claimed = RunRepository(session).get_run(run_id)
+        repository = RunRepository(session)
+        try:
+            claimed = repository.validate_current_execution_task(
+                run_id,
+                worker_id=worker_id,
+                execution_task_id=execution_task_id,
+            )
+        except StaleExecutionTaskError:
+            return _worker_result(repository.get_run(run_id))
 
     try:
         completed = executor.execute(claimed)
@@ -213,6 +252,7 @@ def execute_claimed_run(
         engine,
         completed,
         worker_id=worker_id,
+        execution_task_id=execution_task_id,
         request_id=request_id,
     )
     return _worker_result(saved)
@@ -306,6 +346,7 @@ def _save_worker_result(
     run,
     *,
     worker_id: str,
+    execution_task_id: str | None,
     request_id: str | None,
 ):
     with session_scope(engine) as session:
@@ -314,8 +355,11 @@ def _save_worker_result(
             return repository.save_worker_result(
                 run,
                 worker_id=worker_id,
+                execution_task_id=execution_task_id,
                 request_id=request_id,
             )
+        except StaleExecutionTaskError:
+            return repository.get_run(run.run_id)
         except ValueError:
             current = repository.get_run(run.run_id)
             if current.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
@@ -375,6 +419,20 @@ def _run_is_canceled(engine: Engine, *, run_id: str) -> bool:
         return RunRepository(session).get_run(run_id).status is RunStatus.CANCELED
 
 
+def _current_run_if_execution_task_is_stale(
+    engine: Engine,
+    *,
+    run_id: str,
+    execution_task_id: str,
+):
+    with session_scope(engine) as session:
+        repository = RunRepository(session)
+        current = repository.get_run(run_id)
+        if repository.current_execution_task_id(run_id) != execution_task_id:
+            return current
+        return None
+
+
 def _terminate_process(process) -> tuple[str, str]:
     process.terminate()
     try:
@@ -400,12 +458,14 @@ class WorkerHeartbeat:
         engine: Engine,
         run_id: str,
         worker_id: str,
+        execution_task_id: str | None,
         interval_seconds: int,
         request_id: str | None,
     ) -> None:
         self.engine = engine
         self.run_id = run_id
         self.worker_id = worker_id
+        self.execution_task_id = execution_task_id
         self.interval_seconds = interval_seconds
         self.request_id = request_id
         self._stop = threading.Event()
@@ -438,6 +498,7 @@ class WorkerHeartbeat:
                     self.run_id,
                     worker_id=self.worker_id,
                     status=RunStatus.RUNNING,
+                    execution_task_id=self.execution_task_id,
                     request_id=self.request_id,
                 )
         except Exception as exc:
@@ -462,6 +523,7 @@ def _execution_child_args(
     *,
     run_id: str,
     worker_id: str,
+    execution_task_id: str,
     request_id: str | None,
 ) -> list[str]:
     args = [
@@ -472,6 +534,8 @@ def _execution_child_args(
         run_id,
         "--worker-id",
         worker_id,
+        "--execution-task-id",
+        execution_task_id,
     ]
     if request_id:
         args.extend(["--request-id", request_id])

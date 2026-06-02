@@ -35,6 +35,7 @@ from agentic_data_platform.persistence.repositories import (
     IdentityRepository,
     ProjectRepository,
     RunRepository,
+    StaleExecutionTaskError,
 )
 
 
@@ -869,6 +870,73 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(saved.status, RunStatus.CANCELED)
         self.assertEqual(saved.failure_reason, "operator canceled during provisioning")
         self.assertEqual([event.event_type for event in events], ["run.created", "run.claimed", "run.canceled"])
+
+    def test_run_repository_rejects_stale_execution_task_result_after_retry(self):
+        run = _queued_run(run_id="run_stale_execution_task_001")
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            runs = RunRepository(session)
+
+            runs.create_run(run, request_id="req-create-001")
+            claimed = runs.claim_next_queued_run(worker_id="worker-a", request_id="req-claim-001")
+            stale_execution_task_id = runs.current_execution_task_id(run.run_id)
+            runs.cancel_run(
+                run.run_id,
+                reason="operator canceled stale attempt",
+                request_id="req-cancel-001",
+            )
+            runs.retry_run(
+                run.run_id,
+                reason="retry after stale attempt",
+                request_id="req-retry-001",
+            )
+
+            claimed.transition_to(RunStatus.RUNNING)
+            claimed.transition_to(RunStatus.EVALUATING)
+            claimed.attach_evaluator_result(
+                EvaluatorResult(
+                    evaluator_id="llm-judge-v0",
+                    status="completed",
+                    score=1.0,
+                    metrics={"task_success": True},
+                    verbal_feedback="Stale result must not overwrite attempt 2.",
+                    judge=JudgeConfig(
+                        provider="mock",
+                        model_name="deterministic-judge",
+                        rubric_version="latent-skill-v0",
+                    ),
+                    artifact_refs=[],
+                )
+            )
+            claimed.transition_to(RunStatus.SUCCEEDED)
+
+            with self.assertRaisesRegex(StaleExecutionTaskError, "stale execution task"):
+                runs.save_worker_result(
+                    claimed,
+                    worker_id="worker-a",
+                    execution_task_id=stale_execution_task_id,
+                    request_id="req-worker-finish-001",
+                )
+
+            loaded = runs.get_run(run.run_id)
+            current_execution_task_id = runs.current_execution_task_id(run.run_id)
+            events = runs.list_status_events(run.run_id)
+
+        self.assertEqual(loaded.status, RunStatus.QUEUED)
+        self.assertEqual(current_execution_task_id, "run_stale_execution_task_001:attempt:2")
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["run.created", "run.claimed", "run.canceled", "run.retried"],
+        )
 
     def test_run_repository_rejects_invalid_lifecycle_transitions(self):
         run = _completed_run()

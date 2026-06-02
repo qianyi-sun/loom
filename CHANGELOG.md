@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #158 stale execution-task guard. Workers now carry the current
+  `execution_task_id` into subprocess children, validate it before child
+  execution, attach it to heartbeat/result persistence, and ignore stale child
+  completions when a retry has already created a newer attempt.
 - Updated shared-dev deployment to run API, scheduler, and worker as the
   long-running service set. `scripts/deploy-dev.sh` now stops and starts
   `api scheduler worker` for both local and remote deployment paths so
@@ -13,8 +17,8 @@ All notable changes to this project will be documented in this file.
   dispatch now records a versioned scheduler lease block on the latest
   `run_attempts.metadata`, worker claim/heartbeat/terminal result persistence
   records a versioned runner process block, and lifecycle event metadata now
-  includes the current `execution_task_id` for later stale-task rejection and
-  duplicate-delivery hardening.
+  includes the current `execution_task_id` for stale-task rejection and
+  follow-on duplicate-delivery hardening.
 - Added the first shared execution event contract slice for #157/#160. The
   backend now centralizes current run lifecycle event names and Phase 1 recovery
   reason codes in `agentic_data_platform.domain.execution_events`, and

@@ -12,6 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Execute one claimed platform run in an isolated subprocess.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--worker-id", required=True)
+    parser.add_argument("--execution-task-id", required=True)
     parser.add_argument("--request-id", default=None)
     args = parser.parse_args(argv)
 
@@ -24,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
             engine=engine,
             worker_id=args.worker_id,
             run_id=args.run_id,
+            execution_task_id=args.execution_task_id,
             request_id=args.request_id,
             executor=build_configured_executor(settings),
         )
