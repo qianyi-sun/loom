@@ -1,6 +1,6 @@
 # Core API Resources
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
 Related trackers:
 
@@ -19,8 +19,9 @@ surface for PM dashboards, researcher inspection, and future frontend
 development. The API is still an internal control-plane surface, but it now has
 stable routes for projects, benchmark tasks, queued run submission, lifecycle
 events, run summaries, run detail trajectories, artifacts, evaluator feedback,
-PM progress summaries, frontend session login, model/harness discovery,
-run-scoped telemetry, artifact bundle download, cancel, and retry.
+artifact chunk metadata, PM progress summaries, frontend session login,
+model/harness discovery, run-scoped telemetry, artifact bundle download,
+cancel, and retry.
 
 The implementation deliberately reuses existing domain and dashboard projection
 contracts rather than introducing a second API-only data model.
@@ -85,6 +86,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
+| `GET /runs/{run_id}/artifact-chunks` | List project-scoped stdout/stderr/trajectory/artifact chunk metadata with optional attempt, artifact, kind, sequence cursor, and bounded limit filters | `RunRepository.list_artifact_chunks()` |
 | `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunDashboardProjection.evaluator` + `RunDashboardProjection.evaluator_results` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_dashboard_progress_records()` + aggregate projection |
@@ -281,11 +283,14 @@ serializing dashboard payloads.
   `object_size_bytes`, and `object_sha256` in metadata. The
   `artifact_chunks` table indexes ordered stdout/stderr/trajectory/artifact
   chunks by run, attempt, artifact, kind, and sequence, with object key, media
-  type, byte size, SHA-256, upload status, and optional error reason for future
-  streaming APIs. Upload-state repository recovery can now expire stale
+  type, byte size, SHA-256, upload status, and optional error reason. `GET
+  /runs/{run_id}/artifact-chunks` exposes this bounded metadata to authenticated
+  project viewers without returning object payload bytes or storage
+  credentials. Upload-state repository recovery can now expire stale
   `pending` or `started` rows to `expired` with a durable `run.recovered`
-  event; richer upload transition histories and user-facing chunk stream APIs
-  remain #159 follow-up work.
+  event; automatic chunk writers, payload streaming/download by chunk
+  reference, richer upload transition histories, and typed log/artifact events
+  remain #159/#157 follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured

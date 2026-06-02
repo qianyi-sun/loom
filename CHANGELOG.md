@@ -8,8 +8,14 @@ All notable changes to this project will be documented in this file.
   `artifact_chunks` now records ordered stdout/stderr/trajectory/artifact chunk
   metadata with run, attempt, artifact, chunk kind, sequence, object key, size,
   SHA-256, upload status, and optional upload error reason. Repository methods
-  can idempotently record and list chunk indexes, while the streaming HTTP API
-  remains follow-up work.
+  can idempotently record and list chunk indexes.
+- Added a #159 run artifact chunk metadata API. `GET
+  /runs/{run_id}/artifact-chunks` lists bounded, project-scoped chunk metadata
+  by optional attempt, artifact, kind, sequence cursor, and limit so live
+  monitors and operators can discover object-backed log/trajectory chunks
+  without downloading payload bytes through Postgres. Automatic chunk writers,
+  payload streaming/download by chunk reference, richer upload transition
+  history, and typed log/artifact events remain follow-up work.
 - Split the #150 OpenHands adapter contract into separate OpenHands CLI and
   OpenHands SDK specs. The CLI path now passes a Harbor-compatible
   `openhands-ai` version through `--agent-kwarg version=1.6.0` so Harbor 0.9.0

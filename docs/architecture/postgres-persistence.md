@@ -1,6 +1,6 @@
 # Postgres Persistence Foundation
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
 Related trackers:
 
@@ -185,7 +185,9 @@ queries remain a later #157 migration.
 The #159 artifact chunk migration adds
 `artifact_chunks(run_id, attempt_id, chunk_kind, chunk_sequence)` for ordered
 chunk reads and `artifact_chunks(upload_status, created_at)` for upload-state
-inspection.
+inspection. `GET /runs/{run_id}/artifact-chunks` exposes bounded project-scoped
+metadata reads over those indexes without loading object payloads into API
+responses.
 
 ## API Resource Boundary
 
@@ -219,8 +221,10 @@ upload states as unavailable and surface `upload_status` /
 and `started` rows as `expired`, records the previous upload status, scheduler
 id, expiry timestamp, and error reason in artifact metadata, and appends a
 same-status `run.recovered` event with `recovery=artifact_upload_expired`.
-Streaming log APIs, automatic chunk writers, and richer upload transition
-history are still #159 follow-up work.
+The current service API exposes chunk metadata through
+`GET /runs/{run_id}/artifact-chunks`; automatic chunk writers, object payload
+streaming/download by chunk reference, richer upload transition history, and
+typed log/artifact events are still #159/#157 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

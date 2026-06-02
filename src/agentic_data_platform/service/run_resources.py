@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
+from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactChunkMetadata
 from agentic_data_platform.domain.execution_events import RunEventType, event_type_value
 from agentic_data_platform.domain.run_records import (
     BenchmarkTaskInstance,
@@ -345,6 +346,41 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         artifacts = RunDashboardProjection.from_run(run).to_dict()["artifacts"]
         return _with_request_id(request, {"run_id": run_id, "artifacts": artifacts})
 
+    @app.get("/runs/{run_id}/artifact-chunks", tags=["runs"], responses=_example_response(_ARTIFACT_CHUNKS_EXAMPLE))
+    def list_run_artifact_chunks(
+        run_id: str,
+        request: Request,
+        attempt_id: str | None = None,
+        artifact_id: str | None = None,
+        chunk_kind: ArtifactChunkKind | None = None,
+        after_sequence: int | None = Query(None, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+        session: Session = Depends(session_dependency),
+    ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
+        run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
+        chunks = RunRepository(session).list_artifact_chunks(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            artifact_id=artifact_id,
+            chunk_kind=chunk_kind,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        payload: dict[str, Any] = {
+            "run_id": run_id,
+            "chunks": [_artifact_chunk_payload(chunk) for chunk in chunks],
+            "next_after_sequence": _next_after_chunk_sequence(chunks, after_sequence),
+        }
+        if attempt_id is not None:
+            payload["attempt_id"] = attempt_id
+        if artifact_id is not None:
+            payload["artifact_id"] = artifact_id
+        if chunk_kind is not None:
+            payload["chunk_kind"] = chunk_kind.value
+        return _with_request_id(request, payload)
+
     @app.get("/runs/{run_id}/evaluation", tags=["runs"], responses=_example_response(_EVALUATION_EXAMPLE))
     def get_run_evaluation(
         run_id: str,
@@ -506,6 +542,10 @@ def _terminal_turn_payload(turn: TerminalTurn) -> dict[str, Any]:
     return payload
 
 
+def _artifact_chunk_payload(chunk: ArtifactChunkMetadata) -> dict[str, Any]:
+    return chunk.to_dict()
+
+
 def _status_event_payload(event) -> dict[str, Any]:
     return {
         "event_id": event.event_id,
@@ -527,6 +567,12 @@ def _next_after_seq(events: list[dict[str, Any]], fallback: int) -> int:
     if not events:
         return fallback
     return int(events[-1]["seq"])
+
+
+def _next_after_chunk_sequence(chunks: list[ArtifactChunkMetadata], fallback: int | None) -> int | None:
+    if not chunks:
+        return fallback
+    return int(chunks[-1].chunk_sequence)
 
 
 def _run_event_stream(
@@ -733,6 +779,30 @@ _RUN_RETRIED_EXAMPLE = {
 _ARTIFACTS_EXAMPLE = {
     "run_id": "run_001",
     "artifacts": _RUN_PAYLOAD_EXAMPLE["artifacts"],
+    "request_id": "req_123",
+}
+_ARTIFACT_CHUNKS_EXAMPLE = {
+    "run_id": "run_001",
+    "artifact_id": "run_001-trajectory",
+    "chunk_kind": "stdout",
+    "chunks": [
+        {
+            "run_id": "run_001",
+            "attempt_id": "run_001:attempt:1",
+            "artifact_id": "run_001-trajectory",
+            "chunk_kind": "stdout",
+            "chunk_sequence": 0,
+            "storage_key": "runs/run_001/tasks/task_family_invoice_images/logs/stdout/000000.jsonl",
+            "media_type": "application/x-ndjson",
+            "size_bytes": 65536,
+            "sha256": "0" * 64,
+            "upload_status": "completed",
+            "created_at": "2026-05-28T12:00:00Z",
+            "metadata": {"preview_start_byte": 0, "preview_end_byte": 65536},
+            "schema_version": "artifact-chunk-metadata-v1",
+        }
+    ],
+    "next_after_sequence": 0,
     "request_id": "req_123",
 }
 _EVALUATION_EXAMPLE = {

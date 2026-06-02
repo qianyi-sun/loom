@@ -6,6 +6,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
+from agentic_data_platform.domain.artifact_metadata import (
+    ArtifactChunkKind,
+    ArtifactChunkMetadata,
+    ArtifactUploadStatus,
+)
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
@@ -135,6 +140,114 @@ class RunResourcesTest(unittest.TestCase):
         self.assertNotIn("/srv/private", rendered)
         self.assertNotIn("X-Amz-Signature", rendered)
         self.assertNotIn("secret", rendered)
+
+    def test_list_artifact_chunks_returns_bounded_metadata_cursor(self):
+        now = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_001",
+                    attempt_id="run_001:attempt:1",
+                    artifact_id="run_001-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=0,
+                    storage_key="runs/run_001/tasks/task/logs/stdout/000000.jsonl",
+                    sha256="a" * 64,
+                    size_bytes=128,
+                    created_at=now,
+                    metadata={"preview_start_byte": 0, "preview_end_byte": 128},
+                )
+            )
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_001",
+                    attempt_id="run_001:attempt:1",
+                    artifact_id="run_001-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=1,
+                    storage_key="runs/run_001/tasks/task/logs/stdout/000001.jsonl",
+                    sha256="b" * 64,
+                    size_bytes=96,
+                    upload_status=ArtifactUploadStatus.FAILED,
+                    upload_error_reason="object upload failed",
+                    created_at=now,
+                )
+            )
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_001",
+                    attempt_id="run_001:attempt:1",
+                    artifact_id="run_001-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDERR,
+                    chunk_sequence=0,
+                    storage_key="runs/run_001/tasks/task/logs/stderr/000000.jsonl",
+                    sha256="c" * 64,
+                    size_bytes=16,
+                    created_at=now,
+                )
+            )
+
+        response = self.client.get(
+            "/runs/run_001/artifact-chunks",
+            params={
+                "artifact_id": "run_001-trajectory",
+                "chunk_kind": "stdout",
+                "after_sequence": 0,
+                "limit": 1,
+            },
+            headers={"X-Request-ID": "req-artifact-chunks-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run_id"], "run_001")
+        self.assertEqual(payload["artifact_id"], "run_001-trajectory")
+        self.assertEqual(payload["chunk_kind"], "stdout")
+        self.assertEqual(payload["next_after_sequence"], 1)
+        self.assertEqual(payload["request_id"], "req-artifact-chunks-001")
+        self.assertEqual(
+            payload["chunks"],
+            [
+                {
+                    "run_id": "run_001",
+                    "attempt_id": "run_001:attempt:1",
+                    "artifact_id": "run_001-trajectory",
+                    "chunk_kind": "stdout",
+                    "chunk_sequence": 1,
+                    "storage_key": "runs/run_001/tasks/task/logs/stdout/000001.jsonl",
+                    "media_type": "application/x-ndjson",
+                    "size_bytes": 96,
+                    "sha256": "b" * 64,
+                    "upload_status": "failed",
+                    "upload_error_reason": "object upload failed",
+                    "created_at": "2026-06-02T12:00:00Z",
+                    "metadata": {},
+                    "schema_version": "artifact-chunk-metadata-v1",
+                }
+            ],
+        )
+
+    def test_list_artifact_chunks_enforces_project_access(self):
+        with session_scope(self.engine) as session:
+            identities = IdentityRepository(session)
+            identities.create_team(team_id="private-team", name="Private Team")
+            identities.create_user(
+                user_id="private-user",
+                email="private@example.com",
+                display_name="Private User",
+                team_id="private-team",
+            )
+            ProjectRepository(session).create_project(
+                project_id="private-project",
+                name="Private Project",
+                owner_team_id="private-team",
+            )
+            RunRepository(session).save_run(_completed_run("run_private_chunks", project_id="private-project"))
+
+        response = self.client.get("/runs/run_private_chunks/artifact-chunks")
+
+        self.assertEqual(response.status_code, 403)
 
     def test_get_evaluation_returns_projected_evaluator_object(self):
         response = self.client.get("/runs/run_001/evaluation", headers={"X-Request-ID": "req-eval-001"})
@@ -726,3 +839,35 @@ def _trajectory_payload(turn: TerminalTurn) -> dict:
     if turn.model_call_id is not None:
         payload["model_call_id"] = turn.model_call_id
     return payload
+
+
+def _artifact_chunk(
+    *,
+    run_id: str,
+    attempt_id: str,
+    artifact_id: str,
+    chunk_kind: ArtifactChunkKind,
+    chunk_sequence: int,
+    storage_key: str,
+    sha256: str,
+    size_bytes: int,
+    created_at: datetime,
+    upload_status: ArtifactUploadStatus = ArtifactUploadStatus.COMPLETED,
+    upload_error_reason: str | None = None,
+    metadata: dict | None = None,
+) -> ArtifactChunkMetadata:
+    return ArtifactChunkMetadata(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        artifact_id=artifact_id,
+        chunk_kind=chunk_kind,
+        chunk_sequence=chunk_sequence,
+        storage_key=storage_key,
+        media_type="application/x-ndjson",
+        size_bytes=size_bytes,
+        sha256=sha256,
+        upload_status=upload_status,
+        upload_error_reason=upload_error_reason,
+        created_at=created_at,
+        metadata=dict(metadata or {}),
+    )
