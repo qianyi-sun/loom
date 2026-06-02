@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Fixed a shared-dev scheduler Docker cleanup smoke race. The synthetic cleanup
+  smoke now claims its own queued run by `run_id` before marking it stale, so
+  pre-existing queued backlog cannot steal the claim and leave the smoke
+  container outside scheduler recovery.
 - Moved `GET /runs` onto the #157 durable projection read path where clean
   `run_dashboard_projections` rows are available. Run lists now return the
   stored dashboard-safe payload for clean projections and fall back to hydrated

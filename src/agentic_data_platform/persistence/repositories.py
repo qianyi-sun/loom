@@ -1215,6 +1215,20 @@ class RunRepository:
             request_id=request_id,
         )
 
+    def claim_queued_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        _require_non_empty("run_id", run_id)
+        _require_non_empty("worker_id", worker_id)
+        row = self._run_row_for_update(run_id)
+        if row.status != RunStatus.QUEUED.value:
+            raise ValueError(f"run {run_id} is not queued")
+        return self._claim_run_row(row, worker_id=worker_id, request_id=request_id)
+
     def claim_next_dispatched_run(
         self,
         *,
@@ -1244,7 +1258,15 @@ class RunRepository:
         )
         if row is None:
             return None
+        return self._claim_run_row(row, worker_id=worker_id, request_id=request_id)
 
+    def _claim_run_row(
+        self,
+        row: RunRow,
+        *,
+        worker_id: str,
+        request_id: str | None,
+    ) -> RunRecord:
         previous_status = RunStatus(row.status)
         run = self._run_record(row)
         run.transition_to(RunStatus.PROVISIONING)

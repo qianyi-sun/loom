@@ -401,8 +401,9 @@ durable recovery events. With `DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE=1`
 (default), the same deploy path also runs
 `python -m agentic_data_platform.scheduler.cleanup_smoke` before API/frontend
 smokes. That smoke starts a labeled dummy Docker container for a synthetic
-stale active run, runs scheduler recovery, and fails deployment unless the
-container is removed and `sandbox.container_cleanup` evidence is persisted.
+stale active run, claims that exact run before marking it stale, runs scheduler
+recovery, and fails deployment unless the container is removed and
+`sandbox.container_cleanup` evidence is persisted.
 With `DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE=1` (default), deployment
 also runs `cleanup_smoke --mode parent-death`: a helper parent process starts a
 live labeled sandbox container, is terminated, and then scheduler recovery must

@@ -279,7 +279,11 @@ def _seed_stale_active_run(*, engine: Engine, run_id: str, stale_active_seconds:
         )
         repository = RunRepository(session)
         repository.create_run(_smoke_run(run_id=run_id), request_id=f"{run_id}-cleanup-smoke-create")
-        repository.claim_next_queued_run(worker_id="scheduler-cleanup-smoke-worker")
+        repository.claim_queued_run(
+            run_id,
+            worker_id="scheduler-cleanup-smoke-worker",
+            request_id=f"{run_id}-cleanup-smoke-claim",
+        )
         row = session.get(RunRow, run_id)
         if row is not None:
             row.updated_at = stale_at

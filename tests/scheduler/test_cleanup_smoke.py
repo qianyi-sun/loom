@@ -9,8 +9,9 @@ from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence import session_scope
 from agentic_data_platform.persistence.database import create_database_engine
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.repositories import RunRepository
+from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.scheduler.cleanup_smoke import (
+    _smoke_run,
     run_scheduler_docker_cleanup_smoke,
     run_scheduler_parent_death_cleanup_smoke,
 )
@@ -57,6 +58,37 @@ class SchedulerDockerCleanupSmokeTest(unittest.TestCase):
         self.assertEqual(len(cleanup_events), 1)
         self.assertEqual(cleanup_events[0].metadata["recovery"], RecoveryReasonCode.DOCKER_CONTAINER_CLEANUP.value)
         self.assertEqual(cleanup_events[0].metadata["removed_container_ids"], [FakeDockerRunner.SHORT_CONTAINER_ID])
+
+    def test_smoke_claims_target_run_when_older_queued_runs_exist(self) -> None:
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(team_id="scheduler-smoke", name="Scheduler Smoke")
+            ProjectRepository(session).create_project(
+                project_id="scheduler-cleanup-smoke",
+                name="Scheduler Cleanup Smoke",
+                owner_team_id="scheduler-smoke",
+            )
+            RunRepository(session).create_run(_smoke_run(run_id="older_backlog_run"))
+
+        runner = FakeDockerRunner()
+
+        result = run_scheduler_docker_cleanup_smoke(
+            engine=self.engine,
+            scheduler_id="cleanup-smoke-target-scheduler",
+            run_id="cleanup_smoke_target_run",
+            runner=runner,
+            smoke_image="python:3.12-slim",
+            stale_active_seconds=60,
+        )
+
+        with session_scope(self.engine) as session:
+            repository = RunRepository(session)
+            target = repository.get_run("cleanup_smoke_target_run")
+            backlog = repository.get_run("older_backlog_run")
+
+        self.assertEqual(target.status, RunStatus.FAILED)
+        self.assertEqual(backlog.status, RunStatus.QUEUED)
+        self.assertEqual(result.docker_cleanup_count, 1)
+        self.assertEqual(result.removed_container_ids, [FakeDockerRunner.SHORT_CONTAINER_ID])
 
     def test_parent_death_smoke_kills_container_parent_and_records_cleanup_evidence(self) -> None:
         runner = FakeParentDeathDockerRunner()
