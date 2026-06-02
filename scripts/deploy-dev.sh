@@ -15,6 +15,7 @@ DEPLOY_RUN_API_SMOKE="${DEPLOY_RUN_API_SMOKE:-1}"
 DEPLOY_RUN_FRONTEND_SMOKE="${DEPLOY_RUN_FRONTEND_SMOKE:-1}"
 DEPLOY_RUN_HARBOR_SMOKE="${DEPLOY_RUN_HARBOR_SMOKE:-1}"
 DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE="${DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE:-0}"
+DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE:-1}"
 DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS="${DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS:-60}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
@@ -39,6 +40,14 @@ compose() {
 recover_stale_active_runs_before_smoke() {
   log "Recovering stale active runs before API/frontend smokes"
   SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS="$DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS" compose run --rm -T scheduler python -m agentic_data_platform.scheduler.service --recover-once --scheduler-id deploy-dev-recovery </dev/null
+}
+
+run_scheduler_docker_cleanup_smoke() {
+  if [[ "$DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE" != "1" ]]; then
+    return 0
+  fi
+  log "Checking scheduler Docker cleanup recovery smoke"
+  SCHEDULER_DOCKER_CLEANUP_ENABLED=true compose run --rm -T scheduler python -m agentic_data_platform.scheduler.cleanup_smoke --scheduler-id deploy-dev-cleanup-smoke </dev/null
 }
 
 run_compose_smoke() {
@@ -87,6 +96,7 @@ run_compose_smoke() {
   log "Checking API health endpoint"
   check_api_health
   recover_stale_active_runs_before_smoke
+  run_scheduler_docker_cleanup_smoke
 
   if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
     log "Checking authenticated API-created Docker sandbox run"
@@ -237,6 +247,10 @@ PY
 done
 printf '[deploy-dev] Recovering stale active runs before API/frontend smokes\n'
 SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS="$DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS" docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.service --recover-once --scheduler-id deploy-dev-recovery </dev/null
+if [[ "$DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE" == "1" ]]; then
+  printf '[deploy-dev] Checking scheduler Docker cleanup recovery smoke\n'
+  SCHEDULER_DOCKER_CLEANUP_ENABLED=true docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.cleanup_smoke --scheduler-id deploy-dev-cleanup-smoke </dev/null
+fi
 if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking authenticated API-created Docker sandbox run\n'
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T api-smoke </dev/null

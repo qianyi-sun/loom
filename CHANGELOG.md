@@ -10,7 +10,10 @@ All notable changes to this project will be documented in this file.
   containers for stale recovered active runs and emit
   `sandbox.container_cleanup` evidence, and the worker CLI still exposes
   `--cleanup-run-containers` with an optional attempt filter for manual
-  operator recovery.
+  operator recovery. Shared-dev deploy validation now also runs a scheduler
+  Docker cleanup smoke that creates a labeled container, recovers a synthetic
+  stale active run, and verifies removal plus cleanup-event evidence before API
+  and frontend smokes.
 - Clarified the main README product direction for new contributors by removing
   local-reference wording and replacing MVP-facing status text with
   product-grade platform terminology.

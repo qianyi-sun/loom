@@ -55,6 +55,31 @@ class DeployDevScriptTests(unittest.TestCase):
             script.index("Checking authenticated API-created Docker sandbox run"),
         )
 
+    def test_shared_dev_deploy_verifies_scheduler_docker_cleanup_before_api_smoke(self) -> None:
+        script = _script_text()
+
+        self.assertIn(
+            'DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE:-1}"',
+            script,
+        )
+        self.assertIn("Checking scheduler Docker cleanup recovery smoke", script)
+        self.assertIn(
+            "SCHEDULER_DOCKER_CLEANUP_ENABLED=true "
+            "compose run --rm -T scheduler "
+            "python -m agentic_data_platform.scheduler.cleanup_smoke --scheduler-id deploy-dev-cleanup-smoke",
+            script,
+        )
+        self.assertIn(
+            "SCHEDULER_DOCKER_CLEANUP_ENABLED=true "
+            'docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler '
+            "python -m agentic_data_platform.scheduler.cleanup_smoke --scheduler-id deploy-dev-cleanup-smoke",
+            script,
+        )
+        self.assertLess(
+            script.index("Checking scheduler Docker cleanup recovery smoke"),
+            script.index("Checking authenticated API-created Docker sandbox run"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -397,7 +397,12 @@ runs left by a previous worker restart are then marked `failed` with
 smoke runs queued. The normal scheduler recovery pass also expires stale
 artifact uploads older than `SCHEDULER_STALE_ARTIFACT_UPLOAD_TIMEOUT_SECONDS` so
 pending/started object writes become visible as `expired` artifact metadata and
-durable recovery events.
+durable recovery events. With `DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE=1`
+(default), the same deploy path also runs
+`python -m agentic_data_platform.scheduler.cleanup_smoke` before API/frontend
+smokes. That smoke starts a labeled dummy Docker container for a synthetic
+stale active run, runs scheduler recovery, and fails deployment unless the
+container is removed and `sandbox.container_cleanup` evidence is persisted.
 
 Verify the frontend login, model/backend/benchmark discovery, Harbor-backed run
 launch, durable lifecycle event replay and one-shot SSE replay, telemetry

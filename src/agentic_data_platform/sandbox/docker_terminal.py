@@ -360,7 +360,7 @@ def _index_workspace(workspace_path: Path) -> dict[str, tuple[int, str]]:
     return indexed
 
 
-def _docker_owned_container_labels(*, run_id: str, attempt_id: str | None = None) -> dict[str, str]:
+def docker_owned_container_labels(*, run_id: str, attempt_id: str | None = None) -> dict[str, str]:
     labels = {
         "com.agentic-data-platform.managed": "true",
         "com.agentic-data-platform.run_id": run_id,
@@ -369,6 +369,10 @@ def _docker_owned_container_labels(*, run_id: str, attempt_id: str | None = None
     if attempt_id is not None:
         labels["com.agentic-data-platform.attempt_id"] = attempt_id
     return labels
+
+
+def _docker_owned_container_labels(*, run_id: str, attempt_id: str | None = None) -> dict[str, str]:
+    return docker_owned_container_labels(run_id=run_id, attempt_id=attempt_id)
 
 
 def _docker_ps_owned_container_args(*, run_id: str, attempt_id: str | None = None) -> list[str]:
