@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
   performs a bounded terminal projection refresh sweep for missing, dirty, or
   stale projection rows and logs projection-only recovery work from the
   long-running scheduler loop.
+- Added #159/#160 stale artifact upload expiry recovery. Scheduler recovery can
+  now mark stale `pending` or `started` artifact uploads as `expired`, record
+  previous status / scheduler / expiry metadata on the artifact row, emit a
+  same-status `run.recovered` event with `recovery=artifact_upload_expired`,
+  and report expired artifact ids in scheduler recovery output.
 - Added #159/#160 artifact bundle upload-state reporting. Bundle generation now
   treats artifact metadata with non-`completed` `upload_status` as unavailable
   DB truth, skips object-store reads for those artifacts, and records

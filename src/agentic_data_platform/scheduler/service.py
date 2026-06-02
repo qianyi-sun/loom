@@ -36,6 +36,7 @@ class SchedulerRecoveryResult:
     requeued_run_ids: list[str]
     failed_run_ids: list[str]
     projection_refreshed_run_ids: list[str]
+    artifact_expired_artifact_ids: list[str]
 
     @property
     def requeued_count(self) -> int:
@@ -49,6 +50,10 @@ class SchedulerRecoveryResult:
     def projection_refreshed_count(self) -> int:
         return len(self.projection_refreshed_run_ids)
 
+    @property
+    def artifact_expired_count(self) -> int:
+        return len(self.artifact_expired_artifact_ids)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "scheduler_id": self.scheduler_id,
@@ -58,6 +63,8 @@ class SchedulerRecoveryResult:
             "failed_run_ids": list(self.failed_run_ids),
             "projection_refreshed_count": self.projection_refreshed_count,
             "projection_refreshed_run_ids": list(self.projection_refreshed_run_ids),
+            "artifact_expired_count": self.artifact_expired_count,
+            "artifact_expired_artifact_ids": list(self.artifact_expired_artifact_ids),
         }
 
 
@@ -99,6 +106,9 @@ class RunScheduler:
         stale_active_older_than = datetime.now(timezone.utc) - timedelta(
             seconds=self.settings.scheduler_stale_active_heartbeat_timeout_seconds
         )
+        stale_artifact_upload_older_than = datetime.now(timezone.utc) - timedelta(
+            seconds=self.settings.scheduler_stale_artifact_upload_timeout_seconds
+        )
         with session_scope(self.engine) as session:
             repository = RunRepository(session)
             requeued = repository.requeue_stale_dispatched_runs(
@@ -111,6 +121,12 @@ class RunScheduler:
                 older_than=stale_active_older_than,
                 scheduler_id=self.scheduler_id,
                 max_runs=self.settings.scheduler_recovery_batch_size,
+                request_id=request_id,
+            )
+            artifact_expired = repository.expire_stale_artifact_uploads(
+                older_than=stale_artifact_upload_older_than,
+                scheduler_id=self.scheduler_id,
+                max_artifacts=self.settings.scheduler_recovery_batch_size,
                 request_id=request_id,
             )
             projection_refreshed = repository.refresh_terminal_dashboard_projections(
@@ -127,6 +143,7 @@ class RunScheduler:
             requeued_run_ids=[run.run_id for run in requeued],
             failed_run_ids=[run.run_id for run in failed],
             projection_refreshed_run_ids=projection_refreshed_ids,
+            artifact_expired_artifact_ids=[artifact.artifact_id for artifact in artifact_expired],
         )
 
 
@@ -156,6 +173,7 @@ def run_scheduler_loop(
             recovery_result.requeued_count
             or recovery_result.failed_count
             or recovery_result.projection_refreshed_count
+            or recovery_result.artifact_expired_count
         ):
             print(json.dumps({"action": "recover", **recovery_result.to_dict()}, sort_keys=True), flush=True)
         result = scheduler.dispatch_once()

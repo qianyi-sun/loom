@@ -193,8 +193,12 @@ states (`pending`, `started`, `completed`, `failed`, `expired`) and
 `artifact-chunk-metadata-v1` for future stdout/stderr, trajectory, and artifact
 chunk rows. Artifact bundles already treat non-`completed` upload states as
 unavailable and surface `upload_status` / `upload_error_reason` in
-`manifest.json`; dedicated upload-state transitions, chunk tables, and recovery
-queries are still #159/#160 follow-up work.
+`manifest.json`. `RunRepository.expire_stale_artifact_uploads(...)` now marks
+stale `pending` and `started` rows as `expired`, records the previous upload
+status, scheduler id, expiry timestamp, and error reason in artifact metadata,
+and appends a same-status `run.recovered` event with
+`recovery=artifact_upload_expired`. Dedicated chunk tables, streaming log
+indexes, and richer upload transition history are still #159 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

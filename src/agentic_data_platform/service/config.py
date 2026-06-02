@@ -44,6 +44,7 @@ class ServiceSettings:
     scheduler_benchmark_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_stale_dispatched_timeout_seconds: int = 300
     scheduler_stale_active_heartbeat_timeout_seconds: int = 900
+    scheduler_stale_artifact_upload_timeout_seconds: int = 1800
     scheduler_recovery_batch_size: int = 50
 
 
@@ -98,6 +99,11 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
             values,
             "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS",
             900,
+        ),
+        scheduler_stale_artifact_upload_timeout_seconds=_get_int(
+            values,
+            "SCHEDULER_STALE_ARTIFACT_UPLOAD_TIMEOUT_SECONDS",
+            1800,
         ),
         scheduler_recovery_batch_size=_get_int(values, "SCHEDULER_RECOVERY_BATCH_SIZE", 50),
     )

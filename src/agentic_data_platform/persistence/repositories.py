@@ -14,6 +14,7 @@ from agentic_data_platform.benchmarks.fixtures import (
     BenchmarkFixtureFamily,
     BenchmarkFixtureInstance,
 )
+from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
 from agentic_data_platform.domain.execution_events import (
     RecoveryReasonCode,
     RunEventType,
@@ -70,6 +71,17 @@ class StaleExecutionTaskError(ValueError):
 
 class DuplicateExecutionTaskError(ValueError):
     """Raised when a worker tries to execute an already-running task."""
+
+
+@dataclass(frozen=True)
+class ExpiredArtifactUploadRecord:
+    run_id: str
+    attempt_id: str | None
+    artifact_id: str
+    previous_upload_status: str
+    upload_status: str
+    scheduler_id: str
+    expired_at: datetime
 
 
 @dataclass(frozen=True)
@@ -1267,6 +1279,103 @@ class RunRepository:
         self.session.flush()
         return refreshed
 
+    def expire_stale_artifact_uploads(
+        self,
+        *,
+        older_than: datetime,
+        scheduler_id: str,
+        max_artifacts: int,
+        reason: str = "artifact upload expired",
+        request_id: str | None = None,
+    ) -> list[ExpiredArtifactUploadRecord]:
+        _require_non_empty("scheduler_id", scheduler_id)
+        if max_artifacts <= 0:
+            return []
+        if older_than.tzinfo is None:
+            raise ValueError("older_than must be timezone-aware")
+
+        pending_statuses = {
+            ArtifactUploadStatus.PENDING.value,
+            ArtifactUploadStatus.STARTED.value,
+        }
+        status_expr = ArtifactRow.metadata_json["upload_status"].as_string()
+        candidates = self.session.scalars(
+            select(ArtifactRow)
+            .where(status_expr.in_(pending_statuses))
+            .where(ArtifactRow.created_at < older_than)
+            .order_by(ArtifactRow.created_at, ArtifactRow.artifact_id)
+            .with_for_update(skip_locked=True)
+            .limit(max(max_artifacts * 5, 25))
+        )
+        expired: list[ExpiredArtifactUploadRecord] = []
+        refreshed_run_ids: set[str] = set()
+        for artifact in candidates:
+            if len(expired) >= max_artifacts:
+                break
+            metadata = dict(artifact.metadata_json or {})
+            upload_status = str(metadata.get("upload_status") or "").strip()
+            if upload_status not in pending_statuses:
+                continue
+            upload_started_at = _parse_metadata_datetime(metadata.get("upload_started_at")) or _aware(
+                artifact.created_at
+            )
+            if upload_started_at >= older_than:
+                continue
+
+            now = utc_now()
+            metadata["upload_status"] = ArtifactUploadStatus.EXPIRED.value
+            metadata["upload_previous_status"] = upload_status
+            metadata["upload_recovery"] = RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value
+            metadata["upload_recovery_scheduler_id"] = scheduler_id
+            metadata["upload_expired_at"] = _datetime_json(now)
+            metadata["upload_error_reason"] = reason
+            artifact.metadata_json = metadata
+
+            run_row = _required(self.session.get(RunRow, artifact.run_id), "run", artifact.run_id)
+            attempt = self._latest_attempt_row(artifact.run_id)
+            run_status = RunStatus(run_row.status)
+            self._append_status_event(
+                run_id=artifact.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.RECOVERED,
+                from_status=run_status,
+                to_status=run_status,
+                reason=reason,
+                request_id=request_id,
+                metadata=recovery_event_metadata(
+                    RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED,
+                    scheduler_id=scheduler_id,
+                    artifact_id=artifact.artifact_id,
+                    execution_task_id=attempt.attempt_id,
+                    previous_upload_status=upload_status,
+                    upload_status=ArtifactUploadStatus.EXPIRED.value,
+                    stale_before=older_than.isoformat(),
+                    upload_started_at=_datetime_json(upload_started_at),
+                    expired_at=_datetime_json(now),
+                ),
+            )
+            expired.append(
+                ExpiredArtifactUploadRecord(
+                    artifact_id=artifact.artifact_id,
+                    run_id=artifact.run_id,
+                    attempt_id=artifact.attempt_id,
+                    previous_upload_status=upload_status,
+                    upload_status=ArtifactUploadStatus.EXPIRED.value,
+                    scheduler_id=scheduler_id,
+                    expired_at=now,
+                )
+            )
+            refreshed_run_ids.add(artifact.run_id)
+
+        for run_id in sorted(refreshed_run_ids):
+            self._upsert_dashboard_projection(
+                run_id=run_id,
+                refresh_reason=RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value,
+            )
+
+        self.session.flush()
+        return expired
+
     def _run_record(self, row: RunRow) -> RunRecord:
         latest_attempt = self._latest_attempt_row(row.run_id)
         turns = [
@@ -1961,6 +2070,10 @@ def _terminal_runner_process_status(status: RunStatus) -> RunnerProcessStatus:
 
 
 def _parse_worker_datetime(value: Any) -> datetime | None:
+    return _parse_metadata_datetime(value)
+
+
+def _parse_metadata_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:

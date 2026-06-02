@@ -241,12 +241,11 @@ serializing dashboard payloads.
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, and `run.worker_subprocess_failed`.
-  Recovery metadata currently uses canonical reason codes for
-  `stale_dispatched`, `stale_worker_heartbeat`, `terminal_result_mismatch`,
-  `canceled_resource_cleanup`, `artifact_upload_expired`, and
-  `projection_refresh_failed`; not every listed recovery path is implemented
-  yet, but later #160 slices should reuse these codes instead of minting local
-  strings.
+  Recovery metadata currently uses canonical reason codes for implemented
+  `stale_dispatched`, `stale_worker_heartbeat`, and `artifact_upload_expired`
+  paths, plus reserved `terminal_result_mismatch`, `canceled_resource_cleanup`,
+  and `projection_refresh_failed` paths. Later #160 slices should reuse these
+  codes instead of minting local strings.
 - Scheduler and worker writers use
   `agentic_data_platform.domain.execution_metadata` as the v1 attempt metadata
   contract. `run_attempts.metadata.execution.scheduler` records the scheduler
@@ -275,7 +274,9 @@ serializing dashboard payloads.
   object-store writes mark successfully persisted payloads as `completed` and
   include `artifact_metadata_schema`, `upload_status`, `storage_key`,
   `object_size_bytes`, and `object_sha256` in metadata. Upload-state repository
-  transitions and chunk-index APIs remain #159 follow-up work.
+  recovery can now expire stale `pending` or `started` rows to `expired` with a
+  durable `run.recovered` event; chunk-index APIs and richer upload transition
+  histories remain #159 follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured
@@ -287,7 +288,10 @@ serializing dashboard payloads.
   metadata has non-`completed` `upload_status` are treated as unavailable even
   if an object key exists; the manifest records `upload_status` and any
   `upload_error_reason` so partial upload state is visible to operators and
-  recovery jobs. Raw Harbor `jobs/` payload preservation is implemented through
+  recovery jobs. Scheduler recovery expires stale `pending` and `started`
+  upload rows after `SCHEDULER_STALE_ARTIFACT_UPLOAD_TIMEOUT_SECONDS` so the
+  bundle can report `expired` instead of silently reading a stale object key.
+  Raw Harbor `jobs/` payload preservation is implemented through
   the #65 ingestor path and appears as object-store-backed payload files when
   the worker and API share the same artifact store.
 - Telemetry responses expose run status, queue/worker state, host CPU/RAM/disk

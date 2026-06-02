@@ -8,10 +8,12 @@ from unittest.mock import patch
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
+from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
+from agentic_data_platform.domain.execution_events import RecoveryReasonCode, RunEventType
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.models import RunAttemptRow, RunDashboardProjectionRow, RunRow
+from agentic_data_platform.persistence.models import ArtifactRow, RunAttemptRow, RunDashboardProjectionRow, RunRow
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.scheduler.service import RunScheduler, run_scheduler_loop
 from agentic_data_platform.service.config import ServiceSettings
@@ -268,6 +270,53 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertIsNotNone(projection)
         self.assertEqual(projection.status, RunStatus.SUCCEEDED.value)
         self.assertEqual(projection.refresh_reason, "projection_recovery")
+
+    def test_scheduler_expires_stale_artifact_uploads_from_service_settings(self):
+        now = datetime.now(timezone.utc)
+        stale_timestamp = now - timedelta(minutes=10)
+
+        with session_scope(self.engine) as session:
+            RunRepository(session).save_run(_completed_run(run_id="run_scheduler_artifact_expiry"))
+            artifact = session.get(ArtifactRow, "run_scheduler_artifact_expiry-workspace-snapshot")
+            artifact.metadata_json = {
+                **dict(artifact.metadata_json or {}),
+                "upload_status": ArtifactUploadStatus.STARTED.value,
+                "upload_started_at": stale_timestamp.isoformat(),
+            }
+            artifact.created_at = stale_timestamp
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_stale_artifact_upload_timeout_seconds=300,
+                scheduler_recovery_batch_size=10,
+            ),
+        )
+
+        result = scheduler.recover_once(request_id="req-scheduler-artifact-expiry-001")
+
+        with session_scope(self.engine) as session:
+            artifact = session.get(ArtifactRow, "run_scheduler_artifact_expiry-workspace-snapshot")
+            events = RunRepository(session).list_status_events("run_scheduler_artifact_expiry")
+
+        self.assertEqual(result.artifact_expired_count, 1)
+        self.assertEqual(result.artifact_expired_artifact_ids, ["run_scheduler_artifact_expiry-workspace-snapshot"])
+        self.assertEqual(artifact.metadata_json["upload_status"], ArtifactUploadStatus.EXPIRED.value)
+
+        recovery_events = [event for event in events if event.event_type == RunEventType.RECOVERED.value]
+        self.assertEqual(len(recovery_events), 1)
+        self.assertEqual(recovery_events[0].metadata["recovery"], RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value)
+        self.assertEqual(recovery_events[0].metadata["artifact_id"], "run_scheduler_artifact_expiry-workspace-snapshot")
 
     def test_scheduler_loop_logs_projection_only_recovery(self):
         with session_scope(self.engine) as session:

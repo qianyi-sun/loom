@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import inspect, select
 
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
+from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
 from agentic_data_platform.domain.execution_metadata import (
     EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION,
     RunnerProcessStatus,
@@ -29,7 +30,7 @@ from agentic_data_platform.domain.run_records import (
 )
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.models import RunAttemptRow, RunDashboardProjectionRow, RunRow
+from agentic_data_platform.persistence.models import ArtifactRow, RunAttemptRow, RunDashboardProjectionRow, RunRow
 from agentic_data_platform.persistence.repositories import (
     AuditEventRepository,
     BenchmarkCatalogRepository,
@@ -294,6 +295,111 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(projection_0.status, RunStatus.SUCCEEDED.value)
         self.assertFalse(projection_0.dirty)
         self.assertEqual(projection_0.refresh_reason, "projection_recovery")
+
+    def test_expire_stale_artifact_uploads_marks_pending_and_started_rows_with_recovery_events(self):
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=5)
+        stale_timestamp = now - timedelta(minutes=10)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(_completed_run(run_id="run_artifact_expiry"))
+
+            pending = session.get(ArtifactRow, "run_artifact_expiry-trajectory")
+            pending.metadata_json = {
+                **dict(pending.metadata_json or {}),
+                "upload_status": ArtifactUploadStatus.PENDING.value,
+                "upload_started_at": stale_timestamp.isoformat(),
+            }
+            pending.created_at = stale_timestamp
+
+            started = session.get(ArtifactRow, "run_artifact_expiry-workspace-snapshot")
+            started.metadata_json = {
+                **dict(started.metadata_json or {}),
+                "upload_status": ArtifactUploadStatus.STARTED.value,
+                "upload_started_at": stale_timestamp.isoformat(),
+            }
+            started.created_at = stale_timestamp + timedelta(seconds=1)
+
+            completed = session.get(ArtifactRow, "run_artifact_expiry-llm-judge-v0-report")
+            completed.metadata_json = {
+                **dict(completed.metadata_json or {}),
+                "upload_status": ArtifactUploadStatus.COMPLETED.value,
+            }
+            completed.created_at = stale_timestamp
+
+            expired = runs.expire_stale_artifact_uploads(
+                older_than=cutoff,
+                scheduler_id="scheduler-artifact-expiry",
+                max_artifacts=10,
+                request_id="req-artifact-expiry-001",
+            )
+            events = runs.list_status_events("run_artifact_expiry")
+
+        self.assertEqual(
+            [item.artifact_id for item in expired],
+            ["run_artifact_expiry-trajectory", "run_artifact_expiry-workspace-snapshot"],
+        )
+        self.assertEqual([item.previous_upload_status for item in expired], ["pending", "started"])
+
+        with session_scope(self.engine) as session:
+            pending = session.get(ArtifactRow, "run_artifact_expiry-trajectory")
+            started = session.get(ArtifactRow, "run_artifact_expiry-workspace-snapshot")
+            completed = session.get(ArtifactRow, "run_artifact_expiry-llm-judge-v0-report")
+
+        self.assertEqual(pending.metadata_json["upload_status"], ArtifactUploadStatus.EXPIRED.value)
+        self.assertEqual(started.metadata_json["upload_status"], ArtifactUploadStatus.EXPIRED.value)
+        self.assertEqual(completed.metadata_json["upload_status"], ArtifactUploadStatus.COMPLETED.value)
+        self.assertEqual(pending.metadata_json["upload_recovery"], "artifact_upload_expired")
+        self.assertEqual(pending.metadata_json["upload_recovery_scheduler_id"], "scheduler-artifact-expiry")
+        self.assertIn("upload_expired_at", pending.metadata_json)
+        self.assertIn("upload_error_reason", pending.metadata_json)
+
+        recovery_events = [event for event in events if event.event_type == RunEventType.RECOVERED.value]
+        self.assertEqual([event.metadata["artifact_id"] for event in recovery_events], [
+            "run_artifact_expiry-trajectory",
+            "run_artifact_expiry-workspace-snapshot",
+        ])
+        self.assertEqual(recovery_events[0].metadata["recovery"], RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value)
+        self.assertEqual(recovery_events[0].from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(recovery_events[0].to_status, RunStatus.SUCCEEDED)
+
+    def test_expire_stale_artifact_uploads_respects_batch_limit(self):
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=5)
+        stale_timestamp = now - timedelta(minutes=10)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(_completed_run(run_id="run_artifact_expiry_batch_0"))
+            runs.save_run(_completed_run(run_id="run_artifact_expiry_batch_1"))
+            for artifact_id in [
+                "run_artifact_expiry_batch_0-trajectory",
+                "run_artifact_expiry_batch_1-trajectory",
+            ]:
+                artifact = session.get(ArtifactRow, artifact_id)
+                artifact.metadata_json = {
+                    **dict(artifact.metadata_json or {}),
+                    "upload_status": ArtifactUploadStatus.STARTED.value,
+                    "upload_started_at": stale_timestamp.isoformat(),
+                }
+                artifact.created_at = stale_timestamp
+
+            expired = runs.expire_stale_artifact_uploads(
+                older_than=cutoff,
+                scheduler_id="scheduler-artifact-expiry",
+                max_artifacts=1,
+            )
+
+        self.assertEqual([item.artifact_id for item in expired], ["run_artifact_expiry_batch_0-trajectory"])
+        with session_scope(self.engine) as session:
+            expired_row = session.get(ArtifactRow, "run_artifact_expiry_batch_0-trajectory")
+            still_started = session.get(ArtifactRow, "run_artifact_expiry_batch_1-trajectory")
+
+        self.assertEqual(expired_row.metadata_json["upload_status"], ArtifactUploadStatus.EXPIRED.value)
+        self.assertEqual(still_started.metadata_json["upload_status"], ArtifactUploadStatus.STARTED.value)
 
     def test_run_repository_stores_bounded_terminal_stream_previews(self):
         run = _completed_run(run_id="run_large_stream_001")
