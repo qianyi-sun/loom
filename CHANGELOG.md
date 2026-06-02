@@ -13,7 +13,9 @@ All notable changes to this project will be documented in this file.
   operator recovery. Shared-dev deploy validation now also runs a scheduler
   Docker cleanup smoke that creates a labeled container, recovers a synthetic
   stale active run, and verifies removal plus cleanup-event evidence before API
-  and frontend smokes.
+  and frontend smokes. A follow-up fix makes that smoke accept Docker's
+  short-container-ID removal output when matching it against the full ID
+  returned by `docker run -d`.
 - Clarified the main README product direction for new contributors by removing
   local-reference wording and replacing MVP-facing status text with
   product-grade platform terminology.

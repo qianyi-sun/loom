@@ -39,9 +39,9 @@ class SchedulerDockerCleanupSmokeTest(unittest.TestCase):
 
         self.assertEqual(run.status, RunStatus.FAILED)
         self.assertEqual(result.run_id, "cleanup_smoke_test_run")
-        self.assertEqual(result.container_id, "container-cleanup-smoke")
+        self.assertEqual(result.container_id, FakeDockerRunner.FULL_CONTAINER_ID)
         self.assertEqual(result.docker_cleanup_count, 1)
-        self.assertEqual(result.removed_container_ids, ["container-cleanup-smoke"])
+        self.assertEqual(result.removed_container_ids, [FakeDockerRunner.SHORT_CONTAINER_ID])
         self.assertEqual(result.cleanup_event_count, 1)
         docker_run = runner.commands[0]
         self.assertEqual(docker_run[:3], ["docker", "run", "-d"])
@@ -52,10 +52,13 @@ class SchedulerDockerCleanupSmokeTest(unittest.TestCase):
         cleanup_events = [event for event in events if event.event_type == RunEventType.SANDBOX_CONTAINER_CLEANUP.value]
         self.assertEqual(len(cleanup_events), 1)
         self.assertEqual(cleanup_events[0].metadata["recovery"], RecoveryReasonCode.DOCKER_CONTAINER_CLEANUP.value)
-        self.assertEqual(cleanup_events[0].metadata["removed_container_ids"], ["container-cleanup-smoke"])
+        self.assertEqual(cleanup_events[0].metadata["removed_container_ids"], [FakeDockerRunner.SHORT_CONTAINER_ID])
 
 
 class FakeDockerRunner:
+    FULL_CONTAINER_ID = "36d97bfaf5d59348bdbb33be4ab7b63a1aa356b3899e49c8bcf393b3d3cb9347"
+    SHORT_CONTAINER_ID = FULL_CONTAINER_ID[:12]
+
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
 
@@ -68,11 +71,11 @@ class FakeDockerRunner:
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(list(args))
         if args[:3] == ["docker", "run", "-d"]:
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="container-cleanup-smoke\n", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"{self.FULL_CONTAINER_ID}\n", stderr="")
         if args[:3] == ["docker", "ps", "-aq"]:
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="container-cleanup-smoke\n", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"{self.SHORT_CONTAINER_ID}\n", stderr="")
         if args[:3] == ["docker", "rm", "-f"]:
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="container-cleanup-smoke\n", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"{self.SHORT_CONTAINER_ID}\n", stderr="")
         return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr=f"unexpected command: {args}")
 
 

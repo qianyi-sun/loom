@@ -102,7 +102,7 @@ def run_scheduler_docker_cleanup_smoke(
     result = scheduler.recover_once(request_id=f"{run_id}-cleanup-smoke")
     removed_container_ids = _removed_container_ids(result.docker_cleanup_runs, run_id=run_id)
     cleanup_event_count = _cleanup_event_count(engine=engine, run_id=run_id)
-    if container_id not in removed_container_ids:
+    if not _container_id_was_removed(container_id=container_id, removed_container_ids=removed_container_ids):
         _cleanup_container_best_effort(runner=command_runner, container_id=container_id, timeout_seconds=timeout_seconds)
         raise RuntimeError(
             f"scheduler Docker cleanup smoke did not remove container {container_id}; "
@@ -257,6 +257,23 @@ def _removed_container_ids(cleanup_runs: list[dict[str, object]], *, run_id: str
         if item.get("run_id") == run_id:
             return [str(container_id) for container_id in item.get("removed_container_ids", [])]
     return []
+
+
+def _container_id_was_removed(*, container_id: str, removed_container_ids: list[str]) -> bool:
+    for removed_container_id in removed_container_ids:
+        if _container_ids_match(container_id, removed_container_id):
+            return True
+    return False
+
+
+def _container_ids_match(expected_container_id: str, removed_container_id: str) -> bool:
+    if expected_container_id == removed_container_id:
+        return True
+    expected = expected_container_id.strip()
+    removed = removed_container_id.strip()
+    if len(expected) < 12 or len(removed) < 12:
+        return False
+    return expected.startswith(removed) or removed.startswith(expected)
 
 
 def _cleanup_event_count(*, engine: Engine, run_id: str) -> int:
