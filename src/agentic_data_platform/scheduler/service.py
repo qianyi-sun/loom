@@ -74,6 +74,10 @@ class RunScheduler:
                 max_runs=self.settings.scheduler_global_max_active_runs,
                 backend_limits=self.settings.scheduler_backend_max_active_runs,
                 project_limits=self.settings.scheduler_project_max_active_runs,
+                provider_limits=self.settings.scheduler_provider_max_active_runs,
+                model_limits=self.settings.scheduler_model_max_active_runs,
+                agent_limits=self.settings.scheduler_agent_max_active_runs,
+                benchmark_limits=self.settings.scheduler_benchmark_max_active_runs,
                 request_id=request_id,
             )
         return SchedulerDispatchResult(

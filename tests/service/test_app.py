@@ -47,6 +47,10 @@ class ServiceAppTest(unittest.TestCase):
                 "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS": "8",
                 "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS": "harbor-local-docker=3,docker_terminal=2",
                 "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS": "pilot-project=2,foundation-model=1",
+                "SCHEDULER_PROVIDER_MAX_ACTIVE_RUNS": "openai=4,anthropic=2",
+                "SCHEDULER_MODEL_MAX_ACTIVE_RUNS": "gpt-5=2,claude-sonnet-4=1",
+                "SCHEDULER_AGENT_MAX_ACTIVE_RUNS": "codex=2,aider=1",
+                "SCHEDULER_BENCHMARK_MAX_ACTIVE_RUNS": "terminal-bench@2.0=2,skillflow@2026-06-01=1",
                 "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS": "420",
                 "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS": "900",
                 "SCHEDULER_RECOVERY_BATCH_SIZE": "25",
@@ -89,6 +93,13 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(
             settings.scheduler_project_max_active_runs,
             {"pilot-project": 2, "foundation-model": 1},
+        )
+        self.assertEqual(settings.scheduler_provider_max_active_runs, {"openai": 4, "anthropic": 2})
+        self.assertEqual(settings.scheduler_model_max_active_runs, {"gpt-5": 2, "claude-sonnet-4": 1})
+        self.assertEqual(settings.scheduler_agent_max_active_runs, {"codex": 2, "aider": 1})
+        self.assertEqual(
+            settings.scheduler_benchmark_max_active_runs,
+            {"terminal-bench@2.0": 2, "skillflow@2026-06-01": 1},
         )
         self.assertEqual(settings.scheduler_stale_dispatched_timeout_seconds, 420)
         self.assertEqual(settings.scheduler_stale_active_heartbeat_timeout_seconds, 900)

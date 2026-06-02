@@ -85,10 +85,10 @@ read models:
 For v0, `RunRecord` has no public `attempt_id`, so `RunRepository.get_run()`
 hydrates the latest internal attempt back into the existing dataclass shape.
 `RunRepository.dispatch_queued_runs(...)` moves eligible `queued` rows to
-`dispatched` after global, backend, and project capacity checks, records a
-`run.dispatched` event with scheduler id, backend key, project id, and current
-`execution_task_id`, and writes the v1 scheduler lease block to
-`run_attempts.metadata.execution`.
+`dispatched` after global, backend, project, provider, model, agent, and
+benchmark capacity checks, records a `run.dispatched` event with scheduler id,
+capacity keys, project id, and current `execution_task_id`, and writes the v1
+scheduler lease block to `run_attempts.metadata.execution`.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.
@@ -104,9 +104,10 @@ store their canonical reason in `metadata_json.recovery` using
 Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch
-time, and `execution_task_id`. The `execution.runner` block records worker id,
-runner process status, heartbeat status, claim time, latest heartbeat, and
-completion time when available. The older `worker` metadata block is still
+time, `execution_task_id`, and any provider/model/agent/benchmark capacity keys
+used during dispatch. The `execution.runner` block records worker id, runner
+process status, heartbeat status, claim time, latest heartbeat, and completion
+time when available. The older `worker` metadata block is still
 written for compatibility with current recovery code and historic rows.
 `RunRepository.record_worker_heartbeat(...)` updates this metadata while
 execution is active, and

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #156 expanded scheduler capacity gates. `RunScheduler` and
+  `RunRepository.dispatch_queued_runs(...)` now support env-configured
+  provider, model, agent, and benchmark active-run caps in addition to global,
+  backend, and project limits, and `run.dispatched` metadata records those
+  capacity keys for operator diagnostics.
 - Added #158 subprocess child log-tail diagnostics. Worker subprocess
   nonzero, timeout, and incomplete-result failures now persist bounded,
   redacted child stdout/stderr tails plus return-code/stage metadata under the

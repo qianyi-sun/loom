@@ -50,12 +50,24 @@ def scheduler_lease_metadata(
     execution_task_id: str,
     backend_key: str,
     project_id: str,
+    provider_key: str | None = None,
+    model_key: str | None = None,
+    agent_key: str | None = None,
+    benchmark_key: str | None = None,
 ) -> dict[str, Any]:
     _require_non_empty("scheduler_id", scheduler_id)
     _require_non_empty("execution_task_id", execution_task_id)
     _require_non_empty("backend_key", backend_key)
     _require_non_empty("project_id", project_id)
     _require_timezone("observed_at", observed_at)
+    for name, value in {
+        "provider_key": provider_key,
+        "model_key": model_key,
+        "agent_key": agent_key,
+        "benchmark_key": benchmark_key,
+    }.items():
+        if value is not None:
+            _require_non_empty(name, value)
 
     updated = dict(metadata or {})
     execution = _execution_metadata(updated)
@@ -71,6 +83,14 @@ def scheduler_lease_metadata(
             "lease_updated_at": _datetime_json(observed_at),
         }
     )
+    if provider_key is not None:
+        scheduler["provider_key"] = provider_key
+    if model_key is not None:
+        scheduler["model_key"] = model_key
+    if agent_key is not None:
+        scheduler["agent_key"] = agent_key
+    if benchmark_key is not None:
+        scheduler["benchmark_key"] = benchmark_key
     if canonical_status == SchedulerLeaseStatus.DISPATCHED.value:
         scheduler["dispatched_at"] = _datetime_json(observed_at)
     execution["scheduler"] = scheduler

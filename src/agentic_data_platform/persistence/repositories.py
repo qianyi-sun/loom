@@ -524,6 +524,10 @@ class RunRepository:
         max_runs: int,
         backend_limits: dict[str, int] | None = None,
         project_limits: dict[str, int] | None = None,
+        provider_limits: dict[str, int] | None = None,
+        model_limits: dict[str, int] | None = None,
+        agent_limits: dict[str, int] | None = None,
+        benchmark_limits: dict[str, int] | None = None,
         request_id: str | None = None,
     ) -> list[RunRecord]:
         _require_non_empty("scheduler_id", scheduler_id)
@@ -532,6 +536,10 @@ class RunRepository:
 
         backend_limits = _positive_limits(backend_limits or {})
         project_limits = _positive_limits(project_limits or {})
+        provider_limits = _positive_limits(provider_limits or {})
+        model_limits = _positive_limits(model_limits or {})
+        agent_limits = _positive_limits(agent_limits or {})
+        benchmark_limits = _positive_limits(benchmark_limits or {})
         active_statuses = {
             RunStatus.DISPATCHED.value,
             RunStatus.PROVISIONING.value,
@@ -546,9 +554,17 @@ class RunRepository:
 
         active_by_backend: dict[str, int] = {}
         active_by_project: dict[str, int] = {}
+        active_by_provider: dict[str, int] = {}
+        active_by_model: dict[str, int] = {}
+        active_by_agent: dict[str, int] = {}
+        active_by_benchmark: dict[str, int] = {}
         for row in active_rows:
             _increment(active_by_backend, _backend_capacity_key(row))
             _increment(active_by_project, row.project_id)
+            _increment(active_by_provider, _provider_capacity_key(row))
+            _increment(active_by_model, _model_capacity_key(row))
+            _increment(active_by_agent, _agent_capacity_key(row))
+            _increment(active_by_benchmark, _benchmark_capacity_key(row))
 
         candidates = self.session.scalars(
             select(RunRow)
@@ -562,9 +578,21 @@ class RunRepository:
             if len(dispatched_ids) >= remaining_global_capacity:
                 break
             backend_key = _backend_capacity_key(row)
+            provider_key = _provider_capacity_key(row)
+            model_key = _model_capacity_key(row)
+            agent_key = _agent_capacity_key(row)
+            benchmark_key = _benchmark_capacity_key(row)
             if _at_capacity(active_by_backend, backend_key, backend_limits):
                 continue
             if _at_capacity(active_by_project, row.project_id, project_limits):
+                continue
+            if _at_capacity(active_by_provider, provider_key, provider_limits):
+                continue
+            if _at_capacity(active_by_model, model_key, model_limits):
+                continue
+            if _at_capacity(active_by_agent, agent_key, agent_limits):
+                continue
+            if _at_capacity(active_by_benchmark, benchmark_key, benchmark_limits):
                 continue
 
             previous_status = RunStatus(row.status)
@@ -583,6 +611,10 @@ class RunRepository:
                 execution_task_id=attempt.attempt_id,
                 backend_key=backend_key,
                 project_id=row.project_id,
+                provider_key=provider_key,
+                model_key=model_key,
+                agent_key=agent_key,
+                benchmark_key=benchmark_key,
             )
             attempt.updated_at = utc_now()
 
@@ -598,10 +630,18 @@ class RunRepository:
                     "execution_task_id": attempt.attempt_id,
                     "backend_key": backend_key,
                     "project_id": row.project_id,
+                    "provider_key": provider_key,
+                    "model_key": model_key,
+                    "agent_key": agent_key,
+                    "benchmark_key": benchmark_key,
                 },
             )
             _increment(active_by_backend, backend_key)
             _increment(active_by_project, row.project_id)
+            _increment(active_by_provider, provider_key)
+            _increment(active_by_model, model_key)
+            _increment(active_by_agent, agent_key)
+            _increment(active_by_benchmark, benchmark_key)
             dispatched_ids.append(run.run_id)
 
         self.session.flush()
@@ -1413,6 +1453,40 @@ def _backend_capacity_key(row: RunRow) -> str:
     if runner_contract == "harbor-local-docker-v0":
         return "harbor-local-docker"
     return row.sandbox_backend
+
+
+def _provider_capacity_key(row: RunRow) -> str:
+    return row.model_provider
+
+
+def _model_capacity_key(row: RunRow) -> str:
+    return row.model_name
+
+
+def _agent_capacity_key(row: RunRow) -> str:
+    run_metadata = dict(row.metadata_json or {})
+    harbor_run = run_metadata.get("harbor_run")
+    if isinstance(harbor_run, dict):
+        value = harbor_run.get("agent")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    runner_metadata = dict(row.runner_metadata or {})
+    for key in ("agent_id", "agent", "harbor_agent"):
+        value = runner_metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "unknown-agent"
+
+
+def _benchmark_capacity_key(row: RunRow) -> str:
+    run_metadata = dict(row.metadata_json or {})
+    harbor_run = run_metadata.get("harbor_run")
+    if isinstance(harbor_run, dict):
+        for key in ("dataset_ref", "benchmark_ref", "benchmark"):
+            value = harbor_run.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return f"{row.benchmark_suite}@{row.benchmark_version}"
 
 
 def _team_record(row: TeamRow) -> TeamRecord:

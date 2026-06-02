@@ -11,7 +11,7 @@ from agentic_data_platform.persistence.models import RunAttemptRow, RunRow
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.scheduler.service import RunScheduler
 from agentic_data_platform.service.config import ServiceSettings
-from tests.persistence.test_repositories import _queued_run
+from tests.persistence.test_repositories import _queued_capacity_run, _queued_run
 
 
 class SchedulerServiceTest(unittest.TestCase):
@@ -76,6 +76,63 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(statuses["run_scheduler_service_0"], RunStatus.DISPATCHED)
         self.assertEqual(statuses["run_scheduler_service_1"], RunStatus.QUEUED)
         self.assertEqual(statuses["run_scheduler_service_2"], RunStatus.QUEUED)
+
+    def test_scheduler_dispatches_from_expanded_service_settings_capacity(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_scheduler_expanded_capacity_a",
+                    provider="openai",
+                    model_name="gpt-5",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_scheduler_expanded_capacity_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="skillflow@2026-06-01",
+                )
+            )
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_global_max_active_runs=2,
+                scheduler_provider_max_active_runs={"openai": 1},
+                scheduler_model_max_active_runs={"gpt-5": 1},
+                scheduler_agent_max_active_runs={"codex": 1},
+                scheduler_benchmark_max_active_runs={"terminal-bench@2.0": 1},
+            ),
+        )
+
+        result = scheduler.dispatch_once(request_id="req-scheduler-expanded-capacity-001")
+
+        with session_scope(self.engine) as session:
+            statuses = {
+                run.run_id: run.status
+                for run in RunRepository(session).list_runs(project_id="pilot-project")
+                if run.run_id.startswith("run_scheduler_expanded_capacity_")
+            }
+
+        self.assertEqual(result.dispatched_run_ids, ["run_scheduler_expanded_capacity_a"])
+        self.assertEqual(result.dispatched_count, 1)
+        self.assertEqual(statuses["run_scheduler_expanded_capacity_a"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_scheduler_expanded_capacity_b"], RunStatus.QUEUED)
 
     def test_scheduler_recovers_stale_dispatched_runs_from_service_settings(self):
         now = datetime.now(timezone.utc)

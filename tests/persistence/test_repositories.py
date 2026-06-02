@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import inspect, select
@@ -610,6 +611,95 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(statuses["run_dispatch_latent_b"], RunStatus.QUEUED)
         self.assertEqual(statuses["run_dispatch_foundation"], RunStatus.DISPATCHED)
 
+    def test_run_repository_dispatch_respects_provider_model_agent_and_benchmark_capacity(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_capacity_a",
+                    provider="openai",
+                    model_name="gpt-5",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_capacity_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="skillflow@2026-06-01",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_capacity_c",
+                    provider="anthropic",
+                    model_name="gpt-5",
+                    agent_id="codex",
+                    benchmark_ref="skillflow@2026-06-01",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_capacity_d",
+                    provider="anthropic",
+                    model_name="claude-sonnet-4",
+                    agent_id="aider",
+                    benchmark_ref="terminal-bench@2.0",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_capacity_e",
+                    provider="anthropic",
+                    model_name="claude-sonnet-4",
+                    agent_id="aider",
+                    benchmark_ref="skillflow@2026-06-01",
+                )
+            )
+
+            dispatched = runs.dispatch_queued_runs(
+                scheduler_id="scheduler-a",
+                max_runs=5,
+                provider_limits={"openai": 1},
+                model_limits={"gpt-5": 1},
+                agent_limits={"codex": 1},
+                benchmark_limits={"terminal-bench@2.0": 1},
+                request_id="req-dispatch-expanded-capacity-001",
+            )
+            statuses = {
+                run.run_id: run.status
+                for run in runs.list_runs(project_id="pilot-project")
+                if run.run_id.startswith("run_dispatch_capacity_")
+            }
+            events = runs.list_status_events("run_dispatch_capacity_a")
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_dispatch_capacity_a")
+            )
+
+        self.assertEqual(
+            [run.run_id for run in dispatched],
+            ["run_dispatch_capacity_a", "run_dispatch_capacity_e"],
+        )
+        self.assertEqual(statuses["run_dispatch_capacity_a"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_dispatch_capacity_b"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_dispatch_capacity_c"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_dispatch_capacity_d"], RunStatus.QUEUED)
+        self.assertEqual(statuses["run_dispatch_capacity_e"], RunStatus.DISPATCHED)
+        scheduler = attempt.metadata_json["execution"]["scheduler"]
+        self.assertEqual(scheduler["provider_key"], "openai")
+        self.assertEqual(scheduler["model_key"], "gpt-5")
+        self.assertEqual(scheduler["agent_key"], "codex")
+        self.assertEqual(scheduler["benchmark_key"], "terminal-bench@2.0")
+        self.assertEqual(events[1].metadata["provider_key"], "openai")
+        self.assertEqual(events[1].metadata["model_key"], "gpt-5")
+        self.assertEqual(events[1].metadata["agent_key"], "codex")
+        self.assertEqual(events[1].metadata["benchmark_key"], "terminal-bench@2.0")
+
     def test_run_repository_dispatch_skips_canceled_runs(self):
         with session_scope(self.engine) as session:
             _seed_latent_project(session)
@@ -1182,6 +1272,23 @@ def _queued_run(*, run_id: str) -> RunRecord:
             )
         ],
     )
+
+
+def _queued_capacity_run(
+    *,
+    run_id: str,
+    provider: str,
+    model_name: str,
+    agent_id: str,
+    benchmark_ref: str,
+) -> RunRecord:
+    run = _queued_run(run_id=run_id)
+    run.model = replace(run.model, provider=provider, model_name=model_name)
+    run.metadata["harbor_run"] = {
+        "agent": agent_id,
+        "dataset_ref": benchmark_ref,
+    }
+    return run
 
 
 def _set_worker_last_heartbeat(session, *, run_id: str, heartbeat_at: str) -> None:

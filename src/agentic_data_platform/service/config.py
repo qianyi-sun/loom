@@ -38,6 +38,10 @@ class ServiceSettings:
     scheduler_global_max_active_runs: int = 1
     scheduler_backend_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_project_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_provider_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_model_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_agent_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_benchmark_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_stale_dispatched_timeout_seconds: int = 300
     scheduler_stale_active_heartbeat_timeout_seconds: int = 900
     scheduler_recovery_batch_size: int = 50
@@ -81,6 +85,10 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         scheduler_global_max_active_runs=_get_int(values, "SCHEDULER_GLOBAL_MAX_ACTIVE_RUNS", 1),
         scheduler_backend_max_active_runs=_get_int_map(values, "SCHEDULER_BACKEND_MAX_ACTIVE_RUNS"),
         scheduler_project_max_active_runs=_get_int_map(values, "SCHEDULER_PROJECT_MAX_ACTIVE_RUNS"),
+        scheduler_provider_max_active_runs=_get_int_map(values, "SCHEDULER_PROVIDER_MAX_ACTIVE_RUNS"),
+        scheduler_model_max_active_runs=_get_int_map(values, "SCHEDULER_MODEL_MAX_ACTIVE_RUNS"),
+        scheduler_agent_max_active_runs=_get_int_map(values, "SCHEDULER_AGENT_MAX_ACTIVE_RUNS"),
+        scheduler_benchmark_max_active_runs=_get_int_map(values, "SCHEDULER_BENCHMARK_MAX_ACTIVE_RUNS"),
         scheduler_stale_dispatched_timeout_seconds=_get_int(
             values,
             "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS",
