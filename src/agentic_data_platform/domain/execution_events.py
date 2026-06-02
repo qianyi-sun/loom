@@ -19,6 +19,9 @@ class RunEventType(str, Enum):
     WORKER_FAILED = "run.worker_failed"
     WORKER_SUBPROCESS_FAILED = "run.worker_subprocess_failed"
     SCHEDULER_CAPACITY_BLOCKED = "scheduler.capacity_blocked"
+    ARTIFACT_CHUNK_RECORDED = "artifact.chunk_recorded"
+    ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"
+    LOG_CHUNK_RECORDED = "log.chunk_recorded"
 
 
 class RecoveryReasonCode(str, Enum):

@@ -91,7 +91,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["evaluator"]["score"], 0.75)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
         )
         self.assertEqual(payload["lifecycle_events"][1]["metadata"]["worker_id"], "worker-test")
 
@@ -127,7 +127,15 @@ class WorkerServiceTest(unittest.TestCase):
         detail = self.client.get("/runs/run_worker_dispatched_001")
         self.assertEqual(
             [event["event_type"] for event in detail.json()["lifecycle_events"]],
-            ["run.created", "run.dispatched", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+            [
+                "run.created",
+                "run.dispatched",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "run.succeeded",
+                "log.chunk_recorded",
+            ],
         )
         self.assertEqual(detail.json()["lifecycle_events"][2]["from_status"], "dispatched")
 
@@ -585,7 +593,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 2)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.failed"],
+            ["run.created", "run.claimed", "run.started", "run.failed", "log.chunk_recorded"],
         )
 
     def test_worker_executes_harbor_run_and_ingests_verifier_result(self):
@@ -641,7 +649,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("generated_file", artifact_kinds)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
         )
 
     def test_harbor_worker_ingests_current_retry_job_when_previous_job_remains(self):
@@ -1212,7 +1220,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("log", artifact_kinds)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
         )
 
     def test_worker_marks_original_wrapper_exit_failure(self):
@@ -1260,7 +1268,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("log", artifact_kinds)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.failed"],
+            ["run.created", "run.claimed", "run.started", "run.failed", "log.chunk_recorded"],
         )
 
 

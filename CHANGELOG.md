@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 - Added a main developer platform guide for repo admins and primary developers,
   covering the current architecture, API surface, runtime topology, progress,
   priority issues, and maintainer responsibilities.
+- Added the first #157/#159 typed artifact/log event slice. Artifact chunk
+  writes now append `artifact.chunk_recorded` or `log.chunk_recorded` lifecycle
+  events with object metadata only, and stale upload expiry appends
+  `artifact.upload_expired` alongside the existing recovery event.
 - Added the first #159 persisted artifact chunk index slice.
   `artifact_chunks` now records ordered stdout/stderr/trajectory/artifact chunk
   metadata with run, attempt, artifact, chunk kind, sequence, object key, size,
@@ -28,8 +32,7 @@ All notable changes to this project will be documented in this file.
   /runs/{run_id}/artifact-chunks/content` returns object-store payload bytes for
   a project-scoped completed chunk selected by artifact id, chunk kind, and
   sequence while rejecting incomplete upload states without exposing storage
-  keys. Richer upload transition history and typed log/artifact events remain
-  follow-up work.
+  keys.
 - Added a #160 terminal result mismatch recovery slice. Scheduler recovery now
   detects active runs whose latest attempt runner metadata already records a
   terminal child process result, marks the run failed with

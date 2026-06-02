@@ -376,6 +376,17 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(recovery_events[0].metadata["recovery"], RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value)
         self.assertEqual(recovery_events[0].from_status, RunStatus.SUCCEEDED)
         self.assertEqual(recovery_events[0].to_status, RunStatus.SUCCEEDED)
+        artifact_events = [event for event in events if event.event_type == RunEventType.ARTIFACT_UPLOAD_EXPIRED.value]
+        self.assertEqual([event.metadata["artifact_id"] for event in artifact_events], [
+            "run_artifact_expiry-trajectory",
+            "run_artifact_expiry-workspace-snapshot",
+        ])
+        self.assertEqual(artifact_events[0].metadata["previous_upload_status"], "pending")
+        self.assertEqual(artifact_events[0].metadata["upload_status"], ArtifactUploadStatus.EXPIRED.value)
+        self.assertEqual(artifact_events[0].metadata["scheduler_id"], "scheduler-artifact-expiry")
+        self.assertEqual(artifact_events[0].metadata["recovery"], RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value)
+        self.assertEqual(artifact_events[0].from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(artifact_events[0].to_status, RunStatus.SUCCEEDED)
 
     def test_expire_stale_artifact_uploads_respects_batch_limit(self):
         now = datetime.now(timezone.utc)
@@ -520,6 +531,19 @@ class PersistenceRepositoryTest(unittest.TestCase):
                     created_at=now,
                 )
             )
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_log_chunks",
+                    attempt_id="run_log_chunks:attempt:1",
+                    artifact_id="run_log_chunks-trajectory",
+                    chunk_kind=ArtifactChunkKind.TRAJECTORY,
+                    chunk_sequence=0,
+                    storage_key="runs/run_log_chunks/tasks/task/trajectory/000000.jsonl",
+                    sha256="5" * 64,
+                    size_bytes=16,
+                    created_at=now,
+                )
+            )
 
             stdout_chunks = runs.list_artifact_chunks(
                 run_id="run_log_chunks",
@@ -536,6 +560,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 chunk_kind=ArtifactChunkKind.STDOUT,
                 limit=1,
             )
+            events = runs.list_status_events("run_log_chunks")
 
         self.assertEqual([chunk.chunk_sequence for chunk in stdout_chunks], [0, 1])
         self.assertEqual([chunk.size_bytes for chunk in stdout_chunks], [32, 128])
@@ -544,6 +569,24 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(stdout_chunks[1].metadata["retry_count"], 1)
         self.assertEqual([chunk.chunk_sequence for chunk in stdout_after_zero], [1])
         self.assertEqual([chunk.chunk_sequence for chunk in first_chunk], [0])
+        log_events = [event for event in events if event.event_type == RunEventType.LOG_CHUNK_RECORDED.value]
+        artifact_events = [
+            event for event in events if event.event_type == RunEventType.ARTIFACT_CHUNK_RECORDED.value
+        ]
+        self.assertEqual(len(log_events), 4)
+        self.assertEqual(len(artifact_events), 1)
+        failed_log_event = next(event for event in log_events if event.metadata["upload_status"] == "failed")
+        self.assertEqual(failed_log_event.from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(failed_log_event.to_status, RunStatus.SUCCEEDED)
+        self.assertEqual(failed_log_event.metadata["artifact_id"], "run_log_chunks-trajectory")
+        self.assertEqual(failed_log_event.metadata["chunk_kind"], ArtifactChunkKind.STDOUT.value)
+        self.assertEqual(failed_log_event.metadata["chunk_sequence"], 1)
+        self.assertEqual(failed_log_event.metadata["size_bytes"], 128)
+        self.assertEqual(failed_log_event.metadata["sha256"], "3" * 64)
+        self.assertEqual(failed_log_event.metadata["upload_error_reason"], "object store write failed")
+        self.assertNotIn("stdout", failed_log_event.metadata)
+        self.assertNotIn("stderr", failed_log_event.metadata)
+        self.assertEqual(artifact_events[0].metadata["chunk_kind"], ArtifactChunkKind.TRAJECTORY.value)
 
     def test_run_repository_records_create_cancel_and_retry_lifecycle(self):
         run = _queued_run(run_id="run_lifecycle_001")

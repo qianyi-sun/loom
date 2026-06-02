@@ -1577,7 +1577,7 @@ class RunRepository:
         return refreshed
 
     def record_artifact_chunk(self, chunk: ArtifactChunkMetadata) -> ArtifactChunkMetadata:
-        _required(self.session.get(RunRow, chunk.run_id), "run", chunk.run_id)
+        run_row = _required(self.session.get(RunRow, chunk.run_id), "run", chunk.run_id)
         attempt = _required(self.session.get(RunAttemptRow, chunk.attempt_id), "run attempt", chunk.attempt_id)
         artifact = _required(self.session.get(ArtifactRow, chunk.artifact_id), "artifact", chunk.artifact_id)
         if attempt.run_id != chunk.run_id:
@@ -1616,6 +1616,16 @@ class RunRepository:
         existing.upload_error_reason = chunk.upload_error_reason
         existing.metadata_json = dict(chunk.metadata)
         existing.updated_at = now
+        run_status = RunStatus(run_row.status)
+        self._append_status_event(
+            run_id=chunk.run_id,
+            attempt_id=chunk.attempt_id,
+            event_type=_artifact_chunk_event_type(chunk_kind),
+            from_status=run_status,
+            to_status=run_status,
+            reason=chunk.upload_error_reason,
+            metadata=_artifact_chunk_event_metadata(chunk, upload_status=upload_status),
+        )
         self.session.flush()
         return _artifact_chunk_metadata(existing)
 
@@ -1729,6 +1739,17 @@ class RunRepository:
             run_row = _required(self.session.get(RunRow, artifact.run_id), "run", artifact.run_id)
             attempt = self._latest_attempt_row(artifact.run_id)
             run_status = RunStatus(run_row.status)
+            event_metadata = recovery_event_metadata(
+                RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED,
+                scheduler_id=scheduler_id,
+                artifact_id=artifact.artifact_id,
+                execution_task_id=attempt.attempt_id,
+                previous_upload_status=upload_status,
+                upload_status=ArtifactUploadStatus.EXPIRED.value,
+                stale_before=older_than.isoformat(),
+                upload_started_at=_datetime_json(upload_started_at),
+                expired_at=_datetime_json(now),
+            )
             self._append_status_event(
                 run_id=artifact.run_id,
                 attempt_id=attempt.attempt_id,
@@ -1737,17 +1758,17 @@ class RunRepository:
                 to_status=run_status,
                 reason=reason,
                 request_id=request_id,
-                metadata=recovery_event_metadata(
-                    RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED,
-                    scheduler_id=scheduler_id,
-                    artifact_id=artifact.artifact_id,
-                    execution_task_id=attempt.attempt_id,
-                    previous_upload_status=upload_status,
-                    upload_status=ArtifactUploadStatus.EXPIRED.value,
-                    stale_before=older_than.isoformat(),
-                    upload_started_at=_datetime_json(upload_started_at),
-                    expired_at=_datetime_json(now),
-                ),
+                metadata=event_metadata,
+            )
+            self._append_status_event(
+                run_id=artifact.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.ARTIFACT_UPLOAD_EXPIRED,
+                from_status=run_status,
+                to_status=run_status,
+                reason=reason,
+                request_id=request_id,
+                metadata=event_metadata,
             )
             expired.append(
                 ExpiredArtifactUploadRecord(
@@ -2355,6 +2376,33 @@ def _artifact_chunk_kind_value(value: ArtifactChunkKind | str) -> str:
     if isinstance(value, ArtifactChunkKind):
         return value.value
     return ArtifactChunkKind(value).value
+
+
+def _artifact_chunk_event_type(chunk_kind: str) -> RunEventType:
+    if chunk_kind in {ArtifactChunkKind.STDOUT.value, ArtifactChunkKind.STDERR.value}:
+        return RunEventType.LOG_CHUNK_RECORDED
+    return RunEventType.ARTIFACT_CHUNK_RECORDED
+
+
+def _artifact_chunk_event_metadata(
+    chunk: ArtifactChunkMetadata,
+    *,
+    upload_status: str,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "artifact_id": chunk.artifact_id,
+        "chunk_kind": _artifact_chunk_kind_value(chunk.chunk_kind),
+        "chunk_sequence": chunk.chunk_sequence,
+        "storage_key": chunk.storage_key,
+        "media_type": chunk.media_type,
+        "size_bytes": chunk.size_bytes,
+        "sha256": chunk.sha256,
+        "upload_status": upload_status,
+        "schema_version": chunk.schema_version,
+    }
+    if chunk.upload_error_reason is not None:
+        metadata["upload_error_reason"] = chunk.upload_error_reason
+    return metadata
 
 
 def _artifact_upload_status_value(value: ArtifactUploadStatus | str) -> str:

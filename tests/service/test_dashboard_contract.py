@@ -146,7 +146,7 @@ class DashboardContractSmokeTest(unittest.TestCase):
         self.assertEqual(detail_payload["trajectory"][0]["changed_paths"], ["solution/answer.txt"])
         self.assertEqual(
             [event["event_type"] for event in detail_payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
         )
 
         artifact_kinds = {artifact["kind"] for artifact in artifacts.json()["artifacts"]}

@@ -249,7 +249,9 @@ serializing dashboard payloads.
   v1 execution-event contract. Current run events cover `run.created`,
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
-  `run.recovered`, `run.worker_failed`, and `run.worker_subprocess_failed`.
+  `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
+  `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
+  `artifact.upload_expired`, and `log.chunk_recorded`.
   Recovery metadata currently uses canonical reason codes for implemented
   `stale_dispatched`, `stale_worker_heartbeat`, `terminal_result_mismatch`,
   and `artifact_upload_expired` paths, plus reserved
@@ -290,13 +292,17 @@ serializing dashboard payloads.
   project viewers without returning object payload bytes or storage
   credentials. Upload-state repository recovery can now expire stale
   `pending` or `started` rows to `expired` with a durable `run.recovered`
-  event. Worker result persistence now writes object-backed terminal
-  stdout/stderr chunks and records their metadata against the current attempt's
-  trajectory artifact. `GET /runs/{run_id}/artifact-chunks/content` downloads a
+  event and a typed `artifact.upload_expired` event. Worker result persistence
+  now writes object-backed terminal stdout/stderr chunks, records their metadata
+  against the current attempt's trajectory artifact, and appends typed
+  `log.chunk_recorded` events. Non-log trajectory/artifact chunks append
+  `artifact.chunk_recorded` events. These events carry object metadata such as
+  chunk sequence, storage key, size, SHA-256, media type, and upload status, not
+  payload bytes. `GET /runs/{run_id}/artifact-chunks/content` downloads a
   completed chunk payload through the platform API by artifact id, chunk kind,
   and sequence; non-completed upload states return structured errors without
-  fetching object storage or exposing storage keys. Richer upload transition
-  histories and typed log/artifact events remain #159/#157 follow-up work.
+  fetching object storage or exposing storage keys. Broader upload transition
+  histories remain #159 follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured
@@ -350,9 +356,10 @@ serializing dashboard payloads.
   SSE routes, keep telemetry polling available, persist terminal dashboard
   projection rows that scheduler recovery can refresh in bounded batches, and
   make `/dashboard/progress` prefer clean projection rows before falling back to
-  hydrated run records. They do not yet implement Redis fanout, typed
-  sandbox/resource sample events, or list/detail routes fully backed by
-  projection rows.
+  hydrated run records. The first typed artifact/log event slice records chunk
+  metadata and upload expiry events without embedding payloads. The remaining
+  #157 work is Redis fanout, typed sandbox/resource/evaluator events, and
+  list/detail routes fully backed by projection rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal
