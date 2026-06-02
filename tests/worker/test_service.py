@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
 from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind
-from agentic_data_platform.domain.run_records import RunStatus
+from agentic_data_platform.domain.run_records import EvaluatorResult, RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
@@ -91,9 +91,31 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["evaluator"]["score"], 0.75)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "run.succeeded",
+                "log.chunk_recorded",
+            ],
         )
         self.assertEqual(payload["lifecycle_events"][1]["metadata"]["worker_id"], "worker-test")
+        evaluator_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.completed"
+        )
+        self.assertEqual(evaluator_event["from_status"], "evaluating")
+        self.assertEqual(evaluator_event["to_status"], "evaluating")
+        self.assertEqual(evaluator_event["metadata"]["evaluator_id"], "mock-judge-v0")
+        self.assertEqual(evaluator_event["metadata"]["mode"], "llm_judge")
+        self.assertEqual(evaluator_event["metadata"]["status"], "completed")
+        self.assertEqual(evaluator_event["metadata"]["score"], 0.75)
+        self.assertEqual(evaluator_event["metadata"]["worker_id"], "worker-test")
+        self.assertEqual(evaluator_event["metadata"]["execution_task_id"], "run_worker_001:attempt:1")
+        self.assertIn("artifact_refs", evaluator_event["metadata"])
+        self.assertNotIn("verbal_feedback", evaluator_event["metadata"])
+        self.assertNotIn("metrics", evaluator_event["metadata"])
 
     def test_worker_claims_scheduler_dispatched_run(self):
         create_response = self.client.post(
@@ -133,6 +155,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.claimed",
                 "run.started",
                 "run.evaluating",
+                "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
             ],
@@ -161,6 +184,48 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIsNone(result)
         detail = self.client.get("/runs/run_worker_requires_dispatch_001")
         self.assertEqual(detail.json()["run"]["status"], "queued")
+
+    def test_worker_records_failed_evaluator_event(self):
+        create_response = self.client.post(
+            "/runs",
+            json=_run_create_payload("run_worker_failed_evaluator_001"),
+        )
+        self.assertEqual(create_response.status_code, 201)
+
+        worker = RunWorker(
+            engine=self.engine,
+            worker_id="worker-test",
+            executor=FailedEvaluatorExecutor(),
+        )
+
+        result = worker.run_once(request_id="req-worker-failed-evaluator-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        detail = self.client.get("/runs/run_worker_failed_evaluator_001")
+        payload = detail.json()
+        self.assertEqual(
+            [event["event_type"] for event in payload["lifecycle_events"]],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.failed",
+                "run.failed",
+            ],
+        )
+        evaluator_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.failed"
+        )
+        self.assertEqual(evaluator_event["reason"], "judge service unavailable")
+        self.assertEqual(evaluator_event["metadata"]["evaluator_id"], "failed-judge-v0")
+        self.assertEqual(evaluator_event["metadata"]["mode"], "harbor_verifier")
+        self.assertEqual(evaluator_event["metadata"]["status"], "failed")
+        self.assertEqual(evaluator_event["metadata"]["failure_reason"], "judge service unavailable")
+        self.assertIsNone(evaluator_event["metadata"]["score"])
+        self.assertNotIn("verbal_feedback", evaluator_event["metadata"])
+        self.assertNotIn("metrics", evaluator_event["metadata"])
 
     def test_worker_returns_none_when_no_queued_run_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -649,7 +714,15 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("generated_file", artifact_kinds)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "run.succeeded",
+                "log.chunk_recorded",
+            ],
         )
 
     def test_harbor_worker_ingests_current_retry_job_when_previous_job_remains(self):
@@ -1220,7 +1293,15 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("log", artifact_kinds)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded", "log.chunk_recorded"],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "run.succeeded",
+                "log.chunk_recorded",
+            ],
         )
 
     def test_worker_marks_original_wrapper_exit_failure(self):
@@ -1526,6 +1607,30 @@ class FailRunBeforeSaveExecutor:
                 event_type="run.recovered",
                 reason="scheduler recovery won the save race",
             )
+        return run
+
+
+class FailedEvaluatorExecutor:
+    def execute(self, run):
+        if run.status is not RunStatus.PROVISIONING:
+            run.transition_to(RunStatus.PROVISIONING)
+        run.transition_to(RunStatus.RUNNING)
+        run.transition_to(RunStatus.EVALUATING)
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="failed-judge-v0",
+                mode="harbor_verifier",
+                status="failed",
+                score=None,
+                metrics={"task_success": False},
+                verbal_feedback="Judge service failed before feedback.",
+                judge=None,
+                artifact_refs=[],
+                failure_reason="judge service unavailable",
+            )
+        )
+        run.failure_reason = "judge service unavailable"
+        run.transition_to(RunStatus.FAILED)
         return run
 
 

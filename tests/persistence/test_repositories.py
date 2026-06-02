@@ -1266,6 +1266,87 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertIn("completed_at", runner)
         self.assertEqual(events[-1].metadata["execution_task_id"], "run_worker_terminal_metadata:attempt:1")
 
+    def test_save_worker_result_records_evaluator_event_when_previous_status_already_evaluating(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_worker_existing_evaluating"))
+            claimed = runs.claim_next_queued_run(worker_id="worker-a")
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_worker_existing_evaluating")
+            )
+            row = session.get(RunRow, "run_worker_existing_evaluating")
+
+            row.status = RunStatus.RUNNING.value
+            attempt.status = RunStatus.RUNNING.value
+            runs._append_status_event(
+                run_id="run_worker_existing_evaluating",
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.STARTED,
+                from_status=RunStatus.PROVISIONING,
+                to_status=RunStatus.RUNNING,
+                metadata={"worker_id": "worker-a", "execution_task_id": attempt.attempt_id},
+            )
+            row.status = RunStatus.EVALUATING.value
+            attempt.status = RunStatus.EVALUATING.value
+            runs._append_status_event(
+                run_id="run_worker_existing_evaluating",
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.EVALUATING,
+                from_status=RunStatus.RUNNING,
+                to_status=RunStatus.EVALUATING,
+                metadata={"worker_id": "worker-a", "execution_task_id": attempt.attempt_id},
+            )
+
+            claimed.transition_to(RunStatus.RUNNING)
+            claimed.attach_artifact(_log_artifact("run_worker_existing_evaluating-trajectory"))
+            claimed.transition_to(RunStatus.EVALUATING)
+            claimed.attach_evaluator_result(
+                EvaluatorResult(
+                    evaluator_id="harbor-verifier-v1",
+                    mode="harbor_verifier",
+                    status="completed",
+                    score=1.0,
+                    metrics={"reward": 1.0},
+                    verbal_feedback="Do not persist full feedback in event metadata.",
+                    judge=None,
+                    artifact_refs=[
+                        "file:///tmp/secret/evaluator/report.json",
+                        "minio://runs/run_worker_existing_evaluating/evaluation/report.json?signature=secret#fragment",
+                    ],
+                )
+            )
+            claimed.transition_to(RunStatus.SUCCEEDED)
+
+            runs.save_worker_result(
+                claimed,
+                worker_id="worker-a",
+                request_id="req-existing-evaluating-result",
+            )
+            events = runs.list_status_events("run_worker_existing_evaluating")
+
+        self.assertEqual(
+            [event.event_type for event in events],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "run.succeeded",
+            ],
+        )
+        evaluator_event = next(event for event in events if event.event_type == "evaluator.completed")
+        self.assertEqual(evaluator_event.from_status, RunStatus.EVALUATING)
+        self.assertEqual(evaluator_event.to_status, RunStatus.EVALUATING)
+        self.assertEqual(evaluator_event.metadata["evaluator_id"], "harbor-verifier-v1")
+        self.assertEqual(evaluator_event.metadata["artifact_refs"], [
+            "report.json",
+            "minio://runs/run_worker_existing_evaluating/evaluation/report.json",
+        ])
+        self.assertNotIn("verbal_feedback", evaluator_event.metadata)
+        self.assertNotIn("metrics", evaluator_event.metadata)
+
     def test_run_repository_fails_stale_active_runs_with_expired_worker_heartbeat(self):
         stale_before = datetime.now(timezone.utc) - timedelta(minutes=10)
         stale_heartbeat = (stale_before - timedelta(seconds=1)).isoformat()

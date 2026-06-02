@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from sqlalchemy import delete, select
@@ -2060,12 +2062,16 @@ class RunRepository:
         request_id: str | None,
     ) -> None:
         transitions: list[tuple[RunEventType, RunStatus, RunStatus, str | None]] = []
+        has_evaluator_results = bool(run.all_evaluator_results())
+        emit_evaluator_events_before_terminal = False
         if from_status is RunStatus.PROVISIONING:
             transitions.append((RunEventType.STARTED, RunStatus.PROVISIONING, RunStatus.RUNNING, None))
             from_status = RunStatus.RUNNING
-        if from_status is RunStatus.RUNNING and run.evaluator_result is not None:
+        if from_status is RunStatus.RUNNING and has_evaluator_results:
             transitions.append((RunEventType.EVALUATING, RunStatus.RUNNING, RunStatus.EVALUATING, None))
             from_status = RunStatus.EVALUATING
+        elif from_status is RunStatus.EVALUATING and has_evaluator_results:
+            emit_evaluator_events_before_terminal = True
 
         terminal_event = {
             RunStatus.SUCCEEDED: RunEventType.SUCCEEDED,
@@ -2075,6 +2081,14 @@ class RunRepository:
         transitions.append((terminal_event, from_status, run.status, run.failure_reason))
 
         for event_type, previous_status, next_status, reason in transitions:
+            if emit_evaluator_events_before_terminal and event_type is terminal_event:
+                self._append_evaluator_events(
+                    run=run,
+                    attempt_id=attempt_id,
+                    worker_id=worker_id,
+                    request_id=request_id,
+                )
+                emit_evaluator_events_before_terminal = False
             self._append_status_event(
                 run_id=run.run_id,
                 attempt_id=attempt_id,
@@ -2084,6 +2098,42 @@ class RunRepository:
                 reason=reason,
                 request_id=request_id,
                 metadata={"worker_id": worker_id, "execution_task_id": attempt_id},
+            )
+            if event_type is RunEventType.EVALUATING:
+                self._append_evaluator_events(
+                    run=run,
+                    attempt_id=attempt_id,
+                    worker_id=worker_id,
+                    request_id=request_id,
+                )
+
+    def _append_evaluator_events(
+        self,
+        *,
+        run: RunRecord,
+        attempt_id: str,
+        worker_id: str,
+        request_id: str | None,
+    ) -> None:
+        for result in run.all_evaluator_results():
+            event_type = (
+                RunEventType.EVALUATOR_COMPLETED
+                if result.status == "completed"
+                else RunEventType.EVALUATOR_FAILED
+            )
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt_id,
+                event_type=event_type,
+                from_status=RunStatus.EVALUATING,
+                to_status=RunStatus.EVALUATING,
+                reason=result.failure_reason,
+                request_id=request_id,
+                metadata=_evaluator_event_metadata(
+                    result,
+                    worker_id=worker_id,
+                    execution_task_id=attempt_id,
+                ),
             )
 
 
@@ -2480,6 +2530,35 @@ def _evaluator_result_row(*, run_id: str, attempt_id: str, result: EvaluatorResu
         metadata_json=dict(result.metadata),
         created_at=result.created_at,
     )
+
+
+def _evaluator_event_metadata(
+    result: EvaluatorResult,
+    *,
+    worker_id: str,
+    execution_task_id: str,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "evaluator_id": result.evaluator_id,
+        "mode": result.mode,
+        "status": result.status,
+        "score": result.score,
+        "artifact_refs": [_safe_evaluator_artifact_ref(ref) for ref in result.artifact_refs],
+        "worker_id": worker_id,
+        "execution_task_id": execution_task_id,
+    }
+    if result.failure_reason is not None:
+        metadata["failure_reason"] = result.failure_reason
+    return metadata
+
+
+def _safe_evaluator_artifact_ref(ref: str) -> str:
+    parsed = urlparse(ref)
+    if parsed.scheme == "file" or (parsed.scheme == "" and ref.startswith("/")):
+        return PurePosixPath(parsed.path or ref).name or "artifact"
+    if parsed.query or parsed.fragment:
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    return ref
 
 
 def _evaluator_result(row: EvaluatorResultRow) -> EvaluatorResult:

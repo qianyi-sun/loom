@@ -648,9 +648,16 @@ _REQUIRED_LIFECYCLE_EVENT_TYPES = (
     "run.claimed",
     "run.started",
     "run.evaluating",
+    "evaluator.completed",
     "run.succeeded",
 )
-_WORKER_LIFECYCLE_EVENT_TYPES = {"run.claimed", "run.started", "run.evaluating", "run.succeeded"}
+_WORKER_LIFECYCLE_EVENT_TYPES = {
+    "run.claimed",
+    "run.started",
+    "run.evaluating",
+    "evaluator.completed",
+    "run.succeeded",
+}
 
 
 if __name__ == "__main__":

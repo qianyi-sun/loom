@@ -432,6 +432,8 @@ function runEventTypes() {
     "run.claimed",
     "run.started",
     "run.evaluating",
+    "evaluator.completed",
+    "evaluator.failed",
     "run.succeeded",
     "run.failed",
     "run.canceled",

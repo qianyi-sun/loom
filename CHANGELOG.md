@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #157 typed evaluator event slice. Worker result persistence
+  now appends metadata-only `evaluator.completed` or `evaluator.failed` events
+  after `run.evaluating` and before the terminal lifecycle event, with safe
+  evaluator id/mode/status/score/artifact-ref metadata and without embedding
+  verbal feedback, metrics, judge prompts, or local file paths. Frontend smoke
+  replay now requires the evaluator completion event.
 - Added the first #158/#160 scheduler-driven Docker-owned resource cleanup
   slice. Docker terminal sandbox containers now carry stable
   platform/run/resource labels, scheduler recovery can remove labeled

@@ -251,8 +251,11 @@ serializing dashboard payloads.
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
-  `artifact.upload_expired`, `log.chunk_recorded`, and
-  `sandbox.container_cleanup`.
+  `artifact.upload_expired`, `log.chunk_recorded`, `evaluator.completed`,
+  `evaluator.failed`, and `sandbox.container_cleanup`.
+  Evaluator events carry summary-only metadata such as evaluator id, mode,
+  status, score, safe artifact refs, worker id, and execution task id; they do
+  not embed full metrics, verbal feedback, judge prompts, or local file paths.
   Recovery metadata currently uses canonical reason codes for implemented
   `stale_dispatched`, `stale_worker_heartbeat`, `terminal_result_mismatch`,
   `docker_container_cleanup`, and `artifact_upload_expired` paths, plus
@@ -357,10 +360,11 @@ serializing dashboard payloads.
   SSE routes, keep telemetry polling available, persist terminal dashboard
   projection rows that scheduler recovery can refresh in bounded batches, and
   make `/dashboard/progress` prefer clean projection rows before falling back to
-  hydrated run records. The first typed artifact/log event slice records chunk
-  metadata and upload expiry events without embedding payloads. The remaining
-  #157 work is Redis fanout, typed sandbox/resource/evaluator events, and
-  list/detail routes fully backed by projection rows.
+  hydrated run records. The first typed artifact/log/evaluator event slices
+  record chunk, upload-expiry, and evaluator completion/failure metadata without
+  embedding payloads. The remaining #157 work is Redis fanout, broader typed
+  sandbox/resource events, and list/detail routes fully backed by projection
+  rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal

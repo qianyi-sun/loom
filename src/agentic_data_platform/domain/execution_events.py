@@ -23,6 +23,8 @@ class RunEventType(str, Enum):
     ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"
     LOG_CHUNK_RECORDED = "log.chunk_recorded"
     SANDBOX_CONTAINER_CLEANUP = "sandbox.container_cleanup"
+    EVALUATOR_COMPLETED = "evaluator.completed"
+    EVALUATOR_FAILED = "evaluator.failed"
 
 
 class RecoveryReasonCode(str, Enum):

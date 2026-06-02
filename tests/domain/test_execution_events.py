@@ -28,6 +28,8 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.ARTIFACT_UPLOAD_EXPIRED.value, "artifact.upload_expired")
         self.assertEqual(RunEventType.LOG_CHUNK_RECORDED.value, "log.chunk_recorded")
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_CLEANUP.value, "sandbox.container_cleanup")
+        self.assertEqual(RunEventType.EVALUATOR_COMPLETED.value, "evaluator.completed")
+        self.assertEqual(RunEventType.EVALUATOR_FAILED.value, "evaluator.failed")
 
     def test_recovery_reason_codes_cover_phase_one_reconciliation_paths(self):
         self.assertEqual(RecoveryReasonCode.STALE_DISPATCHED.value, "stale_dispatched")

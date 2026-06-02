@@ -109,7 +109,10 @@ store their canonical reason in `metadata_json.recovery` using
 follow-up reasons are `canceled_resource_cleanup` and
 `projection_refresh_failed`. Scheduler-driven Docker cleanup records
 same-status `sandbox.container_cleanup` events with container ids, removed ids,
-exit codes, cleanup status, and bounded cleanup error reasons.
+exit codes, cleanup status, and bounded cleanup error reasons. Worker result
+persistence records `evaluator.completed` or `evaluator.failed` events after
+the run enters `evaluating`; these events keep evaluator progress replayable
+while storing only summary metadata and safe artifact refs.
 Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch

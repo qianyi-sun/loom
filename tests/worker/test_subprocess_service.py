@@ -319,7 +319,14 @@ class SubprocessRunWorkerTest(unittest.TestCase):
         self.assertEqual(loaded.status, RunStatus.SUCCEEDED)
         self.assertEqual(
             [event.event_type for event in events],
-            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "run.succeeded",
+            ],
         )
 
     def test_subprocess_worker_does_not_fail_new_attempt_when_child_task_is_stale(self):

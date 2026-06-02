@@ -41,8 +41,8 @@ class FrontendSmokeTest(unittest.TestCase):
         self.assertEqual(result.artifact_count, 3)
         self.assertEqual(result.telemetry_status, "succeeded")
         self.assertEqual(result.bundle_file_count, 7)
-        self.assertEqual(result.lifecycle_event_count, 6)
-        self.assertEqual(result.sse_event_count, 6)
+        self.assertEqual(result.lifecycle_event_count, 7)
+        self.assertEqual(result.sse_event_count, 7)
         self.assertEqual(client.requests[0]["path"], "/auth/login")
         self.assertIn("/runs/frontend_smoke_001/artifact-bundle", [request["path"] for request in client.requests])
         self.assertNotIn("Authorization", str(client.requests))
@@ -444,6 +444,22 @@ def _events(run_id="frontend_smoke_001"):
             ),
             _event(
                 6,
+                "evaluator.completed",
+                "evaluating",
+                "evaluating",
+                {
+                    "worker_id": "worker-dev-1",
+                    "execution_task_id": f"{run_id}:attempt:1",
+                    "evaluator_id": "harbor-verifier",
+                    "mode": "harbor_verifier",
+                    "status": "completed",
+                    "score": 1.0,
+                    "artifact_refs": [f"minio://runs/{run_id}/evaluation/verifier.json"],
+                },
+                run_id=run_id,
+            ),
+            _event(
+                7,
                 "run.succeeded",
                 "evaluating",
                 "succeeded",
