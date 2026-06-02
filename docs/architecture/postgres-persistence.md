@@ -222,9 +222,11 @@ and `started` rows as `expired`, records the previous upload status, scheduler
 id, expiry timestamp, and error reason in artifact metadata, and appends a
 same-status `run.recovered` event with `recovery=artifact_upload_expired`.
 The current service API exposes chunk metadata through
-`GET /runs/{run_id}/artifact-chunks`; automatic chunk writers, object payload
-streaming/download by chunk reference, richer upload transition history, and
-typed log/artifact events are still #159/#157 follow-up work.
+`GET /runs/{run_id}/artifact-chunks`. Worker result persistence now writes
+object-backed terminal stdout/stderr chunks and records their metadata against
+the current attempt's trajectory artifact. Object payload streaming/download by
+chunk reference, richer upload transition history, and typed log/artifact
+events are still #159/#157 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
+from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
@@ -294,6 +295,68 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 3)
         self.assertEqual(payload["run"]["evaluator"]["status"], "completed")
+
+    def test_docker_worker_records_stdout_and_stderr_chunks(self):
+        payload = _run_create_payload("run_worker_log_chunks_001")
+        payload["metadata"] = {
+            "worker_commands": [
+                {
+                    "command": "python solve.py",
+                    "cwd": "/workspace",
+                    "model_call_id": "call-log-chunks-1",
+                }
+            ]
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        stdout_payload = "created receipts workbook\n" + ("x" * 70_000) + "\nstdout line two\n"
+        stderr_payload = "solver warning\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                stdout=stdout_payload,
+                stderr=stderr_payload,
+                write_files={"receipts.xlsx": "spreadsheet bytes\n"},
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-docker-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-log-chunks-001")
+
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(run_id="run_worker_log_chunks_001")
+
+            stdout_chunks = [chunk for chunk in chunks if chunk.chunk_kind is ArtifactChunkKind.STDOUT]
+            stderr_chunks = [chunk for chunk in chunks if chunk.chunk_kind is ArtifactChunkKind.STDERR]
+            self.assertEqual([chunk.chunk_sequence for chunk in stdout_chunks], [0])
+            self.assertEqual([chunk.chunk_sequence for chunk in stderr_chunks], [0])
+            self.assertEqual(stdout_chunks[0].metadata["turn_index"], 0)
+            self.assertEqual(stderr_chunks[0].metadata["turn_index"], 0)
+            self.assertEqual(stdout_chunks[0].metadata["stream"], "stdout")
+            self.assertEqual(stderr_chunks[0].metadata["stream"], "stderr")
+            self.assertEqual(stdout_chunks[0].size_bytes, len(stdout_payload.encode("utf-8")))
+            self.assertTrue((temp_path / "artifacts" / stdout_chunks[0].storage_key).exists())
+            self.assertTrue((temp_path / "artifacts" / stderr_chunks[0].storage_key).exists())
+            self.assertEqual(
+                (temp_path / "artifacts" / stdout_chunks[0].storage_key).read_text(),
+                stdout_payload,
+            )
+            self.assertEqual(
+                (temp_path / "artifacts" / stderr_chunks[0].storage_key).read_text(),
+                stderr_payload,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
 
     def test_docker_worker_uses_configured_api_model_provider_without_leaking_secret(self):
         payload = _run_create_payload("run_worker_api_provider_001")

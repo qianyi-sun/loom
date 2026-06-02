@@ -18,7 +18,7 @@ from agentic_data_platform.artifacts.store import (
     build_s3_artifact_store,
 )
 from agentic_data_platform.domain.execution_events import RunEventType
-from agentic_data_platform.domain.run_records import RunStatus
+from agentic_data_platform.domain.run_records import ArtifactKind, RunStatus, TerminalTurn
 from agentic_data_platform.persistence import create_database_engine, session_scope
 from agentic_data_platform.persistence.repositories import (
     DuplicateExecutionTaskError,
@@ -109,6 +109,7 @@ class RunWorker:
             worker_id=self.worker_id,
             execution_task_id=execution_task_id,
             request_id=request_id,
+            artifact_persistence=_artifact_persistence_for_executor(self.executor),
         )
         return _worker_result(saved)
 
@@ -271,6 +272,7 @@ def execute_claimed_run(
         worker_id=worker_id,
         execution_task_id=execution_task_id,
         request_id=request_id,
+        artifact_persistence=_artifact_persistence_for_executor(executor),
     )
     return _worker_result(saved)
 
@@ -365,16 +367,25 @@ def _save_worker_result(
     worker_id: str,
     execution_task_id: str | None,
     request_id: str | None,
+    artifact_persistence: ArtifactPersistence | None = None,
 ):
     with session_scope(engine) as session:
         repository = RunRepository(session)
         try:
-            return repository.save_worker_result(
+            saved = repository.save_worker_result(
                 run,
                 worker_id=worker_id,
                 execution_task_id=execution_task_id,
                 request_id=request_id,
             )
+            _record_terminal_log_chunks(
+                repository,
+                saved,
+                execution_task_id=execution_task_id,
+                artifact_persistence=artifact_persistence,
+                source_turns=run.trajectory,
+            )
+            return saved
         except StaleExecutionTaskError:
             return repository.get_run(run.run_id)
         except ValueError:
@@ -382,6 +393,39 @@ def _save_worker_result(
             if current.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
                 return current
             raise
+
+
+def _artifact_persistence_for_executor(executor: WorkerRunExecutor) -> ArtifactPersistence | None:
+    persistence = getattr(executor, "artifact_persistence", None)
+    if isinstance(persistence, ArtifactPersistence):
+        return persistence
+    return None
+
+
+def _record_terminal_log_chunks(
+    repository: RunRepository,
+    run,
+    *,
+    execution_task_id: str | None,
+    artifact_persistence: ArtifactPersistence | None,
+    source_turns: list[TerminalTurn],
+) -> None:
+    if artifact_persistence is None or execution_task_id is None or not source_turns:
+        return
+    trajectory_artifact = next(
+        (artifact for artifact in run.artifacts if artifact.kind is ArtifactKind.TRAJECTORY),
+        None,
+    )
+    if trajectory_artifact is None:
+        return
+    for chunk in artifact_persistence.persist_terminal_log_chunks(
+        run_id=run.run_id,
+        task_instance_id=run.task.instance_id,
+        attempt_id=execution_task_id,
+        trajectory_artifact_id=trajectory_artifact.artifact_id,
+        turns=source_turns,
+    ):
+        repository.record_artifact_chunk(chunk)
 
 
 def _run_child_command_with_cancel_monitor(

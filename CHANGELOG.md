@@ -13,9 +13,13 @@ All notable changes to this project will be documented in this file.
   /runs/{run_id}/artifact-chunks` lists bounded, project-scoped chunk metadata
   by optional attempt, artifact, kind, sequence cursor, and limit so live
   monitors and operators can discover object-backed log/trajectory chunks
-  without downloading payload bytes through Postgres. Automatic chunk writers,
-  payload streaming/download by chunk reference, richer upload transition
-  history, and typed log/artifact events remain follow-up work.
+  without downloading payload bytes through Postgres.
+- Added the first automatic #159 terminal log chunk writer. Worker result
+  persistence now writes terminal stdout/stderr chunks to object storage and
+  records their chunk metadata against the trajectory artifact for the current
+  execution attempt. Payload streaming/download by chunk reference, richer
+  upload transition history, and typed log/artifact events remain follow-up
+  work.
 - Split the #150 OpenHands adapter contract into separate OpenHands CLI and
   OpenHands SDK specs. The CLI path now passes a Harbor-compatible
   `openhands-ai` version through `--agent-kwarg version=1.6.0` so Harbor 0.9.0

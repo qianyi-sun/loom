@@ -13,7 +13,10 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
 
 from agentic_data_platform.domain.artifact_metadata import (
+    ArtifactChunkKind,
+    ArtifactChunkMetadata,
     ArtifactContentType,
+    ArtifactUploadStatus,
     finalize_stored_artifact_metadata,
 )
 from agentic_data_platform.domain.run_records import (
@@ -219,6 +222,27 @@ class ArtifactKeyFactory:
 
     def harbor_ingestion_diagnostics_key(self, run_id: str, task_instance_id: str) -> str:
         return self._key(run_id, task_instance_id, "logs", "harbor-ingestion-diagnostics.json")
+
+    def terminal_log_chunk_key(
+        self,
+        run_id: str,
+        task_instance_id: str,
+        attempt_id: str,
+        stream: ArtifactChunkKind | str,
+        chunk_sequence: int,
+    ) -> str:
+        if chunk_sequence < 0:
+            raise ValueError("chunk_sequence must be non-negative")
+        stream_name = stream.value if isinstance(stream, ArtifactChunkKind) else stream
+        return self._key(
+            run_id,
+            task_instance_id,
+            "attempts",
+            _safe_component(attempt_id),
+            "logs",
+            _safe_component(stream_name),
+            f"{chunk_sequence:06d}.txt",
+        )
 
     def wrapper_artifact_key(self, run_id: str, task_instance_id: str, artifact_path: str) -> str:
         return self._key(run_id, task_instance_id, "wrapper", *_safe_relative_parts(artifact_path))
@@ -450,6 +474,73 @@ class ArtifactPersistence:
             artifact_id=f"{_safe_component(run_id)}-{_safe_component('-'.join(relative_parts))}",
             kind=kind,
         )
+
+    def persist_terminal_log_chunks(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        attempt_id: str,
+        trajectory_artifact_id: str,
+        turns: list[TerminalTurn],
+    ) -> list[ArtifactChunkMetadata]:
+        chunks: list[ArtifactChunkMetadata] = []
+        sequence_by_stream = {
+            ArtifactChunkKind.STDOUT: 0,
+            ArtifactChunkKind.STDERR: 0,
+        }
+        for turn in turns:
+            for chunk_kind, text in (
+                (ArtifactChunkKind.STDOUT, turn.stdout),
+                (ArtifactChunkKind.STDERR, turn.stderr),
+            ):
+                if not text:
+                    continue
+                chunk_sequence = sequence_by_stream[chunk_kind]
+                sequence_by_stream[chunk_kind] += 1
+                stored = self.store.put_bytes(
+                    self.key_factory.terminal_log_chunk_key(
+                        run_id,
+                        task_instance_id,
+                        attempt_id,
+                        chunk_kind,
+                        chunk_sequence,
+                    ),
+                    text.encode("utf-8"),
+                    media_type="text/plain; charset=utf-8",
+                    metadata={
+                        "run_id": run_id,
+                        "task_instance_id": task_instance_id,
+                        "attempt_id": attempt_id,
+                        "artifact_id": trajectory_artifact_id,
+                        "chunk_kind": chunk_kind.value,
+                        "chunk_sequence": chunk_sequence,
+                        "turn_index": turn.turn_index,
+                        "stream": chunk_kind.value,
+                    },
+                )
+                chunks.append(
+                    ArtifactChunkMetadata(
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                        artifact_id=trajectory_artifact_id,
+                        chunk_kind=chunk_kind,
+                        chunk_sequence=chunk_sequence,
+                        storage_key=stored.key,
+                        media_type=stored.media_type,
+                        size_bytes=stored.size_bytes,
+                        sha256=stored.sha256,
+                        upload_status=ArtifactUploadStatus.COMPLETED,
+                        created_at=datetime.now(timezone.utc),
+                        metadata={
+                            "turn_index": turn.turn_index,
+                            "stream": chunk_kind.value,
+                            "command": turn.command,
+                            "model_call_id": turn.model_call_id,
+                        },
+                    )
+                )
+        return chunks
 
 
 def _artifact_ref(stored: StoredArtifact, *, artifact_id: str, kind: ArtifactKind) -> ArtifactRef:

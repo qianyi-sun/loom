@@ -288,9 +288,11 @@ serializing dashboard payloads.
   project viewers without returning object payload bytes or storage
   credentials. Upload-state repository recovery can now expire stale
   `pending` or `started` rows to `expired` with a durable `run.recovered`
-  event; automatic chunk writers, payload streaming/download by chunk
-  reference, richer upload transition histories, and typed log/artifact events
-  remain #159/#157 follow-up work.
+  event. Worker result persistence now writes object-backed terminal
+  stdout/stderr chunks and records their metadata against the current attempt's
+  trajectory artifact. Payload streaming/download by chunk reference, richer
+  upload transition histories, and typed log/artifact events remain #159/#157
+  follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured
