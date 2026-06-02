@@ -19,7 +19,11 @@ from agentic_data_platform.artifacts.store import (
 from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence import create_database_engine, session_scope
-from agentic_data_platform.persistence.repositories import RunRepository, StaleExecutionTaskError
+from agentic_data_platform.persistence.repositories import (
+    DuplicateExecutionTaskError,
+    RunRepository,
+    StaleExecutionTaskError,
+)
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.sandbox.docker_terminal import CommandRunner, SubprocessCommandRunner
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
@@ -227,12 +231,12 @@ def execute_claimed_run(
     with session_scope(engine) as session:
         repository = RunRepository(session)
         try:
-            claimed = repository.validate_current_execution_task(
+            claimed = repository.acquire_execution_task_lock(
                 run_id,
                 worker_id=worker_id,
                 execution_task_id=execution_task_id,
             )
-        except StaleExecutionTaskError:
+        except (DuplicateExecutionTaskError, StaleExecutionTaskError):
             return _worker_result(repository.get_run(run_id))
 
     try:

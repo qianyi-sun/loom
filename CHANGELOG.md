@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #158 duplicate-delivery guard. Subprocess children now acquire
+  an attempt-level execution lock before entering benchmark execution; duplicate
+  deliveries with the same `execution_task_id` return the current run snapshot
+  without running Harbor/Docker/model work twice. The lock is stored in
+  `run_attempts.metadata.execution.runner` and survives heartbeat metadata
+  updates.
 - Hardened the generated `harbor-cli-smoke` task environment by pre-creating
   writable `/logs/verifier` and `/logs/artifacts` directories, preventing
   Harbor verifier stdout redirection from failing before `tests/test.sh` can
@@ -39,7 +45,7 @@ All notable changes to this project will be documented in this file.
   `run_attempts.metadata`, worker claim/heartbeat/terminal result persistence
   records a versioned runner process block, and lifecycle event metadata now
   includes the current `execution_task_id` for stale-task rejection and
-  follow-on duplicate-delivery hardening.
+  duplicate-delivery hardening.
 - Added the first shared execution event contract slice for #157/#160. The
   backend now centralizes current run lifecycle event names and Phase 1 recovery
   reason codes in `agentic_data_platform.domain.execution_events`, and

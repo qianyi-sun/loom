@@ -32,6 +32,7 @@ from agentic_data_platform.persistence.models import RunAttemptRow, RunRow
 from agentic_data_platform.persistence.repositories import (
     AuditEventRepository,
     BenchmarkCatalogRepository,
+    DuplicateExecutionTaskError,
     IdentityRepository,
     ProjectRepository,
     RunRepository,
@@ -937,6 +938,47 @@ class PersistenceRepositoryTest(unittest.TestCase):
             [event.event_type for event in events],
             ["run.created", "run.claimed", "run.canceled", "run.retried"],
         )
+
+    def test_run_repository_rejects_duplicate_execution_task_lock(self):
+        run = _queued_run(run_id="run_duplicate_execution_task_001")
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            runs = RunRepository(session)
+
+            runs.create_run(run, request_id="req-create-001")
+            runs.claim_next_queued_run(worker_id="worker-a", request_id="req-claim-001")
+            execution_task_id = runs.current_execution_task_id(run.run_id)
+
+            locked = runs.acquire_execution_task_lock(
+                run.run_id,
+                worker_id="worker-a",
+                execution_task_id=execution_task_id,
+                request_id="req-lock-001",
+            )
+            with self.assertRaisesRegex(DuplicateExecutionTaskError, "already executing"):
+                runs.acquire_execution_task_lock(
+                    run.run_id,
+                    worker_id="worker-a",
+                    execution_task_id=execution_task_id,
+                    request_id="req-lock-duplicate-001",
+                )
+
+            attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == run.run_id))
+            runner = attempt.metadata_json["execution"]["runner"]
+
+        self.assertEqual(locked.status, RunStatus.PROVISIONING)
+        self.assertEqual(runner["execution_lock_id"], execution_task_id)
+        self.assertEqual(runner["process_status"], RunnerProcessStatus.EXECUTING.value)
+        self.assertIn("execution_lock_acquired_at", runner)
 
     def test_run_repository_rejects_invalid_lifecycle_transitions(self):
         run = _completed_run()

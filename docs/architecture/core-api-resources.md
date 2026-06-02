@@ -244,7 +244,10 @@ serializing dashboard payloads.
   metadata. Lifecycle event metadata includes `execution_task_id` where the
   writer knows the current attempt. Worker heartbeat and result persistence can
   validate that identifier so stale child completions from a previous attempt do
-  not overwrite a newer retry.
+  not overwrite a newer retry. Subprocess children also acquire an
+  attempt-level execution lock before benchmark execution; duplicate deliveries
+  with the same `execution_task_id` return the current run snapshot without
+  entering Harbor/Docker/model execution twice.
 - Invalid cancel/retry transitions return structured `409 conflict` errors
   through the shared service error boundary.
 - Invalid nested create payloads and blank cancel/retry reasons return
@@ -309,8 +312,10 @@ serializing dashboard payloads.
   an opt-in subprocess-isolated worker path where the parent worker claims the
   run, launches `agentic_data_platform.worker.execution_child` with the current
   `execution_task_id`, and reloads the terminal state after the child persists
-  the result. Stale child completions are ignored if the current attempt changed
-  while the child was running. A production
+  the result. The child acquires the attempt execution lock before work starts,
+  stale child completions are ignored if the current attempt changed while the
+  child was running, and duplicate deliveries are skipped before they reach the
+  executor. A production
   LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction

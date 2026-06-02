@@ -10,6 +10,7 @@ from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArti
 from agentic_data_platform.domain.run_records import (
     BenchmarkTaskInstance,
     EvaluatorConfig,
+    EvaluatorResult,
     JudgeConfig,
     ModelConfig,
     RunRecord,
@@ -207,6 +208,45 @@ class SubprocessRunWorkerTest(unittest.TestCase):
         self.assertEqual(
             [event.event_type for event in events],
             ["run.created", "run.claimed", "run.canceled", "run.retried"],
+        )
+
+    def test_execute_claimed_run_skips_duplicate_delivery_after_first_child_locks_task(self):
+        _create_run(self.engine, "run_subprocess_child_duplicate_001")
+        with session_scope(self.engine) as session:
+            repository = RunRepository(session)
+            repository.claim_next_queued_run(
+                worker_id="worker-child-duplicate-test",
+                request_id="req-child-duplicate-claim-001",
+            )
+            execution_task_id = repository.current_execution_task_id(
+                "run_subprocess_child_duplicate_001"
+            )
+
+        executor = ExecutorThatAttemptsDuplicateDelivery(
+            engine=self.engine,
+            worker_id="worker-child-duplicate-test",
+            run_id="run_subprocess_child_duplicate_001",
+            execution_task_id=execution_task_id,
+        )
+        result = execute_claimed_run(
+            engine=self.engine,
+            worker_id="worker-child-duplicate-test",
+            run_id="run_subprocess_child_duplicate_001",
+            execution_task_id=execution_task_id,
+            request_id="req-child-duplicate-execute-001",
+            executor=executor,
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertIsNotNone(executor.duplicate_result)
+        self.assertEqual(executor.duplicate_result.status, "provisioning")
+        with session_scope(self.engine) as session:
+            loaded = RunRepository(session).get_run("run_subprocess_child_duplicate_001")
+            events = RunRepository(session).list_status_events("run_subprocess_child_duplicate_001")
+        self.assertEqual(loaded.status, RunStatus.SUCCEEDED)
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["run.created", "run.claimed", "run.started", "run.evaluating", "run.succeeded"],
         )
 
     def test_subprocess_worker_does_not_fail_new_attempt_when_child_task_is_stale(self):
@@ -416,6 +456,44 @@ class StaleExecutionTaskCommandRunner:
 class ExecutorThatMustNotRun:
     def execute(self, run):
         raise AssertionError("stale execution task should not execute")
+
+
+class ExecutorThatAttemptsDuplicateDelivery:
+    def __init__(self, *, engine, worker_id: str, run_id: str, execution_task_id: str) -> None:
+        self.engine = engine
+        self.worker_id = worker_id
+        self.run_id = run_id
+        self.execution_task_id = execution_task_id
+        self.duplicate_result = None
+
+    def execute(self, run):
+        self.duplicate_result = execute_claimed_run(
+            engine=self.engine,
+            worker_id=self.worker_id,
+            run_id=self.run_id,
+            execution_task_id=self.execution_task_id,
+            request_id="req-child-duplicate-delivery-001",
+            executor=ExecutorThatMustNotRun(),
+        )
+        run.transition_to(RunStatus.RUNNING)
+        run.transition_to(RunStatus.EVALUATING)
+        run.attach_evaluator_result(
+            EvaluatorResult(
+                evaluator_id="mock-judge-v0",
+                status="completed",
+                score=1.0,
+                metrics={"task_success": True},
+                verbal_feedback="Primary execution completed after duplicate delivery was skipped.",
+                judge=JudgeConfig(
+                    provider="mock",
+                    model_name="deterministic-judge",
+                    rubric_version="latent-skill-v0",
+                ),
+                artifact_refs=[],
+            )
+        )
+        run.transition_to(RunStatus.SUCCEEDED)
+        return run
 
 
 class CancelingManagedCommandRunner:

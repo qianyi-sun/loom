@@ -70,6 +70,32 @@ class ExecutionMetadataContractTest(unittest.TestCase):
         self.assertEqual(runner["process_id"], 1234)
         self.assertEqual(runner["return_code"], 0)
 
+    def test_runner_process_metadata_preserves_execution_lock_during_heartbeat(self):
+        lock_at = datetime(2026, 6, 1, 12, 0, 10, tzinfo=timezone.utc)
+        heartbeat_at = datetime(2026, 6, 1, 12, 0, 30, tzinfo=timezone.utc)
+
+        metadata = runner_process_metadata(
+            {},
+            worker_id="worker-a",
+            process_status=RunnerProcessStatus.EXECUTING,
+            heartbeat_status="provisioning",
+            observed_at=lock_at,
+            execution_lock_id="run_001:attempt:1",
+            execution_lock_acquired_at=lock_at,
+        )
+        metadata = runner_process_metadata(
+            metadata,
+            worker_id="worker-a",
+            process_status=RunnerProcessStatus.HEARTBEATING,
+            heartbeat_status="running",
+            observed_at=heartbeat_at,
+        )
+
+        runner = metadata["execution"]["runner"]
+        self.assertEqual(runner["process_status"], "heartbeating")
+        self.assertEqual(runner["execution_lock_id"], "run_001:attempt:1")
+        self.assertEqual(runner["execution_lock_acquired_at"], "2026-06-01T12:00:10Z")
+
     def test_execution_metadata_rejects_missing_identifiers(self):
         with self.assertRaisesRegex(ValueError, "scheduler_id must be a non-empty string"):
             scheduler_lease_metadata(

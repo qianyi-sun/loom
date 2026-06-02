@@ -123,7 +123,11 @@ scheduler rollout; both claim paths persist a `run.claimed` transition to
 subprocess children validate that the latest attempt still matches the claimed
 execution task before heartbeat or terminal result persistence. If retry has
 created a newer attempt, stale worker results are rejected instead of mutating
-the current run state.
+the current run state. `RunRepository.acquire_execution_task_lock(...)` records
+`execution.runner.execution_lock_id` and `execution_lock_acquired_at` before a
+subprocess child enters benchmark execution; a duplicate delivery for the same
+`execution_task_id` is rejected before it can run Harbor/Docker/model work a
+second time.
 Retry creates a new `run_attempts` row for the same `run_id`, moves the run back
 to `queued`, and records a `run.retried` status event. Follow-on `save_run()`
 calls update the latest internal attempt so worker code can persist terminal

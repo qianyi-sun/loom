@@ -18,6 +18,7 @@ class SchedulerLeaseStatus(str, Enum):
 
 class RunnerProcessStatus(str, Enum):
     CLAIMED = "claimed"
+    EXECUTING = "executing"
     HEARTBEATING = "heartbeating"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -88,6 +89,8 @@ def runner_process_metadata(
     completed_at: datetime | None = None,
     process_id: int | None = None,
     return_code: int | None = None,
+    execution_lock_id: str | None = None,
+    execution_lock_acquired_at: datetime | None = None,
 ) -> dict[str, Any]:
     _require_non_empty("worker_id", worker_id)
     _require_non_empty("heartbeat_status", heartbeat_status)
@@ -96,6 +99,10 @@ def runner_process_metadata(
         _require_timezone("claimed_at", claimed_at)
     if completed_at is not None:
         _require_timezone("completed_at", completed_at)
+    if execution_lock_acquired_at is not None:
+        _require_timezone("execution_lock_acquired_at", execution_lock_acquired_at)
+    if execution_lock_id is not None:
+        _require_non_empty("execution_lock_id", execution_lock_id)
 
     updated = dict(metadata or {})
     execution = _execution_metadata(updated)
@@ -116,6 +123,10 @@ def runner_process_metadata(
         runner["process_id"] = process_id
     if return_code is not None:
         runner["return_code"] = return_code
+    if execution_lock_id is not None:
+        runner["execution_lock_id"] = execution_lock_id
+    if execution_lock_acquired_at is not None:
+        runner["execution_lock_acquired_at"] = _datetime_json(execution_lock_acquired_at)
     execution["runner"] = runner
     updated["execution"] = execution
     return updated

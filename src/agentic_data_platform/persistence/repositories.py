@@ -65,6 +65,10 @@ class StaleExecutionTaskError(ValueError):
     """Raised when a worker acts on an execution task that is no longer current."""
 
 
+class DuplicateExecutionTaskError(ValueError):
+    """Raised when a worker tries to execute an already-running task."""
+
+
 @dataclass(frozen=True)
 class TeamRecord:
     team_id: str
@@ -736,6 +740,51 @@ class RunRepository:
                 f"stale execution task {execution_task_id}: run {run_id} is {row.status}"
             )
         return self._run_record(row)
+
+    def acquire_execution_task_lock(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        execution_task_id: str,
+        request_id: str | None = None,
+    ) -> RunRecord:
+        del request_id
+        _require_non_empty("worker_id", worker_id)
+        row = self._run_row_for_update(run_id)
+        attempt = self._latest_attempt_row(run_id)
+        self._validate_execution_task_row(
+            row,
+            attempt,
+            execution_task_id=execution_task_id,
+            worker_id=worker_id,
+        )
+        if RunStatus(row.status) not in {RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.EVALUATING}:
+            raise StaleExecutionTaskError(
+                f"stale execution task {execution_task_id}: run {run_id} is {row.status}"
+            )
+
+        runner = _runner_metadata(attempt.metadata_json)
+        existing_lock_id = runner.get("execution_lock_id")
+        if isinstance(existing_lock_id, str) and existing_lock_id.strip():
+            raise DuplicateExecutionTaskError(
+                f"execution task {execution_task_id} is already executing"
+            )
+
+        now = utc_now()
+        attempt.metadata_json = runner_process_metadata(
+            attempt.metadata_json,
+            worker_id=worker_id,
+            process_status=RunnerProcessStatus.EXECUTING,
+            heartbeat_status=row.status,
+            observed_at=now,
+            execution_lock_id=execution_task_id,
+            execution_lock_acquired_at=now,
+        )
+        attempt.updated_at = now
+        row.updated_at = now
+        self.session.flush()
+        return self.get_run(run_id)
 
     def fail_stale_active_runs_by_heartbeat(
         self,
@@ -1665,6 +1714,10 @@ def _worker_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     worker = (metadata or {}).get("worker")
     if isinstance(worker, dict):
         return dict(worker)
+    return _runner_metadata(metadata)
+
+
+def _runner_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     execution = (metadata or {}).get("execution")
     if isinstance(execution, dict):
         runner = execution.get("runner")
