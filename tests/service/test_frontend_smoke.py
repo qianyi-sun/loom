@@ -41,6 +41,8 @@ class FrontendSmokeTest(unittest.TestCase):
         self.assertEqual(result.artifact_count, 3)
         self.assertEqual(result.telemetry_status, "succeeded")
         self.assertEqual(result.bundle_file_count, 7)
+        self.assertEqual(result.lifecycle_event_count, 6)
+        self.assertEqual(result.sse_event_count, 6)
         self.assertEqual(client.requests[0]["path"], "/auth/login")
         self.assertIn("/runs/frontend_smoke_001/artifact-bundle", [request["path"] for request in client.requests])
         self.assertNotIn("Authorization", str(client.requests))
@@ -61,6 +63,30 @@ class FrontendSmokeTest(unittest.TestCase):
             },
         )
         self.assertEqual(run_launch["json"]["evaluators"], [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}])
+        event_reads = [request for request in client.requests if request["path"] == "/runs/frontend_smoke_001/events"]
+        self.assertEqual(
+            event_reads,
+            [
+                {
+                    "method": "GET",
+                    "path": "/runs/frontend_smoke_001/events",
+                    "params": {"after_seq": 0, "limit": 100},
+                    "headers": {"X-Request-ID": "frontend_smoke_001-frontend-smoke"},
+                }
+            ],
+        )
+        stream_reads = [request for request in client.requests if request["path"] == "/runs/frontend_smoke_001/stream"]
+        self.assertEqual(
+            stream_reads,
+            [
+                {
+                    "method": "GET",
+                    "path": "/runs/frontend_smoke_001/stream",
+                    "params": {"after_seq": 0, "limit": 100, "once": True},
+                    "headers": {"X-Request-ID": "frontend_smoke_001-frontend-smoke"},
+                }
+            ],
+        )
 
     def test_frontend_smoke_retries_transient_run_detail_404_after_launch(self):
         client = FakeFrontendSmokeClient(
@@ -111,6 +137,58 @@ class FrontendSmokeTest(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.artifact_count, 5)
 
+    def test_frontend_smoke_rejects_incomplete_event_replay(self):
+        client = FakeFrontendSmokeClient(
+            run_details=[_run_detail("succeeded", artifact_count=3, turn_count=1)],
+            telemetry=_telemetry("succeeded"),
+            bundle=_bundle(),
+            events={
+                "run_id": "frontend_smoke_001",
+                "next_after_seq": 1,
+                "events": [_event(1, "run.created", None, "queued", {})],
+            },
+        )
+
+        with self.assertRaisesRegex(FrontendSmokeError, "event replay missing required lifecycle events"):
+            run_frontend_smoke(
+                FrontendSmokeConfig(
+                    base_url="http://api:8000",
+                    username="[REDACTED_OWNER]",
+                    password="[REDACTED_PASSWORD]",
+                    run_id="frontend_smoke_001",
+                    poll_interval_seconds=0,
+                ),
+                client=client,
+                sleep=lambda _: None,
+            )
+
+    def test_frontend_smoke_rejects_incomplete_sse_replay(self):
+        client = FakeFrontendSmokeClient(
+            run_details=[_run_detail("succeeded", artifact_count=3, turn_count=1)],
+            telemetry=_telemetry("succeeded"),
+            bundle=_bundle(),
+            sse_content=_sse_from_events(
+                {
+                    "run_id": "frontend_smoke_001",
+                    "next_after_seq": 1,
+                    "events": [_event(1, "run.created", None, "queued", {})],
+                }
+            ),
+        )
+
+        with self.assertRaisesRegex(FrontendSmokeError, "SSE replay missing required lifecycle events"):
+            run_frontend_smoke(
+                FrontendSmokeConfig(
+                    base_url="http://api:8000",
+                    username="[REDACTED_OWNER]",
+                    password="[REDACTED_PASSWORD]",
+                    run_id="frontend_smoke_001",
+                    poll_interval_seconds=0,
+                ),
+                client=client,
+                sleep=lambda _: None,
+            )
+
     def test_frontend_smoke_rejects_empty_bundle_download(self):
         client = FakeFrontendSmokeClient(
             run_details=[_run_detail("succeeded", artifact_count=3, turn_count=1)],
@@ -153,10 +231,12 @@ class FrontendSmokeTest(unittest.TestCase):
 
 
 class FakeFrontendSmokeClient:
-    def __init__(self, *, run_details, telemetry, bundle):
+    def __init__(self, *, run_details, telemetry, bundle, events=None, sse_content=None):
         self.run_details = list(run_details)
         self.telemetry = telemetry
         self.bundle = bundle
+        self.events = events
+        self.sse_content = sse_content
         self.requests = []
 
     def post(self, path, *, json=None, headers=None):
@@ -270,6 +350,13 @@ class FakeFrontendSmokeClient:
             if isinstance(detail, FakeResponse):
                 return detail
             return FakeResponse(200, detail)
+        if path.endswith("/events"):
+            run_id = path.split("/")[2]
+            return FakeResponse(200, self.events or _events(run_id))
+        if path.endswith("/stream"):
+            run_id = path.split("/")[2]
+            content = self.sse_content if self.sse_content is not None else _sse_from_events(self.events or _events(run_id))
+            return FakeResponse(200, content=content.encode("utf-8"), headers={"content-type": "text/event-stream"})
         if path.endswith("/telemetry"):
             return FakeResponse(200, self.telemetry)
         if path.endswith("/artifact-bundle"):
@@ -312,6 +399,101 @@ def _telemetry(status):
     return {"run": {"run_id": "frontend_smoke_001", "status": status}, "sandbox": {"status": "exited"}}
 
 
+def _events(run_id="frontend_smoke_001"):
+    return {
+        "run_id": run_id,
+        "next_after_seq": 6,
+        "events": [
+            _event(1, "run.created", None, "queued", {}, run_id=run_id),
+            _event(
+                2,
+                "run.dispatched",
+                "queued",
+                "dispatched",
+                {
+                    "scheduler_id": "scheduler-dev-1",
+                    "execution_task_id": f"{run_id}:attempt:1",
+                    "backend_key": "harbor-local-docker",
+                    "project_id": "pilot-project",
+                },
+                run_id=run_id,
+            ),
+            _event(
+                3,
+                "run.claimed",
+                "dispatched",
+                "provisioning",
+                {"worker_id": "worker-dev-1", "execution_task_id": f"{run_id}:attempt:1"},
+                run_id=run_id,
+            ),
+            _event(
+                4,
+                "run.started",
+                "provisioning",
+                "running",
+                {"worker_id": "worker-dev-1", "execution_task_id": f"{run_id}:attempt:1"},
+                run_id=run_id,
+            ),
+            _event(
+                5,
+                "run.evaluating",
+                "running",
+                "evaluating",
+                {"worker_id": "worker-dev-1", "execution_task_id": f"{run_id}:attempt:1"},
+                run_id=run_id,
+            ),
+            _event(
+                6,
+                "run.succeeded",
+                "evaluating",
+                "succeeded",
+                {"worker_id": "worker-dev-1", "execution_task_id": f"{run_id}:attempt:1"},
+                run_id=run_id,
+            ),
+        ],
+    }
+
+
+def _event(seq, event_type, from_status, to_status, metadata, *, run_id="frontend_smoke_001"):
+    return {
+        "event_id": f"evt_{seq}",
+        "seq": seq,
+        "run_id": run_id,
+        "attempt_id": f"{run_id}:attempt:1",
+        "event_type": event_type,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": None,
+        "actor_user_id": None,
+        "request_id": f"{run_id}-frontend-smoke",
+        "metadata": metadata,
+        "created_at": "2026-06-02T00:00:00Z",
+    }
+
+
+def _sse_from_events(payload):
+    frames = []
+    for event in payload["events"]:
+        frames.append(
+            "\n".join(
+                [
+                    f"id: {event['seq']}",
+                    f"event: {event['event_type']}",
+                    f"data: {json_dumps(event)}",
+                    "",
+                    "",
+                ]
+            )
+        )
+    return "".join(frames)
+
+
+def json_dumps(payload):
+    import json
+
+    return json.dumps(payload, sort_keys=True)
+
+
 def _bundle():
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -320,7 +502,7 @@ def _bundle():
         archive.writestr("trajectory.jsonl", "{}\n")
         archive.writestr("evaluation.json", "{}")
         archive.writestr("artifact-metadata.json", "{}")
-        archive.writestr("lifecycle-events.json", "{}")
+        archive.writestr("lifecycle-events.json", json_dumps({"lifecycle_events": _events()["events"]}))
         archive.writestr("artifacts/trajectory/frontend_smoke_001-trajectory.jsonl", "{}\n")
     return buffer.getvalue()
 
@@ -333,5 +515,5 @@ def _metadata_only_bundle():
         archive.writestr("trajectory.jsonl", "{}\n")
         archive.writestr("evaluation.json", "{}")
         archive.writestr("artifact-metadata.json", "{}")
-        archive.writestr("lifecycle-events.json", "{}")
+        archive.writestr("lifecycle-events.json", json_dumps({"lifecycle_events": _events()["events"]}))
     return buffer.getvalue()

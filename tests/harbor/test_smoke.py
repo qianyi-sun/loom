@@ -24,6 +24,9 @@ class HarborCliSmokeTest(unittest.TestCase):
             self.assertTrue(authors)
             self.assertTrue(all(isinstance(author, dict) for author in authors))
             self.assertEqual(authors[0]["name"], "CARIN Research Center")
+            dockerfile = (task_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("mkdir -p /logs/verifier /logs/artifacts", dockerfile)
+            self.assertIn("chmod -R 0777 /logs", dockerfile)
 
     def test_creates_task_runs_harbor_and_ingests_output(self):
         with TemporaryDirectory() as temp_dir:

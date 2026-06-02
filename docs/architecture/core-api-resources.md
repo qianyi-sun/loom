@@ -265,11 +265,14 @@ serializing dashboard payloads.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured
-  `Artifacpilot groupjectStore`. Missing object payloads are reported as generic bundle
-  manifest errors without leaking host paths or backend exception strings. Raw
-  Harbor `jobs/` payload preservation is implemented through the #65 ingestor
-  path and appears as object-store-backed payload files when the worker and API
-  share the same artifact store.
+  `Artifacpilot groupjectStore`. Bundle `lifecycle-events.json` uses the same event
+  payload shape as replay APIs, including the monotonic `seq` watermark, so
+  deployment smokes can compare bundle events with `/events` and one-shot SSE
+  replay. Missing object payloads are reported as generic bundle manifest errors
+  without leaking host paths or backend exception strings. Raw Harbor `jobs/`
+  payload preservation is implemented through the #65 ingestor path and appears
+  as object-store-backed payload files when the worker and API share the same
+  artifact store.
 - Telemetry responses expose run status, queue/worker state, host CPU/RAM/disk
   saturation indicators, and sandbox status without command output, env vars,
   host paths, or secret refs.

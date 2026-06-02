@@ -136,7 +136,15 @@ def write_harbor_cli_smoke_task(task_dir: Path) -> None:
         encoding="utf-8",
     )
     (task_dir / "environment" / "Dockerfile").write_text(
-        "FROM ubuntu:24.04\n\nWORKDIR /app\n",
+        "\n".join(
+            [
+                "FROM ubuntu:24.04",
+                "",
+                "RUN mkdir -p /logs/verifier /logs/artifacts && chmod -R 0777 /logs",
+                "WORKDIR /app",
+                "",
+            ]
+        ),
         encoding="utf-8",
     )
     solve_path = task_dir / "solution" / "solve.sh"

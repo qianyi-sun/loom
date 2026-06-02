@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import LocalArtifactStore
+from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
@@ -60,7 +61,25 @@ class FrontendE2EResourcesTest(unittest.TestCase):
                 owner_team_id="pilot-project",
                 created_by_user_id="[REDACTED_OWNER]",
             )
-            RunRepository(session).save_run(_completed_run("run_frontend_001"))
+            repository = RunRepository(session)
+            repository.save_run(_completed_run("run_frontend_001"))
+            repository._append_status_event(  # Test fixture for persisted lifecycle bundle content.
+                run_id="run_frontend_001",
+                attempt_id="run_frontend_001:attempt:1",
+                event_type=RunEventType.CREATED,
+                from_status=None,
+                to_status=RunStatus.QUEUED,
+                request_id="req-created-001",
+            )
+            repository._append_status_event(
+                run_id="run_frontend_001",
+                attempt_id="run_frontend_001:attempt:1",
+                event_type=RunEventType.SUCCEEDED,
+                from_status=RunStatus.EVALUATING,
+                to_status=RunStatus.SUCCEEDED,
+                request_id="req-succeeded-001",
+                metadata={"worker_id": "worker-dev-1", "execution_task_id": "run_frontend_001:attempt:1"},
+            )
         self.client = TestClient(_app(self.engine))
 
     def tearDown(self):
@@ -210,6 +229,7 @@ class FrontendE2EResourcesTest(unittest.TestCase):
                 },
             )
             manifest = json.loads(archive.read("manifest.json"))
+            lifecycle_events = json.loads(archive.read("lifecycle-events.json"))["lifecycle_events"]
             trajectory = archive.read("trajectory.jsonl").decode("utf-8")
             rendered_bundle = "\n".join(
                 archive.read(name).decode("utf-8") for name in sorted(names) if name.endswith((".json", ".jsonl"))
@@ -217,6 +237,7 @@ class FrontendE2EResourcesTest(unittest.TestCase):
 
         self.assertEqual(manifest["run_id"], "run_frontend_001")
         self.assertEqual(manifest["artifact_count"], 3)
+        self.assertEqual([event["seq"] for event in lifecycle_events], [1, 2])
         self.assertIn("python solve.py", trajectory)
         self.assertNotIn("file://", rendered_bundle)
         self.assertNotIn("/srv/private", rendered_bundle)

@@ -331,7 +331,10 @@ Verify legacy queue claim plus fixture worker execution:
 docker compose -f docker-compose.dev.yml run --rm --build worker-smoke
 ```
 
-Verify the real Harbor CLI local Docker path without external model keys:
+Verify the real Harbor CLI local Docker path without external model keys. The
+generated smoke task pre-creates writable verifier and artifact log directories
+inside its Docker environment so Harbor can capture verifier output before it
+ingests `reward.txt`:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build harbor-smoke
@@ -380,8 +383,11 @@ previous worker restart are marked `failed` with `run.recovered` evidence before
 they can hold scheduler capacity and keep new smoke runs queued.
 
 Verify the frontend login, model/harness/benchmark discovery, Harbor-backed run
-launch, telemetry polling, Harbor verifier output, and object-store-backed
-artifact bundle download path with API, scheduler, and worker running:
+launch, durable lifecycle event replay and one-shot SSE replay, telemetry
+polling, Harbor verifier output, and object-store-backed artifact bundle
+download path with API, scheduler, and worker running. The smoke JSON includes
+`lifecycle_event_count` and `sse_event_count`, and the downloaded bundle must
+carry a matching `lifecycle-events.json` file:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke

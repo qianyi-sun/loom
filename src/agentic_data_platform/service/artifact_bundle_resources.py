@@ -217,6 +217,7 @@ def _terminal_turn_payload(turn: TerminalTurn) -> dict[str, Any]:
 def _status_event_payload(event) -> dict[str, Any]:
     return {
         "event_id": event.event_id,
+        "seq": event.seq,
         "run_id": event.run_id,
         "attempt_id": event.attempt_id,
         "event_type": event.event_type,

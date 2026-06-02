@@ -38,6 +38,8 @@ class FrontendSmokeResult:
     telemetry_status: str
     artifact_count: int
     bundle_file_count: int
+    lifecycle_event_count: int
+    sse_event_count: int
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -49,6 +51,8 @@ class FrontendSmokeResult:
             "telemetry_status": self.telemetry_status,
             "artifact_count": self.artifact_count,
             "bundle_file_count": self.bundle_file_count,
+            "lifecycle_event_count": self.lifecycle_event_count,
+            "sse_event_count": self.sse_event_count,
         }
 
 
@@ -128,6 +132,31 @@ def run_frontend_smoke(
             context="launch frontend smoke run",
         )
         detail = _wait_for_terminal_run(config, active_client, headers=headers, sleep=sleep)
+        lifecycle_events = _validate_event_replay(
+            config,
+            _response_json(
+                active_client.get(
+                    f"/runs/{config.run_id}/events",
+                    params={"after_seq": 0, "limit": 100},
+                    headers=headers,
+                ),
+                expected_status=200,
+                context="read run lifecycle event replay",
+            ),
+        )
+        sse_events = _validate_sse_replay(
+            config,
+            _response_bytes(
+                active_client.get(
+                    f"/runs/{config.run_id}/stream",
+                    params={"after_seq": 0, "limit": 100, "once": True},
+                    headers=headers,
+                ),
+                expected_status=200,
+                context="read run lifecycle SSE replay",
+            ),
+            expected_events=lifecycle_events,
+        )
         telemetry = _response_json(
             active_client.get(f"/runs/{config.run_id}/telemetry", headers=headers),
             expected_status=200,
@@ -138,7 +167,8 @@ def run_frontend_smoke(
                 active_client.get(f"/runs/{config.run_id}/artifact-bundle", headers=headers),
                 expected_status=200,
                 context="download artifact bundle",
-            )
+            ),
+            expected_events=lifecycle_events,
         )
         _response_json(
             active_client.get(
@@ -160,6 +190,8 @@ def run_frontend_smoke(
             telemetry_status=str(_dict_at(telemetry, "run").get("status")),
             artifact_count=_int_value(progress.get("artifact_count"), "run.progress.artifact_count"),
             bundle_file_count=bundle_file_count,
+            lifecycle_event_count=len(lifecycle_events),
+            sse_event_count=len(sse_events),
         )
     finally:
         if owns_client and hasattr(active_client, "close"):
@@ -227,6 +259,122 @@ def _validate_detail(detail: dict[str, Any]) -> None:
         raise FrontendSmokeError("frontend smoke evaluator output was not completed")
     if turn_count < 1 and evaluator.get("mode") != "harbor_verifier":
         raise FrontendSmokeError("frontend smoke expected at least one terminal trajectory turn")
+
+
+def _validate_event_replay(config: FrontendSmokeConfig, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if payload.get("run_id") != config.run_id:
+        raise FrontendSmokeError(f"frontend smoke event replay returned unexpected run_id: {payload.get('run_id')!r}")
+    events = [_dict_value(event, "events[]") for event in _list_at(payload, "events")]
+    return _validate_lifecycle_events(config, events, context="event replay")
+
+
+def _validate_sse_replay(
+    config: FrontendSmokeConfig,
+    payload: bytes,
+    *,
+    expected_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    events = _validate_lifecycle_events(config, _parse_sse_events(payload), context="SSE replay")
+    if _event_pairs(events) != _event_pairs(expected_events):
+        raise FrontendSmokeError("frontend smoke SSE replay did not match durable event replay")
+    return events
+
+
+def _parse_sse_events(payload: bytes) -> list[dict[str, Any]]:
+    try:
+        text = payload.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise FrontendSmokeError("frontend smoke SSE replay was not valid UTF-8") from exc
+    events: list[dict[str, Any]] = []
+    for frame in text.split("\n\n"):
+        event_id: str | None = None
+        event_type: str | None = None
+        data_lines: list[str] = []
+        for line in frame.splitlines():
+            if not line or line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if not separator:
+                continue
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "id":
+                event_id = value
+            elif field == "event":
+                event_type = value
+            elif field == "data":
+                data_lines.append(value)
+        if not data_lines:
+            continue
+        try:
+            event_payload = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError as exc:
+            raise FrontendSmokeError("frontend smoke SSE replay contained invalid JSON data") from exc
+        event = _dict_value(event_payload, "SSE data")
+        if event_id is not None and str(event.get("seq")) != event_id:
+            raise FrontendSmokeError("frontend smoke SSE replay id did not match event seq")
+        if event_type is not None and str(event.get("event_type")) != event_type:
+            raise FrontendSmokeError("frontend smoke SSE replay event name did not match event payload")
+        events.append(event)
+    if not events:
+        raise FrontendSmokeError("frontend smoke SSE replay returned no events")
+    return events
+
+
+def _validate_lifecycle_events(
+    config: FrontendSmokeConfig,
+    events: list[dict[str, Any]],
+    *,
+    context: str,
+) -> list[dict[str, Any]]:
+    event_types = [str(event.get("event_type")) for event in events]
+    missing = [event_type for event_type in _REQUIRED_LIFECYCLE_EVENT_TYPES if event_type not in event_types]
+    if missing:
+        raise FrontendSmokeError(f"frontend smoke {context} missing required lifecycle events: {', '.join(missing)}")
+
+    previous_index = -1
+    previous_seq = -1
+    for event_type in _REQUIRED_LIFECYCLE_EVENT_TYPES:
+        index = event_types.index(event_type)
+        if index <= previous_index:
+            raise FrontendSmokeError(f"frontend smoke {context} lifecycle events were not ordered")
+        previous_index = index
+
+    for event in events:
+        if event.get("run_id") != config.run_id:
+            raise FrontendSmokeError(f"frontend smoke {context} included unrelated run_id: {event.get('run_id')!r}")
+        seq = _int_value(event.get("seq"), "events[].seq")
+        if seq <= previous_seq:
+            raise FrontendSmokeError(f"frontend smoke {context} seq values were not strictly increasing")
+        previous_seq = seq
+
+    expected_execution_task_id: str | None = None
+    for event_type in _REQUIRED_LIFECYCLE_EVENT_TYPES[1:]:
+        event = events[event_types.index(event_type)]
+        metadata = _dict_value(event.get("metadata") or {}, "events[].metadata")
+        execution_task_id = _required_metadata_str(metadata, "execution_task_id", context=context, event_type=event_type)
+        if expected_execution_task_id is None:
+            expected_execution_task_id = execution_task_id
+        elif execution_task_id != expected_execution_task_id:
+            raise FrontendSmokeError(f"frontend smoke {context} changed execution_task_id before terminal state")
+        if event_type == "run.dispatched":
+            _required_metadata_str(metadata, "scheduler_id", context=context, event_type=event_type)
+            _required_metadata_str(metadata, "backend_key", context=context, event_type=event_type)
+            _required_metadata_str(metadata, "project_id", context=context, event_type=event_type)
+        if event_type in _WORKER_LIFECYCLE_EVENT_TYPES:
+            _required_metadata_str(metadata, "worker_id", context=context, event_type=event_type)
+    return events
+
+
+def _required_metadata_str(metadata: dict[str, Any], key: str, *, context: str, event_type: str) -> str:
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise FrontendSmokeError(f"frontend smoke {context} missing {key} on {event_type}")
+    return value.strip()
+
+
+def _event_pairs(events: list[dict[str, Any]]) -> list[tuple[int, str]]:
+    return [(_int_value(event.get("seq"), "events[].seq"), str(event.get("event_type"))) for event in events]
 
 
 def _run_create_payload(
@@ -379,12 +527,17 @@ def _select_task(payload: dict[str, Any]) -> dict[str, Any]:
     return _dict_value(tasks[0], "tasks[0]")
 
 
-def _validate_bundle(payload: bytes) -> int:
+def _validate_bundle(payload: bytes, *, expected_events: list[dict[str, Any]]) -> int:
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             names = set(archive.namelist())
+            lifecycle_payload = json.loads(archive.read("lifecycle-events.json").decode("utf-8"))
     except zipfile.BadZipFile as exc:
         raise FrontendSmokeError("artifact bundle download was not a zip archive") from exc
+    except KeyError as exc:
+        raise FrontendSmokeError("artifact bundle missing files: lifecycle-events.json") from exc
+    except json.JSONDecodeError as exc:
+        raise FrontendSmokeError("artifact bundle lifecycle-events.json was not valid JSON") from exc
     required = {
         "manifest.json",
         "run.json",
@@ -396,6 +549,12 @@ def _validate_bundle(payload: bytes) -> int:
     missing = sorted(required - names)
     if missing:
         raise FrontendSmokeError(f"artifact bundle missing files: {', '.join(missing)}")
+    lifecycle_events = [
+        _dict_value(event, "lifecycle_events[]")
+        for event in _list_at(_dict_value(lifecycle_payload, "lifecycle-events.json"), "lifecycle_events")
+    ]
+    if _event_pairs(lifecycle_events) != _event_pairs(expected_events):
+        raise FrontendSmokeError("artifact bundle lifecycle events did not match durable event replay")
     if not any(name.startswith("artifacts/") and not name.endswith("/") for name in names):
         raise FrontendSmokeError("artifact bundle did not include any artifact payload files")
     return len(names)
@@ -483,6 +642,15 @@ def _env(values: Mapping[str, str], key: str, default: str) -> str:
 
 
 _TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
+_REQUIRED_LIFECYCLE_EVENT_TYPES = (
+    "run.created",
+    "run.dispatched",
+    "run.claimed",
+    "run.started",
+    "run.evaluating",
+    "run.succeeded",
+)
+_WORKER_LIFECYCLE_EVENT_TYPES = {"run.claimed", "run.started", "run.evaluating", "run.succeeded"}
 
 
 if __name__ == "__main__":

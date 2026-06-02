@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Hardened the generated `harbor-cli-smoke` task environment by pre-creating
+  writable `/logs/verifier` and `/logs/artifacts` directories, preventing
+  Harbor verifier stdout redirection from failing before `tests/test.sh` can
+  write `reward.txt`.
+- Extended `frontend-smoke` deployment validation to read
+  `/runs/{run_id}/events` and one-shot `/runs/{run_id}/stream` after a
+  terminal Harbor run and require ordered durable lifecycle replay through
+  create, dispatch, worker claim, run, evaluation, and success events with
+  execution-task metadata before telemetry checks pass. The artifact bundle
+  check now also requires `lifecycle-events.json` to match the same replayed
+  events and reports lifecycle/SSE event counts in the smoke JSON output.
 - Added a shared-dev deployment recovery preflight before API/frontend smokes.
   `scripts/deploy-dev.sh` now runs one scheduler `--recover-once` pass with
   `DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS` so orphaned active runs from a prior
