@@ -182,6 +182,10 @@ The #157/#160 projection refresh migration adds
 `run_dashboard_projections(dirty, is_terminal, updated_at)` indexes for
 projection refresh and dashboard progress queries. List/detail projection
 queries remain a later #157 migration.
+The #159 artifact chunk migration adds
+`artifact_chunks(run_id, attempt_id, chunk_kind, chunk_sequence)` for ordered
+chunk reads and `artifact_chunks(upload_status, created_at)` for upload-state
+inspection.
 
 ## API Resource Boundary
 
@@ -202,15 +206,21 @@ persist completed payload metadata with `artifact_metadata_schema`,
 `object_sha256`; `ArtifactRow` continues to index the stable `storage_key`,
 SHA-256, size, media type, and metadata JSON. The contract also reserves upload
 states (`pending`, `started`, `completed`, `failed`, `expired`) and
-`artifact-chunk-metadata-v1` for future stdout/stderr, trajectory, and artifact
-chunk rows. Artifact bundles already treat non-`completed` upload states as
-unavailable and surface `upload_status` / `upload_error_reason` in
-`manifest.json`. `RunRepository.expire_stale_artifact_uploads(...)` now marks
-stale `pending` and `started` rows as `expired`, records the previous upload
-status, scheduler id, expiry timestamp, and error reason in artifact metadata,
-and appends a same-status `run.recovered` event with
-`recovery=artifact_upload_expired`. Dedicated chunk tables, streaming log
-indexes, and richer upload transition history are still #159 follow-up work.
+`artifact-chunk-metadata-v1` for stdout/stderr, trajectory, and artifact chunk
+rows. The `artifact_chunks` table now stores one row per object-backed chunk
+with run id, attempt id, artifact id, chunk kind, sequence, object key, media
+type, byte size, SHA-256, upload status, optional upload error reason, metadata
+JSON, and timestamps. The unique key is
+`(artifact_id, chunk_kind, chunk_sequence)`, making repeated writes for the same
+chunk coordinate idempotent. Artifact bundles already treat non-`completed`
+upload states as unavailable and surface `upload_status` /
+`upload_error_reason` in `manifest.json`.
+`RunRepository.expire_stale_artifact_uploads(...)` now marks stale `pending`
+and `started` rows as `expired`, records the previous upload status, scheduler
+id, expiry timestamp, and error reason in artifact metadata, and appends a
+same-status `run.recovered` event with `recovery=artifact_upload_expired`.
+Streaming log APIs, automatic chunk writers, and richer upload transition
+history are still #159 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

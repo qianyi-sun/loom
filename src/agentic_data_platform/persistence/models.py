@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -193,6 +194,7 @@ class RunRow(Base):
     attempts = relationship("RunAttemptRow", back_populates="run", cascade="all, delete-orphan")
     turns = relationship("RunTerminalTurnRow", back_populates="run", cascade="all, delete-orphan")
     artifacts = relationship("ArtifactRow", back_populates="run", cascade="all, delete-orphan")
+    artifact_chunks = relationship("ArtifactChunkRow", back_populates="run", cascade="all, delete-orphan")
     evaluator_results = relationship("EvaluatorResultRow", back_populates="run", cascade="all, delete-orphan")
     status_events = relationship("RunStatusEventRow", back_populates="run", cascade="all, delete-orphan")
 
@@ -215,6 +217,7 @@ class RunAttemptRow(Base):
     run = relationship("RunRow", back_populates="attempts")
     turns = relationship("RunTerminalTurnRow", back_populates="attempt", cascade="all, delete-orphan")
     artifacts = relationship("ArtifactRow", back_populates="attempt")
+    artifact_chunks = relationship("ArtifactChunkRow", back_populates="attempt", cascade="all, delete-orphan")
     evaluator_results = relationship("EvaluatorResultRow", back_populates="attempt")
     status_events = relationship("RunStatusEventRow", back_populates="attempt")
 
@@ -299,6 +302,46 @@ class ArtifactRow(Base):
 
     run = relationship("RunRow", back_populates="artifacts")
     attempt = relationship("RunAttemptRow", back_populates="artifacts")
+    chunks = relationship("ArtifactChunkRow", back_populates="artifact", cascade="all, delete-orphan")
+
+
+class ArtifactChunkRow(Base):
+    __tablename__ = "artifact_chunks"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "chunk_kind", "chunk_sequence", name="uq_artifact_chunk_sequence"),
+        Index(
+            "ix_artifact_chunks_run_attempt_kind_sequence",
+            "run_id",
+            "attempt_id",
+            "chunk_kind",
+            "chunk_sequence",
+        ),
+        Index("ix_artifact_chunks_upload_status_created", "upload_status", "created_at"),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id = mapped_column(String(128), ForeignKey("runs.run_id"), nullable=False)
+    attempt_id = mapped_column(String(160), ForeignKey("run_attempts.attempt_id"), nullable=False)
+    artifact_id = mapped_column(
+        String(255),
+        ForeignKey("artifacts.artifact_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_kind = mapped_column(String(64), nullable=False)
+    chunk_sequence = mapped_column(Integer, nullable=False)
+    storage_key = mapped_column(Text, nullable=False)
+    media_type = mapped_column(String(255), nullable=False)
+    size_bytes = mapped_column(Integer, nullable=False)
+    sha256 = mapped_column(String(64), nullable=False)
+    upload_status = mapped_column(String(64), nullable=False)
+    upload_error_reason = mapped_column(Text, nullable=True)
+    metadata_json = mapped_column("metadata", JSON, nullable=False, default=dict)
+    created_at = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run = relationship("RunRow", back_populates="artifact_chunks")
+    attempt = relationship("RunAttemptRow", back_populates="artifact_chunks")
+    artifact = relationship("ArtifactRow", back_populates="chunks")
 
 
 class EvaluatorResultRow(Base):

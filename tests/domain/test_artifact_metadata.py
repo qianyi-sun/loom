@@ -65,6 +65,7 @@ class ArtifactMetadataContractTest(unittest.TestCase):
             size_bytes=128,
             sha256="2" * 64,
             upload_status=ArtifactUploadStatus.COMPLETED,
+            upload_error_reason="",
             created_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
         )
 
@@ -74,6 +75,7 @@ class ArtifactMetadataContractTest(unittest.TestCase):
         self.assertEqual(payload["chunk_kind"], "stdout")
         self.assertEqual(payload["upload_status"], "completed")
         self.assertEqual(payload["chunk_sequence"], 0)
+        self.assertEqual(payload["upload_error_reason"], "")
 
     def test_artifact_chunk_metadata_rejects_invalid_chunk_sequence(self):
         with self.assertRaisesRegex(ValueError, "chunk_sequence must be non-negative"):
@@ -90,6 +92,24 @@ class ArtifactMetadataContractTest(unittest.TestCase):
                 upload_status=ArtifactUploadStatus.COMPLETED,
                 created_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
             )
+
+    def test_artifact_chunk_metadata_rejects_unsafe_storage_keys(self):
+        for storage_key in ("../private/stdout.jsonl", "/runs/run_001/stdout.jsonl", "runs//stdout.jsonl"):
+            with self.subTest(storage_key=storage_key):
+                with self.assertRaisesRegex(ValueError, "storage_key must be a safe object key"):
+                    ArtifactChunkMetadata(
+                        run_id="run_001",
+                        attempt_id="run_001:attempt:1",
+                        artifact_id="run_001-stdout",
+                        chunk_kind=ArtifactChunkKind.STDOUT,
+                        chunk_sequence=0,
+                        storage_key=storage_key,
+                        media_type="application/x-ndjson",
+                        size_bytes=128,
+                        sha256="2" * 64,
+                        upload_status=ArtifactUploadStatus.COMPLETED,
+                        created_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+                    )
 
     def test_artifact_content_type_value_rejects_blank_values(self):
         with self.assertRaisesRegex(ValueError, "content_type must be a non-empty string"):

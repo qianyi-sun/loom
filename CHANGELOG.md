@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #159 persisted artifact chunk index slice.
+  `artifact_chunks` now records ordered stdout/stderr/trajectory/artifact chunk
+  metadata with run, attempt, artifact, chunk kind, sequence, object key, size,
+  SHA-256, upload status, and optional upload error reason. Repository methods
+  can idempotently record and list chunk indexes, while the streaming HTTP API
+  remains follow-up work.
 - Split the #150 OpenHands adapter contract into separate OpenHands CLI and
   OpenHands SDK specs. The CLI path now passes a Harbor-compatible
   `openhands-ai` version through `--agent-kwarg version=1.6.0` so Harbor 0.9.0

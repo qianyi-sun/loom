@@ -14,7 +14,7 @@ from agentic_data_platform.benchmarks.fixtures import (
     BenchmarkFixtureFamily,
     BenchmarkFixtureInstance,
 )
-from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
+from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactChunkMetadata, ArtifactUploadStatus
 from agentic_data_platform.domain.execution_events import (
     RecoveryReasonCode,
     RunEventType,
@@ -43,6 +43,7 @@ from agentic_data_platform.domain.run_records import (
     TerminalTurn,
 )
 from agentic_data_platform.persistence.models import (
+    ArtifactChunkRow,
     ArtifactRow,
     AuditEventRow,
     BenchmarkSuiteRow,
@@ -1284,6 +1285,12 @@ class RunRepository:
             )
         )
         self.session.execute(
+            delete(ArtifactChunkRow).where(
+                ArtifactChunkRow.run_id == run_id,
+                ArtifactChunkRow.attempt_id == attempt_id,
+            )
+        )
+        self.session.execute(
             delete(ArtifactRow).where(
                 ArtifactRow.run_id == run_id,
                 ArtifactRow.attempt_id == attempt_id,
@@ -1477,6 +1484,83 @@ class RunRepository:
 
         self.session.flush()
         return refreshed
+
+    def record_artifact_chunk(self, chunk: ArtifactChunkMetadata) -> ArtifactChunkMetadata:
+        _required(self.session.get(RunRow, chunk.run_id), "run", chunk.run_id)
+        attempt = _required(self.session.get(RunAttemptRow, chunk.attempt_id), "run attempt", chunk.attempt_id)
+        artifact = _required(self.session.get(ArtifactRow, chunk.artifact_id), "artifact", chunk.artifact_id)
+        if attempt.run_id != chunk.run_id:
+            raise ValueError("chunk attempt_id does not belong to run_id")
+        if artifact.run_id != chunk.run_id:
+            raise ValueError("chunk artifact_id does not belong to run_id")
+        if artifact.attempt_id != chunk.attempt_id:
+            raise ValueError("chunk artifact_id does not belong to attempt_id")
+
+        chunk_kind = _artifact_chunk_kind_value(chunk.chunk_kind)
+        upload_status = _artifact_upload_status_value(chunk.upload_status)
+        existing = self.session.scalar(
+            select(ArtifactChunkRow)
+            .where(ArtifactChunkRow.artifact_id == chunk.artifact_id)
+            .where(ArtifactChunkRow.chunk_kind == chunk_kind)
+            .where(ArtifactChunkRow.chunk_sequence == chunk.chunk_sequence)
+            .with_for_update()
+        )
+        now = utc_now()
+        if existing is None:
+            existing = ArtifactChunkRow(
+                run_id=chunk.run_id,
+                attempt_id=chunk.attempt_id,
+                artifact_id=chunk.artifact_id,
+                chunk_kind=chunk_kind,
+                chunk_sequence=chunk.chunk_sequence,
+                created_at=chunk.created_at,
+            )
+            self.session.add(existing)
+
+        existing.storage_key = chunk.storage_key
+        existing.media_type = chunk.media_type
+        existing.size_bytes = chunk.size_bytes
+        existing.sha256 = chunk.sha256
+        existing.upload_status = upload_status
+        existing.upload_error_reason = chunk.upload_error_reason
+        existing.metadata_json = dict(chunk.metadata)
+        existing.updated_at = now
+        self.session.flush()
+        return _artifact_chunk_metadata(existing)
+
+    def list_artifact_chunks(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str | None = None,
+        artifact_id: str | None = None,
+        chunk_kind: ArtifactChunkKind | str | None = None,
+        after_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[ArtifactChunkMetadata]:
+        _required(self.session.get(RunRow, run_id), "run", run_id)
+        if after_sequence is not None and after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+
+        query = select(ArtifactChunkRow).where(ArtifactChunkRow.run_id == run_id)
+        if attempt_id is not None:
+            query = query.where(ArtifactChunkRow.attempt_id == attempt_id)
+        if artifact_id is not None:
+            query = query.where(ArtifactChunkRow.artifact_id == artifact_id)
+        if chunk_kind is not None:
+            query = query.where(ArtifactChunkRow.chunk_kind == _artifact_chunk_kind_value(chunk_kind))
+        if after_sequence is not None:
+            query = query.where(ArtifactChunkRow.chunk_sequence > after_sequence)
+        query = query.order_by(
+            ArtifactChunkRow.artifact_id,
+            ArtifactChunkRow.chunk_kind,
+            ArtifactChunkRow.chunk_sequence,
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        return [_artifact_chunk_metadata(row) for row in self.session.scalars(query)]
 
     def expire_stale_artifact_uploads(
         self,
@@ -2135,6 +2219,36 @@ def _artifact_ref(row: ArtifactRow) -> ArtifactRef:
         size_bytes=row.size_bytes,
         metadata=dict(row.metadata_json or {}),
     )
+
+
+def _artifact_chunk_metadata(row: ArtifactChunkRow) -> ArtifactChunkMetadata:
+    return ArtifactChunkMetadata(
+        run_id=row.run_id,
+        attempt_id=row.attempt_id,
+        artifact_id=row.artifact_id,
+        chunk_kind=row.chunk_kind,
+        chunk_sequence=row.chunk_sequence,
+        storage_key=row.storage_key,
+        media_type=row.media_type,
+        size_bytes=row.size_bytes,
+        sha256=row.sha256,
+        upload_status=row.upload_status,
+        upload_error_reason=row.upload_error_reason,
+        created_at=_aware(row.created_at),
+        metadata=dict(row.metadata_json or {}),
+    )
+
+
+def _artifact_chunk_kind_value(value: ArtifactChunkKind | str) -> str:
+    if isinstance(value, ArtifactChunkKind):
+        return value.value
+    return ArtifactChunkKind(value).value
+
+
+def _artifact_upload_status_value(value: ArtifactUploadStatus | str) -> str:
+    if isinstance(value, ArtifactUploadStatus):
+        return value.value
+    return ArtifactUploadStatus(value).value
 
 
 def _evaluator_result_row(*, run_id: str, attempt_id: str, result: EvaluatorResult) -> EvaluatorResultRow:

@@ -51,6 +51,7 @@ class ArtifactChunkMetadata:
     sha256: str
     upload_status: ArtifactUploadStatus | str
     created_at: datetime
+    upload_error_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     schema_version: str = ARTIFACT_CHUNK_METADATA_SCHEMA_VERSION
 
@@ -59,6 +60,7 @@ class ArtifactChunkMetadata:
         _require_non_empty("attempt_id", self.attempt_id)
         _require_non_empty("artifact_id", self.artifact_id)
         _require_non_empty("storage_key", self.storage_key)
+        _require_safe_storage_key(self.storage_key)
         _require_non_empty("media_type", self.media_type)
         if self.chunk_sequence < 0:
             raise ValueError("chunk_sequence must be non-negative")
@@ -137,6 +139,12 @@ def _metadata_value(value: Any) -> Any:
 def _require_non_empty(name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
+
+
+def _require_safe_storage_key(value: str) -> None:
+    parts = value.split("/")
+    if value.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("storage_key must be a safe object key")
 
 
 def _coerce_enum(enum_type: type[Enum], value: Enum | str, field_name: str) -> Any:

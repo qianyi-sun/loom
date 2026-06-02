@@ -6,6 +6,10 @@ from sqlalchemy import inspect, select
 
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
 from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
+from agentic_data_platform.domain.artifact_metadata import (
+    ArtifactChunkKind,
+    ArtifactChunkMetadata,
+)
 from agentic_data_platform.domain.execution_metadata import (
     EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION,
     RunnerProcessStatus,
@@ -67,10 +71,18 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "run_status_events",
                 "run_dashboard_projections",
                 "artifacts",
+                "artifact_chunks",
                 "evaluator_results",
                 "audit_events",
             }.issubset(tables)
         )
+        artifact_chunk_columns = {column["name"]: column for column in inspector.get_columns("artifact_chunks")}
+        self.assertIn("storage_key", artifact_chunk_columns)
+        self.assertIn("upload_status", artifact_chunk_columns)
+        self.assertIn("upload_error_reason", artifact_chunk_columns)
+        artifact_chunk_indexes = {index["name"] for index in inspector.get_indexes("artifact_chunks")}
+        self.assertIn("ix_artifact_chunks_run_attempt_kind_sequence", artifact_chunk_indexes)
+        self.assertIn("ix_artifact_chunks_upload_status_created", artifact_chunk_indexes)
         evaluator_columns = {column["name"]: column for column in inspector.get_columns("evaluator_results")}
         self.assertIn("mode", evaluator_columns)
         self.assertTrue(evaluator_columns["judge_provider"]["nullable"])
@@ -444,6 +456,94 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertTrue(loaded_turn.metadata["stderr_truncated"])
         self.assertEqual(loaded_turn.metadata["stdout_original_bytes"], len(large_stdout.encode("utf-8")))
         self.assertEqual(loaded_turn.metadata["stderr_original_bytes"], len(large_stderr.encode("utf-8")))
+
+    def test_run_repository_records_ordered_artifact_log_chunk_indexes(self):
+        run = _completed_run(run_id="run_log_chunks")
+        now = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(run)
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_log_chunks",
+                    attempt_id="run_log_chunks:attempt:1",
+                    artifact_id="run_log_chunks-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=1,
+                    storage_key="runs/run_log_chunks/tasks/task/logs/stdout/000001.jsonl",
+                    sha256="1" * 64,
+                    size_bytes=64,
+                    created_at=now,
+                )
+            )
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_log_chunks",
+                    attempt_id="run_log_chunks:attempt:1",
+                    artifact_id="run_log_chunks-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=0,
+                    storage_key="runs/run_log_chunks/tasks/task/logs/stdout/000000.jsonl",
+                    sha256="2" * 64,
+                    size_bytes=32,
+                    created_at=now,
+                )
+            )
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_log_chunks",
+                    attempt_id="run_log_chunks:attempt:1",
+                    artifact_id="run_log_chunks-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=1,
+                    storage_key="runs/run_log_chunks/tasks/task/logs/stdout/000001.jsonl",
+                    sha256="3" * 64,
+                    size_bytes=128,
+                    upload_status=ArtifactUploadStatus.FAILED,
+                    upload_error_reason="object store write failed",
+                    created_at=now + timedelta(seconds=1),
+                    metadata={"retry_count": 1},
+                )
+            )
+            runs.record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_log_chunks",
+                    attempt_id="run_log_chunks:attempt:1",
+                    artifact_id="run_log_chunks-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDERR,
+                    chunk_sequence=0,
+                    storage_key="runs/run_log_chunks/tasks/task/logs/stderr/000000.jsonl",
+                    sha256="4" * 64,
+                    size_bytes=8,
+                    created_at=now,
+                )
+            )
+
+            stdout_chunks = runs.list_artifact_chunks(
+                run_id="run_log_chunks",
+                attempt_id="run_log_chunks:attempt:1",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+            )
+            stdout_after_zero = runs.list_artifact_chunks(
+                run_id="run_log_chunks",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+                after_sequence=0,
+            )
+            first_chunk = runs.list_artifact_chunks(
+                run_id="run_log_chunks",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+                limit=1,
+            )
+
+        self.assertEqual([chunk.chunk_sequence for chunk in stdout_chunks], [0, 1])
+        self.assertEqual([chunk.size_bytes for chunk in stdout_chunks], [32, 128])
+        self.assertEqual(stdout_chunks[1].upload_status, ArtifactUploadStatus.FAILED)
+        self.assertEqual(stdout_chunks[1].upload_error_reason, "object store write failed")
+        self.assertEqual(stdout_chunks[1].metadata["retry_count"], 1)
+        self.assertEqual([chunk.chunk_sequence for chunk in stdout_after_zero], [1])
+        self.assertEqual([chunk.chunk_sequence for chunk in first_chunk], [0])
 
     def test_run_repository_records_create_cancel_and_retry_lifecycle(self):
         run = _queued_run(run_id="run_lifecycle_001")
@@ -1503,6 +1603,38 @@ def _log_artifact(artifact_id: str) -> ArtifactRef:
         sha256="4" * 64,
         size_bytes=256,
         metadata={"storage_key": f"runs/{artifact_id}.json"},
+    )
+
+
+def _artifact_chunk(
+    *,
+    run_id: str,
+    attempt_id: str,
+    artifact_id: str,
+    chunk_kind: ArtifactChunkKind,
+    chunk_sequence: int,
+    storage_key: str,
+    sha256: str,
+    size_bytes: int,
+    created_at: datetime,
+    upload_status: ArtifactUploadStatus = ArtifactUploadStatus.COMPLETED,
+    upload_error_reason: str | None = None,
+    metadata: dict | None = None,
+) -> ArtifactChunkMetadata:
+    return ArtifactChunkMetadata(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        artifact_id=artifact_id,
+        chunk_kind=chunk_kind,
+        chunk_sequence=chunk_sequence,
+        storage_key=storage_key,
+        media_type="application/x-ndjson",
+        size_bytes=size_bytes,
+        sha256=sha256,
+        upload_status=upload_status,
+        upload_error_reason=upload_error_reason,
+        created_at=created_at,
+        metadata=dict(metadata or {}),
     )
 
 
