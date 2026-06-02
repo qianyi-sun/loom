@@ -239,6 +239,25 @@ class RunStatusEventRow(Base):
     attempt = relationship("RunAttemptRow", back_populates="status_events")
 
 
+class RunDashboardProjectionRow(Base):
+    __tablename__ = "run_dashboard_projections"
+
+    run_id = mapped_column(String(128), ForeignKey("runs.run_id"), primary_key=True)
+    project_id = mapped_column(String(128), nullable=False)
+    owner_team_name_snapshot = mapped_column(String(255), nullable=False)
+    status = mapped_column(String(64), nullable=False)
+    is_terminal = mapped_column(Boolean, nullable=False, default=False)
+    payload = mapped_column(JSON, nullable=False, default=dict)
+    source_attempt_id = mapped_column(String(160), nullable=True)
+    source_event_seq = mapped_column(Integer, nullable=True)
+    refresh_reason = mapped_column(String(128), nullable=False)
+    dirty = mapped_column(Boolean, nullable=False, default=False)
+    error_reason = mapped_column(Text, nullable=True)
+    refreshed_at = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    created_at = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class RunTerminalTurnRow(Base):
     __tablename__ = "run_terminal_turns"
     __table_args__ = (UniqueConstraint("attempt_id", "turn_index", name="uq_attempt_turn_index"),)

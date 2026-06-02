@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #157/#160 durable dashboard projection refresh slice.
+  Terminal worker results, terminal status transitions, and stale active
+  recovery now upsert `run_dashboard_projections` rows with the current
+  dashboard-safe payload and latest lifecycle `seq`; scheduler recovery also
+  performs a bounded terminal projection refresh sweep for missing, dirty, or
+  stale projection rows and logs projection-only recovery work from the
+  long-running scheduler loop.
 - Added #159/#160 artifact bundle upload-state reporting. Bundle generation now
   treats artifact metadata with non-`completed` `upload_status` as unavailable
   DB truth, skips object-store reads for those artifacts, and records

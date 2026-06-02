@@ -139,6 +139,17 @@ events have a monotonic integer primary key that is exposed as `seq` for
 durable replay. API clients can call `GET /runs/{run_id}/events?after_seq=N`
 or reconnect to `GET /runs/{run_id}/stream` to recover missed lifecycle events
 without hydrating full trajectories or artifact payloads.
+`run_dashboard_projections` is the first durable projection table for dashboard
+read models. Each row stores one sanitized run projection payload, the source
+attempt id, the latest lifecycle event `seq`, current run status, terminal flag,
+dirty flag, refresh reason, and refresh timestamps. Worker terminal result
+persistence and terminal status transitions upsert this row immediately.
+Stale active heartbeat recovery also refreshes the failed terminal projection,
+and `RunRepository.refresh_terminal_dashboard_projections(...)` gives the
+scheduler a bounded sweep to repair terminal projections that are missing,
+dirty, or stale relative to `runs.updated_at`. Non-terminal transitions mark an
+existing projection dirty so a retried or redispatched run is not mistaken for a
+fresh terminal projection by future projection-backed readers.
 Terminal turn stdout/stderr columns are bounded previews, not canonical log
 storage. When a stream exceeds the inline limit, persistence stores truncation
 metadata such as original byte count and inline byte count, while full
@@ -155,6 +166,10 @@ The #53 lifecycle migration adds indexes for dashboard filters:
 `runs(project_id, status, created_at)`,
 `runs(benchmark_suite, task_family, task_instance_id)`,
 `runs(created_by_user_id)`, and `run_status_events(run_id, created_at)`.
+The #157/#160 projection refresh migration adds
+`run_dashboard_projections(project_id, status, updated_at)` and
+`run_dashboard_projections(dirty, is_terminal, updated_at)` indexes for
+projection refresh and future dashboard list/progress queries.
 
 ## API Resource Boundary
 

@@ -1,5 +1,9 @@
+import io
+import json
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
@@ -7,11 +11,11 @@ from sqlalchemy.pool import StaticPool
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.models import RunAttemptRow, RunRow
+from agentic_data_platform.persistence.models import RunAttemptRow, RunDashboardProjectionRow, RunRow
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
-from agentic_data_platform.scheduler.service import RunScheduler
+from agentic_data_platform.scheduler.service import RunScheduler, run_scheduler_loop
 from agentic_data_platform.service.config import ServiceSettings
-from tests.persistence.test_repositories import _queued_capacity_run, _queued_run
+from tests.persistence.test_repositories import _completed_run, _queued_capacity_run, _queued_run
 
 
 class SchedulerServiceTest(unittest.TestCase):
@@ -223,6 +227,82 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(result.failed_run_ids, ["run_scheduler_active_recover"])
         self.assertEqual(result.failed_count, 1)
         self.assertEqual(recovered.status, RunStatus.FAILED)
+        self.assertEqual(result.projection_refreshed_run_ids, ["run_scheduler_active_recover"])
+
+        with session_scope(self.engine) as session:
+            projection = session.get(RunDashboardProjectionRow, "run_scheduler_active_recover")
+
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection.status, RunStatus.FAILED.value)
+        self.assertEqual(projection.refresh_reason, "terminal_worker_recovery")
+
+    def test_scheduler_refreshes_dirty_terminal_projections_from_service_settings(self):
+        with session_scope(self.engine) as session:
+            RunRepository(session).save_run(_completed_run(run_id="run_scheduler_projection_refresh"))
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_recovery_batch_size=1,
+            ),
+        )
+
+        result = scheduler.recover_once(request_id="req-scheduler-projection-refresh-001")
+
+        with session_scope(self.engine) as session:
+            projection = session.get(RunDashboardProjectionRow, "run_scheduler_projection_refresh")
+
+        self.assertEqual(result.requeued_run_ids, [])
+        self.assertEqual(result.failed_run_ids, [])
+        self.assertEqual(result.projection_refreshed_run_ids, ["run_scheduler_projection_refresh"])
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection.status, RunStatus.SUCCEEDED.value)
+        self.assertEqual(projection.refresh_reason, "projection_recovery")
+
+    def test_scheduler_loop_logs_projection_only_recovery(self):
+        with session_scope(self.engine) as session:
+            RunRepository(session).save_run(_completed_run(run_id="run_scheduler_loop_projection_refresh"))
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_recovery_batch_size=1,
+            ),
+        )
+
+        output = io.StringIO()
+        with patch("agentic_data_platform.scheduler.service.time.sleep", side_effect=StopIteration):
+            with self.assertRaises(StopIteration):
+                with redirect_stdout(output):
+                    run_scheduler_loop(scheduler, poll_interval_seconds=0.0)
+
+        lines = [line for line in output.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["action"], "recover")
+        self.assertEqual(payload["projection_refreshed_run_ids"], ["run_scheduler_loop_projection_refresh"])
+        self.assertEqual(payload["requeued_run_ids"], [])
+        self.assertEqual(payload["failed_run_ids"], [])
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ from agentic_data_platform.domain.run_records import (
 )
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
-from agentic_data_platform.persistence.models import RunAttemptRow, RunRow
+from agentic_data_platform.persistence.models import RunAttemptRow, RunDashboardProjectionRow, RunRow
 from agentic_data_platform.persistence.repositories import (
     AuditEventRepository,
     BenchmarkCatalogRepository,
@@ -64,6 +64,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "runs",
                 "run_attempts",
                 "run_status_events",
+                "run_dashboard_projections",
                 "artifacts",
                 "evaluator_results",
                 "audit_events",
@@ -216,6 +217,83 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(loaded.artifacts[0].uri, "minio://runs/run_001/trajectory-v2.jsonl")
         self.assertEqual(len(loaded.artifacts), len(run.artifacts))
         self.assertEqual(events[0].event_type, "run.created")
+
+    def test_save_worker_result_refreshes_terminal_dashboard_projection(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_projection_terminal"))
+            claimed = runs.claim_next_queued_run(worker_id="worker-projection")
+            claimed.transition_to(RunStatus.RUNNING)
+            claimed.add_turn(
+                TerminalTurn(
+                    turn_index=0,
+                    command="python solve.py",
+                    cwd="/workspace",
+                    started_at=datetime(2026, 5, 28, 13, 0, 0, tzinfo=timezone.utc),
+                    completed_at=datetime(2026, 5, 28, 13, 0, 2, tzinfo=timezone.utc),
+                    exit_code=0,
+                    stdout="created answer.txt\n",
+                    stderr="",
+                    changed_paths=["answer.txt"],
+                )
+            )
+            claimed.attach_artifact(_log_artifact("run_projection_terminal-trajectory"))
+            claimed.transition_to(RunStatus.EVALUATING)
+            claimed.attach_evaluator_result(
+                EvaluatorResult(
+                    evaluator_id="harbor-verifier-v1",
+                    mode="harbor_verifier",
+                    status="completed",
+                    score=1.0,
+                    metrics={"reward": 1.0},
+                    verbal_feedback="Verifier accepted the final answer.",
+                    judge=None,
+                    artifact_refs=["minio://runs/run_projection_terminal/evaluation/verifier.json"],
+                )
+            )
+            claimed.transition_to(RunStatus.SUCCEEDED)
+
+            saved = runs.save_worker_result(
+                claimed,
+                worker_id="worker-projection",
+                request_id="req-projection-terminal-001",
+            )
+            projection = session.get(RunDashboardProjectionRow, "run_projection_terminal")
+            events = runs.list_status_events("run_projection_terminal")
+
+        self.assertEqual(saved.status, RunStatus.SUCCEEDED)
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection.status, RunStatus.SUCCEEDED.value)
+        self.assertFalse(projection.dirty)
+        self.assertEqual(projection.refresh_reason, "terminal_worker_result")
+        self.assertEqual(projection.source_event_seq, events[-1].seq)
+        self.assertEqual(projection.payload["status"], "succeeded")
+        self.assertEqual(projection.payload["progress"]["turn_count"], 1)
+        self.assertEqual(projection.payload["progress"]["artifact_count"], 1)
+        self.assertEqual(projection.payload["evaluator"]["mode"], "harbor_verifier")
+
+    def test_refresh_terminal_dashboard_projections_repairs_missing_and_respects_batch_limit(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            for index in range(2):
+                runs.save_run(_completed_run(run_id=f"run_projection_repair_{index}"))
+
+            refreshed = runs.refresh_terminal_dashboard_projections(
+                scheduler_id="scheduler-projection",
+                max_runs=1,
+                request_id="req-projection-repair-001",
+            )
+            projection_0 = session.get(RunDashboardProjectionRow, "run_projection_repair_0")
+            projection_1 = session.get(RunDashboardProjectionRow, "run_projection_repair_1")
+
+        self.assertEqual([projection.run_id for projection in refreshed], ["run_projection_repair_0"])
+        self.assertIsNotNone(projection_0)
+        self.assertIsNone(projection_1)
+        self.assertEqual(projection_0.status, RunStatus.SUCCEEDED.value)
+        self.assertFalse(projection_0.dirty)
+        self.assertEqual(projection_0.refresh_reason, "projection_recovery")
 
     def test_run_repository_stores_bounded_terminal_stream_previews(self):
         run = _completed_run(run_id="run_large_stream_001")

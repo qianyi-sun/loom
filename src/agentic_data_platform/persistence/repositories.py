@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from agentic_data_platform.dashboard.projections import RunDashboardProjection
 from agentic_data_platform.benchmarks.fixtures import (
     BenchmarkFixtureCatalog,
     BenchmarkFixtureFamily,
@@ -54,11 +55,13 @@ from agentic_data_platform.persistence.models import (
     TeamRow,
     UserRow,
     EvaluatorResultRow,
+    RunDashboardProjectionRow,
     utc_now,
 )
 
 _MAX_INLINE_TERMINAL_STREAM_BYTES = 64 * 1024
 _TRUNCATED_STREAM_MARKER = "\n[truncated: full stream is available in object-store artifacts]\n"
+_TERMINAL_STATUS_VALUES = {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value, RunStatus.CANCELED.value}
 
 
 class StaleExecutionTaskError(ValueError):
@@ -470,6 +473,13 @@ class RunRepository:
             request_id=request_id,
         )
         self.session.flush()
+        if run.status.value in _TERMINAL_STATUS_VALUES:
+            self._upsert_dashboard_projection(
+                run_id=run_id,
+                refresh_reason="terminal_status_transition",
+            )
+        else:
+            self._mark_dashboard_projection_dirty(run_id, reason="status_transition")
         return self.get_run(run_id)
 
     def retry_run(
@@ -514,6 +524,7 @@ class RunRepository:
             actor_user_id=actor_user_id,
             request_id=request_id,
         )
+        self._mark_dashboard_projection_dirty(run_id, reason="run_retried")
         self.session.flush()
         return self.get_run(run_id)
 
@@ -636,6 +647,7 @@ class RunRepository:
                     "benchmark_key": benchmark_key,
                 },
             )
+            self._mark_dashboard_projection_dirty(run.run_id, reason="run_dispatched")
             _increment(active_by_backend, backend_key)
             _increment(active_by_project, row.project_id)
             _increment(active_by_provider, provider_key)
@@ -710,6 +722,7 @@ class RunRepository:
                     stale_before=older_than.isoformat(),
                 ),
             )
+            self._mark_dashboard_projection_dirty(run.run_id, reason=RecoveryReasonCode.STALE_DISPATCHED.value)
             requeued_ids.append(run.run_id)
 
         self.session.flush()
@@ -903,6 +916,10 @@ class RunRepository:
                     last_heartbeat_at=worker_metadata.get("last_heartbeat_at"),
                 ),
             )
+            self._upsert_dashboard_projection(
+                run_id=run.run_id,
+                refresh_reason="terminal_worker_recovery",
+            )
             failed_ids.append(run.run_id)
 
         self.session.flush()
@@ -979,6 +996,7 @@ class RunRepository:
             request_id=request_id,
             metadata={"worker_id": worker_id, "execution_task_id": attempt.attempt_id},
         )
+        self._mark_dashboard_projection_dirty(run.run_id, reason="run_claimed")
         self.session.flush()
         return self.get_run(run.run_id)
 
@@ -1027,6 +1045,10 @@ class RunRepository:
             request_id=request_id,
         )
         self.session.flush()
+        self._upsert_dashboard_projection(
+            run_id=run.run_id,
+            refresh_reason="terminal_worker_result",
+        )
         return self.get_run(run.run_id)
 
     def save_run(self, run: RunRecord) -> None:
@@ -1189,6 +1211,62 @@ class RunRepository:
             query = query.limit(limit)
         return [_status_event_record(row) for row in self.session.scalars(query)]
 
+    def get_dashboard_projection(self, run_id: str) -> RunDashboardProjectionRow:
+        row = self.session.get(RunDashboardProjectionRow, run_id)
+        return _required(row, "run dashboard projection", run_id)
+
+    def refresh_dashboard_projection(
+        self,
+        run_id: str,
+        *,
+        refresh_reason: str,
+        request_id: str | None = None,
+    ) -> RunDashboardProjectionRow:
+        del request_id
+        _require_non_empty("refresh_reason", refresh_reason)
+        row = self._upsert_dashboard_projection(
+            run_id=run_id,
+            refresh_reason=refresh_reason,
+        )
+        self.session.flush()
+        return row
+
+    def refresh_terminal_dashboard_projections(
+        self,
+        *,
+        scheduler_id: str,
+        max_runs: int,
+        request_id: str | None = None,
+    ) -> list[RunDashboardProjectionRow]:
+        del request_id
+        _require_non_empty("scheduler_id", scheduler_id)
+        if max_runs <= 0:
+            return []
+
+        terminal_rows = self.session.scalars(
+            select(RunRow)
+            .where(RunRow.status.in_(_TERMINAL_STATUS_VALUES))
+            .order_by(RunRow.updated_at, RunRow.run_id)
+            .with_for_update(skip_locked=True)
+            .limit(max(max_runs * 5, 25))
+        )
+        refreshed: list[RunDashboardProjectionRow] = []
+        for row in terminal_rows:
+            if len(refreshed) >= max_runs:
+                break
+            projection = self.session.get(RunDashboardProjectionRow, row.run_id)
+            if projection is not None and not _dashboard_projection_needs_refresh(projection, row):
+                continue
+            refreshed.append(
+                self._upsert_dashboard_projection(
+                    run_id=row.run_id,
+                    refresh_reason="projection_recovery",
+                )
+            )
+
+        self.session.flush()
+        return refreshed
+
     def _run_record(self, row: RunRow) -> RunRecord:
         latest_attempt = self._latest_attempt_row(row.run_id)
         turns = [
@@ -1261,6 +1339,64 @@ class RunRepository:
             failure_reason=row.failure_reason,
             created_by_user_id=row.created_by_user_id,
             metadata=dict(row.metadata_json or {}),
+        )
+
+    def _upsert_dashboard_projection(
+        self,
+        *,
+        run_id: str,
+        refresh_reason: str,
+    ) -> RunDashboardProjectionRow:
+        _require_non_empty("refresh_reason", refresh_reason)
+        row = _required(self.session.get(RunRow, run_id), "run", run_id)
+        run = self._run_record(row)
+        attempt = self._latest_attempt_row(run_id)
+        now = utc_now()
+        projection = self.session.get(RunDashboardProjectionRow, run_id)
+        if projection is None:
+            projection = RunDashboardProjectionRow(
+                run_id=run_id,
+                project_id=row.project_id,
+                owner_team_name_snapshot=row.owner_team_name_snapshot,
+                status=row.status,
+                is_terminal=row.status in _TERMINAL_STATUS_VALUES,
+                payload={},
+                refresh_reason=refresh_reason,
+                dirty=False,
+                refreshed_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            self.session.add(projection)
+
+        projection.project_id = row.project_id
+        projection.owner_team_name_snapshot = row.owner_team_name_snapshot
+        projection.status = row.status
+        projection.is_terminal = row.status in _TERMINAL_STATUS_VALUES
+        projection.payload = RunDashboardProjection.from_run(run).to_dict()
+        projection.source_attempt_id = attempt.attempt_id
+        projection.source_event_seq = self._latest_status_event_seq(run_id)
+        projection.refresh_reason = refresh_reason
+        projection.dirty = False
+        projection.error_reason = None
+        projection.refreshed_at = now
+        projection.updated_at = now
+        return projection
+
+    def _mark_dashboard_projection_dirty(self, run_id: str, *, reason: str) -> None:
+        projection = self.session.get(RunDashboardProjectionRow, run_id)
+        if projection is None:
+            return
+        projection.dirty = True
+        projection.refresh_reason = reason
+        projection.updated_at = utc_now()
+
+    def _latest_status_event_seq(self, run_id: str) -> int | None:
+        return self.session.scalar(
+            select(RunStatusEventRow.id)
+            .where(RunStatusEventRow.run_id == run_id)
+            .order_by(RunStatusEventRow.id.desc())
+            .limit(1)
         )
 
     def _team_id_for_name(self, team_name: str) -> str | None:
@@ -1737,6 +1873,22 @@ def _status_event_record(row: RunStatusEventRow) -> RunStatusEvent:
         request_id=row.request_id,
         metadata=dict(row.metadata_json or {}),
     )
+
+
+def _dashboard_projection_needs_refresh(projection: RunDashboardProjectionRow, run: RunRow) -> bool:
+    if projection.dirty:
+        return True
+    if projection.status != run.status:
+        return True
+    if projection.project_id != run.project_id:
+        return True
+    if projection.owner_team_name_snapshot != run.owner_team_name_snapshot:
+        return True
+    if projection.is_terminal != (run.status in _TERMINAL_STATUS_VALUES):
+        return True
+    if projection.updated_at is None:
+        return True
+    return _aware(projection.updated_at) < _aware(run.updated_at)
 
 
 def _attempt_id(run_id: str, attempt_number: int) -> str:

@@ -35,6 +35,7 @@ class SchedulerRecoveryResult:
     scheduler_id: str
     requeued_run_ids: list[str]
     failed_run_ids: list[str]
+    projection_refreshed_run_ids: list[str]
 
     @property
     def requeued_count(self) -> int:
@@ -44,6 +45,10 @@ class SchedulerRecoveryResult:
     def failed_count(self) -> int:
         return len(self.failed_run_ids)
 
+    @property
+    def projection_refreshed_count(self) -> int:
+        return len(self.projection_refreshed_run_ids)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "scheduler_id": self.scheduler_id,
@@ -51,6 +56,8 @@ class SchedulerRecoveryResult:
             "requeued_run_ids": list(self.requeued_run_ids),
             "failed_count": self.failed_count,
             "failed_run_ids": list(self.failed_run_ids),
+            "projection_refreshed_count": self.projection_refreshed_count,
+            "projection_refreshed_run_ids": list(self.projection_refreshed_run_ids),
         }
 
 
@@ -106,10 +113,20 @@ class RunScheduler:
                 max_runs=self.settings.scheduler_recovery_batch_size,
                 request_id=request_id,
             )
+            projection_refreshed = repository.refresh_terminal_dashboard_projections(
+                scheduler_id=self.scheduler_id,
+                max_runs=self.settings.scheduler_recovery_batch_size,
+                request_id=request_id,
+            )
+            projection_refreshed_ids = [projection.run_id for projection in projection_refreshed]
+            for run in failed:
+                if run.run_id not in projection_refreshed_ids:
+                    projection_refreshed_ids.append(run.run_id)
         return SchedulerRecoveryResult(
             scheduler_id=self.scheduler_id,
             requeued_run_ids=[run.run_id for run in requeued],
             failed_run_ids=[run.run_id for run in failed],
+            projection_refreshed_run_ids=projection_refreshed_ids,
         )
 
 
@@ -135,7 +152,11 @@ def run_scheduler_loop(
 ) -> None:
     while True:
         recovery_result = scheduler.recover_once()
-        if recovery_result.requeued_count or recovery_result.failed_count:
+        if (
+            recovery_result.requeued_count
+            or recovery_result.failed_count
+            or recovery_result.projection_refreshed_count
+        ):
             print(json.dumps({"action": "recover", **recovery_result.to_dict()}, sort_keys=True), flush=True)
         result = scheduler.dispatch_once()
         if result.dispatched_count:

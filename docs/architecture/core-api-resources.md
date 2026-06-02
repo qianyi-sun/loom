@@ -125,6 +125,17 @@ as run reads, and returns a global `summary` plus per-project rows with status
 counts, queue depth, terminal run count, artifact count, turn count, evaluator
 completion count, average evaluator score, and latest update timestamp.
 
+The first durable dashboard projection table is `run_dashboard_projections`.
+It stores one dashboard-safe payload per run, the source attempt id, the latest
+lifecycle `seq` used to build the payload, a `dirty` flag, refresh reason, and
+refresh timestamps. Terminal worker results, terminal status transitions, and
+stale active recovery upsert this row immediately. Scheduler recovery also runs
+a bounded projection refresh sweep for terminal runs whose projection is
+missing, dirty, or older than the run row. Current `GET /runs`,
+`GET /runs/{run_id}`, and `GET /dashboard/progress` still hydrate current
+`RunRecord` values for compatibility; moving high-volume list/progress reads to
+the durable projection rows is the next #157 dashboard migration slice.
+
 `GET /models` returns only safe model selection metadata: provider id, provider
 config id, display/model name, API mode, source, disabled/error state, basic
 model-family metadata, endpoint dialect hints, and freshness timestamp. It
@@ -304,11 +315,12 @@ serializing dashboard payloads.
   legacy queued-claim compatibility path. Redis remains available in the dev
   stack for a later queue/cache backend, but it is not the current source of
   truth.
-- #157 has started the durable live-event migration. The current slice reuses
-  `run_status_events.id` as the replay sequence, exposes replay and SSE routes,
-  and keeps telemetry polling available. It does not yet implement Redis
-  fanout, typed sandbox/resource sample events, or projection tables for every
-  summary.
+- #157 has started the durable live-event and projection migration. The current
+  slices reuse `run_status_events.id` as the replay sequence, expose replay and
+  SSE routes, keep telemetry polling available, and persist terminal dashboard
+  projection rows that scheduler recovery can refresh in bounded batches. They
+  do not yet implement Redis fanout, typed sandbox/resource sample events, or
+  list/progress routes fully backed by projection rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal
@@ -347,10 +359,13 @@ serializing dashboard payloads.
   the public run projection shows the latest attempt. Full attempt-detail APIs
   should be added when worker-managed retries preserve per-attempt artifacts and
   trajectories.
-- Artifact, evaluator, and dashboard progress routes are projection-backed.
-  Dedicated artifact, evaluation, and analytics repositories should be added
-  when upload/download, pagination, retention, detailed evaluator history, and
-  high-volume PM reporting are implemented.
+- Artifact and evaluator routes use dashboard-safe projection payloads. The
+  first durable `run_dashboard_projections` table now keeps terminal run
+  projection payloads recoverable, but high-volume dashboard progress routes
+  still hydrate current run records. Dedicated artifact, evaluation, projection,
+  and analytics repositories should be added when upload/download, pagination,
+  retention, detailed evaluator history, and high-volume PM reporting are
+  implemented.
 - List endpoints do not yet include pagination or quota-aware filtering. Add
   these before broad internal rollout.
 - `GET /runs` currently hydrates complete `RunRecord` objects before projecting
