@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -101,6 +102,72 @@ class SubprocessRunWorkerTest(unittest.TestCase):
         self.assertIn("Worker subprocess exited with code 70", run.failure_reason)
         self.assertEqual(run.metadata["failure"]["category"], "worker_subprocess_failed")
 
+    def test_subprocess_worker_failure_records_redacted_child_log_tail(self):
+        _create_run(self.engine, "run_subprocess_child_diagnostics_001")
+        command_runner = FakeWorkerSubprocessCommandRunner(
+            self.engine,
+            returncode=71,
+            terminal_status=None,
+            stdout=("setup line\n" * 140) + "OPENAI_API_KEY=sk-subprocess-secret\nlast stdout line\n",
+            stderr="Traceback line\nAuthorization: Bearer provider-token-123\nlast stderr line\n",
+        )
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-diagnostics-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-diagnostics-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        with session_scope(self.engine) as session:
+            run = RunRepository(session).get_run("run_subprocess_child_diagnostics_001")
+        failure = run.metadata["failure"]
+        diagnostics = failure["metadata"]["child_process"]
+        rendered_failure = json.dumps(failure, sort_keys=True)
+        self.assertEqual(diagnostics["return_code"], 71)
+        self.assertEqual(diagnostics["stage"], "worker_subprocess_exit")
+        self.assertLessEqual(len(diagnostics["stdout_tail"]), 1000)
+        self.assertIn("OPENAI_API_KEY=[redacted]", diagnostics["stdout_tail"])
+        self.assertIn("last stdout line", diagnostics["stdout_tail"])
+        self.assertIn("Bearer [redacted]", diagnostics["stderr_tail"])
+        self.assertIn("last stderr line", diagnostics["stderr_tail"])
+        self.assertNotIn("sk-subprocess-secret", rendered_failure)
+        self.assertNotIn("provider-token-123", rendered_failure)
+
+    def test_subprocess_worker_timeout_records_redacted_child_log_tail(self):
+        _create_run(self.engine, "run_subprocess_child_timeout_diagnostics_001")
+        command_runner = TimeoutWorkerSubprocessCommandRunner(
+            output=b"booting\nMODEL_PROVIDER_API_KEY=sk-timeout-secret\nlast timeout stdout\n",
+            stderr=b"Authorization: Bearer timeout-token-123\nlast timeout stderr\n",
+        )
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-timeout-diagnostics-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-timeout-diagnostics-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        with session_scope(self.engine) as session:
+            run = RunRepository(session).get_run("run_subprocess_child_timeout_diagnostics_001")
+        failure = run.metadata["failure"]
+        diagnostics = failure["metadata"]["child_process"]
+        rendered_failure = json.dumps(failure, sort_keys=True)
+        self.assertIsNone(diagnostics["return_code"])
+        self.assertEqual(diagnostics["stage"], "worker_subprocess_timeout")
+        self.assertIn("MODEL_PROVIDER_API_KEY=[redacted]", diagnostics["stdout_tail"])
+        self.assertIn("last timeout stdout", diagnostics["stdout_tail"])
+        self.assertIn("Bearer [redacted]", diagnostics["stderr_tail"])
+        self.assertIn("last timeout stderr", diagnostics["stderr_tail"])
+        self.assertNotIn("sk-timeout-secret", rendered_failure)
+        self.assertNotIn("timeout-token-123", rendered_failure)
+
     def test_subprocess_worker_marks_run_failed_when_child_returns_without_terminalizing(self):
         _create_run(self.engine, "run_subprocess_child_incomplete_001")
         command_runner = FakeWorkerSubprocessCommandRunner(self.engine, returncode=0, terminal_status=None)
@@ -119,6 +186,9 @@ class SubprocessRunWorkerTest(unittest.TestCase):
             run = RunRepository(session).get_run("run_subprocess_child_incomplete_001")
         self.assertIn("Worker subprocess exited without saving a terminal run result", run.failure_reason)
         self.assertEqual(run.metadata["failure"]["category"], "worker_subprocess_failed")
+        diagnostics = run.metadata["failure"]["metadata"]["child_process"]
+        self.assertEqual(diagnostics["stage"], "worker_subprocess_incomplete_result")
+        self.assertIn("child complete", diagnostics["stdout_tail"])
 
     def test_subprocess_worker_terminates_child_when_run_is_canceled(self):
         _create_run(self.engine, "run_subprocess_cancel_001")
@@ -383,10 +453,14 @@ class FakeWorkerSubprocessCommandRunner:
         *,
         returncode: int = 0,
         terminal_status: RunStatus | None = RunStatus.SUCCEEDED,
+        stdout: str = "child complete\n",
+        stderr: str = "",
     ) -> None:
         self.engine = engine
         self.returncode = returncode
         self.terminal_status = terminal_status
+        self.stdout = stdout
+        self.stderr = stderr
         self.calls: list[dict[str, object]] = []
 
     def run(
@@ -414,8 +488,30 @@ class FakeWorkerSubprocessCommandRunner:
         return subprocess.CompletedProcess(
             args=args,
             returncode=self.returncode,
-            stdout="child complete\n",
-            stderr="",
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+
+class TimeoutWorkerSubprocessCommandRunner:
+    def __init__(self, *, output, stderr) -> None:
+        self.output = output
+        self.stderr = stderr
+        self.calls: list[dict[str, object]] = []
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"args": args, "timeout": timeout, "env": env})
+        raise subprocess.TimeoutExpired(
+            cmd=args,
+            timeout=timeout,
+            output=self.output,
+            stderr=self.stderr,
         )
 
 

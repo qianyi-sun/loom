@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #158 subprocess child log-tail diagnostics. Worker subprocess
+  nonzero, timeout, and incomplete-result failures now persist bounded,
+  redacted child stdout/stderr tails plus return-code/stage metadata under the
+  run failure summary, while keeping full logs out of Postgres.
 - Added the first #158 duplicate-delivery guard. Subprocess children now acquire
   an attempt-level execution lock before entering benchmark execution; duplicate
   deliveries with the same `execution_task_id` return the current run snapshot

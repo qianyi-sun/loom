@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -28,6 +29,9 @@ from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.sandbox.docker_terminal import CommandRunner, SubprocessCommandRunner
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
 from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor, WorkerRunExecutor
+
+
+SUBPROCESS_LOG_TAIL_MAX_CHARS = 1000
 
 
 @dataclass(frozen=True)
@@ -172,7 +176,7 @@ class SubprocessRunWorker:
                     run_id=claimed.run_id,
                     poll_interval_seconds=self.cancel_poll_interval_seconds,
                 )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             stale = _current_run_if_execution_task_is_stale(
                 self.engine,
                 run_id=claimed.run_id,
@@ -185,6 +189,7 @@ class SubprocessRunWorker:
                 run_id=claimed.run_id,
                 reason=f"Worker subprocess timed out after {self.timeout_seconds} seconds",
                 request_id=request_id,
+                child_process=_subprocess_timeout_diagnostics(exc),
             )
         if process.returncode != 0:
             stale = _current_run_if_execution_task_is_stale(
@@ -199,6 +204,10 @@ class SubprocessRunWorker:
                 run_id=claimed.run_id,
                 reason=f"Worker subprocess exited with code {process.returncode}",
                 request_id=request_id,
+                child_process=_subprocess_process_diagnostics(
+                    process,
+                    stage="worker_subprocess_exit",
+                ),
             )
 
         with session_scope(self.engine) as session:
@@ -212,6 +221,10 @@ class SubprocessRunWorker:
                 run_id=claimed.run_id,
                 reason="Worker subprocess exited without saving a terminal run result",
                 request_id=request_id,
+                child_process=_subprocess_process_diagnostics(
+                    process,
+                    stage="worker_subprocess_incomplete_result",
+                ),
             )
         return _worker_result(completed)
 
@@ -552,6 +565,7 @@ def _fail_active_subprocess_run(
     run_id: str,
     reason: str,
     request_id: str | None,
+    child_process: dict[str, object] | None = None,
 ) -> WorkerRunResult:
     with session_scope(engine) as session:
         repository = RunRepository(session)
@@ -565,12 +579,62 @@ def _fail_active_subprocess_run(
             reason=reason,
             request_id=request_id,
         )
-        failed.metadata["failure"] = {
+        failure: dict[str, object] = {
             "category": "worker_subprocess_failed",
             "message": reason,
         }
+        if child_process is not None:
+            failure["metadata"] = {"child_process": child_process}
+        failed.metadata["failure"] = failure
         repository.save_run(failed)
     return _worker_result(failed)
+
+
+def _subprocess_process_diagnostics(
+    process: subprocess.CompletedProcess[str],
+    *,
+    stage: str,
+) -> dict[str, object]:
+    stdout_tail, stdout_truncated = _redacted_log_tail(process.stdout)
+    stderr_tail, stderr_truncated = _redacted_log_tail(process.stderr)
+    return {
+        "stage": stage,
+        "return_code": process.returncode,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    }
+
+
+def _subprocess_timeout_diagnostics(exc: subprocess.TimeoutExpired) -> dict[str, object]:
+    stdout_tail, stdout_truncated = _redacted_log_tail(exc.output)
+    stderr_tail, stderr_truncated = _redacted_log_tail(exc.stderr)
+    return {
+        "stage": "worker_subprocess_timeout",
+        "return_code": None,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    }
+
+
+def _redacted_log_tail(value: object) -> tuple[str, bool]:
+    redacted = _redact_subprocess_output(_coerce_process_output(value))
+    if len(redacted) <= SUBPROCESS_LOG_TAIL_MAX_CHARS:
+        return redacted, False
+    return redacted[-SUBPROCESS_LOG_TAIL_MAX_CHARS:], True
+
+
+def _redact_subprocess_output(value: str) -> str:
+    redacted = re.sub(
+        r"(?i)\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION)[A-Z0-9_]*=)[^\s,;]+",
+        r"\1[redacted]",
+        value,
+    )
+    redacted = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", redacted)
+    return re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", redacted)
 
 
 def build_worker_artifact_store(settings: ServiceSettings):

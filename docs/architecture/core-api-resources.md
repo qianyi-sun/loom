@@ -315,7 +315,8 @@ serializing dashboard payloads.
   the result. The child acquires the attempt execution lock before work starts,
   stale child completions are ignored if the current attempt changed while the
   child was running, and duplicate deliveries are skipped before they reach the
-  executor. A production
+  executor. Nonzero, timeout, and incomplete-result child failures include
+  bounded, redacted stdout/stderr tails in run failure metadata. A production
   LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
