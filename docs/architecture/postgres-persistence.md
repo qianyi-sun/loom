@@ -244,10 +244,12 @@ object-backed terminal stdout/stderr chunks and records their metadata against
 the current attempt's trajectory artifact. Chunk writes append metadata-only
 `log.chunk_recorded` events for stdout/stderr chunks and
 `artifact.chunk_recorded` events for trajectory/artifact chunks. Upload expiry
-also appends `artifact.upload_expired` alongside the recovery event. The chunk
-content endpoint downloads completed chunk payloads by metadata reference while
-rejecting non-completed upload states before object storage access. Richer
-upload transition history remains #159 follow-up work.
+also appends `artifact.upload_expired` alongside the recovery event. Chunk
+upload-state changes and expiry append `artifact.upload_status_changed` with
+previous/current status metadata. The chunk content endpoint downloads completed
+chunk payloads by metadata reference while rejecting non-completed upload states
+before object storage access. Dedicated object upload transaction APIs remain
+#159 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

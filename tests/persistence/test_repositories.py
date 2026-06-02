@@ -406,6 +406,19 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(artifact_events[0].metadata["recovery"], RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value)
         self.assertEqual(artifact_events[0].from_status, RunStatus.SUCCEEDED)
         self.assertEqual(artifact_events[0].to_status, RunStatus.SUCCEEDED)
+        transition_events = [
+            event for event in events if event.event_type == RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED.value
+        ]
+        self.assertEqual([event.metadata["artifact_id"] for event in transition_events], [
+            "run_artifact_expiry-trajectory",
+            "run_artifact_expiry-workspace-snapshot",
+        ])
+        self.assertEqual(transition_events[0].metadata["previous_upload_status"], "pending")
+        self.assertEqual(transition_events[0].metadata["upload_status"], ArtifactUploadStatus.EXPIRED.value)
+        self.assertEqual(transition_events[0].metadata["scheduler_id"], "scheduler-artifact-expiry")
+        self.assertEqual(transition_events[0].metadata["transition_reason"], "artifact upload expired")
+        self.assertEqual(transition_events[0].from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(transition_events[0].to_status, RunStatus.SUCCEEDED)
 
     def test_expire_stale_artifact_uploads_respects_batch_limit(self):
         now = datetime.now(timezone.utc)
@@ -592,8 +605,27 @@ class PersistenceRepositoryTest(unittest.TestCase):
         artifact_events = [
             event for event in events if event.event_type == RunEventType.ARTIFACT_CHUNK_RECORDED.value
         ]
+        transition_events = [
+            event for event in events if event.event_type == RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED.value
+        ]
         self.assertEqual(len(log_events), 4)
         self.assertEqual(len(artifact_events), 1)
+        self.assertEqual(len(transition_events), 1)
+        failed_transition_event = next(
+            event
+            for event in transition_events
+            if event.metadata["artifact_id"] == "run_log_chunks-trajectory"
+            and event.metadata.get("chunk_kind") == ArtifactChunkKind.STDOUT.value
+            and event.metadata.get("chunk_sequence") == 1
+            and event.metadata["upload_status"] == ArtifactUploadStatus.FAILED.value
+        )
+        self.assertEqual(failed_transition_event.from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(failed_transition_event.to_status, RunStatus.SUCCEEDED)
+        self.assertEqual(failed_transition_event.metadata["previous_upload_status"], ArtifactUploadStatus.COMPLETED.value)
+        self.assertEqual(failed_transition_event.metadata["upload_error_reason"], "object store write failed")
+        self.assertEqual(failed_transition_event.metadata["storage_key"], "runs/run_log_chunks/tasks/task/logs/stdout/000001.jsonl")
+        self.assertNotIn("stdout", failed_transition_event.metadata)
+        self.assertNotIn("stderr", failed_transition_event.metadata)
         failed_log_event = next(event for event in log_events if event.metadata["upload_status"] == "failed")
         self.assertEqual(failed_log_event.from_status, RunStatus.SUCCEEDED)
         self.assertEqual(failed_log_event.to_status, RunStatus.SUCCEEDED)

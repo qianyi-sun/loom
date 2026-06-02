@@ -26,6 +26,7 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.SCHEDULER_CAPACITY_BLOCKED.value, "scheduler.capacity_blocked")
         self.assertEqual(RunEventType.ARTIFACT_CHUNK_RECORDED.value, "artifact.chunk_recorded")
         self.assertEqual(RunEventType.ARTIFACT_UPLOAD_EXPIRED.value, "artifact.upload_expired")
+        self.assertEqual(RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED.value, "artifact.upload_status_changed")
         self.assertEqual(RunEventType.LOG_CHUNK_RECORDED.value, "log.chunk_recorded")
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_CLEANUP.value, "sandbox.container_cleanup")
         self.assertEqual(RunEventType.EVALUATOR_COMPLETED.value, "evaluator.completed")

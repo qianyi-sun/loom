@@ -21,6 +21,7 @@ class RunEventType(str, Enum):
     SCHEDULER_CAPACITY_BLOCKED = "scheduler.capacity_blocked"
     ARTIFACT_CHUNK_RECORDED = "artifact.chunk_recorded"
     ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"
+    ARTIFACT_UPLOAD_STATUS_CHANGED = "artifact.upload_status_changed"
     LOG_CHUNK_RECORDED = "log.chunk_recorded"
     SANDBOX_CONTAINER_CLEANUP = "sandbox.container_cleanup"
     EVALUATOR_COMPLETED = "evaluator.completed"

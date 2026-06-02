@@ -253,8 +253,9 @@ serializing dashboard payloads.
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
-  `artifact.upload_expired`, `log.chunk_recorded`, `evaluator.completed`,
-  `evaluator.failed`, `projection.refreshed`, and
+  `artifact.upload_expired`, `artifact.upload_status_changed`,
+  `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
+  `projection.refreshed`, and
   `sandbox.container_cleanup`.
   Evaluator events carry summary-only metadata such as evaluator id, mode,
   status, score, safe artifact refs, worker id, and execution task id; they do
@@ -299,17 +300,20 @@ serializing dashboard payloads.
   project viewers without returning object payload bytes or storage
   credentials. Upload-state repository recovery can now expire stale
   `pending` or `started` rows to `expired` with a durable `run.recovered`
-  event and a typed `artifact.upload_expired` event. Worker result persistence
-  now writes object-backed terminal stdout/stderr chunks, records their metadata
-  against the current attempt's trajectory artifact, and appends typed
+  event plus typed `artifact.upload_expired` and
+  `artifact.upload_status_changed` events. Worker result persistence now writes
+  object-backed terminal stdout/stderr chunks, records their metadata against
+  the current attempt's trajectory artifact, and appends typed
   `log.chunk_recorded` events. Non-log trajectory/artifact chunks append
-  `artifact.chunk_recorded` events. These events carry object metadata such as
-  chunk sequence, storage key, size, SHA-256, media type, and upload status, not
-  payload bytes. `GET /runs/{run_id}/artifact-chunks/content` downloads a
+  `artifact.chunk_recorded` events. When a chunk's upload state changes,
+  `artifact.upload_status_changed` records the previous and current status with
+  the same safe chunk/object identifiers. These events carry object metadata such
+  as chunk sequence, storage key, size, SHA-256, media type, and upload status,
+  not payload bytes. `GET /runs/{run_id}/artifact-chunks/content` downloads a
   completed chunk payload through the platform API by artifact id, chunk kind,
   and sequence; non-completed upload states return structured errors without
-  fetching object storage or exposing storage keys. Broader upload transition
-  histories remain #159 follow-up work.
+  fetching object storage or exposing storage keys. Dedicated object upload
+  transaction APIs remain #159 follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured
@@ -363,11 +367,12 @@ serializing dashboard payloads.
   SSE routes, keep telemetry polling available, persist terminal dashboard
   projection rows that scheduler recovery can refresh in bounded batches, and
   make `/dashboard/progress` prefer clean projection rows before falling back to
-  hydrated run records. The first typed artifact/log/evaluator/projection event
-  slices record chunk, upload-expiry, evaluator completion/failure, and
-  projection refresh metadata without embedding payloads. The remaining #157
-  work is Redis fanout, broader typed sandbox/resource events, and list/detail
-  routes fully backed by projection rows.
+  hydrated run records. The first typed artifact/log/upload/evaluator/projection
+  event slices record chunk, upload-expiry, upload-status-change, evaluator
+  completion/failure, and projection refresh metadata without embedding
+  payloads. The remaining #157 work is Redis fanout, broader typed
+  sandbox/resource events, and list/detail routes fully backed by projection
+  rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal

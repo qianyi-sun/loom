@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a #157/#159 artifact upload transition event slice. Artifact chunk
+  status changes and stale upload expiry now append metadata-only
+  `artifact.upload_status_changed` events with previous/current upload status
+  and safe chunk or artifact identifiers, so replay/SSE/bundle consumers can
+  distinguish upload-state transitions from chunk materialization events.
 - Added a #157/#160 projection recovery observability slice. Scheduler
   terminal projection repair now emits same-status `projection.refreshed`
   events with scheduler id, execution task id, refresh reason, previous
