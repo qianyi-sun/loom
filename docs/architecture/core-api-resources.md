@@ -132,8 +132,9 @@ The first durable dashboard projection table is `run_dashboard_projections`.
 It stores one dashboard-safe payload per run, the source attempt id, the latest
 lifecycle `seq` used to build the payload, a `dirty` flag, refresh reason, and
 refresh timestamps. Terminal worker results, terminal status transitions, and
-stale active recovery upsert this row immediately. Scheduler recovery also runs
-a bounded projection refresh sweep for terminal runs whose projection is
+terminal recovery paths such as terminal-result mismatch and stale active
+heartbeat recovery upsert this row immediately. Scheduler recovery also runs a
+bounded projection refresh sweep for terminal runs whose projection is
 missing, dirty, or older than the run row. `GET /dashboard/progress` now uses
 clean projection rows for status, artifact, turn, evaluator, and score counts,
 and falls back to hydrated `RunRecord` values only when a row is missing or
@@ -250,10 +251,10 @@ serializing dashboard payloads.
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, and `run.worker_subprocess_failed`.
   Recovery metadata currently uses canonical reason codes for implemented
-  `stale_dispatched`, `stale_worker_heartbeat`, and `artifact_upload_expired`
-  paths, plus reserved `terminal_result_mismatch`, `canceled_resource_cleanup`,
-  and `projection_refresh_failed` paths. Later #160 slices should reuse these
-  codes instead of minting local strings.
+  `stale_dispatched`, `stale_worker_heartbeat`, `terminal_result_mismatch`,
+  and `artifact_upload_expired` paths, plus reserved
+  `canceled_resource_cleanup` and `projection_refresh_failed` paths. Later
+  #160 slices should reuse these codes instead of minting local strings.
 - Scheduler and worker writers use
   `agentic_data_platform.domain.execution_metadata` as the v1 attempt metadata
   contract. `run_attempts.metadata.execution.scheduler` records the scheduler

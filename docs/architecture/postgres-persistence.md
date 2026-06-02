@@ -103,10 +103,10 @@ Run lifecycle writers share the v1 execution-event contract in
 values, but repository, worker, subprocess-failure, recovery, and run-audit
 paths now use the same `RunEventType` enum before persistence. Recovery events
 store their canonical reason in `metadata_json.recovery` using
-`RecoveryReasonCode`; implemented reasons are `stale_dispatched` and
-`stale_worker_heartbeat`, and reserved Phase 1 follow-up reasons are
-`terminal_result_mismatch`, `canceled_resource_cleanup`,
-`artifact_upload_expired`, and `projection_refresh_failed`.
+`RecoveryReasonCode`; implemented reasons are `stale_dispatched`,
+`stale_worker_heartbeat`, `terminal_result_mismatch`, and
+`artifact_upload_expired`, and reserved Phase 1 follow-up reasons are
+`canceled_resource_cleanup` and `projection_refresh_failed`.
 Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch
@@ -124,6 +124,12 @@ execution is active, and
 expired heartbeats as failed with a `run.recovered` event. Active recovery skips
 runs without heartbeat metadata so legacy or partially migrated rows are not
 failed solely because they predate worker lease tracking.
+`RunRepository.recover_terminal_result_mismatches(...)` runs before stale
+heartbeat recovery and marks active runs failed when the latest attempt runner
+metadata already shows a terminal child process result but the run row is still
+non-terminal. It records `run.recovered` with
+`recovery=terminal_result_mismatch`, preserves the runner process evidence in
+event metadata, and refreshes the terminal dashboard projection.
 Workers prefer `RunRepository.claim_next_dispatched_run(...)` and then retain
 `RunRepository.claim_next_queued_run(...)` as a compatibility path during
 scheduler rollout; both claim paths persist a `run.claimed` transition to
@@ -153,10 +159,11 @@ read models. Each row stores one sanitized run projection payload, the source
 attempt id, the latest lifecycle event `seq`, current run status, terminal flag,
 dirty flag, refresh reason, and refresh timestamps. Worker terminal result
 persistence and terminal status transitions upsert this row immediately.
-Stale active heartbeat recovery also refreshes the failed terminal projection,
-and `RunRepository.refresh_terminal_dashboard_projections(...)` gives the
-scheduler a bounded sweep to repair terminal projections that are missing,
-dirty, or stale relative to `runs.updated_at`. Non-terminal transitions mark an
+Terminal-result mismatch and stale active heartbeat recovery also refresh the
+failed terminal projection, and
+`RunRepository.refresh_terminal_dashboard_projections(...)` gives the scheduler
+a bounded sweep to repair terminal projections that are missing, dirty, or stale
+relative to `runs.updated_at`. Non-terminal transitions mark an
 existing projection dirty so a retried or redispatched run is not mistaken for a
 fresh terminal projection by projection-backed readers. The dashboard progress
 API now reads clean projection rows for terminal aggregate counts and falls back

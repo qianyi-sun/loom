@@ -242,6 +242,67 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(projection.status, RunStatus.FAILED.value)
         self.assertEqual(projection.refresh_reason, "terminal_worker_recovery")
 
+    def test_scheduler_recovers_terminal_result_mismatch_before_stale_heartbeat(self):
+        now = datetime.now(timezone.utc)
+
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_scheduler_terminal_mismatch"))
+            runs.claim_next_queued_run(worker_id="worker-terminal-mismatch")
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_scheduler_terminal_mismatch")
+            )
+            metadata = dict(attempt.metadata_json or {})
+            execution = dict(metadata["execution"])
+            runner = dict(execution["runner"])
+            runner.update(
+                {
+                    "process_status": "completed",
+                    "heartbeat_status": "succeeded",
+                    "completed_at": (now - timedelta(minutes=1)).isoformat(),
+                    "return_code": 0,
+                }
+            )
+            execution["runner"] = runner
+            metadata["execution"] = execution
+            attempt.metadata_json = metadata
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_stale_active_heartbeat_timeout_seconds=0,
+                scheduler_recovery_batch_size=10,
+            ),
+        )
+
+        result = scheduler.recover_once(request_id="req-scheduler-terminal-mismatch-001")
+
+        with session_scope(self.engine) as session:
+            recovered = RunRepository(session).get_run("run_scheduler_terminal_mismatch")
+            events = RunRepository(session).list_status_events("run_scheduler_terminal_mismatch")
+            projection = session.get(RunDashboardProjectionRow, "run_scheduler_terminal_mismatch")
+
+        self.assertEqual(result.failed_run_ids, ["run_scheduler_terminal_mismatch"])
+        self.assertEqual(result.failed_count, 1)
+        self.assertEqual(result.terminal_mismatch_run_ids, ["run_scheduler_terminal_mismatch"])
+        self.assertEqual(result.terminal_mismatch_count, 1)
+        self.assertEqual(result.projection_refreshed_run_ids, ["run_scheduler_terminal_mismatch"])
+        self.assertEqual(recovered.status, RunStatus.FAILED)
+        self.assertEqual(events[-1].metadata["recovery"], RecoveryReasonCode.TERMINAL_RESULT_MISMATCH.value)
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection.status, RunStatus.FAILED.value)
+        self.assertEqual(projection.refresh_reason, "terminal_result_mismatch_recovery")
+
     def test_scheduler_refreshes_dirty_terminal_projections_from_service_settings(self):
         with session_scope(self.engine) as session:
             RunRepository(session).save_run(_completed_run(run_id="run_scheduler_projection_refresh"))

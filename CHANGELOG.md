@@ -27,6 +27,12 @@ All notable changes to this project will be documented in this file.
   sequence while rejecting incomplete upload states without exposing storage
   keys. Richer upload transition history and typed log/artifact events remain
   follow-up work.
+- Added a #160 terminal result mismatch recovery slice. Scheduler recovery now
+  detects active runs whose latest attempt runner metadata already records a
+  terminal child process result, marks the run failed with
+  `recovery=terminal_result_mismatch`, refreshes the terminal dashboard
+  projection, and reports `terminal_mismatch_run_ids` in scheduler recovery
+  output before stale-heartbeat recovery can misclassify the failure.
 - Split the #150 OpenHands adapter contract into separate OpenHands CLI and
   OpenHands SDK specs. The CLI path now passes a Harbor-compatible
   `openhands-ai` version through `--agent-kwarg version=1.6.0` so Harbor 0.9.0

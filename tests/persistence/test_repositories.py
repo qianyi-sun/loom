@@ -1268,6 +1268,68 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[-1].metadata["worker_id"], "worker-run_active_stale")
         self.assertEqual(events[-1].metadata["last_heartbeat_at"], stale_heartbeat)
 
+    def test_run_repository_recovers_terminal_result_mismatch_before_heartbeat_failure(self):
+        completed_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        stale_before = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_terminal_mismatch"))
+            runs.claim_next_queued_run(worker_id="worker-terminal-mismatch")
+            attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_terminal_mismatch"))
+            metadata = dict(attempt.metadata_json or {})
+            execution = dict(metadata["execution"])
+            runner = dict(execution["runner"])
+            runner.update(
+                {
+                    "process_status": RunnerProcessStatus.COMPLETED.value,
+                    "heartbeat_status": RunStatus.SUCCEEDED.value,
+                    "completed_at": completed_at.isoformat(),
+                    "return_code": 0,
+                }
+            )
+            execution["runner"] = runner
+            metadata["execution"] = execution
+            attempt.metadata_json = metadata
+            session.get(RunRow, "run_terminal_mismatch").updated_at = completed_at
+
+            recovered = runs.recover_terminal_result_mismatches(
+                scheduler_id="scheduler-a",
+                max_runs=10,
+                request_id="req-terminal-mismatch-001",
+            )
+            stale_failed = runs.fail_stale_active_runs_by_heartbeat(
+                older_than=stale_before,
+                scheduler_id="scheduler-a",
+                max_runs=10,
+                request_id="req-stale-active-after-mismatch-001",
+            )
+            run = runs.get_run("run_terminal_mismatch")
+            attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_terminal_mismatch"))
+            events = runs.list_status_events("run_terminal_mismatch")
+            projection = session.get(RunDashboardProjectionRow, "run_terminal_mismatch")
+
+        self.assertEqual([run.run_id for run in recovered], ["run_terminal_mismatch"])
+        self.assertEqual(stale_failed, [])
+        self.assertEqual(run.status, RunStatus.FAILED)
+        self.assertEqual(run.failure_reason, "terminal worker result did not persist to run state")
+        self.assertEqual(attempt.status, RunStatus.FAILED.value)
+        self.assertEqual(attempt.metadata_json["execution"]["runner"]["process_status"], RunnerProcessStatus.FAILED.value)
+        self.assertEqual(attempt.metadata_json["execution"]["runner"]["heartbeat_status"], RunStatus.PROVISIONING.value)
+        self.assertEqual(events[-1].event_type, RunEventType.RECOVERED.value)
+        self.assertEqual(events[-1].from_status, RunStatus.PROVISIONING)
+        self.assertEqual(events[-1].to_status, RunStatus.FAILED)
+        self.assertEqual(events[-1].metadata["recovery"], RecoveryReasonCode.TERMINAL_RESULT_MISMATCH.value)
+        self.assertEqual(events[-1].metadata["scheduler_id"], "scheduler-a")
+        self.assertEqual(events[-1].metadata["execution_task_id"], "run_terminal_mismatch:attempt:1")
+        self.assertEqual(events[-1].metadata["worker_id"], "worker-terminal-mismatch")
+        self.assertEqual(events[-1].metadata["runner_process_status"], RunnerProcessStatus.COMPLETED.value)
+        self.assertEqual(events[-1].metadata["runner_heartbeat_status"], RunStatus.SUCCEEDED.value)
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection.status, RunStatus.FAILED.value)
+        self.assertEqual(projection.refresh_reason, "terminal_result_mismatch_recovery")
+
     def test_run_repository_fails_stale_active_runs_respects_batch_limit(self):
         stale_before = datetime.now(timezone.utc) - timedelta(minutes=10)
         stale_heartbeat = (stale_before - timedelta(seconds=1)).isoformat()

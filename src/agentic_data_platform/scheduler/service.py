@@ -42,6 +42,7 @@ class SchedulerRecoveryResult:
     scheduler_id: str
     requeued_run_ids: list[str]
     failed_run_ids: list[str]
+    terminal_mismatch_run_ids: list[str]
     projection_refreshed_run_ids: list[str]
     artifact_expired_artifact_ids: list[str]
 
@@ -52,6 +53,10 @@ class SchedulerRecoveryResult:
     @property
     def failed_count(self) -> int:
         return len(self.failed_run_ids)
+
+    @property
+    def terminal_mismatch_count(self) -> int:
+        return len(self.terminal_mismatch_run_ids)
 
     @property
     def projection_refreshed_count(self) -> int:
@@ -68,6 +73,8 @@ class SchedulerRecoveryResult:
             "requeued_run_ids": list(self.requeued_run_ids),
             "failed_count": self.failed_count,
             "failed_run_ids": list(self.failed_run_ids),
+            "terminal_mismatch_count": self.terminal_mismatch_count,
+            "terminal_mismatch_run_ids": list(self.terminal_mismatch_run_ids),
             "projection_refreshed_count": self.projection_refreshed_count,
             "projection_refreshed_run_ids": list(self.projection_refreshed_run_ids),
             "artifact_expired_count": self.artifact_expired_count,
@@ -125,6 +132,11 @@ class RunScheduler:
                 max_runs=self.settings.scheduler_recovery_batch_size,
                 request_id=request_id,
             )
+            terminal_mismatches = repository.recover_terminal_result_mismatches(
+                scheduler_id=self.scheduler_id,
+                max_runs=self.settings.scheduler_recovery_batch_size,
+                request_id=request_id,
+            )
             failed = repository.fail_stale_active_runs_by_heartbeat(
                 older_than=stale_active_older_than,
                 scheduler_id=self.scheduler_id,
@@ -143,13 +155,14 @@ class RunScheduler:
                 request_id=request_id,
             )
             projection_refreshed_ids = [projection.run_id for projection in projection_refreshed]
-            for run in failed:
+            for run in [*terminal_mismatches, *failed]:
                 if run.run_id not in projection_refreshed_ids:
                     projection_refreshed_ids.append(run.run_id)
         return SchedulerRecoveryResult(
             scheduler_id=self.scheduler_id,
             requeued_run_ids=[run.run_id for run in requeued],
-            failed_run_ids=[run.run_id for run in failed],
+            failed_run_ids=[run.run_id for run in [*terminal_mismatches, *failed]],
+            terminal_mismatch_run_ids=[run.run_id for run in terminal_mismatches],
             projection_refreshed_run_ids=projection_refreshed_ids,
             artifact_expired_artifact_ids=[artifact.artifact_id for artifact in artifact_expired],
         )

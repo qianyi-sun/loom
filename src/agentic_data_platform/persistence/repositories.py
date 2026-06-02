@@ -1110,6 +1110,97 @@ class RunRepository:
         self.session.flush()
         return [self.get_run(run_id) for run_id in failed_ids]
 
+    def recover_terminal_result_mismatches(
+        self,
+        *,
+        scheduler_id: str,
+        max_runs: int,
+        reason: str = "terminal worker result did not persist to run state",
+        request_id: str | None = None,
+    ) -> list[RunRecord]:
+        _require_non_empty("scheduler_id", scheduler_id)
+        if max_runs <= 0:
+            return []
+
+        active_statuses = {
+            RunStatus.PROVISIONING.value,
+            RunStatus.RUNNING.value,
+            RunStatus.EVALUATING.value,
+        }
+        terminal_process_statuses = {
+            RunnerProcessStatus.COMPLETED.value,
+            RunnerProcessStatus.FAILED.value,
+            RunnerProcessStatus.CANCELED.value,
+        }
+        candidates = self.session.scalars(
+            select(RunRow)
+            .where(RunRow.status.in_(active_statuses))
+            .order_by(RunRow.updated_at, RunRow.run_id)
+            .with_for_update(skip_locked=True)
+            .limit(max(max_runs * 5, 25))
+        )
+        failed_ids: list[str] = []
+        for row in candidates:
+            if len(failed_ids) >= max_runs:
+                break
+            attempt = self._latest_attempt_row(row.run_id)
+            runner_metadata = _runner_metadata(attempt.metadata_json)
+            runner_process_status = str(runner_metadata.get("process_status") or "").strip()
+            if runner_process_status not in terminal_process_statuses:
+                continue
+
+            previous_status = RunStatus(row.status)
+            run = self._run_record(row)
+            run.transition_to(RunStatus.FAILED)
+            run.failure_reason = reason
+
+            row.status = run.status.value
+            row.failure_reason = run.failure_reason
+            row.updated_at = run.updated_at
+
+            worker_id = str(runner_metadata.get("worker_id") or "")
+            attempt.status = run.status.value
+            attempt.failure_reason = run.failure_reason
+            attempt.completed_at = run.updated_at
+            attempt.metadata_json = _worker_attempt_metadata(
+                attempt.metadata_json,
+                worker_id=worker_id,
+                process_status=RunnerProcessStatus.FAILED,
+                heartbeat_status=previous_status,
+                now=run.updated_at,
+                claimed_at=None,
+                completed_at=run.updated_at,
+            )
+            attempt.updated_at = utc_now()
+
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.RECOVERED,
+                from_status=previous_status,
+                to_status=RunStatus.FAILED,
+                reason=reason,
+                request_id=request_id,
+                metadata=recovery_event_metadata(
+                    RecoveryReasonCode.TERMINAL_RESULT_MISMATCH,
+                    scheduler_id=scheduler_id,
+                    execution_task_id=attempt.attempt_id,
+                    worker_id=runner_metadata.get("worker_id"),
+                    runner_process_status=runner_process_status,
+                    runner_heartbeat_status=runner_metadata.get("heartbeat_status"),
+                    runner_completed_at=runner_metadata.get("completed_at"),
+                    runner_return_code=runner_metadata.get("return_code"),
+                ),
+            )
+            self._upsert_dashboard_projection(
+                run_id=run.run_id,
+                refresh_reason="terminal_result_mismatch_recovery",
+            )
+            failed_ids.append(run.run_id)
+
+        self.session.flush()
+        return [self.get_run(run_id) for run_id in failed_ids]
+
     def claim_next_queued_run(
         self,
         *,
