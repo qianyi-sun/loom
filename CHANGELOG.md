@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Clarified the main README product direction for new contributors by removing
+  local-reference wording and replacing MVP-facing status text with
+  product-grade platform terminology.
 - Added a main developer platform guide for repo admins and primary developers,
   covering the current architecture, API surface, runtime topology, progress,
   priority issues, and maintainer responsibilities.
