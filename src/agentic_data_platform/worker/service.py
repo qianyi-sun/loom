@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from sqlalchemy import Engine
@@ -26,7 +26,11 @@ from agentic_data_platform.persistence.repositories import (
     StaleExecutionTaskError,
 )
 from agentic_data_platform.providers.config import DevProviderConfigRegistry
-from agentic_data_platform.sandbox.docker_terminal import CommandRunner, SubprocessCommandRunner
+from agentic_data_platform.sandbox.docker_terminal import (
+    CommandRunner,
+    DockerOwnedContainerCleaner,
+    SubprocessCommandRunner,
+)
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
 from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor, WorkerRunExecutor
 
@@ -338,7 +342,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="process at most one queued run and exit")
     parser.add_argument("--worker-id", default="worker-dev-1")
     parser.add_argument("--poll-interval-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--cleanup-run-containers",
+        help="remove Docker sandbox containers labeled for this run and exit",
+    )
+    parser.add_argument(
+        "--cleanup-attempt-id",
+        help="optional attempt id filter for --cleanup-run-containers",
+    )
     args = parser.parse_args(argv)
+
+    if args.cleanup_run_containers:
+        result = DockerOwnedContainerCleaner().cleanup_run(
+            run_id=args.cleanup_run_containers,
+            attempt_id=args.cleanup_attempt_id,
+        )
+        print(json.dumps(asdict(result), sort_keys=True))
+        return 0
 
     worker = build_configured_worker(worker_id=args.worker_id)
     if args.once:

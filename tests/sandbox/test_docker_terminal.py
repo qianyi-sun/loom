@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agentic_data_platform.domain.run_records import TerminalTurn
 from agentic_data_platform.sandbox.docker_terminal import (
+    DockerOwnedContainerCleaner,
     DockerTerminalSandbox,
     DockerTerminalSandboxConfig,
 )
@@ -230,9 +231,105 @@ class DockerTerminalSandboxTest(unittest.TestCase):
             "/srv/agentic-data-platform/dev/current/.runtime/sandbox-workspaces/run_007:/workspace",
         )
 
+    def test_docker_run_labels_owned_container_for_cleanup(self):
+        runner = FakeRunner()
+        runner.add_completed()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sandbox = DockerTerminalSandbox(
+                DockerTerminalSandboxConfig(
+                    run_id="run_008",
+                    attempt_id="run_008:attempt:1",
+                    image="python:3.12-slim",
+                    workspace_root=Path(temp_dir),
+                    timeout_seconds=30,
+                ),
+                runner=runner,
+            )
+
+            sandbox.execute("python --version")
+
+        args = runner.calls[0]["args"]
+        labels = _labels_from_args(args)
+        self.assertEqual(labels["com.agentic-data-platform.managed"], "true")
+        self.assertEqual(labels["com.agentic-data-platform.run_id"], "run_008")
+        self.assertEqual(labels["com.agentic-data-platform.attempt_id"], "run_008:attempt:1")
+        self.assertEqual(labels["com.agentic-data-platform.resource"], "sandbox-container")
+
+    def test_docker_owned_container_cleaner_lists_and_removes_only_matching_run(self):
+        runner = FakeDockerCleanupRunner(
+            ps_stdout="container-one\ncontainer-two\n",
+            rm_stdout="container-one\ncontainer-two\n",
+        )
+        cleaner = DockerOwnedContainerCleaner(runner=runner)
+
+        result = cleaner.cleanup_run(run_id="run_009")
+
+        self.assertEqual(result.container_ids, ["container-one", "container-two"])
+        self.assertEqual(result.removed_container_ids, ["container-one", "container-two"])
+        self.assertEqual(result.removal_exit_code, 0)
+        ps_args = runner.calls[0]["args"]
+        self.assertEqual(ps_args[:3], ["docker", "ps", "-aq"])
+        self.assertIn("label=com.agentic-data-platform.managed=true", ps_args)
+        self.assertIn("label=com.agentic-data-platform.run_id=run_009", ps_args)
+        rm_args = runner.calls[1]["args"]
+        self.assertEqual(rm_args[:3], ["docker", "rm", "-f"])
+        self.assertEqual(rm_args[3:], ["container-one", "container-two"])
+
+    def test_docker_owned_container_cleaner_can_target_attempt(self):
+        runner = FakeDockerCleanupRunner(ps_stdout="")
+        cleaner = DockerOwnedContainerCleaner(runner=runner)
+
+        result = cleaner.cleanup_run(run_id="run_010", attempt_id="run_010:attempt:2")
+
+        self.assertEqual(result.container_ids, [])
+        self.assertEqual(result.removed_container_ids, [])
+        self.assertEqual(result.removal_exit_code, None)
+        ps_args = runner.calls[0]["args"]
+        self.assertIn("label=com.agentic-data-platform.run_id=run_010", ps_args)
+        self.assertIn("label=com.agentic-data-platform.attempt_id=run_010:attempt:2", ps_args)
+
 
 def _workspace_from_args(args):
     volume_index = args.index("-v")
     volume_spec = args[volume_index + 1]
     host_path = volume_spec.split(":", maxsplit=1)[0]
     return Path(host_path)
+
+
+def _labels_from_args(args):
+    labels = {}
+    for index, value in enumerate(args):
+        if value != "--label":
+            continue
+        label = args[index + 1]
+        key, label_value = label.split("=", maxsplit=1)
+        labels[key] = label_value
+    return labels
+
+
+class FakeDockerCleanupRunner:
+    def __init__(self, *, ps_stdout="", rm_stdout="", ps_returncode=0, rm_returncode=0):
+        self.calls = []
+        self.ps_stdout = ps_stdout
+        self.rm_stdout = rm_stdout
+        self.ps_returncode = ps_returncode
+        self.rm_returncode = rm_returncode
+
+    def run(self, args, *, timeout):
+        self.calls.append({"args": args, "timeout": timeout})
+        if args[:3] == ["docker", "ps", "-aq"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=self.ps_returncode,
+                stdout=self.ps_stdout,
+                stderr="",
+            )
+        if args[:3] == ["docker", "rm", "-f"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=self.rm_returncode,
+                stdout=self.rm_stdout,
+                stderr="",
+            )
+        raise AssertionError(f"unexpected docker cleanup command: {args}")

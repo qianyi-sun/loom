@@ -371,8 +371,12 @@ serializing dashboard payloads.
   stale child completions are ignored if the current attempt changed while the
   child was running, and duplicate deliveries are skipped before they reach the
   executor. Nonzero, timeout, and incomplete-result child failures include
-  bounded, redacted stdout/stderr tails in run failure metadata. A production
-  LLM-judge evaluator provider remains follow-up work.
+  bounded, redacted stdout/stderr tails in run failure metadata. Docker terminal
+  sandbox containers now carry platform/run/resource labels and the worker CLI
+  can remove labeled containers for a run as the first explicit cleanup
+  verification surface; scheduler-driven cleanup and parent-death
+  reconciliation remain #158/#160 follow-up work. A production LLM-judge
+  evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace

@@ -1,4 +1,6 @@
 from agentic_data_platform.sandbox.docker_terminal import (
+    DockerOwnedContainerCleaner,
+    DockerOwnedContainerCleanupResult,
     DockerTerminalSandbox,
     DockerTerminalSandboxConfig,
     SandboxCommandResult,
@@ -8,6 +10,8 @@ from agentic_data_platform.sandbox.docker_terminal import (
 )
 
 __all__ = [
+    "DockerOwnedContainerCleaner",
+    "DockerOwnedContainerCleanupResult",
     "DockerTerminalSandbox",
     "DockerTerminalSandboxConfig",
     "SandboxCommandResult",

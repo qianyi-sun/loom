@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,12 +22,14 @@ from agentic_data_platform.domain.run_records import (
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
+from agentic_data_platform.sandbox.docker_terminal import DockerOwnedContainerCleanupResult
 from agentic_data_platform.service.config import load_service_settings
 from agentic_data_platform.worker.executors import FixtureTerminalBenchmarkExecutor
 from agentic_data_platform.worker.service import (
     SubprocessRunWorker,
     build_configured_worker,
     execute_claimed_run,
+    main,
 )
 
 
@@ -373,6 +376,39 @@ class SubprocessRunWorkerTest(unittest.TestCase):
 
         self.assertIsInstance(worker, SubprocessRunWorker)
         self.assertEqual(worker.timeout_seconds, 456)
+
+    def test_worker_cli_can_cleanup_owned_docker_containers_for_run(self):
+        cleanup_result = DockerOwnedContainerCleanupResult(
+            run_id="run_cli_cleanup_001",
+            attempt_id="run_cli_cleanup_001:attempt:1",
+            container_ids=["container-one"],
+            removed_container_ids=["container-one"],
+            list_exit_code=0,
+            removal_exit_code=0,
+        )
+
+        with patch("agentic_data_platform.worker.service.DockerOwnedContainerCleaner") as cleaner_cls:
+            cleaner_cls.return_value.cleanup_run.return_value = cleanup_result
+            output = StringIO()
+            with patch("sys.stdout", output):
+                exit_code = main(
+                    [
+                        "--cleanup-run-containers",
+                        "run_cli_cleanup_001",
+                        "--cleanup-attempt-id",
+                        "run_cli_cleanup_001:attempt:1",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        cleaner_cls.return_value.cleanup_run.assert_called_once_with(
+            run_id="run_cli_cleanup_001",
+            attempt_id="run_cli_cleanup_001:attempt:1",
+        )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["run_id"], "run_cli_cleanup_001")
+        self.assertEqual(payload["attempt_id"], "run_cli_cleanup_001:attempt:1")
+        self.assertEqual(payload["removed_container_ids"], ["container-one"])
 
 
 def _create_run(engine, run_id: str) -> None:

@@ -16,6 +16,7 @@ class DockerTerminalSandboxConfig:
     run_id: str
     image: str
     workspace_root: Path
+    attempt_id: str | None = None
     host_workspace_root: Path | None = None
     container_workspace: str = "/workspace"
     cpu_limit: int | float | None = None
@@ -28,6 +29,8 @@ class DockerTerminalSandboxConfig:
         _require_non_empty("run_id", self.run_id)
         _require_non_empty("image", self.image)
         _require_non_empty("container_workspace", self.container_workspace)
+        if self.attempt_id is not None:
+            _require_non_empty("attempt_id", self.attempt_id)
 
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -144,6 +147,81 @@ class WorkspaceSnapshot:
     files: list[WorkspaceFile]
 
 
+@dataclass(frozen=True)
+class DockerOwnedContainerCleanupResult:
+    run_id: str
+    attempt_id: str | None
+    container_ids: list[str]
+    removed_container_ids: list[str]
+    list_exit_code: int
+    removal_exit_code: int | None
+    stderr: str = ""
+
+
+class DockerOwnedContainerCleaner:
+    def __init__(
+        self,
+        *,
+        runner: CommandRunner | None = None,
+        timeout_seconds: int = 30,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self.runner = runner or SubprocessCommandRunner()
+        self.timeout_seconds = timeout_seconds
+
+    def cleanup_run(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str | None = None,
+    ) -> DockerOwnedContainerCleanupResult:
+        _require_non_empty("run_id", run_id)
+        if attempt_id is not None:
+            _require_non_empty("attempt_id", attempt_id)
+
+        list_process = self.runner.run(
+            _docker_ps_owned_container_args(run_id=run_id, attempt_id=attempt_id),
+            timeout=self.timeout_seconds,
+        )
+        list_stdout = _coerce_output(list_process.stdout)
+        list_stderr = _coerce_output(list_process.stderr)
+        if list_process.returncode != 0:
+            raise RuntimeError(f"docker owned-container list failed: {list_stderr.strip()}")
+
+        container_ids = [line.strip() for line in list_stdout.splitlines() if line.strip()]
+        if not container_ids:
+            return DockerOwnedContainerCleanupResult(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                container_ids=[],
+                removed_container_ids=[],
+                list_exit_code=list_process.returncode,
+                removal_exit_code=None,
+                stderr=list_stderr,
+            )
+
+        remove_process = self.runner.run(
+            ["docker", "rm", "-f", *container_ids],
+            timeout=self.timeout_seconds,
+        )
+        remove_stdout = _coerce_output(remove_process.stdout)
+        remove_stderr = _coerce_output(remove_process.stderr)
+        if remove_process.returncode != 0:
+            raise RuntimeError(f"docker owned-container cleanup failed: {remove_stderr.strip()}")
+
+        removed_container_ids = [line.strip() for line in remove_stdout.splitlines() if line.strip()]
+        return DockerOwnedContainerCleanupResult(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            container_ids=container_ids,
+            removed_container_ids=removed_container_ids,
+            list_exit_code=list_process.returncode,
+            removal_exit_code=remove_process.returncode,
+            stderr=remove_stderr,
+        )
+
+
 class DockerTerminalSandbox:
     def __init__(
         self,
@@ -174,6 +252,10 @@ class DockerTerminalSandbox:
             "image": self.config.image,
             "timeout_seconds": timeout,
             "internet_access": self.config.internet_access,
+            "docker_labels": _docker_owned_container_labels(
+                run_id=self.config.run_id,
+                attempt_id=self.config.attempt_id,
+            ),
             "resource_limits": {
                 "cpu_limit": self.config.cpu_limit,
                 "memory_mb": self.config.memory_mb,
@@ -230,6 +312,14 @@ class DockerTerminalSandbox:
             "docker",
             "run",
             "--rm",
+            *[
+                label_arg
+                for key, value in _docker_owned_container_labels(
+                    run_id=self.config.run_id,
+                    attempt_id=self.config.attempt_id,
+                ).items()
+                for label_arg in ("--label", f"{key}={value}")
+            ],
             "-v",
             f"{self.host_workspace_path}:{self.config.container_workspace}",
             "-w",
@@ -268,6 +358,31 @@ def _index_workspace(workspace_path: Path) -> dict[str, tuple[int, str]]:
         indexed[relative_path] = (path.stat().st_size, _sha256(path))
 
     return indexed
+
+
+def _docker_owned_container_labels(*, run_id: str, attempt_id: str | None = None) -> dict[str, str]:
+    labels = {
+        "com.agentic-data-platform.managed": "true",
+        "com.agentic-data-platform.run_id": run_id,
+        "com.agentic-data-platform.resource": "sandbox-container",
+    }
+    if attempt_id is not None:
+        labels["com.agentic-data-platform.attempt_id"] = attempt_id
+    return labels
+
+
+def _docker_ps_owned_container_args(*, run_id: str, attempt_id: str | None = None) -> list[str]:
+    filters = [
+        "label=com.agentic-data-platform.managed=true",
+        f"label=com.agentic-data-platform.run_id={run_id}",
+        "label=com.agentic-data-platform.resource=sandbox-container",
+    ]
+    if attempt_id is not None:
+        filters.append(f"label=com.agentic-data-platform.attempt_id={attempt_id}")
+    args = ["docker", "ps", "-aq"]
+    for item in filters:
+        args.extend(["--filter", item])
+    return args
 
 
 def _changed_paths(
