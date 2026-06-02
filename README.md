@@ -350,11 +350,11 @@ entrypoint. It is intentionally separate from the default deploy smokes because
 it touches networked benchmark assets and can build/run upstream task
 containers.
 
-Start the long-running development API and worker services:
+Start the long-running development API, scheduler, and worker services:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build migrate
-docker compose -f docker-compose.dev.yml up --build api worker
+docker compose -f docker-compose.dev.yml up --build api scheduler worker
 curl http://localhost:8000/healthz
 ```
 
@@ -366,8 +366,8 @@ Open the frontend at `http://localhost:8000/app/`. The checked-in development
 login is `[REDACTED_OWNER]` / `[REDACTED_PASSWORD]`; it creates an HTTP-only web session cookie
 and does not expose the internal bearer token in browser code.
 
-Verify the authenticated API-created Docker sandbox run path with API and worker
-running:
+Verify the authenticated API-created Docker sandbox run path with API,
+scheduler, and worker running:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build api-smoke
@@ -375,7 +375,7 @@ docker compose -f docker-compose.dev.yml run --rm --build api-smoke
 
 Verify the frontend login, model/harness/benchmark discovery, Harbor-backed run
 launch, telemetry polling, Harbor verifier output, and object-store-backed
-artifact bundle download path with API and worker running:
+artifact bundle download path with API, scheduler, and worker running:
 
 ```bash
 docker compose -f docker-compose.dev.yml run --rm --build frontend-smoke

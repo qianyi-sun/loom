@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Updated shared-dev deployment to run API, scheduler, and worker as the
+  long-running service set. `scripts/deploy-dev.sh` now stops and starts
+  `api scheduler worker` for both local and remote deployment paths so
+  API-created runs use the explicit scheduler dispatch topology after
+  deployment.
 - Added the first #156/#158 execution-attempt metadata contract slice. Scheduler
   dispatch now records a versioned scheduler lease block on the latest
   `run_attempts.metadata`, worker claim/heartbeat/terminal result persistence
