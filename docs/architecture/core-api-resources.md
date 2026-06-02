@@ -380,9 +380,13 @@ serializing dashboard payloads.
   sandbox containers now carry platform/run/resource labels; scheduler recovery
   can remove labeled containers for recovered active runs after closing its DB
   recovery transaction, records same-status `sandbox.container_cleanup`
-  evidence, and the worker CLI keeps the manual operator cleanup path.
-  Parent-death/container-leak verification remains #158/#160 follow-up work. A
-  production LLM-judge evaluator provider remains follow-up work.
+  evidence, and the worker CLI keeps the manual operator cleanup path. Shared
+  dev deploy now also verifies a killed-parent cleanup path by starting a live
+  labeled container from a helper parent process, terminating that parent, and
+  requiring scheduler recovery to remove the surviving container before
+  API/frontend smokes continue. Broader long-running runtime leak auditing
+  remains #158/#160 follow-up work. A production LLM-judge evaluator provider
+  remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace

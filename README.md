@@ -403,6 +403,11 @@ durable recovery events. With `DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE=1`
 smokes. That smoke starts a labeled dummy Docker container for a synthetic
 stale active run, runs scheduler recovery, and fails deployment unless the
 container is removed and `sandbox.container_cleanup` evidence is persisted.
+With `DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE=1` (default), deployment
+also runs `cleanup_smoke --mode parent-death`: a helper parent process starts a
+live labeled sandbox container, is terminated, and then scheduler recovery must
+remove the surviving container and persist cleanup evidence before the API and
+frontend smokes continue.
 
 Verify the frontend login, model/backend/benchmark discovery, Harbor-backed run
 launch, durable lifecycle event replay and one-shot SSE replay, telemetry

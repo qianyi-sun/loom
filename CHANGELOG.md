@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
   evaluator id/mode/status/score/artifact-ref metadata and without embedding
   verbal feedback, metrics, judge prompts, or local file paths. Frontend smoke
   replay now requires the evaluator completion event.
+- Added a #158/#160 parent-death Docker cleanup deploy smoke. The scheduler
+  cleanup smoke now supports `--mode parent-death`, which starts a live labeled
+  sandbox container from a helper parent process, terminates that parent, and
+  requires scheduler recovery to remove the surviving container plus persist
+  `sandbox.container_cleanup` evidence. Shared-dev deploy runs this smoke by
+  default before API/frontend smokes.
 - Added the first #158/#160 scheduler-driven Docker-owned resource cleanup
   slice. Docker terminal sandbox containers now carry stable
   platform/run/resource labels, scheduler recovery can remove labeled
