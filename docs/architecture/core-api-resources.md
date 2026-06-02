@@ -135,10 +135,12 @@ refresh timestamps. Terminal worker results, terminal status transitions, and
 terminal recovery paths such as terminal-result mismatch and stale active
 heartbeat recovery upsert this row immediately. Scheduler recovery also runs a
 bounded projection refresh sweep for terminal runs whose projection is
-missing, dirty, or older than the run row. `GET /dashboard/progress` now uses
-clean projection rows for status, artifact, turn, evaluator, and score counts,
-and falls back to hydrated `RunRecord` values only when a row is missing or
-dirty. Current `GET /runs` and `GET /runs/{run_id}` still hydrate current
+missing, dirty, or older than the run row and records same-status
+`projection.refreshed` events with scheduler id, execution task id, refresh
+reason, prior projection state, and source event sequence metadata. `GET
+/dashboard/progress` now uses clean projection rows for status, artifact, turn,
+evaluator, and score counts, and falls back to hydrated `RunRecord` values only
+when a row is missing or dirty. Current `GET /runs` and `GET /runs/{run_id}` still hydrate current
 `RunRecord` values for compatibility; moving list/detail reads fully onto
 durable projection rows remains a later #157 dashboard migration slice.
 
@@ -252,7 +254,8 @@ serializing dashboard payloads.
   `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
   `artifact.upload_expired`, `log.chunk_recorded`, `evaluator.completed`,
-  `evaluator.failed`, and `sandbox.container_cleanup`.
+  `evaluator.failed`, `projection.refreshed`, and
+  `sandbox.container_cleanup`.
   Evaluator events carry summary-only metadata such as evaluator id, mode,
   status, score, safe artifact refs, worker id, and execution task id; they do
   not embed full metrics, verbal feedback, judge prompts, or local file paths.
@@ -360,11 +363,11 @@ serializing dashboard payloads.
   SSE routes, keep telemetry polling available, persist terminal dashboard
   projection rows that scheduler recovery can refresh in bounded batches, and
   make `/dashboard/progress` prefer clean projection rows before falling back to
-  hydrated run records. The first typed artifact/log/evaluator event slices
-  record chunk, upload-expiry, and evaluator completion/failure metadata without
-  embedding payloads. The remaining #157 work is Redis fanout, broader typed
-  sandbox/resource events, and list/detail routes fully backed by projection
-  rows.
+  hydrated run records. The first typed artifact/log/evaluator/projection event
+  slices record chunk, upload-expiry, evaluator completion/failure, and
+  projection refresh metadata without embedding payloads. The remaining #157
+  work is Redis fanout, broader typed sandbox/resource events, and list/detail
+  routes fully backed by projection rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal

@@ -169,11 +169,15 @@ Terminal-result mismatch and stale active heartbeat recovery also refresh the
 failed terminal projection, and
 `RunRepository.refresh_terminal_dashboard_projections(...)` gives the scheduler
 a bounded sweep to repair terminal projections that are missing, dirty, or stale
-relative to `runs.updated_at`. Non-terminal transitions mark an
-existing projection dirty so a retried or redispatched run is not mistaken for a
-fresh terminal projection by projection-backed readers. The dashboard progress
-API now reads clean projection rows for terminal aggregate counts and falls back
-to hydrated run records when the projection is missing or dirty.
+relative to `runs.updated_at`. Each scheduler repair also emits a same-status
+`projection.refreshed` event with scheduler id, execution task id, refresh
+reason, previous projection state, and source event sequence metadata so
+projection-only recovery is visible through durable event replay and artifact
+bundles. Non-terminal transitions mark an existing projection dirty so a
+retried or redispatched run is not mistaken for a fresh terminal projection by
+projection-backed readers. The dashboard progress API now reads clean
+projection rows for terminal aggregate counts and falls back to hydrated run
+records when the projection is missing or dirty.
 Terminal turn stdout/stderr columns are bounded previews, not canonical log
 storage. When a stream exceeds the inline limit, persistence stores truncation
 metadata such as original byte count and inline byte count, while full

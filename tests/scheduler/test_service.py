@@ -447,6 +447,7 @@ class SchedulerServiceTest(unittest.TestCase):
 
         with session_scope(self.engine) as session:
             projection = session.get(RunDashboardProjectionRow, "run_scheduler_projection_refresh")
+            events = RunRepository(session).list_status_events("run_scheduler_projection_refresh")
 
         self.assertEqual(result.requeued_run_ids, [])
         self.assertEqual(result.failed_run_ids, [])
@@ -454,6 +455,13 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertIsNotNone(projection)
         self.assertEqual(projection.status, RunStatus.SUCCEEDED.value)
         self.assertEqual(projection.refresh_reason, "projection_recovery")
+        projection_events = [
+            event for event in events if event.event_type == RunEventType.PROJECTION_REFRESHED.value
+        ]
+        self.assertEqual(len(projection_events), 1)
+        self.assertEqual(projection_events[0].metadata["scheduler_id"], "scheduler-test")
+        self.assertEqual(projection_events[0].metadata["refresh_reason"], "projection_recovery")
+        self.assertEqual(projection_events[0].metadata["projection_missing_before_refresh"], True)
 
     def test_scheduler_expires_stale_artifact_uploads_from_service_settings(self):
         now = datetime.now(timezone.utc)

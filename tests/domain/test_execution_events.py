@@ -30,6 +30,7 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_CLEANUP.value, "sandbox.container_cleanup")
         self.assertEqual(RunEventType.EVALUATOR_COMPLETED.value, "evaluator.completed")
         self.assertEqual(RunEventType.EVALUATOR_FAILED.value, "evaluator.failed")
+        self.assertEqual(RunEventType.PROJECTION_REFRESHED.value, "projection.refreshed")
 
     def test_recovery_reason_codes_cover_phase_one_reconciliation_paths(self):
         self.assertEqual(RecoveryReasonCode.STALE_DISPATCHED.value, "stale_dispatched")

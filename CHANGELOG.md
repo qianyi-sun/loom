@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a #157/#160 projection recovery observability slice. Scheduler
+  terminal projection repair now emits same-status `projection.refreshed`
+  events with scheduler id, execution task id, refresh reason, previous
+  projection state, and source event sequence metadata so projection-only
+  recovery is durable through `/runs/{run_id}/events`, SSE replay, and artifact
+  bundles.
 - Added the first #157 typed evaluator event slice. Worker result persistence
   now appends metadata-only `evaluator.completed` or `evaluator.failed` events
   after `run.evaluating` and before the terminal lifecycle event, with safe

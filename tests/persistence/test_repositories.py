@@ -300,6 +300,8 @@ class PersistenceRepositoryTest(unittest.TestCase):
             )
             projection_0 = session.get(RunDashboardProjectionRow, "run_projection_repair_0")
             projection_1 = session.get(RunDashboardProjectionRow, "run_projection_repair_1")
+            events_0 = runs.list_status_events("run_projection_repair_0")
+            events_1 = runs.list_status_events("run_projection_repair_1")
 
         self.assertEqual([projection.run_id for projection in refreshed], ["run_projection_repair_0"])
         self.assertIsNotNone(projection_0)
@@ -307,6 +309,23 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(projection_0.status, RunStatus.SUCCEEDED.value)
         self.assertFalse(projection_0.dirty)
         self.assertEqual(projection_0.refresh_reason, "projection_recovery")
+        projection_events = [
+            event for event in events_0 if event.event_type == RunEventType.PROJECTION_REFRESHED.value
+        ]
+        self.assertEqual(len(projection_events), 1)
+        self.assertEqual(projection_events[0].from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(projection_events[0].to_status, RunStatus.SUCCEEDED)
+        self.assertEqual(projection_events[0].reason, "terminal dashboard projection refreshed")
+        self.assertEqual(projection_events[0].request_id, "req-projection-repair-001")
+        self.assertEqual(projection_events[0].metadata["scheduler_id"], "scheduler-projection")
+        self.assertEqual(projection_events[0].metadata["refresh_reason"], "projection_recovery")
+        self.assertEqual(projection_events[0].metadata["projection_dirty_before_refresh"], False)
+        self.assertEqual(projection_events[0].metadata["projection_missing_before_refresh"], True)
+        self.assertEqual(projection_events[0].metadata["source_event_seq"], projection_0.source_event_seq)
+        self.assertEqual(
+            [event.event_type for event in events_1 if event.event_type == RunEventType.PROJECTION_REFRESHED.value],
+            [],
+        )
 
     def test_expire_stale_artifact_uploads_marks_pending_and_started_rows_with_recovery_events(self):
         now = datetime.now(timezone.utc)

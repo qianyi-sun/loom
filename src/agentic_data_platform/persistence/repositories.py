@@ -1549,7 +1549,6 @@ class RunRepository:
         max_runs: int,
         request_id: str | None = None,
     ) -> list[RunDashboardProjectionRow]:
-        del request_id
         _require_non_empty("scheduler_id", scheduler_id)
         if max_runs <= 0:
             return []
@@ -1568,11 +1567,37 @@ class RunRepository:
             projection = self.session.get(RunDashboardProjectionRow, row.run_id)
             if projection is not None and not _dashboard_projection_needs_refresh(projection, row):
                 continue
-            refreshed.append(
-                self._upsert_dashboard_projection(
-                    run_id=row.run_id,
-                    refresh_reason="projection_recovery",
-                )
+            projection_was_missing = projection is None
+            projection_was_dirty = bool(projection.dirty) if projection is not None else False
+            projection_status_before = projection.status if projection is not None else None
+            projection_source_event_seq_before = (
+                projection.source_event_seq if projection is not None else None
+            )
+            refreshed_projection = self._upsert_dashboard_projection(
+                run_id=row.run_id,
+                refresh_reason="projection_recovery",
+            )
+            refreshed.append(refreshed_projection)
+            attempt = self._latest_attempt_row(row.run_id)
+            run_status = RunStatus(row.status)
+            self._append_status_event(
+                run_id=row.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.PROJECTION_REFRESHED,
+                from_status=run_status,
+                to_status=run_status,
+                reason="terminal dashboard projection refreshed",
+                request_id=request_id,
+                metadata={
+                    "scheduler_id": scheduler_id,
+                    "execution_task_id": attempt.attempt_id,
+                    "refresh_reason": refreshed_projection.refresh_reason,
+                    "projection_missing_before_refresh": projection_was_missing,
+                    "projection_dirty_before_refresh": projection_was_dirty,
+                    "projection_status_before_refresh": projection_status_before,
+                    "projection_source_event_seq_before_refresh": projection_source_event_seq_before,
+                    "source_event_seq": refreshed_projection.source_event_seq,
+                },
             )
 
         self.session.flush()
