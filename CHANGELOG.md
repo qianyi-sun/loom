@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #156 project fair-share scheduler candidate ordering. Dispatch now
+  considers each project's oldest queued run before considering a second queued
+  run from the same project, while preserving the existing global, backend,
+  project, provider, model, agent, and benchmark capacity gates plus
+  `scheduler.capacity_blocked` diagnostics.
 - Moved run detail summary reads onto the #157 durable projection read path.
   `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`, and
   `GET /runs/{run_id}/evaluation` now prefer clean `run_dashboard_projections`

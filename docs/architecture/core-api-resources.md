@@ -367,7 +367,10 @@ serializing dashboard payloads.
   queue. `RunRepository.dispatch_queued_runs(...)` lets a scheduler move
   eligible rows from `queued` to `dispatched` after checking global, backend,
   project, provider, model, agent, and benchmark active-run capacity, and
-  records `run.dispatched` lifecycle events with the matched capacity keys.
+  records `run.dispatched` lifecycle events with the matched capacity keys. Its
+  candidate ordering is project fair-share: the scheduler considers each
+  project's oldest queued run before considering a second queued run from the
+  same project, then capacity gates decide which candidates can dispatch.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.

@@ -89,6 +89,10 @@ hydrates the latest internal attempt back into the existing dataclass shape.
 benchmark capacity checks, records a `run.dispatched` event with scheduler id,
 capacity keys, project id, and current `execution_task_id`, and writes the v1
 scheduler lease block to `run_attempts.metadata.execution`.
+Queued candidate selection uses project fair-share ordering: each project's
+oldest queued run is considered before a second queued run from the same
+project, while the existing capacity gates remain responsible for the final
+dispatch/block decision.
 `RunRepository.dispatch_queued_runs_with_diagnostics(...)` uses the same
 transactional dispatch path but also returns queued runs blocked by capacity.
 Blocked rows stay `queued`, store the current blocker under

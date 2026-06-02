@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
@@ -637,10 +637,21 @@ class RunRepository:
             _increment(active_by_agent, _agent_capacity_key(row))
             _increment(active_by_benchmark, _benchmark_capacity_key(row))
 
+        queued_fairness_rank = (
+            select(
+                RunRow.run_id.label("run_id"),
+                func.row_number()
+                .over(partition_by=RunRow.project_id, order_by=(RunRow.created_at, RunRow.run_id))
+                .label("project_queue_rank"),
+            )
+            .where(RunRow.status == RunStatus.QUEUED.value)
+            .subquery()
+        )
         candidates = self.session.scalars(
             select(RunRow)
+            .join(queued_fairness_rank, RunRow.run_id == queued_fairness_rank.c.run_id)
             .where(RunRow.status == RunStatus.QUEUED.value)
-            .order_by(RunRow.created_at, RunRow.run_id)
+            .order_by(queued_fairness_rank.c.project_queue_rank, RunRow.created_at, RunRow.run_id)
             .with_for_update(skip_locked=True)
             .limit(max(max_runs * 5, 25))
         )

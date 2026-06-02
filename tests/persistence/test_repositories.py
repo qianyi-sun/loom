@@ -1093,6 +1093,47 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(statuses["run_dispatch_latent_b"], RunStatus.QUEUED)
         self.assertEqual(statuses["run_dispatch_foundation"], RunStatus.DISPATCHED)
 
+    def test_run_repository_dispatch_interleaves_projects_before_second_project_run(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            identities = IdentityRepository(session)
+            identities.create_team(team_id="foundation-model", name="pilot group")
+            ProjectRepository(session).create_project(
+                project_id="foundation-model",
+                name="Model Research",
+                owner_team_id="foundation-model",
+            )
+            runs = RunRepository(session)
+
+            latent_a = _queued_run(run_id="run_dispatch_fair_latent_a")
+            latent_b = _queued_run(run_id="run_dispatch_fair_latent_b")
+            foundation = _queued_run(run_id="run_dispatch_fair_foundation")
+            foundation.project_id = "foundation-model"
+            foundation.owner_team = "pilot group"
+
+            runs.create_run(latent_a)
+            runs.create_run(latent_b)
+            runs.create_run(foundation)
+
+            dispatched = runs.dispatch_queued_runs(
+                scheduler_id="scheduler-a",
+                max_runs=2,
+                request_id="req-dispatch-fair-001",
+            )
+            statuses = {
+                run.run_id: run.status
+                for run in runs.list_runs()
+                if run.run_id.startswith("run_dispatch_fair_")
+            }
+
+        self.assertEqual(
+            [run.run_id for run in dispatched],
+            ["run_dispatch_fair_latent_a", "run_dispatch_fair_foundation"],
+        )
+        self.assertEqual(statuses["run_dispatch_fair_latent_a"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_dispatch_fair_foundation"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_dispatch_fair_latent_b"], RunStatus.QUEUED)
+
     def test_run_repository_dispatch_respects_provider_model_agent_and_benchmark_capacity(self):
         with session_scope(self.engine) as session:
             _seed_latent_project(session)
