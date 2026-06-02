@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a shared-dev deployment recovery preflight before API/frontend smokes.
+  `scripts/deploy-dev.sh` now runs one scheduler `--recover-once` pass with
+  `DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS` so orphaned active runs from a prior
+  worker restart are marked with durable `run.recovered` evidence before they
+  can hold global scheduler capacity and block deployment validation.
 - Added the first #158 stale execution-task guard. Workers now carry the current
   `execution_task_id` into subprocess children, validate it before child
   execution, attach it to heartbeat/result persistence, and ignore stale child

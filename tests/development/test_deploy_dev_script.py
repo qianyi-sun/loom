@@ -33,6 +33,28 @@ class DeployDevScriptTests(unittest.TestCase):
             script,
         )
 
+    def test_shared_dev_deploy_recovers_stale_active_runs_before_api_smoke(self) -> None:
+        script = _script_text()
+
+        self.assertIn('DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS="${DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS:-60}"', script)
+        self.assertIn("Recovering stale active runs before API/frontend smokes", script)
+        self.assertIn(
+            'SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS="$DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS" '
+            "compose run --rm -T scheduler "
+            "python -m agentic_data_platform.scheduler.service --recover-once --scheduler-id deploy-dev-recovery",
+            script,
+        )
+        self.assertIn(
+            'SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS="$DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS" '
+            'docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler '
+            "python -m agentic_data_platform.scheduler.service --recover-once --scheduler-id deploy-dev-recovery",
+            script,
+        )
+        self.assertLess(
+            script.index("Recovering stale active runs before API/frontend smokes"),
+            script.index("Checking authenticated API-created Docker sandbox run"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

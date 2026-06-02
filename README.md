@@ -373,6 +373,12 @@ scheduler, and worker running:
 docker compose -f docker-compose.dev.yml run --rm --build api-smoke
 ```
 
+`scripts/deploy-dev.sh` runs one scheduler recovery preflight before the API and
+frontend smokes. It uses `DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS` (default `60`)
+as a temporary stale active-run heartbeat timeout so orphaned runs left by a
+previous worker restart are marked `failed` with `run.recovered` evidence before
+they can hold scheduler capacity and keep new smoke runs queued.
+
 Verify the frontend login, model/harness/benchmark discovery, Harbor-backed run
 launch, telemetry polling, Harbor verifier output, and object-store-backed
 artifact bundle download path with API, scheduler, and worker running:
