@@ -23,8 +23,10 @@ from agentic_data_platform.domain.execution_events import (
 )
 from agentic_data_platform.domain.execution_metadata import (
     RunnerProcessStatus,
+    SchedulerCapacityBlock,
     SchedulerLeaseStatus,
     runner_process_metadata,
+    scheduler_capacity_blocked_metadata,
     scheduler_lease_metadata,
 )
 from agentic_data_platform.domain.run_records import (
@@ -71,6 +73,12 @@ class StaleExecutionTaskError(ValueError):
 
 class DuplicateExecutionTaskError(ValueError):
     """Raised when a worker tries to execute an already-running task."""
+
+
+@dataclass(frozen=True)
+class DispatchQueuedRunsResult:
+    dispatched_runs: list[RunRecord]
+    capacity_blocked_runs: list[SchedulerCapacityBlock]
 
 
 @dataclass(frozen=True)
@@ -553,9 +561,34 @@ class RunRepository:
         benchmark_limits: dict[str, int] | None = None,
         request_id: str | None = None,
     ) -> list[RunRecord]:
+        return self.dispatch_queued_runs_with_diagnostics(
+            scheduler_id=scheduler_id,
+            max_runs=max_runs,
+            backend_limits=backend_limits,
+            project_limits=project_limits,
+            provider_limits=provider_limits,
+            model_limits=model_limits,
+            agent_limits=agent_limits,
+            benchmark_limits=benchmark_limits,
+            request_id=request_id,
+        ).dispatched_runs
+
+    def dispatch_queued_runs_with_diagnostics(
+        self,
+        *,
+        scheduler_id: str,
+        max_runs: int,
+        backend_limits: dict[str, int] | None = None,
+        project_limits: dict[str, int] | None = None,
+        provider_limits: dict[str, int] | None = None,
+        model_limits: dict[str, int] | None = None,
+        agent_limits: dict[str, int] | None = None,
+        benchmark_limits: dict[str, int] | None = None,
+        request_id: str | None = None,
+    ) -> DispatchQueuedRunsResult:
         _require_non_empty("scheduler_id", scheduler_id)
         if max_runs <= 0:
-            return []
+            return DispatchQueuedRunsResult(dispatched_runs=[], capacity_blocked_runs=[])
 
         backend_limits = _positive_limits(backend_limits or {})
         project_limits = _positive_limits(project_limits or {})
@@ -572,8 +605,6 @@ class RunRepository:
         active_rows = list(self.session.scalars(select(RunRow).where(RunRow.status.in_(active_statuses))))
         active_total = len(active_rows)
         remaining_global_capacity = max_runs - active_total
-        if remaining_global_capacity <= 0:
-            return []
 
         active_by_backend: dict[str, int] = {}
         active_by_project: dict[str, int] = {}
@@ -597,25 +628,67 @@ class RunRepository:
             .limit(max(max_runs * 5, 25))
         )
         dispatched_ids: list[str] = []
+        capacity_blocked: list[SchedulerCapacityBlock] = []
         for row in candidates:
-            if len(dispatched_ids) >= remaining_global_capacity:
-                break
             backend_key = _backend_capacity_key(row)
             provider_key = _provider_capacity_key(row)
             model_key = _model_capacity_key(row)
             agent_key = _agent_capacity_key(row)
             benchmark_key = _benchmark_capacity_key(row)
-            if _at_capacity(active_by_backend, backend_key, backend_limits):
+            if len(dispatched_ids) >= remaining_global_capacity:
+                capacity_blocked.append(
+                    self._record_scheduler_capacity_block(
+                        row=row,
+                        scheduler_id=scheduler_id,
+                        dimension="global",
+                        key="global",
+                        active_count=active_total + len(dispatched_ids),
+                        limit=max_runs,
+                        reason="global capacity reached",
+                        request_id=request_id,
+                        backend_key=backend_key,
+                        provider_key=provider_key,
+                        model_key=model_key,
+                        agent_key=agent_key,
+                        benchmark_key=benchmark_key,
+                    )
+                )
                 continue
-            if _at_capacity(active_by_project, row.project_id, project_limits):
-                continue
-            if _at_capacity(active_by_provider, provider_key, provider_limits):
-                continue
-            if _at_capacity(active_by_model, model_key, model_limits):
-                continue
-            if _at_capacity(active_by_agent, agent_key, agent_limits):
-                continue
-            if _at_capacity(active_by_benchmark, benchmark_key, benchmark_limits):
+            blocked_dimension = _first_capacity_blocker(
+                (
+                    ("backend", backend_key, active_by_backend, backend_limits, "backend capacity reached"),
+                    ("project", row.project_id, active_by_project, project_limits, "project capacity reached"),
+                    ("provider", provider_key, active_by_provider, provider_limits, "provider capacity reached"),
+                    ("model", model_key, active_by_model, model_limits, "model capacity reached"),
+                    ("agent", agent_key, active_by_agent, agent_limits, "agent capacity reached"),
+                    (
+                        "benchmark",
+                        benchmark_key,
+                        active_by_benchmark,
+                        benchmark_limits,
+                        "benchmark capacity reached",
+                    ),
+                )
+            )
+            if blocked_dimension is not None:
+                dimension, key, active_count, limit, reason = blocked_dimension
+                capacity_blocked.append(
+                    self._record_scheduler_capacity_block(
+                        row=row,
+                        scheduler_id=scheduler_id,
+                        dimension=dimension,
+                        key=key,
+                        active_count=active_count,
+                        limit=limit,
+                        reason=reason,
+                        request_id=request_id,
+                        backend_key=backend_key,
+                        provider_key=provider_key,
+                        model_key=model_key,
+                        agent_key=agent_key,
+                        benchmark_key=benchmark_key,
+                    )
+                )
                 continue
 
             previous_status = RunStatus(row.status)
@@ -669,7 +742,92 @@ class RunRepository:
             dispatched_ids.append(run.run_id)
 
         self.session.flush()
-        return [self.get_run(run_id) for run_id in dispatched_ids]
+        return DispatchQueuedRunsResult(
+            dispatched_runs=[self.get_run(run_id) for run_id in dispatched_ids],
+            capacity_blocked_runs=capacity_blocked,
+        )
+
+    def list_scheduler_capacity_blocks(
+        self,
+        *,
+        project_ids: list[str] | None = None,
+        limit: int = 25,
+    ) -> list[SchedulerCapacityBlock]:
+        if limit <= 0:
+            return []
+        if project_ids is not None and not project_ids:
+            return []
+        query = (
+            select(RunRow)
+            .where(RunRow.status == RunStatus.QUEUED.value)
+            .order_by(RunRow.created_at, RunRow.run_id)
+            .limit(max(limit * 5, limit))
+        )
+        if project_ids is not None:
+            query = query.where(RunRow.project_id.in_(project_ids))
+
+        blocks: list[SchedulerCapacityBlock] = []
+        for row in self.session.scalars(query):
+            attempt = self._latest_attempt_row(row.run_id)
+            block = _scheduler_capacity_block_from_attempt(row, attempt)
+            if block is None:
+                continue
+            blocks.append(block)
+            if len(blocks) >= limit:
+                break
+        return blocks
+
+    def _record_scheduler_capacity_block(
+        self,
+        *,
+        row: RunRow,
+        scheduler_id: str,
+        dimension: str,
+        key: str,
+        active_count: int,
+        limit: int,
+        reason: str,
+        request_id: str | None,
+        backend_key: str,
+        provider_key: str,
+        model_key: str,
+        agent_key: str,
+        benchmark_key: str,
+    ) -> SchedulerCapacityBlock:
+        attempt = self._latest_attempt_row(row.run_id)
+        observed_at = utc_now()
+        block = SchedulerCapacityBlock(
+            run_id=row.run_id,
+            project_id=row.project_id,
+            scheduler_id=scheduler_id,
+            execution_task_id=attempt.attempt_id,
+            dimension=dimension,
+            key=key,
+            active_count=active_count,
+            limit=limit,
+            reason=reason,
+            observed_at=observed_at,
+            backend_key=backend_key,
+            provider_key=provider_key,
+            model_key=model_key,
+            agent_key=agent_key,
+            benchmark_key=benchmark_key,
+        )
+        previous_signature = _capacity_block_signature_from_attempt(attempt)
+        attempt.metadata_json = scheduler_capacity_blocked_metadata(attempt.metadata_json, block=block)
+        attempt.updated_at = observed_at
+        if previous_signature != _capacity_block_signature(block.to_dict()):
+            self._append_status_event(
+                run_id=row.run_id,
+                attempt_id=attempt.attempt_id,
+                event_type=RunEventType.SCHEDULER_CAPACITY_BLOCKED,
+                from_status=RunStatus.QUEUED,
+                to_status=RunStatus.QUEUED,
+                reason=reason,
+                request_id=request_id,
+                metadata=block.to_dict(),
+            )
+        return block
 
     def requeue_stale_dispatched_runs(
         self,
@@ -1679,6 +1837,64 @@ def _positive_limits(limits: dict[str, int]) -> dict[str, int]:
     return cleaned
 
 
+def _scheduler_capacity_block_from_attempt(
+    row: RunRow,
+    attempt: RunAttemptRow,
+) -> SchedulerCapacityBlock | None:
+    metadata = dict(attempt.metadata_json or {})
+    execution = dict(metadata.get("execution") or {})
+    scheduler = dict(execution.get("scheduler") or {})
+    blocked = scheduler.get("capacity_blocked")
+    if not isinstance(blocked, dict):
+        return None
+    try:
+        observed_at = _parse_datetime(str(blocked["observed_at"]))
+        return SchedulerCapacityBlock(
+            run_id=row.run_id,
+            project_id=row.project_id,
+            scheduler_id=str(blocked["scheduler_id"]),
+            execution_task_id=str(blocked["execution_task_id"]),
+            dimension=str(blocked["dimension"]),
+            key=str(blocked["key"]),
+            active_count=int(blocked["active_count"]),
+            limit=int(blocked["limit"]),
+            reason=str(blocked["reason"]),
+            observed_at=observed_at,
+            backend_key=str(blocked["backend_key"]),
+            provider_key=str(blocked["provider_key"]),
+            model_key=str(blocked["model_key"]),
+            agent_key=str(blocked["agent_key"]),
+            benchmark_key=str(blocked["benchmark_key"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _capacity_block_signature_from_attempt(attempt: RunAttemptRow) -> tuple[object, ...] | None:
+    metadata = dict(attempt.metadata_json or {})
+    execution = dict(metadata.get("execution") or {})
+    scheduler = dict(execution.get("scheduler") or {})
+    blocked = scheduler.get("capacity_blocked")
+    if not isinstance(blocked, dict):
+        return None
+    return _capacity_block_signature(blocked)
+
+
+def _capacity_block_signature(blocked: dict[str, Any]) -> tuple[object, ...]:
+    return (
+        blocked.get("dimension"),
+        blocked.get("key"),
+        blocked.get("active_count"),
+        blocked.get("limit"),
+        blocked.get("reason"),
+        blocked.get("backend_key"),
+        blocked.get("provider_key"),
+        blocked.get("model_key"),
+        blocked.get("agent_key"),
+        blocked.get("benchmark_key"),
+    )
+
+
 def _increment(counts: dict[str, int], key: str) -> None:
     counts[key] = counts.get(key, 0) + 1
 
@@ -1686,6 +1902,17 @@ def _increment(counts: dict[str, int], key: str) -> None:
 def _at_capacity(counts: dict[str, int], key: str, limits: dict[str, int]) -> bool:
     limit = limits.get(key)
     return limit is not None and counts.get(key, 0) >= limit
+
+
+def _first_capacity_blocker(
+    checks: tuple[tuple[str, str, dict[str, int], dict[str, int], str], ...],
+) -> tuple[str, str, int, int, str] | None:
+    for dimension, key, counts, limits, reason in checks:
+        limit = limits.get(key)
+        active_count = counts.get(key, 0)
+        if limit is not None and active_count >= limit:
+            return dimension, key, active_count, limit, reason
+    return None
 
 
 def _backend_capacity_key(row: RunRow) -> str:
@@ -2103,6 +2330,10 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _parse_datetime(value: str) -> datetime:
+    return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
 
 
 def _required(value, label: str, key: str):

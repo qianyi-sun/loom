@@ -884,6 +884,109 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[1].metadata["agent_key"], "codex")
         self.assertEqual(events[1].metadata["benchmark_key"], "terminal-bench@2.0")
 
+    def test_run_repository_records_capacity_blocked_reason_without_event_spam(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_blocked_a",
+                    provider="openai",
+                    model_name="gpt-5",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_blocked_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="skillflow@2026-06-01",
+                )
+            )
+
+            result = runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-a",
+                max_runs=2,
+                provider_limits={"openai": 1},
+                request_id="req-dispatch-blocked-001",
+            )
+            runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-a",
+                max_runs=2,
+                provider_limits={"openai": 1},
+                request_id="req-dispatch-blocked-002",
+            )
+            blocked_events = [
+                event
+                for event in runs.list_status_events("run_dispatch_blocked_b")
+                if event.event_type == RunEventType.SCHEDULER_CAPACITY_BLOCKED.value
+            ]
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_dispatch_blocked_b")
+            )
+            current_blocks = runs.list_scheduler_capacity_blocks(project_ids=["pilot-project"])
+
+        self.assertEqual([run.run_id for run in result.dispatched_runs], ["run_dispatch_blocked_a"])
+        self.assertEqual([block.run_id for block in result.capacity_blocked_runs], ["run_dispatch_blocked_b"])
+        self.assertEqual(result.capacity_blocked_runs[0].dimension, "provider")
+        self.assertEqual(result.capacity_blocked_runs[0].key, "openai")
+        self.assertEqual(result.capacity_blocked_runs[0].limit, 1)
+        self.assertEqual(result.capacity_blocked_runs[0].active_count, 1)
+        self.assertEqual(len(blocked_events), 1)
+        self.assertEqual(blocked_events[0].from_status, RunStatus.QUEUED)
+        self.assertEqual(blocked_events[0].to_status, RunStatus.QUEUED)
+        self.assertEqual(blocked_events[0].metadata["dimension"], "provider")
+        blocked = attempt.metadata_json["execution"]["scheduler"]["capacity_blocked"]
+        self.assertEqual(blocked["dimension"], "provider")
+        self.assertEqual(blocked["provider_key"], "openai")
+        self.assertEqual([block.run_id for block in current_blocks], ["run_dispatch_blocked_b"])
+
+    def test_run_repository_clears_capacity_blocked_metadata_when_run_dispatches(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_unblocked_a",
+                    provider="openai",
+                    model_name="gpt-5",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_unblocked_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="skillflow@2026-06-01",
+                )
+            )
+
+            first_result = runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-a",
+                max_runs=2,
+                provider_limits={"openai": 1},
+            )
+            second_result = runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-a",
+                max_runs=3,
+                provider_limits={"openai": 2},
+            )
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_dispatch_unblocked_b")
+            )
+            current_blocks = runs.list_scheduler_capacity_blocks(project_ids=["pilot-project"])
+
+        self.assertEqual([block.run_id for block in first_result.capacity_blocked_runs], ["run_dispatch_unblocked_b"])
+        self.assertEqual([run.run_id for run in second_result.dispatched_runs], ["run_dispatch_unblocked_b"])
+        self.assertNotIn("capacity_blocked", attempt.metadata_json["execution"]["scheduler"])
+        self.assertEqual(current_blocks, [])
+
     def test_run_repository_dispatch_skips_canceled_runs(self):
         with session_scope(self.engine) as session:
             _seed_latent_project(session)

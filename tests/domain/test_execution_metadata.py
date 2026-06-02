@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from agentic_data_platform.domain.execution_metadata import (
     EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION,
     RunnerProcessStatus,
+    SchedulerCapacityBlock,
     SchedulerLeaseStatus,
     runner_process_metadata,
+    scheduler_capacity_blocked_metadata,
     scheduler_lease_metadata,
 )
 
@@ -95,6 +97,38 @@ class ExecutionMetadataContractTest(unittest.TestCase):
         self.assertEqual(runner["process_status"], "heartbeating")
         self.assertEqual(runner["execution_lock_id"], "run_001:attempt:1")
         self.assertEqual(runner["execution_lock_acquired_at"], "2026-06-01T12:00:10Z")
+
+    def test_scheduler_capacity_blocked_metadata_records_current_blocker(self):
+        blocked_at = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        block = SchedulerCapacityBlock(
+            run_id="run_001",
+            project_id="pilot-project",
+            scheduler_id="scheduler-a",
+            execution_task_id="run_001:attempt:1",
+            dimension="provider",
+            key="openai",
+            active_count=1,
+            limit=1,
+            reason="provider capacity reached",
+            observed_at=blocked_at,
+            backend_key="harbor-local-docker",
+            provider_key="openai",
+            model_key="gpt-5",
+            agent_key="codex",
+            benchmark_key="terminal-bench@2.0",
+        )
+
+        metadata = scheduler_capacity_blocked_metadata({}, block=block)
+
+        scheduler = metadata["execution"]["scheduler"]
+        blocked = scheduler["capacity_blocked"]
+        self.assertEqual(metadata["execution"]["schema_version"], EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION)
+        self.assertEqual(blocked["dimension"], "provider")
+        self.assertEqual(blocked["key"], "openai")
+        self.assertEqual(blocked["active_count"], 1)
+        self.assertEqual(blocked["limit"], 1)
+        self.assertEqual(blocked["observed_at"], "2026-06-01T12:00:00Z")
+        self.assertEqual(blocked["provider_key"], "openai")
 
     def test_execution_metadata_rejects_missing_identifiers(self):
         with self.assertRaisesRegex(ValueError, "scheduler_id must be a non-empty string"):

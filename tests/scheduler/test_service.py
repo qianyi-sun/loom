@@ -137,6 +137,10 @@ class SchedulerServiceTest(unittest.TestCase):
 
         self.assertEqual(result.dispatched_run_ids, ["run_scheduler_expanded_capacity_a"])
         self.assertEqual(result.dispatched_count, 1)
+        self.assertEqual(result.capacity_blocked_count, 1)
+        self.assertEqual(result.capacity_blocked_runs[0]["run_id"], "run_scheduler_expanded_capacity_b")
+        self.assertEqual(result.capacity_blocked_runs[0]["dimension"], "provider")
+        self.assertEqual(result.capacity_blocked_runs[0]["key"], "openai")
         self.assertEqual(statuses["run_scheduler_expanded_capacity_a"], RunStatus.DISPATCHED)
         self.assertEqual(statuses["run_scheduler_expanded_capacity_b"], RunStatus.QUEUED)
 

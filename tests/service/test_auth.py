@@ -173,6 +173,34 @@ class ServiceAuthTest(unittest.TestCase):
         self.assertEqual(payload["runs_by_status"]["queued"], 1)
         self.assertEqual(payload["queue_depth"], 1)
 
+    def test_ops_metrics_exposes_scoped_scheduler_capacity_blockers(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.save_run(_queued_run("run_blocked_a", project_id="latent-skill-pilot"))
+            runs.save_run(_queued_run("run_blocked_b", project_id="latent-skill-pilot"))
+            runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-ops",
+                max_runs=3,
+                project_limits={"latent-skill-pilot": 1},
+                request_id="req-ops-blocked-dispatch-001",
+            )
+
+        response = self.client.get(
+            "/ops/metrics",
+            headers=_auth("[REDACTED_OWNER]-token", request_id="req-ops-blocked-metrics-001"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertGreaterEqual(payload["queue_depth"], 2)
+        self.assertEqual(payload["scheduler_capacity_blocked_count"], 2)
+        self.assertEqual(payload["scheduler_capacity_blocked_by_dimension"], {"project": 2})
+        self.assertEqual(
+            [item["run_id"] for item in payload["scheduler_capacity_blocked_runs"]],
+            ["run_blocked_a", "run_blocked_b"],
+        )
+        self.assertEqual(payload["scheduler_capacity_blocked_runs"][0]["key"], "latent-skill-pilot")
+
     def test_ops_metrics_are_scoped_to_authenticated_user_projects(self):
         latent_metrics = self.client.get(
             "/ops/metrics",

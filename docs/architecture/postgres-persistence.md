@@ -89,6 +89,12 @@ hydrates the latest internal attempt back into the existing dataclass shape.
 benchmark capacity checks, records a `run.dispatched` event with scheduler id,
 capacity keys, project id, and current `execution_task_id`, and writes the v1
 scheduler lease block to `run_attempts.metadata.execution`.
+`RunRepository.dispatch_queued_runs_with_diagnostics(...)` uses the same
+transactional dispatch path but also returns queued runs blocked by capacity.
+Blocked rows stay `queued`, store the current blocker under
+`run_attempts.metadata.execution.scheduler.capacity_blocked`, and emit
+`scheduler.capacity_blocked` only when the blocker signature changes, avoiding
+event spam from repeated scheduler loops.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.
@@ -105,7 +111,10 @@ Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch
 time, `execution_task_id`, and any provider/model/agent/benchmark capacity keys
-used during dispatch. The `execution.runner` block records worker id, runner
+used during dispatch. When a queued row is blocked by capacity, the same
+`execution.scheduler` block stores a `capacity_blocked` object with dimension,
+key, active count, limit, reason, scheduler id, observed time, and capacity
+keys. The `execution.runner` block records worker id, runner
 process status, heartbeat status, claim time, latest heartbeat, and completion
 time when available. The older `worker` metadata block is still
 written for compatibility with current recovery code and historic rows.

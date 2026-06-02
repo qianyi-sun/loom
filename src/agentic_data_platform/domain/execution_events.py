@@ -18,6 +18,7 @@ class RunEventType(str, Enum):
     RECOVERED = "run.recovered"
     WORKER_FAILED = "run.worker_failed"
     WORKER_SUBPROCESS_FAILED = "run.worker_subprocess_failed"
+    SCHEDULER_CAPACITY_BLOCKED = "scheduler.capacity_blocked"
 
 
 class RecoveryReasonCode(str, Enum):

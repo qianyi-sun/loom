@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #156 scheduler capacity-blocked diagnostics. Capacity-saturated queued
+  runs now retain current `execution.scheduler.capacity_blocked` metadata,
+  emit `scheduler.capacity_blocked` only when the blocker signature changes,
+  surface blocked run details in scheduler one-shot output, and expose
+  project-scoped blocked counts by dimension through `/ops/metrics`.
 - Added the first #157/#160 durable dashboard projection refresh slice.
   Terminal worker results, terminal status transitions, and stale active
   recovery now upsert `run_dashboard_projections` rows with the current

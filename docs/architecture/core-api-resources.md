@@ -88,7 +88,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunDashboardProjection.evaluator` + `RunDashboardProjection.evaluator_results` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_runs()` + aggregate projection |
-| `GET /ops/metrics` | Return scoped run status counts and queue depth visible to the authenticated user | `RunRepository.list_runs()` |
+| `GET /ops/metrics` | Return scoped run status counts, queue depth, and scheduler capacity-blocked diagnostics visible to the authenticated user | `RunRepository.list_runs()` + `RunRepository.list_scheduler_capacity_blocks()` |
 
 Static frontend assets are served at `GET /app/` by the same FastAPI service.
 The frontend is intentionally no-build for the first MVP slice so `shared dev`
@@ -303,8 +303,9 @@ serializing dashboard payloads.
 - `POST /runs`, cancel, retry, and project update operations write structured
   `audit_events` with actor user id, project id, run id where applicable,
   request id, and event payload. The ops metrics endpoint exposes v0 run status
-  counts, queue depth, and visible project count after applying the
-  authenticated user's project membership boundary.
+  counts, queue depth, visible project count, and scheduler capacity-blocked
+  queued-run diagnostics after applying the authenticated user's project
+  membership boundary.
 - Request middleware emits `request_completed` service logs with request id,
   method, path, status code, and authenticated user id when present.
 
@@ -315,6 +316,11 @@ serializing dashboard payloads.
   eligible rows from `queued` to `dispatched` after checking global, backend,
   project, provider, model, agent, and benchmark active-run capacity, and
   records `run.dispatched` lifecycle events with the matched capacity keys.
+  Queued rows blocked by a cap record current
+  `execution.scheduler.capacity_blocked` metadata and a
+  `scheduler.capacity_blocked` event only when the blocker signature changes.
+  `/ops/metrics` reports visible blocked counts by dimension and a bounded run
+  list so operators can distinguish real queue depth from capacity saturation.
   Workers then prefer `RunRepository.claim_next_dispatched_run(...)` before the
   legacy queued-claim compatibility path. Redis remains available in the dev
   stack for a later queue/cache backend, but it is not the current source of

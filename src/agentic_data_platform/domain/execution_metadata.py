@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -23,6 +24,66 @@ class RunnerProcessStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+@dataclass(frozen=True)
+class SchedulerCapacityBlock:
+    run_id: str
+    project_id: str
+    scheduler_id: str
+    execution_task_id: str
+    dimension: str
+    key: str
+    active_count: int
+    limit: int
+    reason: str
+    observed_at: datetime
+    backend_key: str
+    provider_key: str
+    model_key: str
+    agent_key: str
+    benchmark_key: str
+
+    def __post_init__(self) -> None:
+        for name, value in {
+            "run_id": self.run_id,
+            "project_id": self.project_id,
+            "scheduler_id": self.scheduler_id,
+            "execution_task_id": self.execution_task_id,
+            "dimension": self.dimension,
+            "key": self.key,
+            "reason": self.reason,
+            "backend_key": self.backend_key,
+            "provider_key": self.provider_key,
+            "model_key": self.model_key,
+            "agent_key": self.agent_key,
+            "benchmark_key": self.benchmark_key,
+        }.items():
+            _require_non_empty(name, value)
+        if self.active_count < 0:
+            raise ValueError("active_count must be non-negative")
+        if self.limit <= 0:
+            raise ValueError("limit must be positive")
+        _require_timezone("observed_at", self.observed_at)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "project_id": self.project_id,
+            "scheduler_id": self.scheduler_id,
+            "execution_task_id": self.execution_task_id,
+            "dimension": self.dimension,
+            "key": self.key,
+            "active_count": self.active_count,
+            "limit": self.limit,
+            "reason": self.reason,
+            "observed_at": _datetime_json(self.observed_at),
+            "backend_key": self.backend_key,
+            "provider_key": self.provider_key,
+            "model_key": self.model_key,
+            "agent_key": self.agent_key,
+            "benchmark_key": self.benchmark_key,
+        }
 
 
 def scheduler_lease_status_value(status: SchedulerLeaseStatus | str) -> str:
@@ -92,7 +153,31 @@ def scheduler_lease_metadata(
     if benchmark_key is not None:
         scheduler["benchmark_key"] = benchmark_key
     if canonical_status == SchedulerLeaseStatus.DISPATCHED.value:
+        scheduler.pop("capacity_blocked", None)
         scheduler["dispatched_at"] = _datetime_json(observed_at)
+    execution["scheduler"] = scheduler
+    updated["execution"] = execution
+    return updated
+
+
+def scheduler_capacity_blocked_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    block: SchedulerCapacityBlock,
+) -> dict[str, Any]:
+    updated = dict(metadata or {})
+    execution = _execution_metadata(updated)
+    scheduler = dict(execution.get("scheduler") or {})
+    scheduler["capacity_blocked"] = block.to_dict()
+    scheduler["scheduler_id"] = block.scheduler_id
+    scheduler["execution_task_id"] = block.execution_task_id
+    scheduler["project_id"] = block.project_id
+    scheduler["backend_key"] = block.backend_key
+    scheduler["provider_key"] = block.provider_key
+    scheduler["model_key"] = block.model_key
+    scheduler["agent_key"] = block.agent_key
+    scheduler["benchmark_key"] = block.benchmark_key
+    scheduler["lease_updated_at"] = block.to_dict()["observed_at"]
     execution["scheduler"] = scheduler
     updated["execution"] = execution
     return updated

@@ -16,14 +16,20 @@ def register_ops_routes(app: FastAPI, session_dependency: Callable) -> None:
     def get_metrics(request: Request, session: Session = Depends(session_dependency)) -> dict[str, Any]:
         auth = require_authenticated_user(request, session)
         allowed_project_ids = accessible_project_ids(session, auth)
-        runs = [run for run in RunRepository(session).list_runs() if run.project_id in allowed_project_ids]
+        repository = RunRepository(session)
+        runs = [run for run in repository.list_runs() if run.project_id in allowed_project_ids]
         counts = Counter(run.status.value for run in runs)
+        capacity_blocked = repository.list_scheduler_capacity_blocks(project_ids=allowed_project_ids, limit=25)
+        blocked_by_dimension = Counter(block.dimension for block in capacity_blocked)
         return _with_request_id(
             request,
             {
                 "runs_by_status": {status.value: counts.get(status.value, 0) for status in RunStatus},
                 "queue_depth": counts.get(RunStatus.QUEUED.value, 0),
                 "visible_project_count": len(allowed_project_ids),
+                "scheduler_capacity_blocked_count": len(capacity_blocked),
+                "scheduler_capacity_blocked_by_dimension": dict(blocked_by_dimension),
+                "scheduler_capacity_blocked_runs": [block.to_dict() for block in capacity_blocked],
             },
         )
 
@@ -52,5 +58,26 @@ _METRICS_EXAMPLE = {
     },
     "queue_depth": 4,
     "visible_project_count": 3,
+    "scheduler_capacity_blocked_count": 1,
+    "scheduler_capacity_blocked_by_dimension": {"provider": 1},
+    "scheduler_capacity_blocked_runs": [
+        {
+            "run_id": "run_123",
+            "project_id": "pilot-project",
+            "scheduler_id": "scheduler-dev-1",
+            "execution_task_id": "run_123:attempt:1",
+            "dimension": "provider",
+            "key": "openai",
+            "active_count": 2,
+            "limit": 2,
+            "reason": "provider capacity reached",
+            "observed_at": "2026-06-01T12:00:00Z",
+            "backend_key": "harbor-local-docker",
+            "provider_key": "openai",
+            "model_key": "gpt-5",
+            "agent_key": "codex",
+            "benchmark_key": "terminal-bench@2.0",
+        }
+    ],
     "request_id": "req_123",
 }

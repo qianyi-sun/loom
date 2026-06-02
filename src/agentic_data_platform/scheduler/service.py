@@ -17,16 +17,23 @@ from agentic_data_platform.service.config import ServiceSettings, load_service_s
 class SchedulerDispatchResult:
     scheduler_id: str
     dispatched_run_ids: list[str]
+    capacity_blocked_runs: list[dict[str, object]]
 
     @property
     def dispatched_count(self) -> int:
         return len(self.dispatched_run_ids)
+
+    @property
+    def capacity_blocked_count(self) -> int:
+        return len(self.capacity_blocked_runs)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "scheduler_id": self.scheduler_id,
             "dispatched_count": self.dispatched_count,
             "dispatched_run_ids": list(self.dispatched_run_ids),
+            "capacity_blocked_count": self.capacity_blocked_count,
+            "capacity_blocked_runs": list(self.capacity_blocked_runs),
         }
 
 
@@ -83,7 +90,7 @@ class RunScheduler:
 
     def dispatch_once(self, *, request_id: str | None = None) -> SchedulerDispatchResult:
         with session_scope(self.engine) as session:
-            dispatched = RunRepository(session).dispatch_queued_runs(
+            result = RunRepository(session).dispatch_queued_runs_with_diagnostics(
                 scheduler_id=self.scheduler_id,
                 max_runs=self.settings.scheduler_global_max_active_runs,
                 backend_limits=self.settings.scheduler_backend_max_active_runs,
@@ -96,7 +103,8 @@ class RunScheduler:
             )
         return SchedulerDispatchResult(
             scheduler_id=self.scheduler_id,
-            dispatched_run_ids=[run.run_id for run in dispatched],
+            dispatched_run_ids=[run.run_id for run in result.dispatched_runs],
+            capacity_blocked_runs=[block.to_dict() for block in result.capacity_blocked_runs],
         )
 
     def recover_once(self, *, request_id: str | None = None) -> SchedulerRecoveryResult:
@@ -177,7 +185,7 @@ def run_scheduler_loop(
         ):
             print(json.dumps({"action": "recover", **recovery_result.to_dict()}, sort_keys=True), flush=True)
         result = scheduler.dispatch_once()
-        if result.dispatched_count:
+        if result.dispatched_count or result.capacity_blocked_count:
             print(json.dumps({"action": "dispatch", **result.to_dict()}, sort_keys=True), flush=True)
         time.sleep(poll_interval_seconds)
 

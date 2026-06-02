@@ -23,6 +23,7 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.RECOVERED.value, "run.recovered")
         self.assertEqual(RunEventType.WORKER_FAILED.value, "run.worker_failed")
         self.assertEqual(RunEventType.WORKER_SUBPROCESS_FAILED.value, "run.worker_subprocess_failed")
+        self.assertEqual(RunEventType.SCHEDULER_CAPACITY_BLOCKED.value, "scheduler.capacity_blocked")
 
     def test_recovery_reason_codes_cover_phase_one_reconciliation_paths(self):
         self.assertEqual(RecoveryReasonCode.STALE_DISPATCHED.value, "stale_dispatched")
