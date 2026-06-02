@@ -1660,24 +1660,18 @@ class RunRepository:
         return refreshed
 
     def record_artifact_chunk(self, chunk: ArtifactChunkMetadata) -> ArtifactChunkMetadata:
-        run_row = _required(self.session.get(RunRow, chunk.run_id), "run", chunk.run_id)
-        attempt = _required(self.session.get(RunAttemptRow, chunk.attempt_id), "run attempt", chunk.attempt_id)
-        artifact = _required(self.session.get(ArtifactRow, chunk.artifact_id), "artifact", chunk.artifact_id)
-        if attempt.run_id != chunk.run_id:
-            raise ValueError("chunk attempt_id does not belong to run_id")
-        if artifact.run_id != chunk.run_id:
-            raise ValueError("chunk artifact_id does not belong to run_id")
-        if artifact.attempt_id != chunk.attempt_id:
-            raise ValueError("chunk artifact_id does not belong to attempt_id")
+        run_row, _, _ = self._require_artifact_chunk_parents(
+            run_id=chunk.run_id,
+            attempt_id=chunk.attempt_id,
+            artifact_id=chunk.artifact_id,
+        )
 
         chunk_kind = _artifact_chunk_kind_value(chunk.chunk_kind)
         upload_status = _artifact_upload_status_value(chunk.upload_status)
-        existing = self.session.scalar(
-            select(ArtifactChunkRow)
-            .where(ArtifactChunkRow.artifact_id == chunk.artifact_id)
-            .where(ArtifactChunkRow.chunk_kind == chunk_kind)
-            .where(ArtifactChunkRow.chunk_sequence == chunk.chunk_sequence)
-            .with_for_update()
+        existing = self._artifact_chunk_row_for_update(
+            artifact_id=chunk.artifact_id,
+            chunk_kind=chunk_kind,
+            chunk_sequence=chunk.chunk_sequence,
         )
         previous_upload_status = existing.upload_status if existing is not None else None
         now = utc_now()
@@ -1726,6 +1720,295 @@ class RunRepository:
             )
         self.session.flush()
         return _artifact_chunk_metadata(existing)
+
+    def start_artifact_chunk_upload(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        artifact_id: str,
+        chunk_kind: ArtifactChunkKind | str,
+        chunk_sequence: int,
+        storage_key: str,
+        media_type: str,
+        started_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> ArtifactChunkMetadata:
+        run_row, _, _ = self._require_artifact_chunk_parents(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            artifact_id=artifact_id,
+        )
+        now = utc_now()
+        created_at = _aware(started_at or now)
+        chunk = ArtifactChunkMetadata(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            artifact_id=artifact_id,
+            chunk_kind=chunk_kind,
+            chunk_sequence=chunk_sequence,
+            storage_key=storage_key,
+            media_type=media_type,
+            size_bytes=None,
+            sha256=None,
+            upload_status=ArtifactUploadStatus.STARTED,
+            created_at=created_at,
+            metadata={
+                **dict(metadata or {}),
+                "upload_started_at": _datetime_json(created_at),
+            },
+        )
+        kind = _artifact_chunk_kind_value(chunk.chunk_kind)
+        existing = self._artifact_chunk_row_for_update(
+            artifact_id=artifact_id,
+            chunk_kind=kind,
+            chunk_sequence=chunk_sequence,
+        )
+        if existing is None:
+            row = ArtifactChunkRow(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                artifact_id=artifact_id,
+                chunk_kind=kind,
+                chunk_sequence=chunk_sequence,
+                storage_key=storage_key,
+                media_type=media_type,
+                size_bytes=None,
+                sha256=None,
+                upload_status=ArtifactUploadStatus.STARTED.value,
+                upload_error_reason=None,
+                metadata_json=dict(chunk.metadata),
+                created_at=created_at,
+                updated_at=now,
+            )
+            self.session.add(row)
+            run_status = RunStatus(run_row.status)
+            self._append_status_event(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                event_type=_artifact_chunk_event_type(kind),
+                from_status=run_status,
+                to_status=run_status,
+                metadata=_artifact_chunk_event_metadata(
+                    chunk,
+                    upload_status=ArtifactUploadStatus.STARTED.value,
+                ),
+                request_id=request_id,
+            )
+            self.session.flush()
+            return _artifact_chunk_metadata(row)
+
+        self._ensure_artifact_chunk_upload_identity(existing, storage_key=storage_key, media_type=media_type)
+        previous_upload_status = existing.upload_status
+        if previous_upload_status == ArtifactUploadStatus.STARTED.value:
+            return _artifact_chunk_metadata(existing)
+        if previous_upload_status == ArtifactUploadStatus.COMPLETED.value:
+            raise ValueError("completed artifact chunk upload cannot be restarted")
+
+        existing.size_bytes = None
+        existing.sha256 = None
+        existing.upload_status = ArtifactUploadStatus.STARTED.value
+        existing.upload_error_reason = None
+        existing.metadata_json = {
+            **dict(existing.metadata_json or {}),
+            **dict(chunk.metadata),
+        }
+        existing.updated_at = now
+        run_status = RunStatus(run_row.status)
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            event_type=RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED,
+            from_status=run_status,
+            to_status=run_status,
+            reason=None,
+            request_id=request_id,
+            metadata=_artifact_chunk_upload_transition_event_metadata(
+                _artifact_chunk_metadata(existing),
+                previous_upload_status=previous_upload_status,
+                upload_status=ArtifactUploadStatus.STARTED.value,
+            ),
+        )
+        self.session.flush()
+        return _artifact_chunk_metadata(existing)
+
+    def complete_artifact_chunk_upload(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        chunk_kind: ArtifactChunkKind | str,
+        chunk_sequence: int,
+        size_bytes: int,
+        sha256: str,
+        completed_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> ArtifactChunkMetadata:
+        run_row = _required(self.session.get(RunRow, run_id), "run", run_id)
+        kind = _artifact_chunk_kind_value(chunk_kind)
+        row = self._required_artifact_chunk_row_for_update(
+            run_id=run_id,
+            artifact_id=artifact_id,
+            chunk_kind=kind,
+            chunk_sequence=chunk_sequence,
+        )
+        completed = _aware(completed_at or utc_now())
+        previous_upload_status = row.upload_status
+        if previous_upload_status == ArtifactUploadStatus.COMPLETED.value:
+            if row.size_bytes == size_bytes and row.sha256 == sha256:
+                return _artifact_chunk_metadata(row)
+            raise ValueError("completed artifact chunk upload object metadata cannot change")
+        if previous_upload_status in {ArtifactUploadStatus.FAILED.value, ArtifactUploadStatus.EXPIRED.value}:
+            raise ValueError(f"artifact chunk upload cannot complete from {previous_upload_status}")
+
+        row.size_bytes = size_bytes
+        row.sha256 = sha256
+        row.upload_status = ArtifactUploadStatus.COMPLETED.value
+        row.upload_error_reason = None
+        row.metadata_json = {
+            **dict(row.metadata_json or {}),
+            **dict(metadata or {}),
+            "upload_completed_at": _datetime_json(completed),
+        }
+        row.updated_at = utc_now()
+        chunk = _artifact_chunk_metadata(row)
+        run_status = RunStatus(run_row.status)
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=row.attempt_id,
+            event_type=RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED,
+            from_status=run_status,
+            to_status=run_status,
+            request_id=request_id,
+            metadata=_artifact_chunk_upload_transition_event_metadata(
+                chunk,
+                previous_upload_status=previous_upload_status,
+                upload_status=ArtifactUploadStatus.COMPLETED.value,
+            ),
+        )
+        self.session.flush()
+        return chunk
+
+    def fail_artifact_chunk_upload(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        chunk_kind: ArtifactChunkKind | str,
+        chunk_sequence: int,
+        reason: str,
+        failed_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> ArtifactChunkMetadata:
+        _require_non_empty("reason", reason)
+        run_row = _required(self.session.get(RunRow, run_id), "run", run_id)
+        kind = _artifact_chunk_kind_value(chunk_kind)
+        row = self._required_artifact_chunk_row_for_update(
+            run_id=run_id,
+            artifact_id=artifact_id,
+            chunk_kind=kind,
+            chunk_sequence=chunk_sequence,
+        )
+        failed = _aware(failed_at or utc_now())
+        previous_upload_status = row.upload_status
+        if previous_upload_status == ArtifactUploadStatus.FAILED.value and row.upload_error_reason == reason:
+            return _artifact_chunk_metadata(row)
+        if previous_upload_status == ArtifactUploadStatus.COMPLETED.value:
+            raise ValueError("completed artifact chunk upload cannot be failed")
+
+        row.size_bytes = None
+        row.sha256 = None
+        row.upload_status = ArtifactUploadStatus.FAILED.value
+        row.upload_error_reason = reason
+        row.metadata_json = {
+            **dict(row.metadata_json or {}),
+            **dict(metadata or {}),
+            "upload_failed_at": _datetime_json(failed),
+        }
+        row.updated_at = utc_now()
+        chunk = _artifact_chunk_metadata(row)
+        run_status = RunStatus(run_row.status)
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=row.attempt_id,
+            event_type=RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED,
+            from_status=run_status,
+            to_status=run_status,
+            reason=reason,
+            request_id=request_id,
+            metadata=_artifact_chunk_upload_transition_event_metadata(
+                chunk,
+                previous_upload_status=previous_upload_status,
+                upload_status=ArtifactUploadStatus.FAILED.value,
+            ),
+        )
+        self.session.flush()
+        return chunk
+
+    def _require_artifact_chunk_parents(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        artifact_id: str,
+    ) -> tuple[RunRow, RunAttemptRow, ArtifactRow]:
+        run_row = _required(self.session.get(RunRow, run_id), "run", run_id)
+        attempt = _required(self.session.get(RunAttemptRow, attempt_id), "run attempt", attempt_id)
+        artifact = _required(self.session.get(ArtifactRow, artifact_id), "artifact", artifact_id)
+        if attempt.run_id != run_id:
+            raise ValueError("chunk attempt_id does not belong to run_id")
+        if artifact.run_id != run_id:
+            raise ValueError("chunk artifact_id does not belong to run_id")
+        if artifact.attempt_id != attempt_id:
+            raise ValueError("chunk artifact_id does not belong to attempt_id")
+        return run_row, attempt, artifact
+
+    def _artifact_chunk_row_for_update(
+        self,
+        *,
+        artifact_id: str,
+        chunk_kind: str,
+        chunk_sequence: int,
+    ) -> ArtifactChunkRow | None:
+        return self.session.scalar(
+            select(ArtifactChunkRow)
+            .where(ArtifactChunkRow.artifact_id == artifact_id)
+            .where(ArtifactChunkRow.chunk_kind == chunk_kind)
+            .where(ArtifactChunkRow.chunk_sequence == chunk_sequence)
+            .with_for_update()
+        )
+
+    def _required_artifact_chunk_row_for_update(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        chunk_kind: str,
+        chunk_sequence: int,
+    ) -> ArtifactChunkRow:
+        row = self._artifact_chunk_row_for_update(
+            artifact_id=artifact_id,
+            chunk_kind=chunk_kind,
+            chunk_sequence=chunk_sequence,
+        )
+        if row is None or row.run_id != run_id:
+            raise KeyError(f"Unknown artifact chunk: {artifact_id}:{chunk_kind}:{chunk_sequence}")
+        return row
+
+    def _ensure_artifact_chunk_upload_identity(
+        self,
+        row: ArtifactChunkRow,
+        *,
+        storage_key: str,
+        media_type: str,
+    ) -> None:
+        if row.storage_key != storage_key:
+            raise ValueError("artifact chunk upload storage_key cannot change")
+        if row.media_type != media_type:
+            raise ValueError("artifact chunk upload media_type cannot change")
 
     def list_artifact_chunks(
         self,
@@ -2611,11 +2894,13 @@ def _artifact_chunk_event_metadata(
         "chunk_sequence": chunk.chunk_sequence,
         "storage_key": chunk.storage_key,
         "media_type": chunk.media_type,
-        "size_bytes": chunk.size_bytes,
-        "sha256": chunk.sha256,
         "upload_status": upload_status,
         "schema_version": chunk.schema_version,
     }
+    if chunk.size_bytes is not None:
+        metadata["size_bytes"] = chunk.size_bytes
+    if chunk.sha256 is not None:
+        metadata["sha256"] = chunk.sha256
     if chunk.upload_error_reason is not None:
         metadata["upload_error_reason"] = chunk.upload_error_reason
     return metadata

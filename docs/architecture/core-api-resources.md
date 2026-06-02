@@ -299,10 +299,16 @@ serializing dashboard payloads.
   `object_size_bytes`, and `object_sha256` in metadata. The
   `artifact_chunks` table indexes ordered stdout/stderr/trajectory/artifact
   chunks by run, attempt, artifact, kind, and sequence, with object key, media
-  type, byte size, SHA-256, upload status, and optional error reason. `GET
+  type, nullable byte size/SHA-256 until completion, upload status, and optional
+  error reason. `GET
   /runs/{run_id}/artifact-chunks` exposes this bounded metadata to authenticated
   project viewers without returning object payload bytes or storage
-  credentials. Upload-state repository recovery can now expire stale
+  credentials. Repository upload transaction APIs now own chunk upload state:
+  `start_artifact_chunk_upload(...)` creates or idempotently observes a
+  `started` row, `complete_artifact_chunk_upload(...)` requires real object
+  size/SHA-256 before marking it `completed`, and
+  `fail_artifact_chunk_upload(...)` records a diagnosable `failed` state without
+  fake object metadata. Upload-state repository recovery can now expire stale
   `pending` or `started` rows to `expired` with a durable `run.recovered`
   event plus typed `artifact.upload_expired` and
   `artifact.upload_status_changed` events. Worker result persistence now writes
@@ -312,8 +318,9 @@ serializing dashboard payloads.
   `artifact.chunk_recorded` events. When a chunk's upload state changes,
   `artifact.upload_status_changed` records the previous and current status with
   the same safe chunk/object identifiers. These events carry object metadata such
-  as chunk sequence, storage key, size, SHA-256, media type, and upload status,
-  not payload bytes. `GET /runs/{run_id}/artifact-chunks/content` downloads a
+  as chunk sequence, storage key, optional size/SHA-256 when known, media type,
+  and upload status, not payload bytes. `GET
+  /runs/{run_id}/artifact-chunks/content` downloads a
   completed chunk payload through the platform API by artifact id, chunk kind,
   and sequence; non-completed upload states return structured errors without
   fetching object storage or exposing storage keys. Dedicated object upload

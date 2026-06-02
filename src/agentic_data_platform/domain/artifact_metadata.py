@@ -47,8 +47,8 @@ class ArtifactChunkMetadata:
     chunk_sequence: int
     storage_key: str
     media_type: str
-    size_bytes: int
-    sha256: str
+    size_bytes: int | None
+    sha256: str | None
     upload_status: ArtifactUploadStatus | str
     created_at: datetime
     upload_error_reason: str | None = None
@@ -64,19 +64,22 @@ class ArtifactChunkMetadata:
         _require_non_empty("media_type", self.media_type)
         if self.chunk_sequence < 0:
             raise ValueError("chunk_sequence must be non-negative")
-        if self.size_bytes < 0:
-            raise ValueError("size_bytes must be non-negative")
-        if len(self.sha256) != 64:
-            raise ValueError("sha256 must be a 64-character hex digest")
-        if self.created_at.tzinfo is None:
-            raise ValueError("created_at must be timezone-aware")
-
         object.__setattr__(self, "chunk_kind", _coerce_enum(ArtifactChunkKind, self.chunk_kind, "chunk_kind"))
         object.__setattr__(
             self,
             "upload_status",
             _coerce_enum(ArtifactUploadStatus, self.upload_status, "upload_status"),
         )
+        if self.size_bytes is not None and self.size_bytes < 0:
+            raise ValueError("size_bytes must be non-negative")
+        if self.sha256 is not None and len(self.sha256) != 64:
+            raise ValueError("sha256 must be a 64-character hex digest")
+        if self.upload_status is ArtifactUploadStatus.COMPLETED and (
+            self.size_bytes is None or self.sha256 is None
+        ):
+            raise ValueError("completed chunk uploads require size_bytes and sha256")
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)

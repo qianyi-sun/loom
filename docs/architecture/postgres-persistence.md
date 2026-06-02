@@ -199,12 +199,13 @@ The #157/#160 projection refresh migration adds
 `run_dashboard_projections(dirty, is_terminal, updated_at)` indexes for
 projection refresh, run-list, and dashboard progress queries. Detail projection
 queries remain a later #157 migration.
-The #159 artifact chunk migration adds
+The #159 artifact chunk migrations add
 `artifact_chunks(run_id, attempt_id, chunk_kind, chunk_sequence)` for ordered
 chunk reads and `artifact_chunks(upload_status, created_at)` for upload-state
-inspection. `GET /runs/{run_id}/artifact-chunks` exposes bounded project-scoped
-metadata reads over those indexes without loading object payloads into API
-responses.
+inspection. Started or failed upload rows may have null `size_bytes` and
+`sha256`; completed rows must carry real object size and SHA-256. `GET
+/runs/{run_id}/artifact-chunks` exposes bounded project-scoped metadata reads
+over those indexes without loading object payloads into API responses.
 
 ## API Resource Boundary
 
@@ -228,10 +229,15 @@ states (`pending`, `started`, `completed`, `failed`, `expired`) and
 `artifact-chunk-metadata-v1` for stdout/stderr, trajectory, and artifact chunk
 rows. The `artifact_chunks` table now stores one row per object-backed chunk
 with run id, attempt id, artifact id, chunk kind, sequence, object key, media
-type, byte size, SHA-256, upload status, optional upload error reason, metadata
-JSON, and timestamps. The unique key is
+type, nullable byte size/SHA-256 until completion, upload status, optional
+upload error reason, metadata JSON, and timestamps. The unique key is
 `(artifact_id, chunk_kind, chunk_sequence)`, making repeated writes for the same
-chunk coordinate idempotent. Artifact bundles already treat non-`completed`
+chunk coordinate idempotent. `RunRepository.start_artifact_chunk_upload(...)`,
+`complete_artifact_chunk_upload(...)`, and `fail_artifact_chunk_upload(...)`
+provide the dedicated transaction boundary for object writers: starts reserve a
+safe object key without fake hash data, completion validates size/SHA-256, and
+failures persist an operator-visible reason. Artifact bundles already treat
+non-`completed`
 upload states as unavailable and surface `upload_status` /
 `upload_error_reason` in `manifest.json`.
 `RunRepository.expire_stale_artifact_uploads(...)` now marks stale `pending`
@@ -248,8 +254,7 @@ also appends `artifact.upload_expired` alongside the recovery event. Chunk
 upload-state changes and expiry append `artifact.upload_status_changed` with
 previous/current status metadata. The chunk content endpoint downloads completed
 chunk payloads by metadata reference while rejecting non-completed upload states
-before object storage access. Dedicated object upload transaction APIs remain
-#159 follow-up work.
+before object storage access.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

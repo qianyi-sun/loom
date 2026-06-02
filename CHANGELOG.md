@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added dedicated #159 artifact chunk upload transaction repository APIs.
+  `RunRepository.start_artifact_chunk_upload(...)`,
+  `complete_artifact_chunk_upload(...)`, and
+  `fail_artifact_chunk_upload(...)` now own the chunk upload lifecycle,
+  preserve idempotent started writes, append metadata-only
+  `artifact.upload_status_changed` events only for real state transitions, and
+  allow started/failed chunk rows to omit object size/SHA-256 until a completed
+  payload is available.
 - Fixed a shared-dev scheduler Docker cleanup smoke race. The synthetic cleanup
   smoke now claims its own queued run by `run_id` before marking it stale, so
   pre-existing queued backlog cannot steal the claim and leave the smoke

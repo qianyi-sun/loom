@@ -77,6 +77,41 @@ class ArtifactMetadataContractTest(unittest.TestCase):
         self.assertEqual(payload["chunk_sequence"], 0)
         self.assertEqual(payload["upload_error_reason"], "")
 
+    def test_started_chunk_upload_can_omit_object_size_and_hash_until_completion(self):
+        chunk = ArtifactChunkMetadata(
+            run_id="run_001",
+            attempt_id="run_001:attempt:1",
+            artifact_id="run_001-stdout",
+            chunk_kind=ArtifactChunkKind.STDOUT,
+            chunk_sequence=0,
+            storage_key="runs/run_001/tasks/task/logs/stdout/000000.jsonl",
+            media_type="application/x-ndjson",
+            size_bytes=None,
+            sha256=None,
+            upload_status=ArtifactUploadStatus.STARTED,
+            created_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNone(chunk.size_bytes)
+        self.assertIsNone(chunk.sha256)
+        self.assertEqual(chunk.to_dict()["upload_status"], ArtifactUploadStatus.STARTED.value)
+
+    def test_completed_chunk_upload_requires_object_size_and_hash(self):
+        with self.assertRaisesRegex(ValueError, "completed chunk uploads require size_bytes and sha256"):
+            ArtifactChunkMetadata(
+                run_id="run_001",
+                attempt_id="run_001:attempt:1",
+                artifact_id="run_001-stdout",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+                chunk_sequence=0,
+                storage_key="runs/run_001/tasks/task/logs/stdout/000000.jsonl",
+                media_type="application/x-ndjson",
+                size_bytes=None,
+                sha256=None,
+                upload_status=ArtifactUploadStatus.COMPLETED,
+                created_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+            )
+
     def test_artifact_chunk_metadata_rejects_invalid_chunk_sequence(self):
         with self.assertRaisesRegex(ValueError, "chunk_sequence must be non-negative"):
             ArtifactChunkMetadata(

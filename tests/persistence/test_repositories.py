@@ -78,6 +78,8 @@ class PersistenceRepositoryTest(unittest.TestCase):
         )
         artifact_chunk_columns = {column["name"]: column for column in inspector.get_columns("artifact_chunks")}
         self.assertIn("storage_key", artifact_chunk_columns)
+        self.assertTrue(artifact_chunk_columns["size_bytes"]["nullable"])
+        self.assertTrue(artifact_chunk_columns["sha256"]["nullable"])
         self.assertIn("upload_status", artifact_chunk_columns)
         self.assertIn("upload_error_reason", artifact_chunk_columns)
         artifact_chunk_indexes = {index["name"] for index in inspector.get_indexes("artifact_chunks")}
@@ -638,6 +640,108 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertNotIn("stdout", failed_log_event.metadata)
         self.assertNotIn("stderr", failed_log_event.metadata)
         self.assertEqual(artifact_events[0].metadata["chunk_kind"], ArtifactChunkKind.TRAJECTORY.value)
+
+    def test_run_repository_tracks_artifact_chunk_upload_transaction_lifecycle(self):
+        run = _completed_run(run_id="run_chunk_upload_transaction")
+        now = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(run)
+
+            started = runs.start_artifact_chunk_upload(
+                run_id="run_chunk_upload_transaction",
+                attempt_id="run_chunk_upload_transaction:attempt:1",
+                artifact_id="run_chunk_upload_transaction-trajectory",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+                chunk_sequence=0,
+                storage_key="runs/run_chunk_upload_transaction/tasks/task/logs/stdout/000000.jsonl",
+                media_type="application/x-ndjson",
+                started_at=now,
+                metadata={"preview_start_byte": 0},
+            )
+            repeated_start = runs.start_artifact_chunk_upload(
+                run_id="run_chunk_upload_transaction",
+                attempt_id="run_chunk_upload_transaction:attempt:1",
+                artifact_id="run_chunk_upload_transaction-trajectory",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+                chunk_sequence=0,
+                storage_key="runs/run_chunk_upload_transaction/tasks/task/logs/stdout/000000.jsonl",
+                media_type="application/x-ndjson",
+                started_at=now + timedelta(seconds=1),
+                metadata={"preview_start_byte": 0},
+            )
+            completed = runs.complete_artifact_chunk_upload(
+                run_id="run_chunk_upload_transaction",
+                artifact_id="run_chunk_upload_transaction-trajectory",
+                chunk_kind=ArtifactChunkKind.STDOUT,
+                chunk_sequence=0,
+                size_bytes=512,
+                sha256="a" * 64,
+                completed_at=now + timedelta(seconds=2),
+                metadata={"preview_end_byte": 512},
+            )
+            runs.start_artifact_chunk_upload(
+                run_id="run_chunk_upload_transaction",
+                attempt_id="run_chunk_upload_transaction:attempt:1",
+                artifact_id="run_chunk_upload_transaction-trajectory",
+                chunk_kind=ArtifactChunkKind.STDERR,
+                chunk_sequence=0,
+                storage_key="runs/run_chunk_upload_transaction/tasks/task/logs/stderr/000000.jsonl",
+                media_type="application/x-ndjson",
+                started_at=now,
+            )
+            failed = runs.fail_artifact_chunk_upload(
+                run_id="run_chunk_upload_transaction",
+                artifact_id="run_chunk_upload_transaction-trajectory",
+                chunk_kind=ArtifactChunkKind.STDERR,
+                chunk_sequence=0,
+                failed_at=now + timedelta(seconds=3),
+                reason="object store write failed",
+            )
+            events = runs.list_status_events("run_chunk_upload_transaction")
+
+        self.assertEqual(started.upload_status, ArtifactUploadStatus.STARTED)
+        self.assertIsNone(started.size_bytes)
+        self.assertIsNone(started.sha256)
+        self.assertEqual(repeated_start.upload_status, ArtifactUploadStatus.STARTED)
+        self.assertEqual(completed.upload_status, ArtifactUploadStatus.COMPLETED)
+        self.assertEqual(completed.size_bytes, 512)
+        self.assertEqual(completed.sha256, "a" * 64)
+        self.assertEqual(completed.metadata["preview_start_byte"], 0)
+        self.assertEqual(completed.metadata["preview_end_byte"], 512)
+        self.assertEqual(failed.upload_status, ArtifactUploadStatus.FAILED)
+        self.assertIsNone(failed.size_bytes)
+        self.assertIsNone(failed.sha256)
+        self.assertEqual(failed.upload_error_reason, "object store write failed")
+
+        log_events = [event for event in events if event.event_type == RunEventType.LOG_CHUNK_RECORDED.value]
+        transition_events = [
+            event for event in events if event.event_type == RunEventType.ARTIFACT_UPLOAD_STATUS_CHANGED.value
+        ]
+        self.assertEqual(len(log_events), 2)
+        self.assertEqual(len(transition_events), 2)
+        completed_transition = next(
+            event
+            for event in transition_events
+            if event.metadata["chunk_kind"] == ArtifactChunkKind.STDOUT.value
+        )
+        self.assertEqual(completed_transition.metadata["previous_upload_status"], ArtifactUploadStatus.STARTED.value)
+        self.assertEqual(completed_transition.metadata["upload_status"], ArtifactUploadStatus.COMPLETED.value)
+        self.assertEqual(completed_transition.metadata["size_bytes"], 512)
+        self.assertEqual(completed_transition.metadata["sha256"], "a" * 64)
+        failed_transition = next(
+            event
+            for event in transition_events
+            if event.metadata["chunk_kind"] == ArtifactChunkKind.STDERR.value
+        )
+        self.assertEqual(failed_transition.reason, "object store write failed")
+        self.assertEqual(failed_transition.metadata["previous_upload_status"], ArtifactUploadStatus.STARTED.value)
+        self.assertEqual(failed_transition.metadata["upload_status"], ArtifactUploadStatus.FAILED.value)
+        self.assertEqual(failed_transition.metadata["upload_error_reason"], "object store write failed")
+        self.assertNotIn("size_bytes", failed_transition.metadata)
+        self.assertNotIn("sha256", failed_transition.metadata)
 
     def test_run_repository_records_create_cancel_and_retry_lifecycle(self):
         run = _queued_run(run_id="run_lifecycle_001")
