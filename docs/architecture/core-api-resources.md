@@ -87,7 +87,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
 | `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunDashboardProjection.evaluator` + `RunDashboardProjection.evaluator_results` |
-| `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_runs()` + aggregate projection |
+| `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_dashboard_progress_records()` + aggregate projection |
 | `GET /ops/metrics` | Return scoped run status counts, queue depth, and scheduler capacity-blocked diagnostics visible to the authenticated user | `RunRepository.list_runs()` + `RunRepository.list_scheduler_capacity_blocks()` |
 
 Static frontend assets are served at `GET /app/` by the same FastAPI service.
@@ -131,10 +131,12 @@ lifecycle `seq` used to build the payload, a `dirty` flag, refresh reason, and
 refresh timestamps. Terminal worker results, terminal status transitions, and
 stale active recovery upsert this row immediately. Scheduler recovery also runs
 a bounded projection refresh sweep for terminal runs whose projection is
-missing, dirty, or older than the run row. Current `GET /runs`,
-`GET /runs/{run_id}`, and `GET /dashboard/progress` still hydrate current
-`RunRecord` values for compatibility; moving high-volume list/progress reads to
-the durable projection rows is the next #157 dashboard migration slice.
+missing, dirty, or older than the run row. `GET /dashboard/progress` now uses
+clean projection rows for status, artifact, turn, evaluator, and score counts,
+and falls back to hydrated `RunRecord` values only when a row is missing or
+dirty. Current `GET /runs` and `GET /runs/{run_id}` still hydrate current
+`RunRecord` values for compatibility; moving list/detail reads fully onto
+durable projection rows remains a later #157 dashboard migration slice.
 
 `GET /models` returns only safe model selection metadata: provider id, provider
 config id, display/model name, API mode, source, disabled/error state, basic
@@ -330,10 +332,12 @@ serializing dashboard payloads.
   truth.
 - #157 has started the durable live-event and projection migration. The current
   slices reuse `run_status_events.id` as the replay sequence, expose replay and
-  SSE routes, keep telemetry polling available, and persist terminal dashboard
-  projection rows that scheduler recovery can refresh in bounded batches. They
-  do not yet implement Redis fanout, typed sandbox/resource sample events, or
-  list/progress routes fully backed by projection rows.
+  SSE routes, keep telemetry polling available, persist terminal dashboard
+  projection rows that scheduler recovery can refresh in bounded batches, and
+  make `/dashboard/progress` prefer clean projection rows before falling back to
+  hydrated run records. They do not yet implement Redis fanout, typed
+  sandbox/resource sample events, or list/detail routes fully backed by
+  projection rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal
@@ -374,10 +378,11 @@ serializing dashboard payloads.
   trajectories.
 - Artifact and evaluator routes use dashboard-safe projection payloads. The
   first durable `run_dashboard_projections` table now keeps terminal run
-  projection payloads recoverable, but high-volume dashboard progress routes
-  still hydrate current run records. Dedicated artifact, evaluation, projection,
-  and analytics repositories should be added when upload/download, pagination,
-  retention, detailed evaluator history, and high-volume PM reporting are
+  projection payloads recoverable, and `/dashboard/progress` uses those clean
+  rows for aggregate PM/research summaries before falling back to current run
+  records. Dedicated artifact, evaluation, projection, and analytics
+  repositories should be added when upload/download, pagination, retention,
+  detailed evaluator history, and high-volume PM reporting are
   implemented.
 - List endpoints do not yet include pagination or quota-aware filtering. Add
   these before broad internal rollout.

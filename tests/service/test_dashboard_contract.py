@@ -5,16 +5,19 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
+from agentic_data_platform.persistence.models import ArtifactRow, EvaluatorResultRow, RunTerminalTurnRow
 from agentic_data_platform.persistence.repositories import (
     BenchmarkCatalogRepository,
     IdentityRepository,
     ProjectRepository,
+    RunRepository,
 )
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
@@ -174,6 +177,73 @@ class DashboardContractSmokeTest(unittest.TestCase):
         self.assertNotIn("file://", rendered)
         self.assertNotIn(str(Path(tempfile.gettempdir()).resolve()), rendered)
         self.assertNotIn("X-Amz-Signature", rendered)
+
+    def test_dashboard_progress_reads_durable_terminal_projection_without_child_hydration(self):
+        create_response = self.client.post(
+            "/runs",
+            json=_run_create_payload(
+                run_id="run_dashboard_projection_progress_001",
+                catalog=self.catalog,
+                task=self.task,
+            ),
+        )
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-dashboard-projection-progress",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(LocalArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=FakeDockerCommandRunner(
+                        stdout="created projection-progress.txt\n",
+                        write_files={"projection-progress.txt": "projection progress output\n"},
+                    ),
+                ),
+            )
+
+            worker_result = worker.run_once(request_id="req-projection-progress-worker-001")
+
+        self.assertIsNotNone(worker_result)
+        self.assertEqual(worker_result.status, "succeeded")
+
+        with session_scope(self.engine) as session:
+            projection = RunRepository(session).get_dashboard_projection("run_dashboard_projection_progress_001")
+            self.assertEqual(projection.payload["progress"]["turn_count"], 1)
+            self.assertEqual(projection.payload["progress"]["artifact_count"], 3)
+            session.execute(
+                delete(RunTerminalTurnRow).where(
+                    RunTerminalTurnRow.run_id == "run_dashboard_projection_progress_001"
+                )
+            )
+            session.execute(
+                delete(ArtifactRow).where(ArtifactRow.run_id == "run_dashboard_projection_progress_001")
+            )
+            session.execute(
+                delete(EvaluatorResultRow).where(
+                    EvaluatorResultRow.run_id == "run_dashboard_projection_progress_001"
+                )
+            )
+
+        progress = self.client.get(
+            "/dashboard/progress",
+            params={"project_id": "pilot-project"},
+            headers={"X-Request-ID": "req-projection-progress-001"},
+        )
+
+        self.assertEqual(progress.status_code, 200)
+        payload = progress.json()
+        self.assertEqual(payload["request_id"], "req-projection-progress-001")
+        self.assertEqual(payload["summary"]["total_runs"], 1)
+        self.assertEqual(payload["summary"]["runs_by_status"]["succeeded"], 1)
+        self.assertEqual(payload["summary"]["artifact_count"], 3)
+        self.assertEqual(payload["summary"]["turn_count"], 1)
+        self.assertEqual(payload["summary"]["evaluator_completed_count"], 1)
+        self.assertEqual(payload["summary"]["average_evaluator_score"], 0.75)
+        self.assertEqual(payload["projects"][0]["artifact_count"], 3)
+        self.assertEqual(payload["projects"][0]["turn_count"], 1)
 
 
 def _app(engine):

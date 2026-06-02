@@ -158,7 +158,9 @@ and `RunRepository.refresh_terminal_dashboard_projections(...)` gives the
 scheduler a bounded sweep to repair terminal projections that are missing,
 dirty, or stale relative to `runs.updated_at`. Non-terminal transitions mark an
 existing projection dirty so a retried or redispatched run is not mistaken for a
-fresh terminal projection by future projection-backed readers.
+fresh terminal projection by projection-backed readers. The dashboard progress
+API now reads clean projection rows for terminal aggregate counts and falls back
+to hydrated run records when the projection is missing or dirty.
 Terminal turn stdout/stderr columns are bounded previews, not canonical log
 storage. When a stream exceeds the inline limit, persistence stores truncation
 metadata such as original byte count and inline byte count, while full
@@ -178,7 +180,8 @@ The #53 lifecycle migration adds indexes for dashboard filters:
 The #157/#160 projection refresh migration adds
 `run_dashboard_projections(project_id, status, updated_at)` and
 `run_dashboard_projections(dirty, is_terminal, updated_at)` indexes for
-projection refresh and future dashboard list/progress queries.
+projection refresh and dashboard progress queries. List/detail projection
+queries remain a later #157 migration.
 
 ## API Resource Boundary
 

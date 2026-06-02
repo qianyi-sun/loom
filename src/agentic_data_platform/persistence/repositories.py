@@ -93,6 +93,20 @@ class ExpiredArtifactUploadRecord:
 
 
 @dataclass(frozen=True)
+class RunDashboardProgressRecord:
+    run_id: str
+    project_id: str
+    owner_team: str | None
+    status: str
+    is_terminal: bool
+    artifact_count: int
+    turn_count: int
+    evaluator_completed: bool
+    evaluator_score: float | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class TeamRecord:
     team_id: str
     name: str
@@ -1358,6 +1372,33 @@ class RunRepository:
             query = query.where(RunRow.created_at <= created_before)
         return [self._run_record(row) for row in self.session.scalars(query)]
 
+    def list_dashboard_progress_records(
+        self,
+        *,
+        project_ids: set[str] | None = None,
+        project_id: str | None = None,
+    ) -> list[RunDashboardProgressRecord]:
+        if project_ids is not None and not project_ids:
+            return []
+
+        query = (
+            select(RunRow, RunDashboardProjectionRow)
+            .outerjoin(RunDashboardProjectionRow, RunDashboardProjectionRow.run_id == RunRow.run_id)
+            .order_by(RunRow.created_at, RunRow.run_id)
+        )
+        if project_id is not None:
+            query = query.where(RunRow.project_id == project_id)
+        if project_ids is not None:
+            query = query.where(RunRow.project_id.in_(project_ids))
+
+        records: list[RunDashboardProgressRecord] = []
+        for row, projection in self.session.execute(query):
+            if projection is not None and not projection.dirty:
+                records.append(_dashboard_progress_record_from_projection(row, projection))
+            else:
+                records.append(_dashboard_progress_record_from_run(self._run_record(row)))
+        return records
+
     def list_status_events(
         self,
         run_id: str,
@@ -2225,6 +2266,72 @@ def _dashboard_projection_needs_refresh(projection: RunDashboardProjectionRow, r
     if projection.updated_at is None:
         return True
     return _aware(projection.updated_at) < _aware(run.updated_at)
+
+
+def _dashboard_progress_record_from_projection(
+    row: RunRow,
+    projection: RunDashboardProjectionRow,
+) -> RunDashboardProgressRecord:
+    payload = projection.payload if isinstance(projection.payload, dict) else {}
+    project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
+    progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
+    evaluator = payload.get("evaluator") if isinstance(payload.get("evaluator"), dict) else {}
+    status = _string_or_default(payload.get("status"), projection.status or row.status)
+    return RunDashboardProgressRecord(
+        run_id=row.run_id,
+        project_id=projection.project_id or row.project_id,
+        owner_team=_string_or_none(project.get("owner_team")) or projection.owner_team_name_snapshot,
+        status=status,
+        is_terminal=_bool_or_default(progress.get("is_terminal"), projection.is_terminal),
+        artifact_count=_int_or_zero(progress.get("artifact_count")),
+        turn_count=_int_or_zero(progress.get("turn_count")),
+        evaluator_completed=evaluator.get("status") == "completed",
+        evaluator_score=_float_or_none(evaluator.get("score")),
+        updated_at=_aware(row.updated_at),
+    )
+
+
+def _dashboard_progress_record_from_run(run: RunRecord) -> RunDashboardProgressRecord:
+    return RunDashboardProgressRecord(
+        run_id=run.run_id,
+        project_id=run.project_id,
+        owner_team=run.owner_team,
+        status=run.status.value,
+        is_terminal=run.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED},
+        artifact_count=len(run.artifacts),
+        turn_count=len(run.trajectory),
+        evaluator_completed=run.evaluator_result is not None and run.evaluator_result.status == "completed",
+        evaluator_score=run.evaluator_result.score if run.evaluator_result is not None else None,
+        updated_at=run.updated_at,
+    )
+
+
+def _string_or_default(value: object, default: str) -> str:
+    return value if isinstance(value, str) and value.strip() else default
+
+
+def _string_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _bool_or_default(value: object, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _int_or_zero(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    return 0
+
+
+def _float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
 
 
 def _attempt_id(run_id: str, attempt_number: int) -> str:

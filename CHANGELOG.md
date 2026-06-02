@@ -14,6 +14,11 @@ All notable changes to this project will be documented in this file.
   emit `scheduler.capacity_blocked` only when the blocker signature changes,
   surface blocked run details in scheduler one-shot output, and expose
   project-scoped blocked counts by dimension through `/ops/metrics`.
+- Moved `/dashboard/progress` onto the #157 durable projection read path where
+  clean `run_dashboard_projections` rows are available. Progress aggregation
+  now uses terminal projection payloads for artifact, turn, evaluator, status,
+  and score counts, while falling back to hydrated `RunRecord` values when a
+  projection row is missing or dirty.
 - Added the first #157/#160 durable dashboard projection refresh slice.
   Terminal worker results, terminal status transitions, and stale active
   recovery now upsert `run_dashboard_projections` rows with the current
