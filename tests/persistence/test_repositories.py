@@ -4,6 +4,11 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import inspect, select
 
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
+from agentic_data_platform.domain.execution_metadata import (
+    EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION,
+    RunnerProcessStatus,
+    SchedulerLeaseStatus,
+)
 from agentic_data_platform.domain.execution_events import RecoveryReasonCode, RunEventType
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
@@ -499,6 +504,14 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[1].to_status, RunStatus.PROVISIONING)
         self.assertEqual(events[1].request_id, "req-claim-001")
         self.assertEqual(events[1].metadata["worker_id"], "worker-a")
+        self.assertEqual(events[1].metadata["execution_task_id"], "run_claim_001:attempt:1")
+        self.assertEqual(attempt.metadata_json["execution"]["schema_version"], EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION)
+        runner = attempt.metadata_json["execution"]["runner"]
+        self.assertEqual(runner["worker_id"], "worker-a")
+        self.assertEqual(runner["process_status"], RunnerProcessStatus.CLAIMED.value)
+        self.assertEqual(runner["heartbeat_status"], "provisioning")
+        self.assertIn("claimed_at", runner)
+        self.assertIn("last_heartbeat_at", runner)
         self.assertEqual(attempt.metadata_json["worker"]["worker_id"], "worker-a")
         self.assertEqual(attempt.metadata_json["worker"]["heartbeat_status"], "provisioning")
         self.assertIn("claimed_at", attempt.metadata_json["worker"])
@@ -523,6 +536,9 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 request_id="req-dispatch-global-002",
             )
             events = runs.list_status_events("run_dispatch_global_0")
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_dispatch_global_0")
+            )
             statuses = {
                 run.run_id: run.status
                 for run in runs.list_runs(project_id="pilot-project")
@@ -539,6 +555,15 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[1].to_status, RunStatus.DISPATCHED)
         self.assertEqual(events[1].request_id, "req-dispatch-global-001")
         self.assertEqual(events[1].metadata["scheduler_id"], "scheduler-a")
+        self.assertEqual(events[1].metadata["execution_task_id"], "run_dispatch_global_0:attempt:1")
+        self.assertEqual(attempt.metadata_json["execution"]["schema_version"], EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION)
+        scheduler = attempt.metadata_json["execution"]["scheduler"]
+        self.assertEqual(scheduler["scheduler_id"], "scheduler-a")
+        self.assertEqual(scheduler["lease_status"], SchedulerLeaseStatus.DISPATCHED.value)
+        self.assertEqual(scheduler["execution_task_id"], "run_dispatch_global_0:attempt:1")
+        self.assertEqual(scheduler["backend_key"], "docker_terminal")
+        self.assertEqual(scheduler["project_id"], "pilot-project")
+        self.assertIn("dispatched_at", scheduler)
 
     def test_run_repository_dispatch_respects_backend_and_project_capacity(self):
         with session_scope(self.engine) as session:
@@ -636,6 +661,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[-1].request_id, "req-recover-dispatched-001")
         self.assertEqual(events[-1].reason, "stale dispatched run expired")
         self.assertEqual(events[-1].metadata["scheduler_id"], "scheduler-a")
+        self.assertEqual(events[-1].metadata["execution_task_id"], "run_recover_stale:attempt:1")
         self.assertEqual(events[-1].metadata["recovery"], RecoveryReasonCode.STALE_DISPATCHED.value)
         self.assertEqual(events[-1].metadata["stale_before"], stale_before.isoformat())
 
@@ -684,9 +710,39 @@ class PersistenceRepositoryTest(unittest.TestCase):
             attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_heartbeat_active"))
 
         self.assertEqual(updated.status, RunStatus.PROVISIONING)
+        runner = attempt.metadata_json["execution"]["runner"]
+        self.assertEqual(runner["worker_id"], "worker-a")
+        self.assertEqual(runner["process_status"], RunnerProcessStatus.HEARTBEATING.value)
+        self.assertEqual(runner["heartbeat_status"], "running")
+        self.assertIn("last_heartbeat_at", runner)
         self.assertEqual(attempt.metadata_json["worker"]["worker_id"], "worker-a")
         self.assertEqual(attempt.metadata_json["worker"]["heartbeat_status"], "running")
         self.assertIn("last_heartbeat_at", attempt.metadata_json["worker"])
+
+    def test_run_repository_records_terminal_runner_process_metadata(self):
+        run = _queued_run(run_id="run_worker_terminal_metadata")
+
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(run)
+            claimed = runs.claim_next_queued_run(worker_id="worker-a")
+            claimed.transition_to(RunStatus.RUNNING)
+            claimed.attach_artifact(_log_artifact("run_worker_terminal_metadata-log"))
+            claimed.transition_to(RunStatus.EVALUATING)
+            claimed.transition_to(RunStatus.SUCCEEDED)
+            runs.save_worker_result(claimed, worker_id="worker-a", request_id="req-save-worker-result")
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_worker_terminal_metadata")
+            )
+            events = runs.list_status_events("run_worker_terminal_metadata")
+
+        runner = attempt.metadata_json["execution"]["runner"]
+        self.assertEqual(runner["worker_id"], "worker-a")
+        self.assertEqual(runner["process_status"], RunnerProcessStatus.COMPLETED.value)
+        self.assertEqual(runner["heartbeat_status"], "succeeded")
+        self.assertIn("completed_at", runner)
+        self.assertEqual(events[-1].metadata["execution_task_id"], "run_worker_terminal_metadata:attempt:1")
 
     def test_run_repository_fails_stale_active_runs_with_expired_worker_heartbeat(self):
         stale_before = datetime.now(timezone.utc) - timedelta(minutes=10)
@@ -729,6 +785,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[-1].reason, "stale worker heartbeat expired")
         self.assertEqual(events[-1].metadata["scheduler_id"], "scheduler-a")
         self.assertEqual(events[-1].metadata["recovery"], RecoveryReasonCode.STALE_WORKER_HEARTBEAT.value)
+        self.assertEqual(events[-1].metadata["execution_task_id"], "run_active_stale:attempt:1")
         self.assertEqual(events[-1].metadata["worker_id"], "worker-run_active_stale")
         self.assertEqual(events[-1].metadata["last_heartbeat_at"], stale_heartbeat)
 

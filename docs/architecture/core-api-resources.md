@@ -236,6 +236,14 @@ serializing dashboard payloads.
   `projection_refresh_failed`; not every listed recovery path is implemented
   yet, but later #160 slices should reuse these codes instead of minting local
   strings.
+- Scheduler and worker writers use
+  `agentic_data_platform.domain.execution_metadata` as the v1 attempt metadata
+  contract. `run_attempts.metadata.execution.scheduler` records the scheduler
+  lease and `execution_task_id`; `run_attempts.metadata.execution.runner`
+  records worker claim, heartbeat, process status, and terminal completion
+  metadata. Lifecycle event metadata includes `execution_task_id` where the
+  writer knows the current attempt so later runner/recovery slices can reject
+  stale deliveries without inventing another task identifier.
 - Invalid cancel/retry transitions return structured `409 conflict` errors
   through the shared service error boundary.
 - Invalid nested create payloads and blank cancel/retry reasons return

@@ -1,6 +1,6 @@
 # Postgres Persistence Foundation
 
-Last updated: 2026-05-28
+Last updated: 2026-06-01
 
 Related trackers:
 
@@ -85,8 +85,10 @@ read models:
 For v0, `RunRecord` has no public `attempt_id`, so `RunRepository.get_run()`
 hydrates the latest internal attempt back into the existing dataclass shape.
 `RunRepository.dispatch_queued_runs(...)` moves eligible `queued` rows to
-`dispatched` after global, backend, and project capacity checks and records a
-`run.dispatched` event with scheduler id, backend key, and project id metadata.
+`dispatched` after global, backend, and project capacity checks, records a
+`run.dispatched` event with scheduler id, backend key, project id, and current
+`execution_task_id`, and writes the v1 scheduler lease block to
+`run_attempts.metadata.execution`.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.
@@ -99,10 +101,15 @@ store their canonical reason in `metadata_json.recovery` using
 `stale_worker_heartbeat`, and reserved Phase 1 follow-up reasons are
 `terminal_result_mismatch`, `canceled_resource_cleanup`,
 `artifact_upload_expired`, and `projection_refresh_failed`.
-Claimed runs store worker lease metadata on the latest `run_attempts.metadata`
-payload, including worker id, claim time, latest heartbeat, heartbeat status,
-and completion time when available. `RunRepository.record_worker_heartbeat(...)`
-updates this metadata while execution is active, and
+Attempt-level execution metadata has a v1 contract in
+`agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
+block records scheduler id, lease status, backend key, project id, dispatch
+time, and `execution_task_id`. The `execution.runner` block records worker id,
+runner process status, heartbeat status, claim time, latest heartbeat, and
+completion time when available. The older `worker` metadata block is still
+written for compatibility with current recovery code and historic rows.
+`RunRepository.record_worker_heartbeat(...)` updates this metadata while
+execution is active, and
 `RunRepository.fail_stale_active_runs_by_heartbeat(...)` marks active runs with
 expired heartbeats as failed with a `run.recovered` event. Active recovery skips
 runs without heartbeat metadata so legacy or partially migrated rows are not
@@ -110,7 +117,7 @@ failed solely because they predate worker lease tracking.
 Workers prefer `RunRepository.claim_next_dispatched_run(...)` and then retain
 `RunRepository.claim_next_queued_run(...)` as a compatibility path during
 scheduler rollout; both claim paths persist a `run.claimed` transition to
-`provisioning`.
+`provisioning` with the current `execution_task_id`.
 Retry creates a new `run_attempts` row for the same `run_id`, moves the run back
 to `queued`, and records a `run.retried` status event. Follow-on `save_run()`
 calls update the latest internal attempt so worker code can persist terminal

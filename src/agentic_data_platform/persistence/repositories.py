@@ -19,6 +19,12 @@ from agentic_data_platform.domain.execution_events import (
     event_type_value,
     recovery_event_metadata,
 )
+from agentic_data_platform.domain.execution_metadata import (
+    RunnerProcessStatus,
+    SchedulerLeaseStatus,
+    runner_process_metadata,
+    scheduler_lease_metadata,
+)
 from agentic_data_platform.domain.run_records import (
     ArtifactRef,
     BenchmarkTaskInstance,
@@ -561,6 +567,15 @@ class RunRepository:
 
             attempt = self._latest_attempt_row(run.run_id)
             attempt.status = run.status.value
+            attempt.metadata_json = scheduler_lease_metadata(
+                attempt.metadata_json,
+                scheduler_id=scheduler_id,
+                lease_status=SchedulerLeaseStatus.DISPATCHED,
+                observed_at=run.updated_at,
+                execution_task_id=attempt.attempt_id,
+                backend_key=backend_key,
+                project_id=row.project_id,
+            )
             attempt.updated_at = utc_now()
 
             self._append_status_event(
@@ -572,6 +587,7 @@ class RunRepository:
                 request_id=request_id,
                 metadata={
                     "scheduler_id": scheduler_id,
+                    "execution_task_id": attempt.attempt_id,
                     "backend_key": backend_key,
                     "project_id": row.project_id,
                 },
@@ -620,6 +636,15 @@ class RunRepository:
             attempt.status = run.status.value
             attempt.failure_reason = None
             attempt.completed_at = None
+            attempt.metadata_json = scheduler_lease_metadata(
+                attempt.metadata_json,
+                scheduler_id=scheduler_id,
+                lease_status=SchedulerLeaseStatus.RECOVERED,
+                observed_at=run.updated_at,
+                execution_task_id=attempt.attempt_id,
+                backend_key=_backend_capacity_key(row),
+                project_id=row.project_id,
+            )
             attempt.updated_at = utc_now()
 
             self._append_status_event(
@@ -633,6 +658,7 @@ class RunRepository:
                 metadata=recovery_event_metadata(
                     RecoveryReasonCode.STALE_DISPATCHED,
                     scheduler_id=scheduler_id,
+                    execution_task_id=attempt.attempt_id,
                     stale_before=older_than.isoformat(),
                 ),
             )
@@ -664,6 +690,7 @@ class RunRepository:
         attempt.metadata_json = _worker_attempt_metadata(
             attempt.metadata_json,
             worker_id=worker_id,
+            process_status=RunnerProcessStatus.HEARTBEATING,
             heartbeat_status=heartbeat_status,
             now=now,
             claimed_at=None,
@@ -726,6 +753,7 @@ class RunRepository:
             attempt.metadata_json = _worker_attempt_metadata(
                 attempt.metadata_json,
                 worker_id=str(worker_metadata.get("worker_id") or ""),
+                process_status=RunnerProcessStatus.FAILED,
                 heartbeat_status=previous_status,
                 now=run.updated_at,
                 claimed_at=None,
@@ -744,6 +772,7 @@ class RunRepository:
                 metadata=recovery_event_metadata(
                     RecoveryReasonCode.STALE_WORKER_HEARTBEAT,
                     scheduler_id=scheduler_id,
+                    execution_task_id=attempt.attempt_id,
                     worker_id=worker_metadata.get("worker_id"),
                     stale_before=older_than.isoformat(),
                     last_heartbeat_at=worker_metadata.get("last_heartbeat_at"),
@@ -808,6 +837,7 @@ class RunRepository:
         attempt.metadata_json = _worker_attempt_metadata(
             attempt.metadata_json,
             worker_id=worker_id,
+            process_status=RunnerProcessStatus.CLAIMED,
             heartbeat_status=run.status,
             now=run.updated_at,
             claimed_at=run.updated_at,
@@ -822,7 +852,7 @@ class RunRepository:
             from_status=previous_status,
             to_status=RunStatus.PROVISIONING,
             request_id=request_id,
-            metadata={"worker_id": worker_id},
+            metadata={"worker_id": worker_id, "execution_task_id": attempt.attempt_id},
         )
         self.session.flush()
         return self.get_run(run.run_id)
@@ -849,6 +879,7 @@ class RunRepository:
         attempt.metadata_json = _worker_attempt_metadata(
             attempt.metadata_json,
             worker_id=worker_id,
+            process_status=_terminal_runner_process_status(run.status),
             heartbeat_status=run.status,
             now=run.updated_at,
             claimed_at=None,
@@ -1185,7 +1216,7 @@ class RunRepository:
                 to_status=next_status,
                 reason=reason,
                 request_id=request_id,
-                metadata={"worker_id": worker_id},
+                metadata={"worker_id": worker_id, "execution_task_id": attempt_id},
             )
 
 
@@ -1532,6 +1563,7 @@ def _worker_attempt_metadata(
     metadata: dict[str, Any] | None,
     *,
     worker_id: str,
+    process_status: RunnerProcessStatus,
     heartbeat_status: RunStatus,
     now: datetime,
     claimed_at: datetime | None,
@@ -1548,12 +1580,37 @@ def _worker_attempt_metadata(
     if completed_at is not None:
         worker["completed_at"] = _datetime_json(completed_at)
     updated["worker"] = worker
+    if worker_id:
+        updated = runner_process_metadata(
+            updated,
+            worker_id=worker_id,
+            process_status=process_status,
+            heartbeat_status=heartbeat_status.value,
+            observed_at=now,
+            claimed_at=claimed_at,
+            completed_at=completed_at,
+        )
     return updated
 
 
 def _worker_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     worker = (metadata or {}).get("worker")
-    return dict(worker) if isinstance(worker, dict) else {}
+    if isinstance(worker, dict):
+        return dict(worker)
+    execution = (metadata or {}).get("execution")
+    if isinstance(execution, dict):
+        runner = execution.get("runner")
+        if isinstance(runner, dict):
+            return dict(runner)
+    return {}
+
+
+def _terminal_runner_process_status(status: RunStatus) -> RunnerProcessStatus:
+    if status is RunStatus.SUCCEEDED:
+        return RunnerProcessStatus.COMPLETED
+    if status is RunStatus.CANCELED:
+        return RunnerProcessStatus.CANCELED
+    return RunnerProcessStatus.FAILED
 
 
 def _parse_worker_datetime(value: Any) -> datetime | None:

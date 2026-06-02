@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #156/#158 execution-attempt metadata contract slice. Scheduler
+  dispatch now records a versioned scheduler lease block on the latest
+  `run_attempts.metadata`, worker claim/heartbeat/terminal result persistence
+  records a versioned runner process block, and lifecycle event metadata now
+  includes the current `execution_task_id` for later stale-task rejection and
+  duplicate-delivery hardening.
 - Added the first shared execution event contract slice for #157/#160. The
   backend now centralizes current run lifecycle event names and Phase 1 recovery
   reason codes in `agentic_data_platform.domain.execution_events`, and
