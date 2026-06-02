@@ -107,6 +107,29 @@ class DeployDevScriptTests(unittest.TestCase):
             script.index("Checking authenticated API-created Docker sandbox run"),
         )
 
+    def test_shared_dev_deploy_verifies_scheduler_race_smoke_before_api_smoke(self) -> None:
+        script = _script_text()
+
+        self.assertIn(
+            'DEPLOY_RUN_SCHEDULER_RACE_SMOKE="${DEPLOY_RUN_SCHEDULER_RACE_SMOKE:-1}"',
+            script,
+        )
+        self.assertIn("Checking scheduler multi-instance race smoke", script)
+        self.assertIn(
+            "compose run --rm -T scheduler "
+            "python -m agentic_data_platform.scheduler.race_smoke --scheduler-id-prefix deploy-dev-race-smoke",
+            script,
+        )
+        self.assertIn(
+            'docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler '
+            "python -m agentic_data_platform.scheduler.race_smoke --scheduler-id-prefix deploy-dev-race-smoke",
+            script,
+        )
+        self.assertLess(
+            script.index("Checking scheduler multi-instance race smoke"),
+            script.index("Checking authenticated API-created Docker sandbox run"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

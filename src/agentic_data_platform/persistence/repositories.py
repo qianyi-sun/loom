@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -7,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
@@ -68,6 +69,8 @@ from agentic_data_platform.persistence.models import (
 _MAX_INLINE_TERMINAL_STREAM_BYTES = 64 * 1024
 _TRUNCATED_STREAM_MARKER = "\n[truncated: full stream is available in object-store artifacts]\n"
 _TERMINAL_STATUS_VALUES = {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value, RunStatus.CANCELED.value}
+_SCHEDULER_DISPATCH_ADVISORY_LOCK_KEY = 4_117_402_174
+_SCHEDULER_DISPATCH_PROCESS_LOCK = threading.Lock()
 
 
 class StaleExecutionTaskError(ValueError):
@@ -124,6 +127,19 @@ def _queued_dispatch_candidate_lock_query(run_ids: list[str]):
         .where(RunRow.status == RunStatus.QUEUED.value, RunRow.run_id.in_(run_ids))
         .with_for_update(skip_locked=True)
     )
+
+
+def _scheduler_dispatch_advisory_lock_statement():
+    return text(f"SELECT pg_advisory_xact_lock({_SCHEDULER_DISPATCH_ADVISORY_LOCK_KEY}::bigint)")
+
+
+def _acquire_scheduler_dispatch_lock(session: Session):
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        session.execute(_scheduler_dispatch_advisory_lock_statement())
+        return None
+    _SCHEDULER_DISPATCH_PROCESS_LOCK.acquire()
+    return _SCHEDULER_DISPATCH_PROCESS_LOCK
 
 
 @dataclass(frozen=True)
@@ -637,6 +653,37 @@ class RunRepository:
         _require_non_empty("scheduler_id", scheduler_id)
         if max_runs <= 0:
             return DispatchQueuedRunsResult(dispatched_runs=[], capacity_blocked_runs=[])
+        dispatch_lock = _acquire_scheduler_dispatch_lock(self.session)
+        try:
+            return self._dispatch_queued_runs_with_diagnostics_locked(
+                scheduler_id=scheduler_id,
+                max_runs=max_runs,
+                backend_limits=backend_limits,
+                project_limits=project_limits,
+                provider_limits=provider_limits,
+                model_limits=model_limits,
+                agent_limits=agent_limits,
+                benchmark_limits=benchmark_limits,
+                request_id=request_id,
+            )
+        finally:
+            if dispatch_lock is not None:
+                dispatch_lock.release()
+
+    def _dispatch_queued_runs_with_diagnostics_locked(
+        self,
+        *,
+        scheduler_id: str,
+        max_runs: int,
+        backend_limits: dict[str, int] | None = None,
+        project_limits: dict[str, int] | None = None,
+        provider_limits: dict[str, int] | None = None,
+        model_limits: dict[str, int] | None = None,
+        agent_limits: dict[str, int] | None = None,
+        benchmark_limits: dict[str, int] | None = None,
+        request_id: str | None = None,
+    ) -> DispatchQueuedRunsResult:
+        _require_non_empty("scheduler_id", scheduler_id)
 
         backend_limits = _positive_limits(backend_limits or {})
         project_limits = _positive_limits(project_limits or {})

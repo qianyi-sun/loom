@@ -374,7 +374,10 @@ serializing dashboard payloads.
   Postgres implementation keeps the fair-share window ranking in a read-only
   candidate-id query and locks the selected queued rows in a separate
   `FOR UPDATE SKIP LOCKED` query so scheduler loops do not combine row locks
-  with window functions.
+  with window functions. Before those reads, Postgres dispatch takes a
+  transaction-scoped advisory lock so concurrent scheduler instances cannot make
+  capacity decisions from stale active counts and over-dispatch different
+  locked rows.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.

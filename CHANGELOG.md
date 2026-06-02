@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #156 scheduler multi-instance race hardening and deploy validation.
+  PostgreSQL dispatch now takes a transaction-scoped advisory lock before
+  reading active capacity and locking queued candidates, so concurrent
+  scheduler loops cannot over-dispatch different locked rows from stale
+  capacity counts. Shared-dev deploy now runs
+  `agentic_data_platform.scheduler.race_smoke` before API/frontend smokes to
+  validate the multi-scheduler capacity boundary against the real Postgres
+  stack, while canceling its synthetic runs after recording pre-cleanup evidence
+  so it does not leave queued or active capacity behind.
 - Fixed the #156 project fair-share scheduler dispatch query for PostgreSQL.
   Fair-share ranking now happens in a read-only candidate-id query, and row
   locking happens in a separate `FOR UPDATE SKIP LOCKED` query. This preserves

@@ -96,7 +96,12 @@ dispatch/block decision. Because PostgreSQL rejects `FOR UPDATE` on queries
 with window functions, the repository first ranks candidate run ids with
 `row_number()` in a read-only query, then locks those queued rows with a
 separate `FOR UPDATE SKIP LOCKED` query before dispatching them in ranked
-order.
+order. PostgreSQL dispatch also takes a transaction-scoped
+`pg_advisory_xact_lock(...)` before reading active capacity and locking queued
+candidates. That serializes capacity decisions across concurrent scheduler
+instances while still keeping row-level `SKIP LOCKED` behavior for candidate
+selection. Non-Postgres local tests use a process-local dispatch decision lock
+for the same in-process capacity invariant.
 `RunRepository.dispatch_queued_runs_with_diagnostics(...)` uses the same
 transactional dispatch path but also returns queued runs blocked by capacity.
 Blocked rows stay `queued`, store the current blocker under

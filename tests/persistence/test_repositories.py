@@ -46,6 +46,7 @@ from agentic_data_platform.persistence.repositories import (
     StaleExecutionTaskError,
     _queued_dispatch_candidate_lock_query,
     _ranked_queued_run_id_query,
+    _scheduler_dispatch_advisory_lock_statement,
 )
 
 
@@ -1346,6 +1347,17 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertIn("row_number() OVER", ranked_sql)
         self.assertIn("FOR UPDATE SKIP LOCKED", locking_sql)
         self.assertNotIn("row_number() OVER", locking_sql)
+
+    def test_run_repository_uses_postgres_transaction_lock_for_dispatch_capacity_decisions(self):
+        lock_sql = str(
+            _scheduler_dispatch_advisory_lock_statement().compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+
+        self.assertIn("pg_advisory_xact_lock", lock_sql)
+        self.assertIn("4117402174", lock_sql)
 
     def test_run_repository_dispatch_skips_canceled_runs(self):
         with session_scope(self.engine) as session:

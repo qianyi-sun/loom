@@ -17,6 +17,7 @@ DEPLOY_RUN_HARBOR_SMOKE="${DEPLOY_RUN_HARBOR_SMOKE:-1}"
 DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE="${DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE:-0}"
 DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE:-1}"
 DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE:-1}"
+DEPLOY_RUN_SCHEDULER_RACE_SMOKE="${DEPLOY_RUN_SCHEDULER_RACE_SMOKE:-1}"
 DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS="${DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS:-60}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
@@ -57,6 +58,14 @@ run_scheduler_parent_death_cleanup_smoke() {
   fi
   log "Checking scheduler parent-death Docker cleanup smoke"
   SCHEDULER_DOCKER_CLEANUP_ENABLED=true compose run --rm -T scheduler python -m agentic_data_platform.scheduler.cleanup_smoke --mode parent-death --scheduler-id deploy-dev-parent-death-cleanup-smoke </dev/null
+}
+
+run_scheduler_race_smoke() {
+  if [[ "$DEPLOY_RUN_SCHEDULER_RACE_SMOKE" != "1" ]]; then
+    return 0
+  fi
+  log "Checking scheduler multi-instance race smoke"
+  compose run --rm -T scheduler python -m agentic_data_platform.scheduler.race_smoke --scheduler-id-prefix deploy-dev-race-smoke </dev/null
 }
 
 run_compose_smoke() {
@@ -107,6 +116,7 @@ run_compose_smoke() {
   recover_stale_active_runs_before_smoke
   run_scheduler_docker_cleanup_smoke
   run_scheduler_parent_death_cleanup_smoke
+  run_scheduler_race_smoke
 
   if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
     log "Checking authenticated API-created Docker sandbox run"
@@ -264,6 +274,10 @@ fi
 if [[ "$DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking scheduler parent-death Docker cleanup smoke\n'
   SCHEDULER_DOCKER_CLEANUP_ENABLED=true docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.cleanup_smoke --mode parent-death --scheduler-id deploy-dev-parent-death-cleanup-smoke </dev/null
+fi
+if [[ "$DEPLOY_RUN_SCHEDULER_RACE_SMOKE" == "1" ]]; then
+  printf '[deploy-dev] Checking scheduler multi-instance race smoke\n'
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.race_smoke --scheduler-id-prefix deploy-dev-race-smoke </dev/null
 fi
 if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking authenticated API-created Docker sandbox run\n'
