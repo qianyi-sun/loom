@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Moved run detail summary reads onto the #157 durable projection read path.
+  `GET /runs/{run_id}`, `GET /runs/{run_id}/artifacts`, and
+  `GET /runs/{run_id}/evaluation` now prefer clean `run_dashboard_projections`
+  payloads for dashboard-safe status/progress/artifact/evaluator summaries,
+  falling back to hydrated `RunRecord` projection only when the projection row
+  is missing or dirty. The heavier detail trajectory preview remains bounded
+  child-row data.
 - Added dedicated #159 artifact chunk upload transaction repository APIs.
   `RunRepository.start_artifact_chunk_upload(...)`,
   `complete_artifact_chunk_upload(...)`, and

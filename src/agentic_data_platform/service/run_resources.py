@@ -12,7 +12,6 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from agentic_data_platform.dashboard.projections import RunDashboardProjection
 from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactChunkMetadata, ArtifactUploadStatus
 from agentic_data_platform.domain.execution_events import RunEventType, event_type_value
 from agentic_data_platform.domain.run_records import (
@@ -340,7 +339,7 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         auth = require_authenticated_user(request, session)
         run = _get_run_or_404(session, run_id)
         require_project_role(session, auth, run.project_id, minimum_role="viewer")
-        artifacts = RunDashboardProjection.from_run(run).to_dict()["artifacts"]
+        artifacts = RunRepository(session).get_run_dashboard_summary(run_id)["artifacts"]
         return _with_request_id(request, {"run_id": run_id, "artifacts": artifacts})
 
     @app.get("/runs/{run_id}/artifact-chunks", tags=["runs"], responses=_example_response(_ARTIFACT_CHUNKS_EXAMPLE))
@@ -428,7 +427,7 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
         auth = require_authenticated_user(request, session)
         run = _get_run_or_404(session, run_id)
         require_project_role(session, auth, run.project_id, minimum_role="viewer")
-        projection = RunDashboardProjection.from_run(run).to_dict()
+        projection = RunRepository(session).get_run_dashboard_summary(run_id)
         evaluation = projection.get("evaluator")
         if evaluation is None:
             raise HTTPException(status_code=404, detail=f"Run has no evaluation: {run_id}")
@@ -555,7 +554,7 @@ def _run_detail_payload(request: Request, session: Session, run: RunRecord) -> d
     return _with_request_id(
         request,
         {
-            "run": RunDashboardProjection.from_run(run).to_dict(),
+            "run": repository.get_run_dashboard_summary(run.run_id),
             "trajectory": [_terminal_turn_payload(turn) for turn in run.trajectory],
             "lifecycle_events": events,
         },

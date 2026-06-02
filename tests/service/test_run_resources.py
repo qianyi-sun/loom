@@ -149,6 +149,33 @@ class RunResourcesTest(unittest.TestCase):
             },
         )
 
+    def test_get_run_reads_clean_dashboard_projection_summary_without_child_hydration(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            projection = runs.refresh_dashboard_projection(
+                "run_001",
+                refresh_reason="test_detail_projection_snapshot",
+            )
+            projected_completed = dict(projection.payload)
+            self.assertEqual(projected_completed["progress"]["turn_count"], 1)
+            self.assertEqual(projected_completed["progress"]["artifact_count"], 3)
+            self.assertEqual(projected_completed["evaluator"]["status"], "completed")
+
+            session.execute(delete(RunTerminalTurnRow).where(RunTerminalTurnRow.run_id == "run_001"))
+            session.execute(delete(ArtifactRow).where(ArtifactRow.run_id == "run_001"))
+            session.execute(delete(EvaluatorResultRow).where(EvaluatorResultRow.run_id == "run_001"))
+
+        response = self.client.get("/runs/run_001", headers={"X-Request-ID": "req-run-projection-001"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-run-projection-001")
+        self.assertEqual(payload["run"], projected_completed)
+        self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
+        self.assertEqual(payload["run"]["progress"]["artifact_count"], 3)
+        self.assertEqual(payload["run"]["evaluator"]["score"], 0.91)
+        self.assertEqual(payload["trajectory"], [])
+
     def test_get_run_returns_404_for_missing_run(self):
         response = self.client.get("/runs/missing-run")
 
@@ -172,6 +199,29 @@ class RunResourcesTest(unittest.TestCase):
         self.assertNotIn("/srv/private", rendered)
         self.assertNotIn("X-Amz-Signature", rendered)
         self.assertNotIn("secret", rendered)
+
+    def test_list_artifacts_reads_clean_dashboard_projection_without_child_hydration(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            projection = runs.refresh_dashboard_projection(
+                "run_001",
+                refresh_reason="test_artifact_projection_snapshot",
+            )
+            projected_artifacts = projection.payload["artifacts"]
+            self.assertEqual(len(projected_artifacts), 3)
+            session.execute(delete(ArtifactRow).where(ArtifactRow.run_id == "run_001"))
+
+        response = self.client.get("/runs/run_001/artifacts", headers={"X-Request-ID": "req-artifacts-projection-001"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "run_id": "run_001",
+                "artifacts": projected_artifacts,
+                "request_id": "req-artifacts-projection-001",
+            },
+        )
 
     def test_list_artifact_chunks_returns_bounded_metadata_cursor(self):
         now = datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -393,6 +443,29 @@ class RunResourcesTest(unittest.TestCase):
                 "run_id": "run_001",
                 "evaluation": RunDashboardProjection.from_run(self.completed_run).to_dict()["evaluator"],
                 "request_id": "req-eval-001",
+            },
+        )
+
+    def test_get_evaluation_reads_clean_dashboard_projection_without_child_hydration(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            projection = runs.refresh_dashboard_projection(
+                "run_001",
+                refresh_reason="test_evaluation_projection_snapshot",
+            )
+            projected_evaluation = projection.payload["evaluator"]
+            self.assertEqual(projected_evaluation["status"], "completed")
+            session.execute(delete(EvaluatorResultRow).where(EvaluatorResultRow.run_id == "run_001"))
+
+        response = self.client.get("/runs/run_001/evaluation", headers={"X-Request-ID": "req-eval-projection-001"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "run_id": "run_001",
+                "evaluation": projected_evaluation,
+                "request_id": "req-eval-projection-001",
             },
         )
 

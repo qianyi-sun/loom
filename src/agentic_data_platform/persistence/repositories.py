@@ -1463,6 +1463,14 @@ class RunRepository:
         row = _required(self.session.get(RunRow, run_id), "run", run_id)
         return self._run_record(row)
 
+    def get_run_dashboard_summary(self, run_id: str) -> dict[str, Any]:
+        row = _required(self.session.get(RunRow, run_id), "run", run_id)
+        projection = self.session.get(RunDashboardProjectionRow, run_id)
+        payload = _dashboard_summary_payload_from_projection(projection)
+        if payload is not None:
+            return payload
+        return RunDashboardProjection.from_run(self._run_record(row)).to_dict()
+
     def list_runs(
         self,
         *,

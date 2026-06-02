@@ -175,9 +175,11 @@ reason, previous projection state, and source event sequence metadata so
 projection-only recovery is visible through durable event replay and artifact
 bundles. Non-terminal transitions mark an existing projection dirty so a
 retried or redispatched run is not mistaken for a fresh terminal projection by
-projection-backed readers. `GET /runs` and the dashboard progress API now read
-clean projection rows for list and aggregate counts, then fall back to hydrated
-run records when the projection is missing or dirty.
+projection-backed readers. `GET /runs`, `GET /runs/{run_id}` summary fields,
+`GET /runs/{run_id}/artifacts`, `GET /runs/{run_id}/evaluation`, and the
+dashboard progress API now read clean projection rows for list, detail,
+artifact, evaluator, and aggregate counts, then fall back to hydrated run
+records when the projection is missing or dirty.
 Terminal turn stdout/stderr columns are bounded previews, not canonical log
 storage. When a stream exceeds the inline limit, persistence stores truncation
 metadata such as original byte count and inline byte count, while full
