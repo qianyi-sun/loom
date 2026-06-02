@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
-from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactChunkMetadata
+from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactChunkMetadata, ArtifactUploadStatus
 from agentic_data_platform.domain.execution_events import RunEventType, event_type_value
 from agentic_data_platform.domain.run_records import (
     BenchmarkTaskInstance,
@@ -381,6 +382,47 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
             payload["chunk_kind"] = chunk_kind.value
         return _with_request_id(request, payload)
 
+    @app.get("/runs/{run_id}/artifact-chunks/content", tags=["runs"])
+    def download_run_artifact_chunk(
+        run_id: str,
+        request: Request,
+        artifact_id: str,
+        chunk_kind: ArtifactChunkKind,
+        chunk_sequence: int = Query(..., ge=0),
+        session: Session = Depends(session_dependency),
+    ) -> Response:
+        auth = require_authenticated_user(request, session)
+        run = _get_run_or_404(session, run_id)
+        require_project_role(session, auth, run.project_id, minimum_role="viewer")
+        try:
+            chunk = RunRepository(session).get_artifact_chunk(
+                run_id=run_id,
+                artifact_id=artifact_id,
+                chunk_kind=chunk_kind,
+                chunk_sequence=chunk_sequence,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Unknown artifact chunk") from exc
+        if chunk.upload_status != ArtifactUploadStatus.COMPLETED:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Chunk upload is not completed: {chunk.upload_status.value}",
+            )
+        object_store = getattr(request.app.state, "artifact_store", None)
+        if object_store is None:
+            raise HTTPException(status_code=503, detail="Artifact object store is not configured")
+        try:
+            payload = object_store.get_bytes(chunk.storage_key)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Chunk payload is unavailable in object storage") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Artifact object store read failed") from exc
+        return Response(
+            content=payload,
+            media_type=chunk.media_type,
+            headers={"Content-Disposition": f'attachment; filename="{_chunk_download_filename(chunk)}"'},
+        )
+
     @app.get("/runs/{run_id}/evaluation", tags=["runs"], responses=_example_response(_EVALUATION_EXAMPLE))
     def get_run_evaluation(
         run_id: str,
@@ -544,6 +586,17 @@ def _terminal_turn_payload(turn: TerminalTurn) -> dict[str, Any]:
 
 def _artifact_chunk_payload(chunk: ArtifactChunkMetadata) -> dict[str, Any]:
     return chunk.to_dict()
+
+
+def _chunk_download_filename(chunk: ArtifactChunkMetadata) -> str:
+    artifact_id = _filename_component(chunk.artifact_id)
+    chunk_kind = chunk.chunk_kind.value if isinstance(chunk.chunk_kind, ArtifactChunkKind) else str(chunk.chunk_kind)
+    return f"{artifact_id}-{_filename_component(chunk_kind)}-{chunk.chunk_sequence:06d}.txt"
+
+
+def _filename_component(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return sanitized.strip("._-") or "chunk"
 
 
 def _status_event_payload(event) -> dict[str, Any]:

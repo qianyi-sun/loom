@@ -87,6 +87,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunDashboardProjection.artifacts` |
 | `GET /runs/{run_id}/artifact-chunks` | List project-scoped stdout/stderr/trajectory/artifact chunk metadata with optional attempt, artifact, kind, sequence cursor, and bounded limit filters | `RunRepository.list_artifact_chunks()` |
+| `GET /runs/{run_id}/artifact-chunks/content` | Download object-store bytes for one project-scoped completed chunk selected by artifact id, chunk kind, and sequence | `RunRepository.get_artifact_chunk()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunDashboardProjection.evaluator` + `RunDashboardProjection.evaluator_results` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_dashboard_progress_records()` + aggregate projection |
@@ -290,9 +291,11 @@ serializing dashboard payloads.
   `pending` or `started` rows to `expired` with a durable `run.recovered`
   event. Worker result persistence now writes object-backed terminal
   stdout/stderr chunks and records their metadata against the current attempt's
-  trajectory artifact. Payload streaming/download by chunk reference, richer
-  upload transition histories, and typed log/artifact events remain #159/#157
-  follow-up work.
+  trajectory artifact. `GET /runs/{run_id}/artifact-chunks/content` downloads a
+  completed chunk payload through the platform API by artifact id, chunk kind,
+  and sequence; non-completed upload states return structured errors without
+  fetching object storage or exposing storage keys. Richer upload transition
+  histories and typed log/artifact events remain #159/#157 follow-up work.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   lifecycle events, and any artifact payload files available from the configured

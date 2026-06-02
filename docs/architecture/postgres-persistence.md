@@ -224,9 +224,10 @@ same-status `run.recovered` event with `recovery=artifact_upload_expired`.
 The current service API exposes chunk metadata through
 `GET /runs/{run_id}/artifact-chunks`. Worker result persistence now writes
 object-backed terminal stdout/stderr chunks and records their metadata against
-the current attempt's trajectory artifact. Object payload streaming/download by
-chunk reference, richer upload transition history, and typed log/artifact
-events are still #159/#157 follow-up work.
+the current attempt's trajectory artifact. The chunk content endpoint downloads
+completed chunk payloads by metadata reference while rejecting non-completed
+upload states before object storage access. Richer upload transition history
+and typed log/artifact events are still #159/#157 follow-up work.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

@@ -17,9 +17,13 @@ All notable changes to this project will be documented in this file.
 - Added the first automatic #159 terminal log chunk writer. Worker result
   persistence now writes terminal stdout/stderr chunks to object storage and
   records their chunk metadata against the trajectory artifact for the current
-  execution attempt. Payload streaming/download by chunk reference, richer
-  upload transition history, and typed log/artifact events remain follow-up
-  work.
+  execution attempt.
+- Added a #159 artifact chunk payload download API. `GET
+  /runs/{run_id}/artifact-chunks/content` returns object-store payload bytes for
+  a project-scoped completed chunk selected by artifact id, chunk kind, and
+  sequence while rejecting incomplete upload states without exposing storage
+  keys. Richer upload transition history and typed log/artifact events remain
+  follow-up work.
 - Split the #150 OpenHands adapter contract into separate OpenHands CLI and
   OpenHands SDK specs. The CLI path now passes a Harbor-compatible
   `openhands-ai` version through `--agent-kwarg version=1.6.0` so Harbor 0.9.0

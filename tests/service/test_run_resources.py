@@ -1,10 +1,13 @@
 import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
+from agentic_data_platform.artifacts.store import LocalArtifactStore
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
 from agentic_data_platform.domain.artifact_metadata import (
     ArtifactChunkKind,
@@ -246,6 +249,108 @@ class RunResourcesTest(unittest.TestCase):
             RunRepository(session).save_run(_completed_run("run_private_chunks", project_id="private-project"))
 
         response = self.client.get("/runs/run_private_chunks/artifact-chunks")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_download_artifact_chunk_returns_object_payload_by_metadata_reference(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalArtifactStore(Path(temp_dir))
+            payload = b"full stdout payload\n"
+            stored = store.put_bytes(
+                "runs/run_001/tasks/task/attempts/run_001_attempt_1/logs/stdout/000000.txt",
+                payload,
+                media_type="text/plain; charset=utf-8",
+            )
+            self.client.app.state.artifact_store = store
+            with session_scope(self.engine) as session:
+                RunRepository(session).record_artifact_chunk(
+                    _artifact_chunk(
+                        run_id="run_001",
+                        attempt_id="run_001:attempt:1",
+                        artifact_id="run_001-trajectory",
+                        chunk_kind=ArtifactChunkKind.STDOUT,
+                        chunk_sequence=0,
+                        storage_key=stored.key,
+                        media_type=stored.media_type,
+                        sha256=stored.sha256,
+                        size_bytes=stored.size_bytes,
+                        created_at=datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc),
+                    )
+                )
+
+            response = self.client.get(
+                "/runs/run_001/artifact-chunks/content",
+                params={
+                    "artifact_id": "run_001-trajectory",
+                    "chunk_kind": "stdout",
+                    "chunk_sequence": 0,
+                },
+                headers={"X-Request-ID": "req-artifact-chunk-content-001"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, payload)
+        self.assertEqual(response.headers["content-type"], "text/plain; charset=utf-8")
+        self.assertIn("run_001-trajectory-stdout-000000.txt", response.headers["content-disposition"])
+        self.assertEqual(response.headers["X-Request-ID"], "req-artifact-chunk-content-001")
+
+    def test_download_artifact_chunk_rejects_unavailable_upload_state_without_storage_fetch(self):
+        with session_scope(self.engine) as session:
+            RunRepository(session).record_artifact_chunk(
+                _artifact_chunk(
+                    run_id="run_001",
+                    attempt_id="run_001:attempt:1",
+                    artifact_id="run_001-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=2,
+                    storage_key="runs/run_001/tasks/task/logs/stdout/000002.txt",
+                    upload_status=ArtifactUploadStatus.FAILED,
+                    upload_error_reason="object upload failed",
+                    sha256="d" * 64,
+                    size_bytes=42,
+                    created_at=datetime(2026, 6, 2, 12, 0, 0, tzinfo=timezone.utc),
+                )
+            )
+
+        response = self.client.get(
+            "/runs/run_001/artifact-chunks/content",
+            params={
+                "artifact_id": "run_001-trajectory",
+                "chunk_kind": "stdout",
+                "chunk_sequence": 2,
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        rendered = json.dumps(response.json())
+        self.assertIn("upload is not completed", rendered)
+        self.assertNotIn("runs/run_001/tasks/task/logs/stdout/000002.txt", rendered)
+
+    def test_download_artifact_chunk_enforces_project_access(self):
+        with session_scope(self.engine) as session:
+            identities = IdentityRepository(session)
+            identities.create_team(team_id="private-team", name="Private Team")
+            identities.create_user(
+                user_id="private-user",
+                email="private@example.com",
+                display_name="Private User",
+                team_id="private-team",
+            )
+            ProjectRepository(session).create_project(
+                project_id="private-project",
+                name="Private Project",
+                owner_team_id="private-team",
+            )
+            RunRepository(session).save_run(_completed_run("run_private_chunk_download", project_id="private-project"))
+
+        response = self.client.get(
+            "/runs/run_private_chunk_download/artifact-chunks/content",
+            params={
+                "artifact_id": "run_private_chunk_download-trajectory",
+                "chunk_kind": "stdout",
+                "chunk_sequence": 0,
+            },
+        )
 
         self.assertEqual(response.status_code, 403)
 
@@ -852,6 +957,7 @@ def _artifact_chunk(
     sha256: str,
     size_bytes: int,
     created_at: datetime,
+    media_type: str = "application/x-ndjson",
     upload_status: ArtifactUploadStatus = ArtifactUploadStatus.COMPLETED,
     upload_error_reason: str | None = None,
     metadata: dict | None = None,
@@ -863,7 +969,7 @@ def _artifact_chunk(
         chunk_kind=chunk_kind,
         chunk_sequence=chunk_sequence,
         storage_key=storage_key,
-        media_type="application/x-ndjson",
+        media_type=media_type,
         size_bytes=size_bytes,
         sha256=sha256,
         upload_status=upload_status,

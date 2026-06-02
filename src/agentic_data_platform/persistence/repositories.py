@@ -1562,6 +1562,27 @@ class RunRepository:
             query = query.limit(limit)
         return [_artifact_chunk_metadata(row) for row in self.session.scalars(query)]
 
+    def get_artifact_chunk(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        chunk_kind: ArtifactChunkKind | str,
+        chunk_sequence: int,
+    ) -> ArtifactChunkMetadata:
+        _required(self.session.get(RunRow, run_id), "run", run_id)
+        if chunk_sequence < 0:
+            raise ValueError("chunk_sequence must be non-negative")
+        kind = _artifact_chunk_kind_value(chunk_kind)
+        row = self.session.scalar(
+            select(ArtifactChunkRow)
+            .where(ArtifactChunkRow.run_id == run_id)
+            .where(ArtifactChunkRow.artifact_id == artifact_id)
+            .where(ArtifactChunkRow.chunk_kind == kind)
+            .where(ArtifactChunkRow.chunk_sequence == chunk_sequence)
+        )
+        return _artifact_chunk_metadata(_required(row, "artifact chunk", f"{artifact_id}:{kind}:{chunk_sequence}"))
+
     def expire_stale_artifact_uploads(
         self,
         *,
