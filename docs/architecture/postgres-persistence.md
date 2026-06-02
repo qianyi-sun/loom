@@ -104,9 +104,12 @@ values, but repository, worker, subprocess-failure, recovery, and run-audit
 paths now use the same `RunEventType` enum before persistence. Recovery events
 store their canonical reason in `metadata_json.recovery` using
 `RecoveryReasonCode`; implemented reasons are `stale_dispatched`,
-`stale_worker_heartbeat`, `terminal_result_mismatch`, and
-`artifact_upload_expired`, and reserved Phase 1 follow-up reasons are
-`canceled_resource_cleanup` and `projection_refresh_failed`.
+`stale_worker_heartbeat`, `terminal_result_mismatch`,
+`artifact_upload_expired`, and `docker_container_cleanup`; reserved Phase 1
+follow-up reasons are `canceled_resource_cleanup` and
+`projection_refresh_failed`. Scheduler-driven Docker cleanup records
+same-status `sandbox.container_cleanup` events with container ids, removed ids,
+exit codes, cleanup status, and bounded cleanup error reasons.
 Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch

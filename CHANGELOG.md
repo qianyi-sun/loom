@@ -4,12 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- Added the first #158/#160 Docker-owned resource cleanup identity slice.
-  Docker terminal sandbox containers now carry stable platform/run/resource
-  labels, and the worker CLI exposes `--cleanup-run-containers` with an
-  optional attempt filter so operators and future recovery jobs can remove
-  platform-owned sandbox containers without touching unrelated Docker
-  resources.
+- Added the first #158/#160 scheduler-driven Docker-owned resource cleanup
+  slice. Docker terminal sandbox containers now carry stable
+  platform/run/resource labels, scheduler recovery can remove labeled
+  containers for stale recovered active runs and emit
+  `sandbox.container_cleanup` evidence, and the worker CLI still exposes
+  `--cleanup-run-containers` with an optional attempt filter for manual
+  operator recovery.
 - Clarified the main README product direction for new contributors by removing
   local-reference wording and replacing MVP-facing status text with
   product-grade platform terminology.

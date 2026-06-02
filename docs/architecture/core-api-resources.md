@@ -251,12 +251,13 @@ serializing dashboard payloads.
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
-  `artifact.upload_expired`, and `log.chunk_recorded`.
+  `artifact.upload_expired`, `log.chunk_recorded`, and
+  `sandbox.container_cleanup`.
   Recovery metadata currently uses canonical reason codes for implemented
   `stale_dispatched`, `stale_worker_heartbeat`, `terminal_result_mismatch`,
-  and `artifact_upload_expired` paths, plus reserved
-  `canceled_resource_cleanup` and `projection_refresh_failed` paths. Later
-  #160 slices should reuse these codes instead of minting local strings.
+  `docker_container_cleanup`, and `artifact_upload_expired` paths, plus
+  reserved `canceled_resource_cleanup` and `projection_refresh_failed` paths.
+  Later #160 slices should reuse these codes instead of minting local strings.
 - Scheduler and worker writers use
   `agentic_data_platform.domain.execution_metadata` as the v1 attempt metadata
   contract. `run_attempts.metadata.execution.scheduler` records the scheduler
@@ -372,11 +373,12 @@ serializing dashboard payloads.
   child was running, and duplicate deliveries are skipped before they reach the
   executor. Nonzero, timeout, and incomplete-result child failures include
   bounded, redacted stdout/stderr tails in run failure metadata. Docker terminal
-  sandbox containers now carry platform/run/resource labels and the worker CLI
-  can remove labeled containers for a run as the first explicit cleanup
-  verification surface; scheduler-driven cleanup and parent-death
-  reconciliation remain #158/#160 follow-up work. A production LLM-judge
-  evaluator provider remains follow-up work.
+  sandbox containers now carry platform/run/resource labels; scheduler recovery
+  can remove labeled containers for recovered active runs after closing its DB
+  recovery transaction, records same-status `sandbox.container_cleanup`
+  evidence, and the worker CLI keeps the manual operator cleanup path.
+  Parent-death/container-leak verification remains #158/#160 follow-up work. A
+  production LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace

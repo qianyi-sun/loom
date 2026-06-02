@@ -27,12 +27,14 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.ARTIFACT_CHUNK_RECORDED.value, "artifact.chunk_recorded")
         self.assertEqual(RunEventType.ARTIFACT_UPLOAD_EXPIRED.value, "artifact.upload_expired")
         self.assertEqual(RunEventType.LOG_CHUNK_RECORDED.value, "log.chunk_recorded")
+        self.assertEqual(RunEventType.SANDBOX_CONTAINER_CLEANUP.value, "sandbox.container_cleanup")
 
     def test_recovery_reason_codes_cover_phase_one_reconciliation_paths(self):
         self.assertEqual(RecoveryReasonCode.STALE_DISPATCHED.value, "stale_dispatched")
         self.assertEqual(RecoveryReasonCode.STALE_WORKER_HEARTBEAT.value, "stale_worker_heartbeat")
         self.assertEqual(RecoveryReasonCode.TERMINAL_RESULT_MISMATCH.value, "terminal_result_mismatch")
         self.assertEqual(RecoveryReasonCode.CANCELED_RESOURCE_CLEANUP.value, "canceled_resource_cleanup")
+        self.assertEqual(RecoveryReasonCode.DOCKER_CONTAINER_CLEANUP.value, "docker_container_cleanup")
         self.assertEqual(RecoveryReasonCode.ARTIFACT_UPLOAD_EXPIRED.value, "artifact_upload_expired")
         self.assertEqual(RecoveryReasonCode.PROJECTION_REFRESH_FAILED.value, "projection_refresh_failed")
 

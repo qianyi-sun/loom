@@ -22,6 +22,7 @@ class RunEventType(str, Enum):
     ARTIFACT_CHUNK_RECORDED = "artifact.chunk_recorded"
     ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"
     LOG_CHUNK_RECORDED = "log.chunk_recorded"
+    SANDBOX_CONTAINER_CLEANUP = "sandbox.container_cleanup"
 
 
 class RecoveryReasonCode(str, Enum):
@@ -29,6 +30,7 @@ class RecoveryReasonCode(str, Enum):
     STALE_WORKER_HEARTBEAT = "stale_worker_heartbeat"
     TERMINAL_RESULT_MISMATCH = "terminal_result_mismatch"
     CANCELED_RESOURCE_CLEANUP = "canceled_resource_cleanup"
+    DOCKER_CONTAINER_CLEANUP = "docker_container_cleanup"
     ARTIFACT_UPLOAD_EXPIRED = "artifact_upload_expired"
     PROJECTION_REFRESH_FAILED = "projection_refresh_failed"
 

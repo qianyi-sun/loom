@@ -15,6 +15,7 @@ from agentic_data_platform.persistence.database import create_database_engine, s
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.persistence.models import ArtifactRow, RunAttemptRow, RunDashboardProjectionRow, RunRow
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
+from agentic_data_platform.sandbox.docker_terminal import DockerOwnedContainerCleanupResult
 from agentic_data_platform.scheduler.service import RunScheduler, run_scheduler_loop
 from agentic_data_platform.service.config import ServiceSettings
 from tests.persistence.test_repositories import _completed_run, _queued_capacity_run, _queued_run
@@ -242,6 +243,124 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(projection.status, RunStatus.FAILED.value)
         self.assertEqual(projection.refresh_reason, "terminal_worker_recovery")
 
+    def test_scheduler_cleans_owned_docker_containers_after_stale_active_recovery(self):
+        now = datetime.now(timezone.utc)
+        stale_heartbeat = (now - timedelta(minutes=10)).isoformat()
+
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_scheduler_docker_cleanup"))
+            runs.claim_next_queued_run(worker_id="worker-docker-cleanup")
+            session.get(RunRow, "run_scheduler_docker_cleanup").updated_at = now - timedelta(minutes=10)
+            attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_scheduler_docker_cleanup"))
+            metadata = dict(attempt.metadata_json or {})
+            worker = dict(metadata["worker"])
+            worker["last_heartbeat_at"] = stale_heartbeat
+            metadata["worker"] = worker
+            attempt.metadata_json = metadata
+
+        docker_cleaner = FakeDockerOwnedContainerCleaner(
+            {
+                "run_scheduler_docker_cleanup": DockerOwnedContainerCleanupResult(
+                    run_id="run_scheduler_docker_cleanup",
+                    attempt_id=None,
+                    container_ids=["container-stale"],
+                    removed_container_ids=["container-stale"],
+                    list_exit_code=0,
+                    removal_exit_code=0,
+                )
+            }
+        )
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_stale_active_heartbeat_timeout_seconds=300,
+                scheduler_docker_cleanup_enabled=True,
+                scheduler_recovery_batch_size=10,
+            ),
+            docker_container_cleaner=docker_cleaner,
+        )
+
+        result = scheduler.recover_once(request_id="req-scheduler-docker-cleanup-001")
+
+        with session_scope(self.engine) as session:
+            events = RunRepository(session).list_status_events("run_scheduler_docker_cleanup")
+
+        self.assertEqual(docker_cleaner.cleanup_calls, [{"run_id": "run_scheduler_docker_cleanup"}])
+        self.assertEqual(result.docker_cleanup_count, 1)
+        self.assertEqual(result.docker_cleanup_error_count, 0)
+        self.assertEqual(result.docker_cleanup_runs[0]["run_id"], "run_scheduler_docker_cleanup")
+        self.assertEqual(result.docker_cleanup_runs[0]["removed_container_ids"], ["container-stale"])
+        cleanup_events = [event for event in events if event.event_type == RunEventType.SANDBOX_CONTAINER_CLEANUP.value]
+        self.assertEqual(len(cleanup_events), 1)
+        self.assertEqual(cleanup_events[0].metadata["recovery"], RecoveryReasonCode.DOCKER_CONTAINER_CLEANUP.value)
+        self.assertEqual(cleanup_events[0].metadata["cleanup_status"], "completed")
+        self.assertEqual(cleanup_events[0].metadata["removed_container_ids"], ["container-stale"])
+
+    def test_scheduler_records_docker_cleanup_failure_without_hiding_run_recovery(self):
+        now = datetime.now(timezone.utc)
+        stale_heartbeat = (now - timedelta(minutes=10)).isoformat()
+
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_scheduler_docker_cleanup_failure"))
+            runs.claim_next_queued_run(worker_id="worker-docker-cleanup-failure")
+            session.get(RunRow, "run_scheduler_docker_cleanup_failure").updated_at = now - timedelta(minutes=10)
+            attempt = session.scalar(
+                select(RunAttemptRow).where(RunAttemptRow.run_id == "run_scheduler_docker_cleanup_failure")
+            )
+            metadata = dict(attempt.metadata_json or {})
+            worker = dict(metadata["worker"])
+            worker["last_heartbeat_at"] = stale_heartbeat
+            metadata["worker"] = worker
+            attempt.metadata_json = metadata
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_stale_active_heartbeat_timeout_seconds=300,
+                scheduler_docker_cleanup_enabled=True,
+                scheduler_recovery_batch_size=10,
+            ),
+            docker_container_cleaner=FailingDockerOwnedContainerCleaner("docker daemon unavailable"),
+        )
+
+        result = scheduler.recover_once(request_id="req-scheduler-docker-cleanup-failure-001")
+
+        with session_scope(self.engine) as session:
+            recovered = RunRepository(session).get_run("run_scheduler_docker_cleanup_failure")
+            events = RunRepository(session).list_status_events("run_scheduler_docker_cleanup_failure")
+
+        self.assertEqual(recovered.status, RunStatus.FAILED)
+        self.assertEqual(result.failed_run_ids, ["run_scheduler_docker_cleanup_failure"])
+        self.assertEqual(result.docker_cleanup_count, 1)
+        self.assertEqual(result.docker_cleanup_error_count, 1)
+        self.assertEqual(result.docker_cleanup_runs[0]["cleanup_status"], "failed")
+        cleanup_events = [event for event in events if event.event_type == RunEventType.SANDBOX_CONTAINER_CLEANUP.value]
+        self.assertEqual(len(cleanup_events), 1)
+        self.assertEqual(cleanup_events[0].metadata["cleanup_status"], "failed")
+        self.assertEqual(cleanup_events[0].metadata["cleanup_error_reason"], "docker daemon unavailable")
+
     def test_scheduler_recovers_terminal_result_mismatch_before_stale_heartbeat(self):
         now = datetime.now(timezone.utc)
 
@@ -417,6 +536,83 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(payload["projection_refreshed_run_ids"], ["run_scheduler_loop_projection_refresh"])
         self.assertEqual(payload["requeued_run_ids"], [])
         self.assertEqual(payload["failed_run_ids"], [])
+
+    def test_scheduler_loop_logs_docker_cleanup_recovery(self):
+        now = datetime.now(timezone.utc)
+        stale_heartbeat = (now - timedelta(minutes=10)).isoformat()
+
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_scheduler_loop_docker_cleanup"))
+            runs.claim_next_queued_run(worker_id="worker-loop-docker-cleanup")
+            session.get(RunRow, "run_scheduler_loop_docker_cleanup").updated_at = now - timedelta(minutes=10)
+            attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_scheduler_loop_docker_cleanup"))
+            metadata = dict(attempt.metadata_json or {})
+            worker = dict(metadata["worker"])
+            worker["last_heartbeat_at"] = stale_heartbeat
+            metadata["worker"] = worker
+            attempt.metadata_json = metadata
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_stale_active_heartbeat_timeout_seconds=300,
+                scheduler_docker_cleanup_enabled=True,
+                scheduler_recovery_batch_size=10,
+            ),
+            docker_container_cleaner=FakeDockerOwnedContainerCleaner(
+                {
+                    "run_scheduler_loop_docker_cleanup": DockerOwnedContainerCleanupResult(
+                        run_id="run_scheduler_loop_docker_cleanup",
+                        attempt_id=None,
+                        container_ids=["container-loop"],
+                        removed_container_ids=["container-loop"],
+                        list_exit_code=0,
+                        removal_exit_code=0,
+                    )
+                }
+            ),
+        )
+
+        output = io.StringIO()
+        with patch("agentic_data_platform.scheduler.service.time.sleep", side_effect=StopIteration):
+            with self.assertRaises(StopIteration):
+                with redirect_stdout(output):
+                    run_scheduler_loop(scheduler, poll_interval_seconds=0.0)
+
+        payload = json.loads(output.getvalue().splitlines()[0])
+        self.assertEqual(payload["action"], "recover")
+        self.assertEqual(payload["docker_cleanup_count"], 1)
+        self.assertEqual(payload["docker_cleanup_error_count"], 0)
+        self.assertEqual(payload["docker_cleanup_runs"][0]["removed_container_ids"], ["container-loop"])
+
+
+class FakeDockerOwnedContainerCleaner:
+    def __init__(self, results):
+        self.results = results
+        self.cleanup_calls = []
+
+    def cleanup_run(self, *, run_id, attempt_id=None):
+        self.cleanup_calls.append({"run_id": run_id})
+        return self.results[run_id]
+
+
+class FailingDockerOwnedContainerCleaner:
+    def __init__(self, message):
+        self.message = message
+
+    def cleanup_run(self, *, run_id, attempt_id=None):
+        raise RuntimeError(self.message)
 
 
 if __name__ == "__main__":

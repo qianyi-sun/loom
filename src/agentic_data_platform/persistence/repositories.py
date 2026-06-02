@@ -1792,6 +1792,55 @@ class RunRepository:
         self.session.flush()
         return expired
 
+    def record_sandbox_container_cleanup(
+        self,
+        *,
+        run_id: str,
+        scheduler_id: str,
+        cleanup_status: str,
+        container_ids: list[str] | None = None,
+        removed_container_ids: list[str] | None = None,
+        list_exit_code: int | None = None,
+        removal_exit_code: int | None = None,
+        attempt_filter: str | None = None,
+        cleanup_error_reason: str | None = None,
+        reason: str = "owned Docker sandbox container cleanup",
+        request_id: str | None = None,
+    ) -> RunStatusEvent:
+        _require_non_empty("run_id", run_id)
+        _require_non_empty("scheduler_id", scheduler_id)
+        _require_non_empty("cleanup_status", cleanup_status)
+
+        row = _required(self.session.get(RunRow, run_id), "run", run_id)
+        attempt = self._latest_attempt_row(run_id)
+        run_status = RunStatus(row.status)
+        metadata = recovery_event_metadata(
+            RecoveryReasonCode.DOCKER_CONTAINER_CLEANUP,
+            scheduler_id=scheduler_id,
+            execution_task_id=attempt.attempt_id,
+            cleanup_status=cleanup_status,
+            container_ids=list(container_ids or []),
+            removed_container_ids=list(removed_container_ids or []),
+            container_count=len(container_ids or []),
+            removed_container_count=len(removed_container_ids or []),
+            list_exit_code=list_exit_code,
+            removal_exit_code=removal_exit_code,
+            attempt_filter=attempt_filter,
+            cleanup_error_reason=cleanup_error_reason,
+        )
+        event = self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt.attempt_id,
+            event_type=RunEventType.SANDBOX_CONTAINER_CLEANUP,
+            from_status=run_status,
+            to_status=run_status,
+            reason=reason,
+            request_id=request_id,
+            metadata=metadata,
+        )
+        self.session.flush()
+        return event
+
     def _run_record(self, row: RunRow) -> RunRecord:
         latest_attempt = self._latest_attempt_row(row.run_id)
         turns = [

@@ -54,6 +54,8 @@ class ServiceAppTest(unittest.TestCase):
                 "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS": "420",
                 "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS": "900",
                 "SCHEDULER_STALE_ARTIFACT_UPLOAD_TIMEOUT_SECONDS": "1800",
+                "SCHEDULER_DOCKER_CLEANUP_ENABLED": "true",
+                "SCHEDULER_DOCKER_CLEANUP_TIMEOUT_SECONDS": "45",
                 "SCHEDULER_RECOVERY_BATCH_SIZE": "25",
             }
         )
@@ -105,6 +107,8 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.scheduler_stale_dispatched_timeout_seconds, 420)
         self.assertEqual(settings.scheduler_stale_active_heartbeat_timeout_seconds, 900)
         self.assertEqual(settings.scheduler_stale_artifact_upload_timeout_seconds, 1800)
+        self.assertTrue(settings.scheduler_docker_cleanup_enabled)
+        self.assertEqual(settings.scheduler_docker_cleanup_timeout_seconds, 45)
         self.assertEqual(settings.scheduler_recovery_batch_size, 25)
 
     def test_health_endpoint_returns_service_identity(self):

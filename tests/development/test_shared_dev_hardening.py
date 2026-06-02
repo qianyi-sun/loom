@@ -45,6 +45,17 @@ class SharedDevHardeningTest(unittest.TestCase):
         self.assertIn("docker build -f Dockerfile.dev -t agentic-data-shared dev:ci .", ci)
         self.assertIn("docker compose -f docker-compose.dev.yml config --quiet", ci)
 
+    def test_scheduler_can_reach_host_docker_for_owned_cleanup(self):
+        compose = _read("docker-compose.dev.yml")
+        scheduler_section = compose.split("  scheduler:", maxsplit=1)[1].split("\n  app:", maxsplit=1)[0]
+
+        self.assertIn("SCHEDULER_DOCKER_CLEANUP_ENABLED: ${SCHEDULER_DOCKER_CLEANUP_ENABLED:-true}", scheduler_section)
+        self.assertIn(
+            "SCHEDULER_DOCKER_CLEANUP_TIMEOUT_SECONDS: ${SCHEDULER_DOCKER_CLEANUP_TIMEOUT_SECONDS:-30}",
+            scheduler_section,
+        )
+        self.assertIn("- /var/run/docker.sock:/var/run/docker.sock", scheduler_section)
+
 
 def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
