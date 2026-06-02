@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Fixed the #156 project fair-share scheduler dispatch query for PostgreSQL.
+  Fair-share ranking now happens in a read-only candidate-id query, and row
+  locking happens in a separate `FOR UPDATE SKIP LOCKED` query. This preserves
+  the #214 project fair-share behavior while avoiding PostgreSQL's
+  `FOR UPDATE is not allowed with window functions` failure that killed the
+  shared-dev scheduler and left API smoke runs queued.
 - Added #156 project fair-share scheduler candidate ordering. Dispatch now
   considers each project's oldest queued run before considering a second queued
   run from the same project, while preserving the existing global, backend,

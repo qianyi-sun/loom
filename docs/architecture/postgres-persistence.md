@@ -92,7 +92,11 @@ scheduler lease block to `run_attempts.metadata.execution`.
 Queued candidate selection uses project fair-share ordering: each project's
 oldest queued run is considered before a second queued run from the same
 project, while the existing capacity gates remain responsible for the final
-dispatch/block decision.
+dispatch/block decision. Because PostgreSQL rejects `FOR UPDATE` on queries
+with window functions, the repository first ranks candidate run ids with
+`row_number()` in a read-only query, then locks those queued rows with a
+separate `FOR UPDATE SKIP LOCKED` query before dispatching them in ranked
+order.
 `RunRepository.dispatch_queued_runs_with_diagnostics(...)` uses the same
 transactional dispatch path but also returns queued runs blocked by capacity.
 Blocked rows stay `queued`, store the current blocker under

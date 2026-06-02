@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import inspect, select
+from sqlalchemy.dialects import postgresql
 
 from agentic_data_platform.benchmarks.fixtures import load_fixture_catalog
 from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
@@ -43,6 +44,8 @@ from agentic_data_platform.persistence.repositories import (
     ProjectRepository,
     RunRepository,
     StaleExecutionTaskError,
+    _queued_dispatch_candidate_lock_query,
+    _ranked_queued_run_id_query,
 )
 
 
@@ -1325,6 +1328,24 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual([run.run_id for run in second_result.dispatched_runs], ["run_dispatch_unblocked_b"])
         self.assertNotIn("capacity_blocked", attempt.metadata_json["execution"]["scheduler"])
         self.assertEqual(current_blocks, [])
+
+    def test_run_repository_keeps_postgres_window_rank_out_of_locking_dispatch_query(self):
+        ranked_sql = str(
+            _ranked_queued_run_id_query(limit=25).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        locking_sql = str(
+            _queued_dispatch_candidate_lock_query(["run_dispatch_a", "run_dispatch_b"]).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+
+        self.assertIn("row_number() OVER", ranked_sql)
+        self.assertIn("FOR UPDATE SKIP LOCKED", locking_sql)
+        self.assertNotIn("row_number() OVER", locking_sql)
 
     def test_run_repository_dispatch_skips_canceled_runs(self):
         with session_scope(self.engine) as session:

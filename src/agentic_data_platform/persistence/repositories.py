@@ -95,6 +95,37 @@ class ExpiredArtifactUploadRecord:
     expired_at: datetime
 
 
+def _ranked_queued_run_id_query(*, limit: int):
+    queued_fairness_rank = (
+        select(
+            RunRow.run_id.label("run_id"),
+            RunRow.created_at.label("created_at"),
+            func.row_number()
+            .over(partition_by=RunRow.project_id, order_by=(RunRow.created_at, RunRow.run_id))
+            .label("project_queue_rank"),
+        )
+        .where(RunRow.status == RunStatus.QUEUED.value)
+        .subquery()
+    )
+    return (
+        select(queued_fairness_rank.c.run_id)
+        .order_by(
+            queued_fairness_rank.c.project_queue_rank,
+            queued_fairness_rank.c.created_at,
+            queued_fairness_rank.c.run_id,
+        )
+        .limit(limit)
+    )
+
+
+def _queued_dispatch_candidate_lock_query(run_ids: list[str]):
+    return (
+        select(RunRow)
+        .where(RunRow.status == RunStatus.QUEUED.value, RunRow.run_id.in_(run_ids))
+        .with_for_update(skip_locked=True)
+    )
+
+
 @dataclass(frozen=True)
 class RunDashboardProgressRecord:
     run_id: str
@@ -637,24 +668,20 @@ class RunRepository:
             _increment(active_by_agent, _agent_capacity_key(row))
             _increment(active_by_benchmark, _benchmark_capacity_key(row))
 
-        queued_fairness_rank = (
-            select(
-                RunRow.run_id.label("run_id"),
-                func.row_number()
-                .over(partition_by=RunRow.project_id, order_by=(RunRow.created_at, RunRow.run_id))
-                .label("project_queue_rank"),
+        ranked_candidate_ids = list(
+            self.session.scalars(_ranked_queued_run_id_query(limit=max(max_runs * 5, 25)))
+        )
+        if ranked_candidate_ids:
+            locked_candidates = list(
+                self.session.scalars(_queued_dispatch_candidate_lock_query(ranked_candidate_ids))
             )
-            .where(RunRow.status == RunStatus.QUEUED.value)
-            .subquery()
-        )
-        candidates = self.session.scalars(
-            select(RunRow)
-            .join(queued_fairness_rank, RunRow.run_id == queued_fairness_rank.c.run_id)
-            .where(RunRow.status == RunStatus.QUEUED.value)
-            .order_by(queued_fairness_rank.c.project_queue_rank, RunRow.created_at, RunRow.run_id)
-            .with_for_update(skip_locked=True)
-            .limit(max(max_runs * 5, 25))
-        )
+            candidate_rank = {run_id: index for index, run_id in enumerate(ranked_candidate_ids)}
+            candidates = sorted(
+                locked_candidates,
+                key=lambda row: candidate_rank.get(row.run_id, len(candidate_rank)),
+            )
+        else:
+            candidates = []
         dispatched_ids: list[str] = []
         capacity_blocked: list[SchedulerCapacityBlock] = []
         for row in candidates:

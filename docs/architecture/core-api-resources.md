@@ -370,7 +370,11 @@ serializing dashboard payloads.
   records `run.dispatched` lifecycle events with the matched capacity keys. Its
   candidate ordering is project fair-share: the scheduler considers each
   project's oldest queued run before considering a second queued run from the
-  same project, then capacity gates decide which candidates can dispatch.
+  same project, then capacity gates decide which candidates can dispatch. The
+  Postgres implementation keeps the fair-share window ranking in a read-only
+  candidate-id query and locks the selected queued rows in a separate
+  `FOR UPDATE SKIP LOCKED` query so scheduler loops do not combine row locks
+  with window functions.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.
