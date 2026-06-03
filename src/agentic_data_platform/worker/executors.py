@@ -3,18 +3,24 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
 from agentic_data_platform.artifacts.store import Artifacpilot groupjectStore, ArtifactPersistence
 from agentic_data_platform.benchmarks.adapters import BenchmarkRegistration
-from agentic_data_platform.domain.artifact_metadata import ArtifactContentType
+from agentic_data_platform.domain.artifact_metadata import (
+    ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION,
+    ArtifactContentType,
+    ArtifactUploadStatus,
+)
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
     ArtifactRef,
@@ -67,6 +73,9 @@ _ORIGINAL_WRAPPER_CONTRACTS = {
     "skillflow-original-wrapper-v0",
     "skilllearnbench-original-wrapper-v0",
 }
+_ARTIFACT_UPLOAD_ERROR_MAX_CHARS = 500
+
+
 class WorkerRunExecutor(Protocol):
     def execute(self, run: RunRecord) -> RunRecord:
         ...
@@ -721,22 +730,122 @@ def _persist_original_wrapper_artifacts(
             or mimetypes.guess_type(local_path.name)[0]
             or "application/octet-stream"
         )
-        artifacts.append(
-            artifact_persistence.persist_wrapper_artifact(
-                run_id=run.run_id,
-                task_instance_id=run.task.instance_id,
-                local_path=local_path,
-                artifact_path=artifact_path,
-                kind=_original_wrapper_artifact_kind(kind_name),
-                media_type=media_type,
-                metadata={
-                    "content_type": ArtifactContentType.ORIGINAL_WRAPPER_ARTIFACT,
-                    "runner_contract": runner_contract,
-                    "wrapper_artifact_kind": kind_name,
-                },
+        try:
+            artifacts.append(
+                artifact_persistence.persist_wrapper_artifact(
+                    run_id=run.run_id,
+                    task_instance_id=run.task.instance_id,
+                    local_path=local_path,
+                    artifact_path=artifact_path,
+                    kind=_original_wrapper_artifact_kind(kind_name),
+                    media_type=media_type,
+                    metadata={
+                        "content_type": ArtifactContentType.ORIGINAL_WRAPPER_ARTIFACT,
+                        "runner_contract": runner_contract,
+                        "wrapper_artifact_kind": kind_name,
+                    },
+                )
             )
-        )
+        except ValueError:
+            raise
+        except Exception as exc:
+            relative_parts = _safe_original_wrapper_artifact_parts(artifact_path)
+            artifacts.append(
+                _failed_original_wrapper_artifact_ref(
+                    run_id=run.run_id,
+                    task_instance_id=run.task.instance_id,
+                    storage_key=artifact_persistence.key_factory.wrapper_artifact_key(
+                        run.run_id,
+                        run.task.instance_id,
+                        artifact_path,
+                    ),
+                    artifact_path="/".join(relative_parts),
+                    kind=_original_wrapper_artifact_kind(kind_name),
+                    media_type=media_type,
+                    runner_contract=runner_contract,
+                    wrapper_artifact_kind=kind_name,
+                    reason=_artifact_upload_error_reason(exc),
+                )
+            )
+
     return artifacts
+
+
+def _failed_original_wrapper_artifact_ref(
+    *,
+    run_id: str,
+    task_instance_id: str,
+    storage_key: str,
+    artifact_path: str,
+    kind: ArtifactKind,
+    media_type: str,
+    runner_contract: str,
+    wrapper_artifact_kind: str,
+    reason: str,
+) -> ArtifactRef:
+    artifact_id = (
+        f"{_safe_artifact_component(run_id)}-"
+        f"{_safe_artifact_component('-'.join(_safe_original_wrapper_artifact_parts(artifact_path)))}"
+    )
+    return ArtifactRef(
+        artifact_id=artifact_id,
+        kind=kind,
+        uri=f"unavailable://artifact-upload/{quote(storage_key, safe='')}",
+        media_type=media_type,
+        metadata={
+            "artifact_metadata_schema": ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION,
+            "run_id": run_id,
+            "task_instance_id": task_instance_id,
+            "content_type": ArtifactContentType.ORIGINAL_WRAPPER_ARTIFACT.value,
+            "artifact_path": artifact_path,
+            "runner_contract": runner_contract,
+            "wrapper_artifact_kind": wrapper_artifact_kind,
+            "upload_status": ArtifactUploadStatus.FAILED.value,
+            "upload_error_reason": reason,
+            "storage_key": storage_key,
+            "object_writer": "original_wrapper_artifact",
+            "artifact_chunk_kind": "artifact",
+            "artifact_chunk_sequence": 0,
+        },
+    )
+
+
+def _artifact_upload_error_reason(exc: Exception) -> str:
+    reason = _redact_failure_text(f"{type(exc).__name__}: {exc}".strip())
+    if len(reason) <= _ARTIFACT_UPLOAD_ERROR_MAX_CHARS:
+        return reason
+    return reason[: _ARTIFACT_UPLOAD_ERROR_MAX_CHARS - 3] + "..."
+
+
+def _redact_failure_text(value: str) -> str:
+    redacted = re.sub(
+        r"(?i)\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION)[A-Z0-9_]*=)[^\s,;]+",
+        r"\1[redacted]",
+        value,
+    )
+    redacted = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", redacted)
+    return re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", redacted)
+
+
+def _safe_original_wrapper_artifact_parts(value: str) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("artifact_path must be a non-empty string")
+    path = Path(value)
+    if path.is_absolute():
+        raise ValueError("artifact_path must be relative")
+    parts = path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("artifact_path must not contain empty, current, or parent segments")
+    return tuple(parts)
+
+
+def _safe_artifact_component(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("path component must be a non-empty string")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip(".-")
+    if not safe:
+        raise ValueError("path component must contain at least one safe character")
+    return quote(safe, safe="A-Za-z0-9_.-")
 
 
 def _original_wrapper_artifact_path(

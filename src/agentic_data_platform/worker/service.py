@@ -17,6 +17,7 @@ from agentic_data_platform.artifacts.store import (
     LocalArtifactStore,
     build_s3_artifact_store,
 )
+from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactUploadStatus
 from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import ArtifactKind, RunStatus, TerminalTurn
 from agentic_data_platform.persistence import create_database_engine, session_scope
@@ -535,6 +536,12 @@ def _save_worker_result(
         source_turns=run.trajectory,
         request_id=request_id,
     )
+    _record_failed_artifact_upload_chunks(
+        engine,
+        saved,
+        execution_task_id=execution_task_id,
+        request_id=request_id,
+    )
     return saved
 
 
@@ -624,6 +631,79 @@ def _artifact_upload_error_reason(exc: Exception) -> str:
     if len(reason) <= ARTIFACT_UPLOAD_ERROR_MAX_CHARS:
         return reason
     return reason[: ARTIFACT_UPLOAD_ERROR_MAX_CHARS - 3] + "..."
+
+
+def _record_failed_artifact_upload_chunks(
+    engine: Engine,
+    run,
+    *,
+    execution_task_id: str | None,
+    request_id: str | None,
+) -> None:
+    if execution_task_id is None:
+        return
+    for artifact in run.artifacts:
+        metadata = dict(artifact.metadata)
+        if metadata.get("upload_status") != ArtifactUploadStatus.FAILED.value:
+            continue
+        if metadata.get("artifact_chunk_kind") != ArtifactChunkKind.ARTIFACT.value:
+            continue
+        storage_key = metadata.get("storage_key")
+        if not isinstance(storage_key, str) or not storage_key.strip():
+            continue
+        raw_sequence = metadata.get("artifact_chunk_sequence", 0)
+        if not isinstance(raw_sequence, int) or raw_sequence < 0:
+            continue
+        reason = metadata.get("upload_error_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "artifact upload failed before object metadata was available"
+        chunk_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key
+            not in {
+                "artifact_chunk_kind",
+                "artifact_chunk_sequence",
+                "upload_error_reason",
+                "upload_status",
+            }
+        }
+        with session_scope(engine) as session:
+            repository = RunRepository(session)
+            try:
+                existing = repository.get_artifact_chunk(
+                    run_id=run.run_id,
+                    artifact_id=artifact.artifact_id,
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                    chunk_sequence=raw_sequence,
+                )
+            except KeyError:
+                existing = None
+            if existing is not None and existing.upload_status in {
+                ArtifactUploadStatus.COMPLETED,
+                ArtifactUploadStatus.FAILED,
+            }:
+                continue
+            repository.start_artifact_chunk_upload(
+                run_id=run.run_id,
+                attempt_id=execution_task_id,
+                artifact_id=artifact.artifact_id,
+                chunk_kind=ArtifactChunkKind.ARTIFACT,
+                chunk_sequence=raw_sequence,
+                storage_key=storage_key,
+                media_type=artifact.media_type,
+                metadata=chunk_metadata,
+                request_id=request_id,
+            )
+            repository.fail_artifact_chunk_upload(
+                run_id=run.run_id,
+                artifact_id=artifact.artifact_id,
+                chunk_kind=ArtifactChunkKind.ARTIFACT,
+                chunk_sequence=raw_sequence,
+                reason=reason,
+                metadata={"object_writer": metadata.get("object_writer", "artifact")},
+                request_id=request_id,
+            )
 
 
 def _run_child_command_with_cancel_monitor(

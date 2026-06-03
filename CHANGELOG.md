@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #159/#160 original-wrapper artifact upload diagnostics. If an
+  original SkillFlow/SkillLearnBench wrapper completes but one generated
+  artifact cannot be written to object storage, the worker now preserves the
+  wrapper evaluation result and records a failed `artifact` chunk with a
+  redacted upload reason. Artifact bundles expose that failed chunk in
+  `artifact_chunk_content_errors` instead of turning the completed evaluation
+  into an opaque worker failure.
 - Added the next #156 scheduler observed-usage cost window gate. Dispatch can
   now combine recent completed-run `provider_usage.cost_usd` telemetry with
   trusted active/queued `metadata.scheduler.estimated_cost_usd` hints, then

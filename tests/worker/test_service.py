@@ -1472,6 +1472,74 @@ class WorkerServiceTest(unittest.TestCase):
             ],
         )
 
+    def test_original_wrapper_artifact_upload_failure_preserves_evaluation_result(self):
+        payload = _run_create_payload("run_worker_wrapper_artifact_upload_failed_001")
+        payload["task"]["metadata"]["instruction_ref"] = "inline:task.metadata.instruction"
+        payload["evaluators"] = [{"evaluator_id": "original-wrapper-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "wrapper_run": {
+                "dry_run": True,
+                "timeout_seconds": 45,
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-wrapper-artifact-upload-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(FailingWrapperArtifactStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    wrapper_command_runner=FakeWrapperCommandRunner(),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-wrapper-artifact-upload-failed-001")
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_wrapper_artifact_upload_failed_001",
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.evaluator_id, "original-wrapper-verifier")
+        self.assertGreaterEqual(len(chunks), 1)
+        failed_chunk = next(chunk for chunk in chunks if chunk.upload_status is ArtifactUploadStatus.FAILED)
+        self.assertIn("simulated wrapper artifact object store failure", failed_chunk.upload_error_reason)
+        self.assertNotIn("api_key=secret", failed_chunk.upload_error_reason)
+        self.assertEqual(failed_chunk.metadata["artifact_path"], "artifacts/planned-command.json")
+        self.assertEqual(failed_chunk.metadata["content_type"], "original_wrapper_artifact")
+        self.assertEqual(failed_chunk.metadata["runner_contract"], "skilllearnbench-original-wrapper-v0")
+
+        detail = self.client.get("/runs/run_worker_wrapper_artifact_upload_failed_001")
+        self.assertEqual(detail.status_code, 200)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["run"]["status"], "succeeded")
+        self.assertEqual(detail_payload["run"]["evaluator"]["score"], 0.91)
+        event_types = [event["event_type"] for event in detail_payload["lifecycle_events"]]
+        self.assertIn("artifact.chunk_recorded", event_types)
+        self.assertIn("artifact.upload_status_changed", event_types)
+
+        bundle = self.client.get("/runs/run_worker_wrapper_artifact_upload_failed_001/artifact-bundle")
+        self.assertEqual(bundle.status_code, 200)
+        with zipfile.ZipFile(BytesIO(bundle.content)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+
+        self.assertGreaterEqual(manifest["artifact_chunk_count"], 1)
+        chunk_errors = manifest["artifact_chunk_content_errors"]
+        self.assertTrue(
+            any(
+                error["upload_status"] == "failed"
+                and "simulated wrapper artifact object store failure" in error["upload_error_reason"]
+                and "api_key=secret" not in error["upload_error_reason"]
+                for error in chunk_errors
+            )
+        )
+
     def test_worker_marks_original_wrapper_exit_failure(self):
         payload = _run_create_payload("run_worker_wrapper_failed_001")
         payload["metadata"] = {
@@ -1687,6 +1755,13 @@ class FailingTerminalLogStore(LocalArtifactStore):
     def put_bytes(self, key, payload, *, media_type, metadata=None):
         if "/logs/stdout/" in key or "/logs/stderr/" in key:
             raise RuntimeError("simulated log object store failure")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
+
+
+class FailingWrapperArtifactStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/wrapper/artifacts/planned-command.json" in key:
+            raise RuntimeError("simulated wrapper artifact object store failure: api_key=secret")
         return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
 
 
