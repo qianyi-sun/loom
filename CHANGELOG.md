@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #157/#158 worker subprocess lifecycle events. `SubprocessRunWorker`
+  now records metadata-only `worker.subprocess_started` and
+  `worker.subprocess_completed` events around the child process boundary, and
+  the browser event stream helper recognizes those typed events for live
+  monitoring. Event metadata keeps only worker id, execution task id,
+  child-entrypoint module, timeout, and return code; it does not persist child
+  argv, local paths, secrets, or logs.
 - Added #156 scheduler multi-instance race hardening and deploy validation.
   PostgreSQL dispatch now takes a transaction-scoped advisory lock before
   reading active capacity and locking queued candidates, so concurrent

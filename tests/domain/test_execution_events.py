@@ -23,6 +23,8 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.RECOVERED.value, "run.recovered")
         self.assertEqual(RunEventType.WORKER_FAILED.value, "run.worker_failed")
         self.assertEqual(RunEventType.WORKER_SUBPROCESS_FAILED.value, "run.worker_subprocess_failed")
+        self.assertEqual(RunEventType.WORKER_SUBPROCESS_STARTED.value, "worker.subprocess_started")
+        self.assertEqual(RunEventType.WORKER_SUBPROCESS_COMPLETED.value, "worker.subprocess_completed")
         self.assertEqual(RunEventType.SCHEDULER_CAPACITY_BLOCKED.value, "scheduler.capacity_blocked")
         self.assertEqual(RunEventType.ARTIFACT_CHUNK_RECORDED.value, "artifact.chunk_recorded")
         self.assertEqual(RunEventType.ARTIFACT_UPLOAD_EXPIRED.value, "artifact.upload_expired")

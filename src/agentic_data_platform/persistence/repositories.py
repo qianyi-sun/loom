@@ -1044,6 +1044,47 @@ class RunRepository:
     def current_execution_task_id(self, run_id: str) -> str:
         return self._latest_attempt_row(run_id).attempt_id
 
+    def record_worker_subprocess_event(
+        self,
+        run_id: str,
+        *,
+        event_type: RunEventType,
+        worker_id: str,
+        execution_task_id: str,
+        request_id: str | None = None,
+        child_entrypoint: str | None = None,
+        timeout_seconds: int | None = None,
+        return_code: int | None = None,
+    ) -> None:
+        _require_non_empty("worker_id", worker_id)
+        _require_non_empty("execution_task_id", execution_task_id)
+        row = self._run_row_for_update(run_id)
+        attempt = self._latest_attempt_row(run_id)
+        self._validate_execution_task_row(
+            row,
+            attempt,
+            execution_task_id=execution_task_id,
+            worker_id=worker_id,
+        )
+        current_status = RunStatus(row.status)
+        metadata = {
+            "worker_id": worker_id,
+            "execution_task_id": execution_task_id,
+            **({} if child_entrypoint is None else {"child_entrypoint": child_entrypoint}),
+            **({} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}),
+            **({} if return_code is None else {"return_code": return_code}),
+        }
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt.attempt_id,
+            event_type=event_type,
+            from_status=current_status,
+            to_status=current_status,
+            request_id=request_id,
+            metadata=metadata,
+        )
+        self.session.flush()
+
     def validate_current_execution_task(
         self,
         run_id: str,

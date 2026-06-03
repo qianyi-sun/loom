@@ -18,6 +18,8 @@ class RunEventType(str, Enum):
     RECOVERED = "run.recovered"
     WORKER_FAILED = "run.worker_failed"
     WORKER_SUBPROCESS_FAILED = "run.worker_subprocess_failed"
+    WORKER_SUBPROCESS_STARTED = "worker.subprocess_started"
+    WORKER_SUBPROCESS_COMPLETED = "worker.subprocess_completed"
     SCHEDULER_CAPACITY_BLOCKED = "scheduler.capacity_blocked"
     ARTIFACT_CHUNK_RECORDED = "artifact.chunk_recorded"
     ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"

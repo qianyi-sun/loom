@@ -440,6 +440,8 @@ function runEventTypes() {
     "run.retried",
     "run.worker_failed",
     "run.worker_subprocess_failed",
+    "worker.subprocess_started",
+    "worker.subprocess_completed",
   ];
 }
 

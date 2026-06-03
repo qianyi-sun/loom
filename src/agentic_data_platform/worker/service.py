@@ -173,6 +173,16 @@ class SubprocessRunWorker:
                 interval_seconds=self.heartbeat_interval_seconds,
                 request_id=request_id,
             ):
+                _record_worker_subprocess_event(
+                    self.engine,
+                    run_id=claimed.run_id,
+                    event_type=RunEventType.WORKER_SUBPROCESS_STARTED,
+                    worker_id=self.worker_id,
+                    execution_task_id=execution_task_id,
+                    request_id=request_id,
+                    child_entrypoint=_child_entrypoint(args),
+                    timeout_seconds=self.timeout_seconds,
+                )
                 process = _run_child_command_with_cancel_monitor(
                     self.command_runner,
                     args,
@@ -204,6 +214,16 @@ class SubprocessRunWorker:
             )
             if stale is not None:
                 return _worker_result(stale)
+            _record_worker_subprocess_event(
+                self.engine,
+                run_id=claimed.run_id,
+                event_type=RunEventType.WORKER_SUBPROCESS_COMPLETED,
+                worker_id=self.worker_id,
+                execution_task_id=execution_task_id,
+                request_id=request_id,
+                child_entrypoint=_child_entrypoint(args),
+                return_code=process.returncode,
+            )
             return _fail_active_subprocess_run(
                 self.engine,
                 run_id=claimed.run_id,
@@ -221,6 +241,16 @@ class SubprocessRunWorker:
         if current_execution_task_id != execution_task_id:
             return _worker_result(completed)
         if completed.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
+            _record_worker_subprocess_event(
+                self.engine,
+                run_id=claimed.run_id,
+                event_type=RunEventType.WORKER_SUBPROCESS_COMPLETED,
+                worker_id=self.worker_id,
+                execution_task_id=execution_task_id,
+                request_id=request_id,
+                child_entrypoint=_child_entrypoint(args),
+                return_code=process.returncode,
+            )
             return _fail_active_subprocess_run(
                 self.engine,
                 run_id=claimed.run_id,
@@ -231,6 +261,16 @@ class SubprocessRunWorker:
                     stage="worker_subprocess_incomplete_result",
                 ),
             )
+        _record_worker_subprocess_event(
+            self.engine,
+            run_id=claimed.run_id,
+            event_type=RunEventType.WORKER_SUBPROCESS_COMPLETED,
+            worker_id=self.worker_id,
+            execution_task_id=execution_task_id,
+            request_id=request_id,
+            child_entrypoint=_child_entrypoint(args),
+            return_code=process.returncode,
+        )
         return _worker_result(completed)
 
 
@@ -621,6 +661,39 @@ def _execution_child_args(
     if request_id:
         args.extend(["--request-id", request_id])
     return args
+
+
+def _record_worker_subprocess_event(
+    engine: Engine,
+    *,
+    run_id: str,
+    event_type: RunEventType,
+    worker_id: str,
+    execution_task_id: str,
+    request_id: str | None,
+    child_entrypoint: str,
+    timeout_seconds: int | None = None,
+    return_code: int | None = None,
+) -> None:
+    with session_scope(engine) as session:
+        RunRepository(session).record_worker_subprocess_event(
+            run_id,
+            event_type=event_type,
+            worker_id=worker_id,
+            execution_task_id=execution_task_id,
+            request_id=request_id,
+            child_entrypoint=child_entrypoint,
+            timeout_seconds=timeout_seconds,
+            return_code=return_code,
+        )
+
+
+def _child_entrypoint(args: list[str]) -> str:
+    if "-m" in args:
+        module_index = args.index("-m") + 1
+        if module_index < len(args):
+            return args[module_index]
+    return Path(args[0]).name if args else "unknown"
 
 
 def _fail_active_subprocess_run(

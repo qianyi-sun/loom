@@ -86,6 +86,44 @@ class SubprocessRunWorkerTest(unittest.TestCase):
         self.assertEqual(args[args.index("--worker-id") + 1], "worker-subprocess-test")
         self.assertEqual(args[args.index("--request-id") + 1], "req-subprocess-delegate-001")
 
+    def test_subprocess_worker_records_child_start_and_completion_events(self):
+        _create_run(self.engine, "run_subprocess_events_001")
+        command_runner = FakeWorkerSubprocessCommandRunner(self.engine, terminal_status=RunStatus.SUCCEEDED)
+        worker = SubprocessRunWorker(
+            engine=self.engine,
+            worker_id="worker-subprocess-events-test",
+            command_runner=command_runner,
+            timeout_seconds=123,
+        )
+
+        result = worker.run_once(request_id="req-subprocess-events-001")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        with session_scope(self.engine) as session:
+            events = RunRepository(session).list_status_events("run_subprocess_events_001")
+        subprocess_events = [
+            event for event in events if event.event_type.startswith("worker.subprocess_")
+        ]
+        self.assertEqual(
+            [event.event_type for event in subprocess_events],
+            ["worker.subprocess_started", "worker.subprocess_completed"],
+        )
+        started, completed = subprocess_events
+        self.assertEqual(started.from_status, RunStatus.PROVISIONING)
+        self.assertEqual(started.to_status, RunStatus.PROVISIONING)
+        self.assertEqual(started.metadata["worker_id"], "worker-subprocess-events-test")
+        self.assertEqual(started.metadata["execution_task_id"], "run_subprocess_events_001:attempt:1")
+        self.assertEqual(started.metadata["timeout_seconds"], 123)
+        self.assertEqual(started.metadata["child_entrypoint"], "agentic_data_platform.worker.execution_child")
+        self.assertNotIn("child_args", started.metadata)
+        self.assertEqual(completed.from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(completed.to_status, RunStatus.SUCCEEDED)
+        self.assertEqual(completed.metadata["worker_id"], "worker-subprocess-events-test")
+        self.assertEqual(completed.metadata["execution_task_id"], "run_subprocess_events_001:attempt:1")
+        self.assertEqual(completed.metadata["return_code"], 0)
+        self.assertEqual(completed.metadata["child_entrypoint"], "agentic_data_platform.worker.execution_child")
+
     def test_subprocess_worker_marks_run_failed_when_child_exits_without_terminal_result(self):
         _create_run(self.engine, "run_subprocess_child_crash_001")
         command_runner = FakeWorkerSubprocessCommandRunner(self.engine, returncode=70, terminal_status=None)
@@ -278,10 +316,12 @@ class SubprocessRunWorkerTest(unittest.TestCase):
             loaded = RunRepository(session).get_run("run_subprocess_child_stale_001")
             events = RunRepository(session).list_status_events("run_subprocess_child_stale_001")
         self.assertEqual(loaded.status, RunStatus.QUEUED)
+        event_types = [event.event_type for event in events]
         self.assertEqual(
-            [event.event_type for event in events],
+            event_types,
             ["run.created", "run.claimed", "run.canceled", "run.retried"],
         )
+        self.assertNotIn("worker.subprocess_completed", event_types)
 
     def test_execute_claimed_run_skips_duplicate_delivery_after_first_child_locks_task(self):
         _create_run(self.engine, "run_subprocess_child_duplicate_001")
@@ -358,10 +398,18 @@ class SubprocessRunWorkerTest(unittest.TestCase):
             )
         self.assertEqual(loaded.status, RunStatus.QUEUED)
         self.assertEqual(current_execution_task_id, "run_subprocess_parent_stale_001:attempt:2")
+        event_types = [event.event_type for event in events]
         self.assertEqual(
-            [event.event_type for event in events],
-            ["run.created", "run.claimed", "run.canceled", "run.retried"],
+            event_types,
+            [
+                "run.created",
+                "run.claimed",
+                "worker.subprocess_started",
+                "run.canceled",
+                "run.retried",
+            ],
         )
+        self.assertNotIn("worker.subprocess_completed", event_types)
 
     def test_configured_subprocess_worker_does_not_build_parent_executor(self):
         settings = load_service_settings(

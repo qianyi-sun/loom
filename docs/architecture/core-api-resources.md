@@ -260,6 +260,7 @@ serializing dashboard payloads.
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
+  `worker.subprocess_started`, `worker.subprocess_completed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
   `artifact.upload_expired`, `artifact.upload_status_changed`,
   `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
@@ -410,7 +411,11 @@ serializing dashboard payloads.
   the result. The child acquires the attempt execution lock before work starts,
   stale child completions are ignored if the current attempt changed while the
   child was running, and duplicate deliveries are skipped before they reach the
-  executor. Nonzero, timeout, and incomplete-result child failures include
+  executor. The parent records metadata-only `worker.subprocess_started` and
+  `worker.subprocess_completed` events around the child process boundary for
+  replay/SSE consumers; those events carry worker id, execution task id,
+  child-entrypoint module, timeout, and return code without storing argv,
+  secrets, paths, or logs. Nonzero, timeout, and incomplete-result child failures include
   bounded, redacted stdout/stderr tails in run failure metadata. Docker terminal
   sandbox containers now carry platform/run/resource labels; scheduler recovery
   can remove labeled containers for recovered active runs after closing its DB
