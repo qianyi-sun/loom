@@ -84,6 +84,16 @@ def run_api_smoke(
 
         detail = _wait_for_terminal_run(config, active_client, headers=headers, sleep=sleep)
         _validate_detail_contract(config, detail)
+        trajectory_page = _response_json(
+            active_client.get(
+                f"/runs/{config.run_id}/trajectory",
+                params={"limit": 1},
+                headers=headers,
+            ),
+            expected_status=200,
+            context="read smoke run trajectory page",
+        )
+        _validate_trajectory_page_contract(config, trajectory_page)
 
         dashboard = _response_json(
             active_client.get(
@@ -198,21 +208,47 @@ def _validate_detail_contract(config: ApiSmokeConfig, detail: dict[str, Any]) ->
     if missing_artifacts:
         raise ApiSmokeError(f"smoke run missing artifacts: {', '.join(missing_artifacts)}")
 
-    trajectory = _list_at(detail, "trajectory")
-    if not trajectory:
-        raise ApiSmokeError("smoke run detail did not include full trajectory")
-    first_turn = _dict_value(trajectory[0], "trajectory[0]")
-    if _int_value(first_turn.get("exit_code"), "trajectory[0].exit_code") != 0:
-        raise ApiSmokeError(f"smoke run command failed: {first_turn.get('stderr')}")
-    changed_paths = first_turn.get("changed_paths") or []
-    if "smoke-output.txt" not in changed_paths:
-        raise ApiSmokeError(f"smoke run did not report final workspace output: {changed_paths}")
+    trajectory_page = _dict_at(detail, "trajectory_page")
+    if trajectory_page.get("run_id") != config.run_id:
+        raise ApiSmokeError(f"run detail trajectory page returned unexpected run_id: {trajectory_page.get('run_id')!r}")
+    if _int_value(trajectory_page.get("total_turn_count"), "trajectory_page.total_turn_count") < 1:
+        raise ApiSmokeError("smoke run detail trajectory preview did not report any terminal turns")
+
+    preview = _list_at(detail, "trajectory")
+    if not preview:
+        raise ApiSmokeError("smoke run detail did not include a trajectory preview")
+    _validate_smoke_turn(_dict_value(preview[0], "trajectory[0]"), "trajectory[0]")
 
     evaluator = _dict_at(run, "evaluator")
     if evaluator.get("status") != "completed":
         raise ApiSmokeError(f"smoke evaluator did not complete: {evaluator.get('status')!r}")
     if not evaluator.get("verbal_feedback_summary"):
         raise ApiSmokeError("smoke evaluator feedback summary is empty")
+
+
+def _validate_trajectory_page_contract(config: ApiSmokeConfig, payload: dict[str, Any]) -> None:
+    _validate_no_internal_leaks(payload)
+    if payload.get("run_id") != config.run_id:
+        raise ApiSmokeError(f"trajectory page returned unexpected run_id: {payload.get('run_id')!r}")
+    page = _dict_at(payload, "page")
+    if page.get("run_id") != config.run_id:
+        raise ApiSmokeError(f"trajectory page metadata returned unexpected run_id: {page.get('run_id')!r}")
+    if _int_value(page.get("returned_count"), "page.returned_count") < 1:
+        raise ApiSmokeError("smoke run trajectory page did not include any terminal turns")
+    if _int_value(page.get("total_turn_count"), "page.total_turn_count") < 1:
+        raise ApiSmokeError("smoke run trajectory page did not report any terminal turns")
+    trajectory = _list_at(payload, "trajectory")
+    if not trajectory:
+        raise ApiSmokeError("smoke run trajectory page was empty")
+    _validate_smoke_turn(_dict_value(trajectory[0], "trajectory[0]"), "trajectory[0]")
+
+
+def _validate_smoke_turn(first_turn: dict[str, Any], path: str) -> None:
+    if _int_value(first_turn.get("exit_code"), f"{path}.exit_code") != 0:
+        raise ApiSmokeError(f"smoke run command failed: {first_turn.get('stderr')}")
+    changed_paths = first_turn.get("changed_paths") or []
+    if "smoke-output.txt" not in changed_paths:
+        raise ApiSmokeError(f"smoke run did not report final workspace output: {changed_paths}")
 
 
 def _validate_no_internal_leaks(payload: dict[str, Any]) -> None:

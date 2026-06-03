@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #157 paginated run trajectory reads. `GET /runs/{run_id}` now returns
+  a bounded trajectory preview plus `trajectory_page` cursor metadata, while
+  `GET /runs/{run_id}/trajectory` exposes cursor-paginated terminal turns for
+  high-volume researcher detail views. API smoke and the no-build frontend now
+  exercise the paginated trajectory route instead of depending on full
+  trajectory payloads inside run detail.
 - Added #159/#160 required execution artifact upload diagnostics for terminal
   benchmark runs. If the trajectory JSONL or final workspace snapshot cannot be
   written after terminal commands complete, the run now fails at the artifact

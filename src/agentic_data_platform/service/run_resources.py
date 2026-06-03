@@ -40,6 +40,11 @@ from agentic_data_platform.service.security import (
 )
 from agentic_data_platform.service.run_event_fanout import NoopRunEventFanout, RunEventFanout
 
+_DEFAULT_TRAJECTORY_PREVIEW_LIMIT = 20
+_MAX_TRAJECTORY_PREVIEW_LIMIT = 100
+_DEFAULT_TRAJECTORY_PAGE_LIMIT = 100
+_MAX_TRAJECTORY_PAGE_LIMIT = 500
+
 
 class BenchmarkTaskInstanceRequest(BaseModel):
     benchmark_suite: str
@@ -199,12 +204,53 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
     def get_run(
         run_id: str,
         request: Request,
+        trajectory_after_turn_index: int = Query(-1, ge=-1),
+        trajectory_limit: int = Query(
+            _DEFAULT_TRAJECTORY_PREVIEW_LIMIT,
+            ge=0,
+            le=_MAX_TRAJECTORY_PREVIEW_LIMIT,
+        ),
         session: Session = Depends(session_dependency),
     ) -> dict[str, Any]:
         auth = require_authenticated_user(request, session)
-        run = _get_run_or_404(session, run_id)
-        require_project_role(session, auth, run.project_id, minimum_role="viewer")
-        return _run_detail_payload(request, session, run)
+        project_id = _get_run_project_id_or_404(session, run_id)
+        require_project_role(session, auth, project_id, minimum_role="viewer")
+        return _run_detail_payload(
+            request,
+            session,
+            run_id,
+            trajectory_after_turn_index=trajectory_after_turn_index,
+            trajectory_limit=trajectory_limit,
+        )
+
+    @app.get("/runs/{run_id}/trajectory", tags=["runs"], responses=_example_response(_RUN_TRAJECTORY_EXAMPLE))
+    def list_run_trajectory(
+        run_id: str,
+        request: Request,
+        after_turn_index: int = Query(-1, ge=-1),
+        limit: int = Query(
+            _DEFAULT_TRAJECTORY_PAGE_LIMIT,
+            ge=0,
+            le=_MAX_TRAJECTORY_PAGE_LIMIT,
+        ),
+        session: Session = Depends(session_dependency),
+    ) -> dict[str, Any]:
+        auth = require_authenticated_user(request, session)
+        project_id = _get_run_project_id_or_404(session, run_id)
+        require_project_role(session, auth, project_id, minimum_role="viewer")
+        page = RunRepository(session).list_run_trajectory_turns(
+            run_id,
+            after_turn_index=after_turn_index,
+            limit=limit,
+        )
+        return _with_request_id(
+            request,
+            {
+                "run_id": run_id,
+                "trajectory": [_terminal_turn_payload(turn) for turn in page.turns],
+                "page": _trajectory_page_payload(page),
+            },
+        )
 
     @app.get("/runs/{run_id}/events", tags=["runs"], responses=_example_response(_RUN_EVENTS_EXAMPLE))
     def list_run_events(
@@ -447,6 +493,13 @@ def _get_run_or_404(session: Session, run_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
 
 
+def _get_run_project_id_or_404(session: Session, run_id: str) -> str:
+    try:
+        return RunRepository(session).get_run_project_id(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
+
+
 def _run_from_create_request(
     payload: RunCreateRequest,
     *,
@@ -550,17 +603,43 @@ def _audit_run_event(
     )
 
 
-def _run_detail_payload(request: Request, session: Session, run: RunRecord) -> dict[str, Any]:
+def _run_detail_payload(
+    request: Request,
+    session: Session,
+    run: RunRecord | str,
+    *,
+    trajectory_after_turn_index: int = -1,
+    trajectory_limit: int = _DEFAULT_TRAJECTORY_PREVIEW_LIMIT,
+) -> dict[str, Any]:
     repository = RunRepository(session)
-    events = [_status_event_payload(event) for event in repository.list_status_events(run.run_id)]
+    run_id = run.run_id if isinstance(run, RunRecord) else run
+    events = [_status_event_payload(event) for event in repository.list_status_events(run_id)]
+    trajectory_page = repository.list_run_trajectory_turns(
+        run_id,
+        after_turn_index=trajectory_after_turn_index,
+        limit=trajectory_limit,
+    )
     return _with_request_id(
         request,
         {
-            "run": repository.get_run_dashboard_summary(run.run_id),
-            "trajectory": [_terminal_turn_payload(turn) for turn in run.trajectory],
+            "run": repository.get_run_dashboard_summary(run_id),
+            "trajectory": [_terminal_turn_payload(turn) for turn in trajectory_page.turns],
+            "trajectory_page": _trajectory_page_payload(trajectory_page),
             "lifecycle_events": events,
         },
     )
+
+
+def _trajectory_page_payload(page) -> dict[str, Any]:
+    return {
+        "run_id": page.run_id,
+        "after_turn_index": page.after_turn_index,
+        "limit": page.limit,
+        "returned_count": page.returned_count,
+        "total_turn_count": page.total_turn_count,
+        "next_after_turn_index": page.next_after_turn_index,
+        "has_more": page.has_more,
+    }
 
 
 def _terminal_turn_payload(turn: TerminalTurn) -> dict[str, Any]:
@@ -812,10 +891,30 @@ _TRAJECTORY_TURN_EXAMPLE = {
     "metadata": {"sandbox_run_id": "run_001", "timed_out": False},
 }
 _RUNS_EXAMPLE = {"runs": [_RUN_PAYLOAD_EXAMPLE], "request_id": "req_123"}
+_TRAJECTORY_PAGE_EXAMPLE = {
+    "run_id": "run_001",
+    "after_turn_index": -1,
+    "limit": _DEFAULT_TRAJECTORY_PREVIEW_LIMIT,
+    "returned_count": 1,
+    "total_turn_count": 1,
+    "next_after_turn_index": None,
+    "has_more": False,
+}
+_RUN_TRAJECTORY_PAGE_EXAMPLE = {
+    **_TRAJECTORY_PAGE_EXAMPLE,
+    "limit": _DEFAULT_TRAJECTORY_PAGE_LIMIT,
+}
 _RUN_EXAMPLE = {
     "run": _RUN_PAYLOAD_EXAMPLE,
     "trajectory": [_TRAJECTORY_TURN_EXAMPLE],
+    "trajectory_page": _TRAJECTORY_PAGE_EXAMPLE,
     "lifecycle_events": [_LIFECYCLE_EVENT_EXAMPLE],
+    "request_id": "req_123",
+}
+_RUN_TRAJECTORY_EXAMPLE = {
+    "run_id": "run_001",
+    "trajectory": [_TRAJECTORY_TURN_EXAMPLE],
+    "page": _RUN_TRAJECTORY_PAGE_EXAMPLE,
     "request_id": "req_123",
 }
 _RUN_EVENTS_EXAMPLE = {

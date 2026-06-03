@@ -39,6 +39,15 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(client.requests[0]["json"]["project_id"], "pilot-project")
         self.assertEqual(client.requests[0]["json"]["run_id"], "api_smoke_test_001")
         self.assertIn("worker_commands", client.requests[0]["json"]["metadata"])
+        self.assertIn(
+            {
+                "method": "GET",
+                "path": "/runs/api_smoke_test_001/trajectory",
+                "params": {"limit": 1},
+                "headers": {"Authorization": "Bearer [REDACTED_TOKEN]", "X-Request-ID": "api_smoke_test_001-smoke"},
+            },
+            client.requests,
+        )
         self.assertEqual(client.requests[-1]["path"], "/dashboard/progress")
 
     def test_api_smoke_fails_when_run_detail_leaks_local_paths(self):
@@ -89,7 +98,7 @@ class ApiSmokeTest(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-        run_detail_requests = [request for request in client.requests if request["path"].startswith("/runs/")]
+        run_detail_requests = [request for request in client.requests if request["path"] == "/runs/api_smoke_test_003"]
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(len(run_detail_requests), 2)
 
@@ -101,10 +110,12 @@ class FakeApiClient:
         run_details: list[dict],
         dashboard: dict,
         run_detail_statuses: list[int] | None = None,
+        trajectory_page: dict | None = None,
     ) -> None:
         self.run_details = list(run_details)
         self.run_detail_statuses = list(run_detail_statuses or [200 for _ in run_details])
         self.dashboard = dashboard
+        self.trajectory_page = trajectory_page
         self.requests: list[dict] = []
 
     def post(self, path: str, *, json: dict, headers: dict) -> "FakeResponse":
@@ -113,6 +124,8 @@ class FakeApiClient:
 
     def get(self, path: str, *, params: dict | None = None, headers: dict) -> "FakeResponse":
         self.requests.append({"method": "GET", "path": path, "params": params or {}, "headers": headers})
+        if path.endswith("/trajectory"):
+            return FakeResponse(200, self.trajectory_page or _trajectory_page(path.split("/")[2]))
         if path.startswith("/runs/"):
             payload = self.run_details.pop(0) if len(self.run_details) > 1 else self.run_details[0]
             status_code = (
@@ -181,7 +194,41 @@ def _run_detail(
                 "changed_paths": ["smoke-output.txt"],
             }
         ][:turn_count],
+        "trajectory_page": {
+            "run_id": run_id,
+            "after_turn_index": -1,
+            "limit": 20,
+            "returned_count": turn_count,
+            "total_turn_count": turn_count,
+            "next_after_turn_index": None,
+            "has_more": False,
+        },
         "lifecycle_events": [],
+    }
+
+
+def _trajectory_page(run_id: str = "api_smoke_test_001") -> dict:
+    return {
+        "run_id": run_id,
+        "trajectory": [
+            {
+                "turn_index": 0,
+                "command": "python -c \"from pathlib import Path; Path('smoke-output.txt').write_text('api smoke ok')\"",
+                "stdout": "api smoke ok\n",
+                "stderr": "",
+                "exit_code": 0,
+                "changed_paths": ["smoke-output.txt"],
+            }
+        ],
+        "page": {
+            "run_id": run_id,
+            "after_turn_index": -1,
+            "limit": 1,
+            "returned_count": 1,
+            "total_turn_count": 1,
+            "next_after_turn_index": None,
+            "has_more": False,
+        },
     }
 
 

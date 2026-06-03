@@ -146,10 +146,101 @@ class RunResourcesTest(unittest.TestCase):
             {
                 "run": RunDashboardProjection.from_run(self.completed_run).to_dict(),
                 "trajectory": [_trajectory_payload(turn) for turn in self.completed_run.trajectory],
+                "trajectory_page": {
+                    "run_id": "run_001",
+                    "after_turn_index": -1,
+                    "limit": 20,
+                    "returned_count": 1,
+                    "total_turn_count": 1,
+                    "next_after_turn_index": None,
+                    "has_more": False,
+                },
                 "lifecycle_events": [],
                 "request_id": "req-run-001",
             },
         )
+
+    def test_get_run_returns_bounded_trajectory_preview_with_page_metadata(self):
+        with session_scope(self.engine) as session:
+            RunRepository(session).save_run(
+                _completed_run_with_turns("run_many_turns_001", project_id="pilot-project", turn_count=25)
+            )
+
+        response = self.client.get(
+            "/runs/run_many_turns_001",
+            params={"trajectory_limit": 5},
+            headers={"X-Request-ID": "req-run-trajectory-preview-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-run-trajectory-preview-001")
+        self.assertEqual([turn["turn_index"] for turn in payload["trajectory"]], [0, 1, 2, 3, 4])
+        self.assertEqual(
+            payload["trajectory_page"],
+            {
+                "run_id": "run_many_turns_001",
+                "after_turn_index": -1,
+                "limit": 5,
+                "returned_count": 5,
+                "total_turn_count": 25,
+                "next_after_turn_index": 4,
+                "has_more": True,
+            },
+        )
+
+    def test_list_run_trajectory_returns_cursor_page(self):
+        with session_scope(self.engine) as session:
+            RunRepository(session).save_run(
+                _completed_run_with_turns("run_many_turns_002", project_id="pilot-project", turn_count=12)
+            )
+
+        response = self.client.get(
+            "/runs/run_many_turns_002/trajectory",
+            params={"after_turn_index": 4, "limit": 3},
+            headers={"X-Request-ID": "req-run-trajectory-page-001"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["request_id"], "req-run-trajectory-page-001")
+        self.assertEqual(payload["run_id"], "run_many_turns_002")
+        self.assertEqual([turn["turn_index"] for turn in payload["trajectory"]], [5, 6, 7])
+        self.assertEqual(
+            payload["page"],
+            {
+                "run_id": "run_many_turns_002",
+                "after_turn_index": 4,
+                "limit": 3,
+                "returned_count": 3,
+                "total_turn_count": 12,
+                "next_after_turn_index": 7,
+                "has_more": True,
+            },
+        )
+
+    def test_list_run_trajectory_enforces_project_access(self):
+        with session_scope(self.engine) as session:
+            identities = IdentityRepository(session)
+            identities.create_team(team_id="private-team", name="Private Team")
+            identities.create_user(
+                user_id="private-user",
+                email="private@example.com",
+                display_name="Private User",
+                team_id="private-team",
+            )
+            ProjectRepository(session).create_project(
+                project_id="private-project",
+                name="Private Project",
+                owner_team_id="private-team",
+            )
+            RunRepository(session).save_run(
+                _completed_run_with_turns("run_private_trajectory", project_id="private-project", turn_count=2)
+            )
+
+        response = self.client.get("/runs/run_private_trajectory/trajectory")
+
+        self.assertEqual(response.status_code, 403)
 
     def test_get_run_reads_clean_dashboard_projection_summary_without_child_hydration(self):
         with session_scope(self.engine) as session:
@@ -177,6 +268,18 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 3)
         self.assertEqual(payload["run"]["evaluator"]["score"], 0.91)
         self.assertEqual(payload["trajectory"], [])
+        self.assertEqual(
+            payload["trajectory_page"],
+            {
+                "run_id": "run_001",
+                "after_turn_index": -1,
+                "limit": 20,
+                "returned_count": 0,
+                "total_turn_count": 0,
+                "next_after_turn_index": None,
+                "has_more": False,
+            },
+        )
 
     def test_get_run_returns_404_for_missing_run(self):
         response = self.client.get("/runs/missing-run")
@@ -899,23 +1002,28 @@ def _app(engine):
 
 
 def _completed_run(run_id: str, *, project_id: str) -> RunRecord:
+    return _completed_run_with_turns(run_id, project_id=project_id, turn_count=1)
+
+
+def _completed_run_with_turns(run_id: str, *, project_id: str, turn_count: int) -> RunRecord:
     run = _base_run(run_id, project_id=project_id)
     run.transition_to(RunStatus.PROVISIONING)
     run.transition_to(RunStatus.RUNNING)
-    run.add_turn(
-        TerminalTurn(
-            turn_index=0,
-            command="python solve.py",
-            cwd="/workspace",
-            started_at=datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc),
-            completed_at=datetime(2026, 5, 28, 12, 0, 2, tzinfo=timezone.utc),
-            exit_code=0,
-            stdout="created answer.xlsx\n",
-            stderr="",
-            changed_paths=["answer.xlsx"],
-            model_call_id="call_001",
+    for index in range(turn_count):
+        run.add_turn(
+            TerminalTurn(
+                turn_index=index,
+                command="python solve.py" if index == 0 else f"python step_{index}.py",
+                cwd="/workspace",
+                started_at=datetime(2026, 5, 28, 12, index, 0, tzinfo=timezone.utc),
+                completed_at=datetime(2026, 5, 28, 12, index, 2, tzinfo=timezone.utc),
+                exit_code=0,
+                stdout="created answer.xlsx\n" if index == 0 else f"completed step {index}\n",
+                stderr="",
+                changed_paths=["answer.xlsx"] if index == 0 else [f"step_{index}.txt"],
+                model_call_id=f"call_{index + 1:03d}",
+            )
         )
-    )
     run.transition_to(RunStatus.EVALUATING)
     run.attach_artifact(
         ArtifactRef(

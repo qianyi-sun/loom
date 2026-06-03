@@ -18,10 +18,10 @@ Issues #52 and #53 expose the first Postgres-backed resource and run lifecycle
 surface for PM dashboards, researcher inspection, and future frontend
 development. The API is still an internal control-plane surface, but it now has
 stable routes for projects, benchmark tasks, queued run submission, lifecycle
-events, run summaries, run detail trajectories, artifacts, evaluator feedback,
-artifact chunk metadata, PM progress summaries, frontend session login,
-model/harness discovery, run-scoped telemetry, artifact bundle download,
-cancel, and retry.
+events, run summaries, bounded run detail trajectory previews, paginated
+trajectory reads, artifacts, evaluator feedback, artifact chunk metadata, PM
+progress summaries, frontend session login, model/harness discovery,
+run-scoped telemetry, artifact bundle download, cancel, and retry.
 
 The implementation deliberately reuses existing domain and dashboard projection
 contracts rather than introducing a second API-only data model.
@@ -79,7 +79,8 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /harbor/agent-adaptation` | Preflight one selected Harbor agent/model/backend combination and report required env contract or actionable gaps | `HarborAgentProvider` + `DevProviderConfigRegistry` |
 | `POST /runs` | Create a durable queued run for worker execution | `RunRepository.create_run()` + `RunDashboardProjection` |
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_run_dashboard_summaries()` + `run_dashboard_projections` fallback |
-| `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run_dashboard_summary()` + bounded `RunRepository.get_run()` detail fields + `RunRepository.list_status_events()` |
+| `GET /runs/{run_id}` | Inspect one dashboard-ready run plus a bounded trajectory preview, trajectory page metadata, and lifecycle events | `RunRepository.get_run_dashboard_summary()` + `RunRepository.list_run_trajectory_turns()` + `RunRepository.list_status_events()` |
+| `GET /runs/{run_id}/trajectory` | Read terminal trajectory turns by cursor for researcher detail views | `RunRepository.list_run_trajectory_turns()` |
 | `GET /runs/{run_id}/events` | Replay durable run lifecycle/progress events after an optional `after_seq` watermark | `RunRepository.list_status_events(after_seq=...)` |
 | `GET /runs/{run_id}/stream` | Stream replayable run events as SSE, using Postgres as the durable event source plus optional Redis commit-signal fanout/hot buffers for live wakeups | `RunRepository.list_status_events(after_seq=...)` + optional `RedisRunEventFanout` |
 | `GET /runs/{run_id}/telemetry` | Inspect scoped run, worker, host, and sandbox health for live monitors | `RunRepository.get_run()` + stdlib host metrics |
@@ -115,11 +116,15 @@ shape.
 summary now uses the same clean `run_dashboard_projections` payload preferred
 by lists, falling back to hydrated `RunRecord` projection when the projection is
 missing or dirty. The bounded `trajectory` preview array still comes from
-detail child rows and includes command, cwd, timestamps, exit code,
-stdout/stderr previews, changed paths, model call id, and turn metadata, plus
-lifecycle events. Full trajectory and log payloads are object-store artifacts
-surfaced through artifact metadata and the artifact-bundle download. The list
-endpoint intentionally does not embed trajectories.
+terminal turn rows and includes command, cwd, timestamps, exit code,
+stdout/stderr previews, changed paths, model call id, and turn metadata. The
+companion `trajectory_page` object records `after_turn_index`, `limit`,
+`returned_count`, `total_turn_count`, `next_after_turn_index`, and `has_more`
+so clients can continue through `GET /runs/{run_id}/trajectory`. Lifecycle
+events remain embedded for detail watermarks. Full trajectory and log payloads
+are object-store artifacts surfaced through artifact metadata and the
+artifact-bundle download. The list endpoint intentionally does not embed
+trajectories.
 
 Evaluator projections expose `evaluator` as the latest primary summary for
 existing clients and `evaluator_results` as the full side-by-side collection
@@ -152,8 +157,9 @@ reason, prior projection state, and source event sequence metadata. `GET
 projection rows for list, detail, aggregate, artifact, evaluator, and score
 data, and fall back to hydrated `RunRecord` values only when a row is missing
 or dirty. Current `GET /runs/{run_id}` still hydrates bounded trajectory
-preview rows for detail compatibility; larger future detail payloads should
-remain object-store-backed instead of moving into Postgres.
+preview rows for detail compatibility. Large or high-volume detail views should
+use `GET /runs/{run_id}/trajectory` for paginated terminal turns and artifact
+bundle/chunk routes for durable object-backed payload bytes.
 
 `GET /models` returns only safe model selection metadata: provider id, provider
 config id, display/model name, API mode, source, disabled/error state, basic
@@ -244,8 +250,9 @@ serializing dashboard payloads.
   consumers share the same visible status/progress/evaluator payload.
 - Run list responses stay lightweight. Run detail exposes bounded terminal
   stdout/stderr previews so researcher views can inspect recent execution
-  context without inflating Postgres rows. The full terminal trajectory remains
-  object-store-backed and downloadable from artifact bundles.
+  context without inflating response payloads. `GET /runs/{run_id}/trajectory`
+  paginates terminal turn rows for longer traces; full terminal trajectory bytes
+  remain object-store-backed and downloadable from artifact bundles.
 - Run projections include `created_by_user_id`, `failure_reason`, and submitted
   evaluator configurations so dashboard clients can display ownership and
   planned evaluator mode before worker execution produces evaluator results.
@@ -545,7 +552,8 @@ serializing dashboard payloads.
   these before broad internal rollout.
 - `GET /runs/{run_id}` now reads its dashboard-safe summary from clean
   projection rows when available, but still hydrates bounded trajectory preview
-  rows for the detail payload. Keep larger future detail payloads object-backed
-  and add dedicated paginated reads before broad rollout.
+  rows for the detail payload. Larger trajectory views should use the dedicated
+  `GET /runs/{run_id}/trajectory` cursor route, while artifact bytes stay on
+  object-backed bundle/chunk routes.
 - The first service tests use SQLite-backed migrations for speed. Shared dev
   Postgres validation happens through the GitHub Actions deployment path.

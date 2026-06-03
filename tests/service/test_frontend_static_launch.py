@@ -361,6 +361,101 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertIn("stdout chunk 0", payload["upload"]["detail"])
         self.assertIn("object store write failed", payload["upload"]["detail"])
 
+    def test_refresh_run_reads_paginated_trajectory_endpoint(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required for static frontend payload tests")
+
+        script = _node_harness(
+            """
+            const elements = {};
+            function makeElement(id) {
+              if (!elements[id]) {
+                elements[id] = {
+                  id,
+                  disabled: false,
+                  innerHTML: "",
+                  textContent: "",
+                  classList: { add: () => null, remove: () => null },
+                  addEventListener: () => null,
+                };
+              }
+              return elements[id];
+            }
+            document.getElementById = makeElement;
+            const requests = [];
+            fetch = async (path) => {
+              requests.push(String(path));
+              let payload;
+              if (path === "/runs/run_static_001") {
+                payload = {
+                  run: {
+                    run_id: "run_static_001",
+                    status: "succeeded",
+                    progress: { artifact_count: 3, turn_count: 2 },
+                    evaluator: { verbal_feedback_summary: "ok" },
+                  },
+                  lifecycle_events: [{ seq: 7, event_type: "run.succeeded", to_status: "succeeded", metadata: {} }],
+                  trajectory: [
+                    { turn_index: 0, command: "old-preview", exit_code: 0, stdout: "old", stderr: "" },
+                  ],
+                };
+              } else if (path === "/runs/run_static_001/trajectory?limit=50") {
+                payload = {
+                  run_id: "run_static_001",
+                  trajectory: [
+                    { turn_index: 0, command: "python solve.py", exit_code: 0, stdout: "ok", stderr: "" },
+                    { turn_index: 1, command: "python verify.py", exit_code: 0, stdout: "verified", stderr: "" },
+                  ],
+                  page: {
+                    run_id: "run_static_001",
+                    after_turn_index: -1,
+                    limit: 50,
+                    returned_count: 2,
+                    total_turn_count: 2,
+                    next_after_turn_index: null,
+                    has_more: false,
+                  },
+                };
+              } else if (path === "/runs/run_static_001/telemetry") {
+                payload = {
+                  run: { run_id: "run_static_001", status: "succeeded" },
+                  sandbox: { status: "exited" },
+                  host: { cpu: { load_per_cpu: 0.25 }, memory: { used_ratio: 0.5 } },
+                  worker: { queue_depth: 0 },
+                };
+              } else {
+                throw new Error(`unexpected fetch ${path}`);
+              }
+              return { ok: true, json: async () => payload };
+            };
+
+            refreshRun("run_static_001").then(() => {
+              console.log(JSON.stringify({
+                requests,
+                watermark: state.eventSeq,
+                trajectoryText: elements["trajectory-log"].textContent,
+              }));
+            });
+            """
+        )
+
+        result = subprocess.run([node, "-e", script], check=True, text=True, capture_output=True)
+        payload = json.loads(result.stdout)
+
+        self.assertEqual(
+            payload["requests"],
+            [
+                "/runs/run_static_001",
+                "/runs/run_static_001/trajectory?limit=50",
+                "/runs/run_static_001/telemetry",
+            ],
+        )
+        self.assertEqual(payload["watermark"], 7)
+        self.assertIn("python solve.py", payload["trajectoryText"])
+        self.assertIn("python verify.py", payload["trajectoryText"])
+        self.assertNotIn("old-preview", payload["trajectoryText"])
+
 
 def _node_harness(assertion_script: str) -> str:
     return textwrap.dedent(

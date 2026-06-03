@@ -101,6 +101,33 @@ class ExpiredArtifactUploadRecord:
     expired_at: datetime
 
 
+@dataclass(frozen=True)
+class TerminalTurnPage:
+    run_id: str
+    after_turn_index: int
+    limit: int
+    total_turn_count: int
+    turns: list[TerminalTurn]
+
+    @property
+    def returned_count(self) -> int:
+        return len(self.turns)
+
+    @property
+    def next_after_turn_index(self) -> int | None:
+        if not self.turns:
+            return None
+        last_index = self.turns[-1].turn_index
+        if last_index >= self.total_turn_count - 1:
+            return None
+        return last_index
+
+    @property
+    def has_more(self) -> bool:
+        next_after = self.next_after_turn_index
+        return next_after is not None and next_after < self.total_turn_count - 1
+
+
 def _ranked_queued_run_id_query(*, limit: int):
     queued_fairness_rank = (
         select(
@@ -1984,6 +2011,10 @@ class RunRepository:
         row = _required(self.session.get(RunRow, run_id), "run", run_id)
         return self._run_record(row)
 
+    def get_run_project_id(self, run_id: str) -> str:
+        project_id = self.session.scalar(select(RunRow.project_id).where(RunRow.run_id == run_id))
+        return _required(project_id, "run", run_id)
+
     def get_run_dashboard_summary(self, run_id: str) -> dict[str, Any]:
         row = _required(self.session.get(RunRow, run_id), "run", run_id)
         projection = self.session.get(RunDashboardProjectionRow, run_id)
@@ -1991,6 +2022,45 @@ class RunRepository:
         if payload is not None:
             return payload
         return RunDashboardProjection.from_run(self._run_record(row)).to_dict()
+
+    def list_run_trajectory_turns(
+        self,
+        run_id: str,
+        *,
+        after_turn_index: int = -1,
+        limit: int = 20,
+    ) -> TerminalTurnPage:
+        _required(self.session.get(RunRow, run_id), "run", run_id)
+        if after_turn_index < -1:
+            raise ValueError("after_turn_index must be greater than or equal to -1")
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to 0")
+        attempt = self._latest_attempt_row(run_id)
+        filters = (
+            RunTerminalTurnRow.run_id == run_id,
+            RunTerminalTurnRow.attempt_id == attempt.attempt_id,
+        )
+        total_turn_count = int(
+            self.session.scalar(select(func.count()).select_from(RunTerminalTurnRow).where(*filters)) or 0
+        )
+        rows = []
+        if limit > 0:
+            rows = list(
+                self.session.scalars(
+                    select(RunTerminalTurnRow)
+                    .where(*filters)
+                    .where(RunTerminalTurnRow.turn_index > after_turn_index)
+                    .order_by(RunTerminalTurnRow.turn_index)
+                    .limit(limit)
+                )
+            )
+        return TerminalTurnPage(
+            run_id=run_id,
+            after_turn_index=after_turn_index,
+            limit=limit,
+            total_turn_count=total_turn_count,
+            turns=[_terminal_turn(row) for row in rows],
+        )
 
     def list_runs(
         self,

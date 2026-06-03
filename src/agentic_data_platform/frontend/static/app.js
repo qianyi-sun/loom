@@ -460,9 +460,13 @@ function runEventTypes() {
 }
 
 async function refreshRun(runId) {
-  const [detail, telemetry] = await Promise.all([api(`/runs/${runId}`), api(`/runs/${runId}/telemetry`)]);
+  const [detail, trajectoryPage, telemetry] = await Promise.all([
+    api(`/runs/${runId}`),
+    api(`/runs/${runId}/trajectory?limit=50`),
+    api(`/runs/${runId}/telemetry`),
+  ]);
   state.eventSeq = Math.max(state.eventSeq, eventWatermarkFromDetail(detail));
-  renderRun(detail, telemetry);
+  renderRun(detail, telemetry, trajectoryPage);
 }
 
 function eventWatermarkFromDetail(detail) {
@@ -673,7 +677,7 @@ function renderLifecycleEvent(event) {
   );
 }
 
-function renderRun(detail, telemetry) {
+function renderRun(detail, telemetry, trajectoryPage = null) {
   const run = detail.run;
   const terminal = ["succeeded", "failed", "canceled"].includes(run.status);
   setText("run-title", run.run_id);
@@ -691,7 +695,7 @@ function renderRun(detail, telemetry) {
     ? lifecycle.map(renderLifecycleEvent).join("")
     : "<li>Created locally in the browser session.</li>";
 
-  const trajectory = detail.trajectory || [];
+  const trajectory = Array.isArray(trajectoryPage?.trajectory) ? trajectoryPage.trajectory : detail.trajectory || [];
   setText(
     "trajectory-log",
     trajectory.length
