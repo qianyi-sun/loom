@@ -167,10 +167,11 @@ def _seed_queued_runs(
     queued_run_count: int,
 ) -> None:
     with session_scope(engine) as session:
-        IdentityRepository(session).create_team(team_id=project_id, name="Scheduler Race Smoke")
+        smoke_name = f"Scheduler Race Smoke {project_id}"
+        IdentityRepository(session).create_team(team_id=project_id, name=smoke_name)
         ProjectRepository(session).create_project(
             project_id=project_id,
-            name="Scheduler Race Smoke",
+            name=smoke_name,
             owner_team_id=project_id,
             description="Synthetic scheduler multi-instance race smoke project",
         )

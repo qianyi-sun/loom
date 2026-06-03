@@ -13,6 +13,39 @@ from agentic_data_platform.scheduler.race_smoke import run_scheduler_race_smoke
 
 
 class SchedulerRaceSmokeTest(unittest.TestCase):
+    def test_race_smoke_can_run_repeatedly_in_shared_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database_path = Path(tmpdir) / "race-smoke-repeat.sqlite"
+            engine = create_database_engine(
+                f"sqlite+pysqlite:///{database_path}",
+                connect_args={"check_same_thread": False},
+            )
+            try:
+                upgrade_database(engine)
+
+                first = run_scheduler_race_smoke(
+                    engine=engine,
+                    run_id_prefix="race_smoke_repeat_first",
+                    scheduler_count=2,
+                    queued_run_count=2,
+                    max_active_runs=1,
+                    project_max_active_runs=1,
+                )
+                second = run_scheduler_race_smoke(
+                    engine=engine,
+                    run_id_prefix="race_smoke_repeat_second",
+                    scheduler_count=2,
+                    queued_run_count=2,
+                    max_active_runs=1,
+                    project_max_active_runs=1,
+                )
+            finally:
+                engine.dispose()
+
+        self.assertNotEqual(first.project_id, second.project_id)
+        self.assertEqual(first.cleanup_status_counts[RunStatus.CANCELED.value], 2)
+        self.assertEqual(second.cleanup_status_counts[RunStatus.CANCELED.value], 2)
+
     def test_race_smoke_reports_capacity_safe_concurrent_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database_path = Path(tmpdir) / "race-smoke.sqlite"

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Fixed #156 shared-dev scheduler race smoke repeatability. Synthetic race
+  smoke teams and projects now use a run-scoped display name, so repeated
+  deploys against the same durable Postgres database no longer trip the
+  `teams.name` uniqueness constraint left by earlier smoke evidence.
 - Added #157/#158 worker subprocess lifecycle events. `SubprocessRunWorker`
   now records metadata-only `worker.subprocess_started` and
   `worker.subprocess_completed` events around the child process boundary, and
