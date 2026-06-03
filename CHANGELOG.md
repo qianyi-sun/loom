@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #159/#160 artifact bundle coverage for persisted artifact chunks.
+  `/runs/{run_id}/artifact-bundle` now includes `artifact-chunks.json` with
+  sanitized chunk metadata and downloads completed chunk payloads from the
+  configured object store under `artifact-chunks/<kind>/`. Non-completed chunks
+  are recorded in `manifest.json` with upload status and error reason instead
+  of fetching object bytes, so partial terminal-log upload failures stay
+  visible without leaking stale payloads or storage paths.
 - Added the first #156 scheduler observed-token window gate. Dispatch can now
   combine completed-run model-provider usage telemetry from evaluator
   `provider_usage` metadata with a queued run's trusted

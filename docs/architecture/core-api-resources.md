@@ -88,7 +88,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /runs/{run_id}/artifacts` | List sanitized artifact references for a run | `RunRepository.get_run_dashboard_summary()` |
 | `GET /runs/{run_id}/artifact-chunks` | List project-scoped stdout/stderr/trajectory/artifact chunk metadata with optional attempt, artifact, kind, sequence cursor, and bounded limit filters | `RunRepository.list_artifact_chunks()` |
 | `GET /runs/{run_id}/artifact-chunks/content` | Download object-store bytes for one project-scoped completed chunk selected by artifact id, chunk kind, and sequence | `RunRepository.get_artifact_chunk()` + `Artifacpilot groupjectStore` |
-| `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
+| `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, artifact chunk metadata, lifecycle events, and available completed artifact/chunk payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `RunRepository.list_artifact_chunks()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunRepository.get_run_dashboard_summary()` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_dashboard_progress_records()` + aggregate projection |
 | `GET /ops/metrics` | Return scoped run status counts, queue depth, scheduler capacity-blocked diagnostics, and observed model-provider usage totals visible to the authenticated user | `RunRepository.list_runs()` + `RunRepository.list_scheduler_capacity_blocks()` |
@@ -345,16 +345,20 @@ serializing dashboard payloads.
   /runs/{run_id}/artifact-chunks/content` downloads a
   completed chunk payload through the platform API by artifact id, chunk kind,
   and sequence; non-completed upload states return structured errors without
-  fetching object storage or exposing storage keys. Dedicated object upload
-  transaction APIs remain #159 follow-up work.
+  fetching object storage or exposing storage keys. Remaining #159 work is
+  broader object-writer integration and final bundle/recovery consistency
+  across additional upload paths.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
-  lifecycle events, and any artifact payload files available from the configured
-  `Artifacpilot groupjectStore`. Bundle `lifecycle-events.json` uses the same event
-  payload shape as replay APIs, including the monotonic `seq` watermark, so
-  deployment smokes can compare bundle events with `/events` and one-shot SSE
-  replay. Missing object payloads are reported as generic bundle manifest errors
-  without leaking host paths or backend exception strings. Artifacts whose DB
+  artifact chunk metadata, lifecycle events, and any artifact or completed chunk
+  payload files available from the configured `Artifacpilot groupjectStore`. Bundle
+  `lifecycle-events.json` uses the same event payload shape as replay APIs,
+  including the monotonic `seq` watermark, so deployment smokes can compare
+  bundle events with `/events` and one-shot SSE replay. Bundle
+  `artifact-chunks.json` carries sanitized persisted chunk metadata, while
+  completed chunk bytes are written under `artifact-chunks/<kind>/`. Missing
+  object payloads are reported as generic bundle manifest errors without
+  leaking host paths or backend exception strings. Artifacts or chunks whose DB
   metadata has non-`completed` `upload_status` are treated as unavailable even
   if an object key exists; the manifest records `upload_status` and any
   `upload_error_reason` so partial upload state is visible to operators and

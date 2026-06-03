@@ -11,7 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import LocalArtifactStore
-from agentic_data_platform.domain.artifact_metadata import ArtifactUploadStatus
+from agentic_data_platform.domain.artifact_metadata import (
+    ArtifactChunkKind,
+    ArtifactChunkMetadata,
+    ArtifactUploadStatus,
+)
 from agentic_data_platform.domain.execution_events import RunEventType
 from agentic_data_platform.domain.run_records import (
     ArtifactKind,
@@ -228,6 +232,7 @@ class FrontendE2EResourcesTest(unittest.TestCase):
                     "trajectory.jsonl",
                     "evaluation.json",
                     "artifact-metadata.json",
+                    "artifact-chunks.json",
                     "lifecycle-events.json",
                 },
             )
@@ -372,6 +377,89 @@ class FrontendE2EResourcesTest(unittest.TestCase):
         self.assertEqual(upload_errors[0]["upload_error_reason"], "object store write failed")
         self.assertIn("upload is failed", upload_errors[0]["message"])
         self.assertNotIn("should-not-be-downloaded.txt", rendered_bundle)
+
+    def test_artifact_bundle_includes_completed_chunk_payloads_and_failed_chunk_state(self):
+        stdout_key = (
+            "runs/run_frontend_001/tasks/task/attempts/"
+            "run_frontend_001-attempt-1/logs/stdout/000000.txt"
+        )
+        stderr_key = (
+            "runs/run_frontend_001/tasks/task/attempts/"
+            "run_frontend_001-attempt-1/logs/stderr/000000.txt"
+        )
+        with session_scope(self.engine) as session:
+            repository = RunRepository(session)
+            repository.record_artifact_chunk(
+                ArtifactChunkMetadata(
+                    run_id="run_frontend_001",
+                    attempt_id="run_frontend_001:attempt:1",
+                    artifact_id="run_frontend_001-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDOUT,
+                    chunk_sequence=0,
+                    storage_key=stdout_key,
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=len(b"full stdout chunk\n"),
+                    sha256="4" * 64,
+                    upload_status=ArtifactUploadStatus.COMPLETED,
+                    created_at=datetime(2026, 5, 29, 12, 0, 4, tzinfo=timezone.utc),
+                    metadata={"turn_index": 0, "stream": "stdout", "command": "python solve.py"},
+                )
+            )
+            repository.record_artifact_chunk(
+                ArtifactChunkMetadata(
+                    run_id="run_frontend_001",
+                    attempt_id="run_frontend_001:attempt:1",
+                    artifact_id="run_frontend_001-trajectory",
+                    chunk_kind=ArtifactChunkKind.STDERR,
+                    chunk_sequence=0,
+                    storage_key=stderr_key,
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=None,
+                    sha256=None,
+                    upload_status=ArtifactUploadStatus.FAILED,
+                    upload_error_reason="object store write failed",
+                    created_at=datetime(2026, 5, 29, 12, 0, 5, tzinfo=timezone.utc),
+                    metadata={"turn_index": 0, "stream": "stderr", "command": "python solve.py"},
+                )
+            )
+
+        with TemporaryDirectory() as temp_dir:
+            store = LocalArtifactStore(Path(temp_dir))
+            store.put_bytes(stdout_key, b"full stdout chunk\n", media_type="text/plain; charset=utf-8")
+            store.put_bytes(stderr_key, b"should not be downloaded\n", media_type="text/plain; charset=utf-8")
+            self.client.app.state.artifact_store = store
+
+            response = self.client.get(
+                "/runs/run_frontend_001/artifact-bundle",
+                headers={"Authorization": "Bearer [REDACTED_TOKEN]", "X-Request-ID": "req-bundle-chunks-001"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+            chunks_payload = json.loads(archive.read("artifact-chunks.json"))
+            stdout_payload = archive.read(
+                "artifact-chunks/stdout/run_frontend_001-trajectory-stdout-000000.txt"
+            ).decode("utf-8")
+            rendered_bundle = "\n".join(
+                archive.read(name).decode("utf-8") for name in sorted(names) if name.endswith((".json", ".jsonl"))
+            )
+
+        self.assertEqual(manifest["artifact_chunk_count"], 2)
+        self.assertEqual(manifest["artifact_chunk_payload_count"], 1)
+        self.assertEqual(len(manifest["artifact_chunk_content_errors"]), 1)
+        self.assertEqual(manifest["artifact_chunk_content_errors"][0]["upload_status"], "failed")
+        self.assertEqual(
+            manifest["artifact_chunk_content_errors"][0]["upload_error_reason"],
+            "object store write failed",
+        )
+        self.assertEqual(len(chunks_payload["chunks"]), 2)
+        self.assertIn("artifact-chunks/stdout/run_frontend_001-trajectory-stdout-000000.txt", names)
+        self.assertNotIn("artifact-chunks/stderr/run_frontend_001-trajectory-stderr-000000.txt", names)
+        self.assertEqual(stdout_payload, "full stdout chunk\n")
+        self.assertNotIn("should not be downloaded", rendered_bundle)
+        self.assertNotIn(str(temp_dir), rendered_bundle)
 
     def test_frontend_static_app_is_served_without_bearer_token(self):
         response = self.client.get("/app/", headers={"X-Request-ID": "req-app-001"})

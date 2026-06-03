@@ -307,7 +307,10 @@ trajectory/artifact chunks. Upload expiry also appends
 changes and expiry append `artifact.upload_status_changed` with previous/current
 status metadata. The chunk content endpoint downloads completed chunk payloads
 by metadata reference while rejecting non-completed upload states before object
-storage access.
+storage access. Artifact bundle generation also reads the same chunk index:
+`artifact-chunks.json` records sanitized chunk metadata, completed chunk
+payloads are included under `artifact-chunks/<kind>/`, and non-completed chunks
+are represented as manifest errors without object-store reads.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.
