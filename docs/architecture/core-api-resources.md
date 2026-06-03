@@ -284,8 +284,8 @@ serializing dashboard payloads.
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
   `artifact.bundle_available`, `artifact.upload_expired`,
   `artifact.upload_status_changed`,
-  `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
-  `projection.refreshed`, `sandbox.container_started`,
+  `log.chunk_recorded`, `evaluator.started`, `evaluator.completed`,
+  `evaluator.failed`, `projection.refreshed`, `sandbox.container_started`,
   `sandbox.container_completed`, `sandbox.resource_sampled`, and
   `sandbox.container_cleanup`.
   Worker heartbeat events carry safe liveness metadata only: worker id,

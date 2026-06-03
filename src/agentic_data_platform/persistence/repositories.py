@@ -3169,6 +3169,19 @@ class RunRepository:
         request_id: str | None,
     ) -> None:
         for result in run.all_evaluator_results():
+            self._append_status_event(
+                run_id=run.run_id,
+                attempt_id=attempt_id,
+                event_type=RunEventType.EVALUATOR_STARTED,
+                from_status=RunStatus.EVALUATING,
+                to_status=RunStatus.EVALUATING,
+                request_id=request_id,
+                metadata=_evaluator_started_event_metadata(
+                    result,
+                    worker_id=worker_id,
+                    execution_task_id=attempt_id,
+                ),
+            )
             event_type = (
                 RunEventType.EVALUATOR_COMPLETED
                 if result.status == "completed"
@@ -3813,6 +3826,22 @@ def _evaluator_event_metadata(
     if result.failure_reason is not None:
         metadata["failure_reason"] = result.failure_reason
     return metadata
+
+
+def _evaluator_started_event_metadata(
+    result: EvaluatorResult,
+    *,
+    worker_id: str,
+    execution_task_id: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "evaluator-started-event-v1",
+        "evaluator_id": result.evaluator_id,
+        "mode": result.mode,
+        "status": "started",
+        "worker_id": worker_id,
+        "execution_task_id": execution_task_id,
+    }
 
 
 def _safe_evaluator_artifact_ref(ref: str) -> str:

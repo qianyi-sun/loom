@@ -311,6 +311,15 @@ class FrontendStaticLaunchTest(unittest.TestCase):
                   bundle_endpoint: "/runs/run_static_001/artifact-bundle",
                 },
               }),
+              evaluatorStarted: lifecycleEventDisplay({
+                event_type: "evaluator.started",
+                to_status: "evaluating",
+                metadata: {
+                  evaluator_id: "mock-judge-v0",
+                  mode: "llm_judge",
+                  status: "started",
+                },
+              }),
             };
             console.log(JSON.stringify(result));
             """
@@ -331,6 +340,7 @@ class FrontendStaticLaunchTest(unittest.TestCase):
                 "run.claimed",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "evaluator.failed",
                 "run.succeeded",
@@ -376,6 +386,9 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertIn("3 artifacts", payload["bundle"]["detail"])
         self.assertIn("4 chunks", payload["bundle"]["detail"])
         self.assertIn("1 turns", payload["bundle"]["detail"])
+        self.assertEqual(payload["evaluatorStarted"]["title"], "Evaluator started")
+        self.assertIn("mock-judge-v0", payload["evaluatorStarted"]["detail"])
+        self.assertIn("mode llm_judge", payload["evaluatorStarted"]["detail"])
 
     def test_refresh_run_reads_paginated_trajectory_endpoint(self):
         node = shutil.which("node")

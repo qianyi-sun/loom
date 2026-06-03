@@ -2037,6 +2037,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "run.claimed",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
                 "artifact.bundle_available",
@@ -2124,10 +2125,21 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "run.claimed",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
             ],
         )
+        evaluator_started_event = next(event for event in events if event.event_type == "evaluator.started")
+        self.assertEqual(evaluator_started_event.from_status, RunStatus.EVALUATING)
+        self.assertEqual(evaluator_started_event.to_status, RunStatus.EVALUATING)
+        self.assertEqual(evaluator_started_event.metadata["evaluator_id"], "harbor-verifier-v1")
+        self.assertEqual(evaluator_started_event.metadata["mode"], "harbor_verifier")
+        self.assertEqual(evaluator_started_event.metadata["status"], "started")
+        self.assertEqual(evaluator_started_event.metadata["worker_id"], "worker-a")
+        self.assertEqual(evaluator_started_event.metadata["execution_task_id"], "run_worker_existing_evaluating:attempt:1")
+        self.assertNotIn("verbal_feedback", evaluator_started_event.metadata)
+        self.assertNotIn("metrics", evaluator_started_event.metadata)
         evaluator_event = next(event for event in events if event.event_type == "evaluator.completed")
         self.assertEqual(evaluator_event.from_status, RunStatus.EVALUATING)
         self.assertEqual(evaluator_event.to_status, RunStatus.EVALUATING)

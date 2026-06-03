@@ -31,6 +31,7 @@ class RunEventType(str, Enum):
     SANDBOX_CONTAINER_COMPLETED = "sandbox.container_completed"
     SANDBOX_RESOURCE_SAMPLED = "sandbox.resource_sampled"
     SANDBOX_CONTAINER_CLEANUP = "sandbox.container_cleanup"
+    EVALUATOR_STARTED = "evaluator.started"
     EVALUATOR_COMPLETED = "evaluator.completed"
     EVALUATOR_FAILED = "evaluator.failed"
     PROJECTION_REFRESHED = "projection.refreshed"

@@ -157,10 +157,10 @@ percent, memory used/limit/percent, IO byte counts, PID count, sample status,
 and sample timestamp, not raw stats JSON. Subprocess worker parents record same-status
 `worker.subprocess_started` and `worker.subprocess_completed` events with only
 worker id, execution task id, child-entrypoint module, timeout, and return
-code. Worker result persistence records `evaluator.completed` or
-`evaluator.failed` events after the run enters `evaluating`; these events keep
-evaluator progress replayable while storing only summary metadata and safe
-artifact refs.
+code. Worker result persistence records `evaluator.started` before
+`evaluator.completed` or `evaluator.failed` after the run enters `evaluating`;
+these events keep evaluator progress replayable while storing only summary
+metadata and safe artifact refs.
 Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch

@@ -97,6 +97,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
@@ -118,6 +119,18 @@ class WorkerServiceTest(unittest.TestCase):
         evaluator_event = next(
             event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.completed"
         )
+        evaluator_started_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.started"
+        )
+        self.assertEqual(evaluator_started_event["from_status"], "evaluating")
+        self.assertEqual(evaluator_started_event["to_status"], "evaluating")
+        self.assertEqual(evaluator_started_event["metadata"]["evaluator_id"], "mock-judge-v0")
+        self.assertEqual(evaluator_started_event["metadata"]["mode"], "llm_judge")
+        self.assertEqual(evaluator_started_event["metadata"]["status"], "started")
+        self.assertEqual(evaluator_started_event["metadata"]["worker_id"], "worker-test")
+        self.assertEqual(evaluator_started_event["metadata"]["execution_task_id"], "run_worker_001:attempt:1")
+        self.assertNotIn("judge", evaluator_started_event["metadata"])
+        self.assertNotIn("secret_ref", evaluator_started_event["metadata"])
         self.assertEqual(evaluator_event["from_status"], "evaluating")
         self.assertEqual(evaluator_event["to_status"], "evaluating")
         self.assertEqual(evaluator_event["metadata"]["evaluator_id"], "mock-judge-v0")
@@ -182,6 +195,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
@@ -241,10 +255,17 @@ class WorkerServiceTest(unittest.TestCase):
                 "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.failed",
                 "run.failed",
             ],
         )
+        evaluator_started_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.started"
+        )
+        self.assertEqual(evaluator_started_event["metadata"]["evaluator_id"], "failed-judge-v0")
+        self.assertEqual(evaluator_started_event["metadata"]["mode"], "harbor_verifier")
+        self.assertEqual(evaluator_started_event["metadata"]["status"], "started")
         evaluator_event = next(
             event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.failed"
         )
@@ -1116,6 +1137,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
@@ -1865,6 +1887,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",

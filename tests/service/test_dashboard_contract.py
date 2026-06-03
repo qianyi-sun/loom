@@ -155,6 +155,7 @@ class DashboardContractSmokeTest(unittest.TestCase):
                 "sandbox.container_completed",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",

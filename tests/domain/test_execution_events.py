@@ -36,6 +36,7 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_COMPLETED.value, "sandbox.container_completed")
         self.assertEqual(RunEventType.SANDBOX_RESOURCE_SAMPLED.value, "sandbox.resource_sampled")
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_CLEANUP.value, "sandbox.container_cleanup")
+        self.assertEqual(RunEventType.EVALUATOR_STARTED.value, "evaluator.started")
         self.assertEqual(RunEventType.EVALUATOR_COMPLETED.value, "evaluator.completed")
         self.assertEqual(RunEventType.EVALUATOR_FAILED.value, "evaluator.failed")
         self.assertEqual(RunEventType.PROJECTION_REFRESHED.value, "projection.refreshed")

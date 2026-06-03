@@ -364,6 +364,7 @@ class SubprocessRunWorkerTest(unittest.TestCase):
                 "run.claimed",
                 "run.started",
                 "run.evaluating",
+                "evaluator.started",
                 "evaluator.completed",
                 "run.succeeded",
             ],

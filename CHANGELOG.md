@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the next #157 evaluator event taxonomy slice. Worker result
+  persistence now appends metadata-only `evaluator.started` before
+  `evaluator.completed` or `evaluator.failed`, giving replay/SSE/frontend
+  monitors an explicit evaluation-boundary start signal without embedding
+  judge prompts, secrets, feedback, metrics, or local paths.
 - Added the next #157/#159 artifact event slice. Workers now append a
   metadata-only `artifact.bundle_available` event after terminal artifact/chunk
   diagnostics are persisted, giving replay/SSE/frontend monitors an explicit
@@ -229,7 +234,7 @@ All notable changes to this project will be documented in this file.
   after `run.evaluating` and before the terminal lifecycle event, with safe
   evaluator id/mode/status/score/artifact-ref metadata and without embedding
   verbal feedback, metrics, judge prompts, or local file paths. Frontend smoke
-  replay now requires the evaluator completion event.
+  replay now requires evaluator result events.
 - Added a #158/#160 parent-death Docker cleanup deploy smoke. The scheduler
   cleanup smoke now supports `--mode parent-death`, which starts a live labeled
   sandbox container from a helper parent process, terminates that parent, and

@@ -648,6 +648,7 @@ _REQUIRED_LIFECYCLE_EVENT_TYPES = (
     "run.claimed",
     "run.started",
     "run.evaluating",
+    "evaluator.started",
     "evaluator.completed",
     "run.succeeded",
 )
@@ -655,6 +656,7 @@ _WORKER_LIFECYCLE_EVENT_TYPES = {
     "run.claimed",
     "run.started",
     "run.evaluating",
+    "evaluator.started",
     "evaluator.completed",
     "run.succeeded",
 }

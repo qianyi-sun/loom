@@ -434,6 +434,7 @@ function runEventTypes() {
     "run.claimed",
     "run.started",
     "run.evaluating",
+    "evaluator.started",
     "evaluator.completed",
     "evaluator.failed",
     "run.succeeded",
@@ -645,6 +646,17 @@ function lifecycleEventDisplay(event) {
       ]),
       status,
       tone: "success",
+    };
+  }
+  if (eventType === "evaluator.started") {
+    return {
+      title: "Evaluator started",
+      detail: compactText([
+        metadataValue(metadata.evaluator_id, "evaluator"),
+        metadata.mode && `mode ${metadataValue(metadata.mode, "")}`,
+      ]),
+      status,
+      tone: "info",
     };
   }
   if (eventType === "evaluator.completed" || eventType === "evaluator.failed") {
