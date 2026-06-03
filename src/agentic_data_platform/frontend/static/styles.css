@@ -236,6 +236,50 @@ h3 {
   margin: 0 0 8px;
 }
 
+.timeline-event {
+  padding-right: 4px;
+  overflow-wrap: anywhere;
+}
+
+.timeline-title {
+  display: inline;
+  font-weight: 800;
+}
+
+.timeline-status {
+  display: inline-block;
+  margin-left: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.timeline-detail {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.timeline-event-success .timeline-status {
+  border-color: #abefc6;
+  color: var(--ok);
+}
+
+.timeline-event-warning .timeline-status {
+  border-color: #fedf89;
+  color: var(--warn);
+}
+
+.timeline-event-danger .timeline-status {
+  border-color: #fecdca;
+  color: var(--danger);
+}
+
 .feedback {
   color: var(--text);
   line-height: 1.45;

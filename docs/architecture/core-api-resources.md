@@ -254,7 +254,11 @@ serializing dashboard payloads.
   `GET /runs/{run_id}/events?after_seq=N` replays missed events from the same
   durable source, and `GET /runs/{run_id}/stream` emits SSE frames with
   `id: <seq>` so browser monitors can reconnect without losing status changes.
-  The stream also honors the browser `Last-Event-ID` header on reconnect.
+  The stream also honors the browser `Last-Event-ID` header on reconnect. The
+  no-build `/app/` frontend now subscribes to the full current event taxonomy,
+  including capacity, chunk, upload, cleanup, recovery, and projection events,
+  and renders common safe metadata fields as timeline diagnostics rather than
+  relying only on raw event names.
 - Backend writers use `agentic_data_platform.domain.execution_events` as the
   v1 execution-event contract. Current run events cover `run.created`,
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
@@ -411,8 +415,11 @@ serializing dashboard payloads.
   projection rows that scheduler recovery can refresh in bounded batches, and
   make `/runs`, `/runs/{run_id}` summary fields, `/runs/{run_id}/artifacts`,
   `/runs/{run_id}/evaluation`, and `/dashboard/progress` prefer clean
-  projection rows before falling back to hydrated run records. The first typed
-  artifact/log/upload/evaluator/projection
+  projection rows before falling back to hydrated run records. The browser
+  frontend consumes the same typed event stream and displays scheduler
+  blockers, worker liveness, sandbox command results, artifact upload state,
+  evaluator summaries, cleanup, and projection refresh metadata in the run
+  timeline. The first typed artifact/log/upload/evaluator/projection
   event slices record chunk, upload-expiry, upload-status-change, evaluator
   completion/failure, and projection refresh metadata without embedding
   payloads. The remaining #157 work is Redis fanout, broader typed sandbox

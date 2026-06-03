@@ -429,6 +429,8 @@ function runEventStreamUrl(runId, afterSeq) {
 function runEventTypes() {
   return [
     "run.created",
+    "run.status_changed",
+    "run.dispatched",
     "run.claimed",
     "run.started",
     "run.evaluating",
@@ -438,13 +440,21 @@ function runEventTypes() {
     "run.failed",
     "run.canceled",
     "run.retried",
+    "run.recovered",
     "run.worker_failed",
     "run.worker_subprocess_failed",
     "worker.heartbeat",
     "worker.subprocess_started",
     "worker.subprocess_completed",
+    "scheduler.capacity_blocked",
+    "artifact.chunk_recorded",
+    "artifact.upload_expired",
+    "artifact.upload_status_changed",
+    "log.chunk_recorded",
     "sandbox.container_started",
     "sandbox.container_completed",
+    "sandbox.container_cleanup",
+    "projection.refreshed",
   ];
 }
 
@@ -462,6 +472,182 @@ function eventWatermarkFromDetail(detail) {
   }, 0);
 }
 
+function lifecycleEventDisplay(event) {
+  const eventType = nonEmptyString(event?.event_type, "run.event");
+  const metadata = objectValue(event?.metadata) || {};
+  const status = nonEmptyString(event?.to_status, "n/a");
+  if (eventType === "scheduler.capacity_blocked") {
+    const dimension = metadataValue(metadata.dimension, "capacity");
+    const key = metadataValue(metadata.key, "unknown");
+    const metric = metadataValue(metadata.metric, "usage");
+    const projected = metadataValue(metadata.projected_usage, "n/a");
+    const limit = metadataValue(metadata.limit, "n/a");
+    const active = metadataValue(metadata.active_count, "n/a");
+    const candidate = metadataValue(metadata.candidate_usage, "n/a");
+    return {
+      title: "Capacity blocked",
+      detail: `${dimension} ${key}: ${projected}/${limit} ${metric} (active ${active}, candidate ${candidate})`,
+      status,
+      tone: "warning",
+    };
+  }
+  if (eventType === "worker.heartbeat") {
+    const worker = metadataValue(metadata.worker_id, "worker");
+    const heartbeat = metadataValue(metadata.heartbeat_status, "heartbeat");
+    const process = metadataValue(metadata.process_status, "");
+    const observed = metadataValue(metadata.last_heartbeat_at, "");
+    return {
+      title: "Worker heartbeat",
+      detail: compactText([`${worker} ${heartbeat}`, observed && `at ${observed}`, process && `(${process})`]),
+      status,
+      tone: "info",
+    };
+  }
+  if (eventType === "worker.subprocess_started") {
+    return {
+      title: "Subprocess started",
+      detail: compactText([
+        metadataValue(metadata.worker_id, "worker"),
+        metadata.child_entrypoint && `module ${metadataValue(metadata.child_entrypoint, "")}`,
+        metadata.timeout_seconds && `timeout ${metadataValue(metadata.timeout_seconds, "")}s`,
+      ]),
+      status,
+      tone: "info",
+    };
+  }
+  if (eventType === "worker.subprocess_completed") {
+    return {
+      title: "Subprocess completed",
+      detail: compactText([
+        metadataValue(metadata.worker_id, "worker"),
+        `return code ${metadataValue(metadata.return_code, "n/a")}`,
+      ]),
+      status,
+      tone: "info",
+    };
+  }
+  if (eventType === "sandbox.container_started") {
+    return {
+      title: "Sandbox command started",
+      detail: compactText([
+        `command ${metadataValue(metadata.command_index, "n/a")}`,
+        metadata.timeout_seconds && `timeout ${metadataValue(metadata.timeout_seconds, "")}s`,
+        metadata.docker_container_id && `container ${metadataValue(metadata.docker_container_id, "")}`,
+      ]),
+      status,
+      tone: "info",
+    };
+  }
+  if (eventType === "sandbox.container_completed") {
+    return {
+      title: "Sandbox command completed",
+      detail: compactText([
+        `command ${metadataValue(metadata.command_index, "n/a")} exit ${metadataValue(metadata.exit_code, "n/a")}`,
+        metadata.timeout || metadata.timed_out ? "timeout" : "",
+        metadata.duration_seconds && `${metadataValue(metadata.duration_seconds, "")}s`,
+        metadata.docker_container_id && `container ${metadataValue(metadata.docker_container_id, "")}`,
+        metadata.changed_path_count !== undefined && `changed paths ${metadataValue(metadata.changed_path_count, "")}`,
+      ]),
+      status,
+      tone: metadata.status === "failed" || metadata.timeout || metadata.timed_out ? "danger" : "info",
+    };
+  }
+  if (eventType === "sandbox.container_cleanup") {
+    return {
+      title: "Sandbox cleanup",
+      detail: compactText([
+        `removed ${metadataValue(metadata.docker_cleanup_count, "0")}`,
+        `errors ${metadataValue(metadata.docker_cleanup_error_count, "0")}`,
+        metadata.recovery && `reason ${metadataValue(metadata.recovery, "")}`,
+      ]),
+      status,
+      tone: Number(metadata.docker_cleanup_error_count || 0) > 0 ? "danger" : "info",
+    };
+  }
+  if (eventType === "artifact.chunk_recorded" || eventType === "log.chunk_recorded") {
+    const kind = metadataValue(metadata.chunk_kind, eventType === "log.chunk_recorded" ? "log" : "artifact");
+    return {
+      title: eventType === "log.chunk_recorded" ? "Log chunk recorded" : "Artifact chunk recorded",
+      detail: compactText([
+        `${kind} chunk ${metadataValue(metadata.chunk_sequence, "n/a")}`,
+        metadata.artifact_id && `artifact ${metadataValue(metadata.artifact_id, "")}`,
+        metadata.upload_status && `status ${metadataValue(metadata.upload_status, "")}`,
+      ]),
+      status,
+      tone: "info",
+    };
+  }
+  if (eventType === "artifact.upload_status_changed") {
+    const uploadStatus = metadataValue(metadata.upload_status, "changed");
+    const kind = metadataValue(metadata.chunk_kind, "artifact");
+    return {
+      title: uploadStatus === "failed" ? "Artifact upload failed" : "Artifact upload changed",
+      detail: compactText([
+        `${kind} chunk ${metadataValue(metadata.chunk_sequence, "n/a")}`,
+        metadata.artifact_id && `artifact ${metadataValue(metadata.artifact_id, "")}`,
+        `${metadataValue(metadata.previous_upload_status, "unknown")} -> ${uploadStatus}`,
+        metadata.error_reason && metadataValue(metadata.error_reason, ""),
+      ]),
+      status,
+      tone: uploadStatus === "failed" || uploadStatus === "expired" ? "danger" : "info",
+    };
+  }
+  if (eventType === "artifact.upload_expired") {
+    return {
+      title: "Artifact upload expired",
+      detail: compactText([
+        metadata.artifact_id && `artifact ${metadataValue(metadata.artifact_id, "")}`,
+        metadata.chunk_kind && `${metadataValue(metadata.chunk_kind, "")} chunk ${metadataValue(metadata.chunk_sequence, "n/a")}`,
+      ]),
+      status,
+      tone: "danger",
+    };
+  }
+  if (eventType === "evaluator.completed" || eventType === "evaluator.failed") {
+    const failed = eventType === "evaluator.failed";
+    return {
+      title: failed ? "Evaluator failed" : "Evaluator completed",
+      detail: compactText([
+        metadataValue(metadata.evaluator_id, "evaluator"),
+        metadata.mode && `mode ${metadataValue(metadata.mode, "")}`,
+        metadata.score !== undefined && `score ${metadataValue(metadata.score, "")}`,
+        metadata.failure_reason && metadataValue(metadata.failure_reason, ""),
+      ]),
+      status,
+      tone: failed ? "danger" : "success",
+    };
+  }
+  if (eventType === "projection.refreshed") {
+    return {
+      title: "Projection refreshed",
+      detail: compactText([
+        metadata.refresh_reason && `reason ${metadataValue(metadata.refresh_reason, "")}`,
+        metadata.scheduler_id && `scheduler ${metadataValue(metadata.scheduler_id, "")}`,
+      ]),
+      status,
+      tone: "info",
+    };
+  }
+  return {
+    title: humanizeEventType(eventType),
+    detail: compactText([event?.reason, metadata.execution_task_id && `task ${metadataValue(metadata.execution_task_id, "")}`]),
+    status,
+    tone: eventType.endsWith(".failed") || status === "failed" ? "danger" : status === "succeeded" ? "success" : "info",
+  };
+}
+
+function renderLifecycleEvent(event) {
+  const display = lifecycleEventDisplay(event);
+  const detail = display.detail ? `<span class="timeline-detail">${escapeHtml(display.detail)}</span>` : "";
+  return (
+    `<li class="timeline-event timeline-event-${escapeHtml(display.tone)}">` +
+    `<span class="timeline-title">${escapeHtml(display.title)}</span>` +
+    `<span class="timeline-status">${escapeHtml(display.status)}</span>` +
+    detail +
+    "</li>"
+  );
+}
+
 function renderRun(detail, telemetry) {
   const run = detail.run;
   const terminal = ["succeeded", "failed", "canceled"].includes(run.status);
@@ -477,7 +663,7 @@ function renderRun(detail, telemetry) {
 
   const lifecycle = detail.lifecycle_events || [];
   el("lifecycle-list").innerHTML = lifecycle.length
-    ? lifecycle.map((event) => `<li><strong>${escapeHtml(event.to_status)}</strong> ${escapeHtml(event.event_type)}</li>`).join("")
+    ? lifecycle.map(renderLifecycleEvent).join("")
     : "<li>Created locally in the browser session.</li>";
 
   const trajectory = detail.trajectory || [];
@@ -627,6 +813,30 @@ function stringList(value, fallback) {
   return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim())
     ? value.map((item) => item.trim())
     : [...fallback];
+}
+
+function metadataValue(value, fallback) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return fallback;
+}
+
+function compactText(parts) {
+  return parts.filter((part) => typeof part === "string" && part.trim()).join(" ");
+}
+
+function humanizeEventType(eventType) {
+  return eventType
+    .split(".")
+    .map((part) => (part ? part[0].toUpperCase() + part.slice(1).replaceAll("_", " ") : part))
+    .join(" ");
 }
 
 function objectValue(value) {

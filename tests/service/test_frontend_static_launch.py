@@ -239,6 +239,53 @@ class FrontendStaticLaunchTest(unittest.TestCase):
               emptyWatermark: eventWatermarkFromDetail({ lifecycle_events: [] }),
               streamUrl: runEventStreamUrl("run/live 001", 5),
               eventTypes: runEventTypes(),
+              capacity: lifecycleEventDisplay({
+                event_type: "scheduler.capacity_blocked",
+                to_status: "queued",
+                metadata: {
+                  dimension: "model_tokens",
+                  key: "deepseek-v4-flash",
+                  metric: "estimated_tokens",
+                  active_count: 950,
+                  candidate_usage: 100,
+                  projected_usage: 1050,
+                  limit: 1000,
+                },
+              }),
+              heartbeat: lifecycleEventDisplay({
+                event_type: "worker.heartbeat",
+                to_status: "running",
+                metadata: {
+                  worker_id: "worker-dev-1",
+                  heartbeat_status: "active",
+                  process_status: "heartbeating",
+                  last_heartbeat_at: "2026-06-03T02:49:00Z",
+                },
+              }),
+              sandbox: lifecycleEventDisplay({
+                event_type: "sandbox.container_completed",
+                to_status: "running",
+                metadata: {
+                  command_index: 2,
+                  status: "completed",
+                  exit_code: 0,
+                  duration_seconds: 1.25,
+                  docker_container_id: "abcdef123456",
+                  changed_path_count: 3,
+                },
+              }),
+              upload: lifecycleEventDisplay({
+                event_type: "artifact.upload_status_changed",
+                to_status: "succeeded",
+                metadata: {
+                  artifact_id: "run-stdout",
+                  chunk_kind: "stdout",
+                  chunk_sequence: 0,
+                  previous_upload_status: "started",
+                  upload_status: "failed",
+                  error_reason: "object store write failed",
+                },
+              }),
             };
             console.log(JSON.stringify(result));
             """
@@ -250,12 +297,49 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertEqual(payload["watermark"], 5)
         self.assertEqual(payload["emptyWatermark"], 0)
         self.assertEqual(payload["streamUrl"], "/runs/run%2Flive%20001/stream?after_seq=5")
-        self.assertIn("run.worker_subprocess_failed", payload["eventTypes"])
-        self.assertIn("worker.heartbeat", payload["eventTypes"])
-        self.assertIn("worker.subprocess_started", payload["eventTypes"])
-        self.assertIn("worker.subprocess_completed", payload["eventTypes"])
-        self.assertIn("sandbox.container_started", payload["eventTypes"])
-        self.assertIn("sandbox.container_completed", payload["eventTypes"])
+        self.assertEqual(
+            payload["eventTypes"],
+            [
+                "run.created",
+                "run.status_changed",
+                "run.dispatched",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "evaluator.failed",
+                "run.succeeded",
+                "run.failed",
+                "run.canceled",
+                "run.retried",
+                "run.recovered",
+                "run.worker_failed",
+                "run.worker_subprocess_failed",
+                "worker.heartbeat",
+                "worker.subprocess_started",
+                "worker.subprocess_completed",
+                "scheduler.capacity_blocked",
+                "artifact.chunk_recorded",
+                "artifact.upload_expired",
+                "artifact.upload_status_changed",
+                "log.chunk_recorded",
+                "sandbox.container_started",
+                "sandbox.container_completed",
+                "sandbox.container_cleanup",
+                "projection.refreshed",
+            ],
+        )
+        self.assertEqual(payload["capacity"]["title"], "Capacity blocked")
+        self.assertIn("model_tokens deepseek-v4-flash", payload["capacity"]["detail"])
+        self.assertIn("1050/1000 estimated_tokens", payload["capacity"]["detail"])
+        self.assertEqual(payload["heartbeat"]["title"], "Worker heartbeat")
+        self.assertIn("worker-dev-1 active", payload["heartbeat"]["detail"])
+        self.assertEqual(payload["sandbox"]["title"], "Sandbox command completed")
+        self.assertIn("command 2 exit 0", payload["sandbox"]["detail"])
+        self.assertIn("container abcdef123456", payload["sandbox"]["detail"])
+        self.assertEqual(payload["upload"]["title"], "Artifact upload failed")
+        self.assertIn("stdout chunk 0", payload["upload"]["detail"])
+        self.assertIn("object store write failed", payload["upload"]["detail"])
 
 
 def _node_harness(assertion_script: str) -> str:

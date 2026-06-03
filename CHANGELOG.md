@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Expanded the no-build frontend's typed event consumption. The browser now
+  subscribes to the full current run-event taxonomy over SSE, including
+  scheduler capacity blockers, artifact/log chunk events, upload transitions,
+  cleanup, recovery, and projection refresh events, and renders common
+  scheduler/worker/sandbox/artifact/evaluator metadata as readable timeline
+  diagnostics instead of showing only raw event names.
 - Added metadata-only `worker.heartbeat` events to the durable run-event
   stream. `RunRepository.record_worker_heartbeat(...)` now updates the existing
   attempt heartbeat metadata and appends a same-status event with worker id,
