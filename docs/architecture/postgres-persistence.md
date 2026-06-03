@@ -122,8 +122,12 @@ Completed Harbor-backed runs can also carry observed model-provider usage under
 evaluator metadata as `provider_usage`. That metadata is normalized to safe
 numeric fields such as input/output/total tokens, cost, and duration, and is
 surfaced through dashboard projections and scoped `/ops/metrics` aggregates.
-It is the first actual usage telemetry source for future #156 rate windows, but
-it does not retroactively turn estimated dispatch hints into a billing ledger.
+Dispatch can optionally use those completed-run total-token observations as a
+recent provider/model window, adding active and candidate estimated-token hints
+before launching the next queued run. These blockers use dimensions such as
+`provider_observed_tokens` or `model_observed_tokens` with metric
+`observed_plus_estimated_tokens`. They still do not retroactively turn estimated
+dispatch hints into a billing ledger.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.

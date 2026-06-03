@@ -403,16 +403,21 @@ serializing dashboard payloads.
   budget hooks using trusted run metadata hints under
   `metadata.scheduler.estimated_cost_usd` and
   `metadata.scheduler.estimated_tokens`. These hooks are dispatch guardrails for
-  API spend/rate protection, not a billing ledger.
+  API spend/rate protection, not a billing ledger. A separate optional
+  observed-token window can combine recent completed-run `provider_usage`
+  telemetry with a queued candidate's estimated token hint before dispatch,
+  using dimensions such as `provider_observed_tokens` and metric
+  `observed_plus_estimated_tokens`.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.
-  Cost/token budget blockers use dimensions such as `provider_cost_usd` or
-  `model_tokens` and include the metric, candidate usage, projected usage, and
-  configured limit in the same operator-visible payload. `/ops/metrics` reports
-  visible blocked counts by dimension, a bounded run list, and scoped observed
-  model-provider usage totals so operators can distinguish real queue depth,
-  capacity saturation, and completed API-model consumption.
+  Cost/token budget blockers use dimensions such as `provider_cost_usd`,
+  `model_tokens`, or `provider_observed_tokens` and include the metric,
+  candidate usage, projected usage, and configured limit in the same
+  operator-visible payload. `/ops/metrics` reports visible blocked counts by
+  dimension, a bounded run list, and scoped observed model-provider usage totals
+  so operators can distinguish real queue depth, capacity saturation, and
+  completed API-model consumption.
   Workers then prefer `RunRepository.claim_next_dispatched_run(...)` before the
   legacy queued-claim compatibility path. Redis remains available in the dev
   stack for a later queue/cache backend, but it is not the current source of

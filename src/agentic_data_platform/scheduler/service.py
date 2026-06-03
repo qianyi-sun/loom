@@ -167,6 +167,7 @@ class RunScheduler:
         self.docker_container_cleaner = docker_container_cleaner
 
     def dispatch_once(self, *, request_id: str | None = None) -> SchedulerDispatchResult:
+        observed_usage_since = self._observed_usage_since()
         with session_scope(self.engine) as session:
             result = RunRepository(session).dispatch_queued_runs_with_diagnostics(
                 scheduler_id=self.scheduler_id,
@@ -181,6 +182,9 @@ class RunScheduler:
                 model_cost_limits_usd=self.settings.scheduler_model_max_estimated_cost_usd,
                 provider_token_limits=self.settings.scheduler_provider_max_estimated_tokens,
                 model_token_limits=self.settings.scheduler_model_max_estimated_tokens,
+                provider_observed_token_limits=self.settings.scheduler_provider_max_observed_tokens,
+                model_observed_token_limits=self.settings.scheduler_model_max_observed_tokens,
+                observed_usage_since=observed_usage_since,
                 request_id=request_id,
             )
         return SchedulerDispatchResult(
@@ -188,6 +192,16 @@ class RunScheduler:
             dispatched_run_ids=[run.run_id for run in result.dispatched_runs],
             capacity_blocked_runs=[block.to_dict() for block in result.capacity_blocked_runs],
         )
+
+    def _observed_usage_since(self) -> datetime | None:
+        if self.settings.scheduler_observed_usage_window_seconds <= 0:
+            return None
+        if not (
+            self.settings.scheduler_provider_max_observed_tokens
+            or self.settings.scheduler_model_max_observed_tokens
+        ):
+            return None
+        return datetime.now(timezone.utc) - timedelta(seconds=self.settings.scheduler_observed_usage_window_seconds)
 
     def recover_once(self, *, request_id: str | None = None) -> SchedulerRecoveryResult:
         stale_dispatched_older_than = datetime.now(timezone.utc) - timedelta(

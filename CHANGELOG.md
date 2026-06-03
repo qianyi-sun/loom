@@ -4,14 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the first #156 scheduler observed-token window gate. Dispatch can now
+  combine completed-run model-provider usage telemetry from evaluator
+  `provider_usage` metadata with a queued run's trusted
+  `metadata.scheduler.estimated_tokens` hint, then block provider/model windows
+  through `SCHEDULER_PROVIDER_MAX_OBSERVED_TOKENS`,
+  `SCHEDULER_MODEL_MAX_OBSERVED_TOKENS`, and
+  `SCHEDULER_OBSERVED_USAGE_WINDOW_SECONDS`. Blocked queued runs reuse
+  `scheduler.capacity_blocked` with `observed_plus_estimated_tokens`
+  diagnostics. This remains an operator guardrail, not billing truth.
 - Added observed model-provider usage telemetry for Harbor-backed runs. Harbor
   result ingestion now normalizes safe numeric usage fields such as input
   tokens, output tokens, total tokens, cost, and duration from Harbor
   `final_metrics` payloads into evaluator metadata; run projections expose the
   sanitized `model_provider_usage` summary; and `/ops/metrics` reports
   authenticated-project-scoped usage totals grouped by provider and model. This
-  is observed telemetry for #156 follow-on rate windows, not estimated dispatch
-  budget data or billing truth.
+  is observed telemetry for scheduler guardrails and ops reporting, not
+  estimated dispatch budget data or billing truth.
 - Added metadata-only `sandbox.resource_sampled` events for Docker terminal
   sandbox commands. The default managed Docker runner now samples
   `docker stats --no-stream` after the cidfile exposes the running container id,

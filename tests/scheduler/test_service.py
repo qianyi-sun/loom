@@ -18,7 +18,7 @@ from agentic_data_platform.persistence.repositories import IdentityRepository, P
 from agentic_data_platform.sandbox.docker_terminal import DockerOwnedContainerCleanupResult
 from agentic_data_platform.scheduler.service import RunScheduler, run_scheduler_loop
 from agentic_data_platform.service.config import ServiceSettings
-from tests.persistence.test_repositories import _completed_run, _queued_capacity_run, _queued_run
+from tests.persistence.test_repositories import _completed_run, _completed_usage_run, _queued_capacity_run, _queued_run
 
 
 class SchedulerServiceTest(unittest.TestCase):
@@ -205,6 +205,60 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertAlmostEqual(result.capacity_blocked_runs[0]["projected_usage"], 0.80)
         self.assertEqual(statuses["run_scheduler_budget_a"], RunStatus.DISPATCHED)
         self.assertEqual(statuses["run_scheduler_budget_b"], RunStatus.QUEUED)
+
+    def test_scheduler_dispatches_from_service_settings_observed_usage_window(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_scheduler_observed_recent",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=90_000,
+                )
+            )
+            session.get(RunRow, "run_scheduler_observed_recent").updated_at = datetime.now(timezone.utc)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_scheduler_observed_candidate",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_tokens=20_000,
+                )
+            )
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_global_max_active_runs=1,
+                scheduler_observed_usage_window_seconds=3600,
+                scheduler_provider_max_observed_tokens={"openai": 100_000},
+            ),
+        )
+
+        result = scheduler.dispatch_once(request_id="req-scheduler-observed-window-001")
+
+        with session_scope(self.engine) as session:
+            candidate = RunRepository(session).get_run("run_scheduler_observed_candidate")
+
+        self.assertEqual(result.dispatched_run_ids, [])
+        self.assertEqual(result.capacity_blocked_count, 1)
+        self.assertEqual(result.capacity_blocked_runs[0]["dimension"], "provider_observed_tokens")
+        self.assertEqual(result.capacity_blocked_runs[0]["metric"], "observed_plus_estimated_tokens")
+        self.assertEqual(result.capacity_blocked_runs[0]["projected_usage"], 110_000)
+        self.assertEqual(candidate.status, RunStatus.QUEUED)
 
     def test_scheduler_recovers_stale_dispatched_runs_from_service_settings(self):
         now = datetime.now(timezone.utc)

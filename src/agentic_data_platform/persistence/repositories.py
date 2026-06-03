@@ -46,6 +46,7 @@ from agentic_data_platform.domain.run_records import (
     RunStatusEvent,
     TerminalTurn,
 )
+from agentic_data_platform.domain.provider_usage import model_provider_usage_from_metadata
 from agentic_data_platform.persistence.models import (
     ArtifactChunkRow,
     ArtifactRow,
@@ -628,6 +629,9 @@ class RunRepository:
         model_cost_limits_usd: dict[str, float] | None = None,
         provider_token_limits: dict[str, int] | None = None,
         model_token_limits: dict[str, int] | None = None,
+        provider_observed_token_limits: dict[str, int] | None = None,
+        model_observed_token_limits: dict[str, int] | None = None,
+        observed_usage_since: datetime | None = None,
         request_id: str | None = None,
     ) -> list[RunRecord]:
         return self.dispatch_queued_runs_with_diagnostics(
@@ -643,6 +647,9 @@ class RunRepository:
             model_cost_limits_usd=model_cost_limits_usd,
             provider_token_limits=provider_token_limits,
             model_token_limits=model_token_limits,
+            provider_observed_token_limits=provider_observed_token_limits,
+            model_observed_token_limits=model_observed_token_limits,
+            observed_usage_since=observed_usage_since,
             request_id=request_id,
         ).dispatched_runs
 
@@ -661,6 +668,9 @@ class RunRepository:
         model_cost_limits_usd: dict[str, float] | None = None,
         provider_token_limits: dict[str, int] | None = None,
         model_token_limits: dict[str, int] | None = None,
+        provider_observed_token_limits: dict[str, int] | None = None,
+        model_observed_token_limits: dict[str, int] | None = None,
+        observed_usage_since: datetime | None = None,
         request_id: str | None = None,
     ) -> DispatchQueuedRunsResult:
         _require_non_empty("scheduler_id", scheduler_id)
@@ -681,6 +691,9 @@ class RunRepository:
                 model_cost_limits_usd=model_cost_limits_usd,
                 provider_token_limits=provider_token_limits,
                 model_token_limits=model_token_limits,
+                provider_observed_token_limits=provider_observed_token_limits,
+                model_observed_token_limits=model_observed_token_limits,
+                observed_usage_since=observed_usage_since,
                 request_id=request_id,
             )
         finally:
@@ -702,6 +715,9 @@ class RunRepository:
         model_cost_limits_usd: dict[str, float] | None = None,
         provider_token_limits: dict[str, int] | None = None,
         model_token_limits: dict[str, int] | None = None,
+        provider_observed_token_limits: dict[str, int] | None = None,
+        model_observed_token_limits: dict[str, int] | None = None,
+        observed_usage_since: datetime | None = None,
         request_id: str | None = None,
     ) -> DispatchQueuedRunsResult:
         _require_non_empty("scheduler_id", scheduler_id)
@@ -716,6 +732,16 @@ class RunRepository:
         model_cost_limits_usd = _positive_float_limits(model_cost_limits_usd or {})
         provider_token_limits = _positive_limits(provider_token_limits or {})
         model_token_limits = _positive_limits(model_token_limits or {})
+        provider_observed_token_limits = _positive_limits(provider_observed_token_limits or {})
+        model_observed_token_limits = _positive_limits(model_observed_token_limits or {})
+        if observed_usage_since is not None and observed_usage_since.tzinfo is None:
+            raise ValueError("observed_usage_since must be timezone-aware")
+        observed_tokens_by_provider: dict[str, int] = {}
+        observed_tokens_by_model: dict[str, int] = {}
+        if observed_usage_since is not None and (provider_observed_token_limits or model_observed_token_limits):
+            observed_tokens_by_provider, observed_tokens_by_model = self._observed_model_provider_tokens_since(
+                observed_usage_since
+            )
         active_statuses = {
             RunStatus.DISPATCHED.value,
             RunStatus.PROVISIONING.value,
@@ -736,6 +762,8 @@ class RunRepository:
         active_cost_by_model: dict[str, float] = {}
         active_tokens_by_provider: dict[str, int] = {}
         active_tokens_by_model: dict[str, int] = {}
+        rate_window_tokens_by_provider = dict(observed_tokens_by_provider)
+        rate_window_tokens_by_model = dict(observed_tokens_by_model)
         for row in active_rows:
             provider_key = _provider_capacity_key(row)
             model_key = _model_capacity_key(row)
@@ -753,6 +781,8 @@ class RunRepository:
             if estimated_tokens > 0:
                 _increment(active_tokens_by_provider, provider_key, estimated_tokens)
                 _increment(active_tokens_by_model, model_key, estimated_tokens)
+                _increment(rate_window_tokens_by_provider, provider_key, estimated_tokens)
+                _increment(rate_window_tokens_by_model, model_key, estimated_tokens)
 
         ranked_candidate_ids = list(
             self.session.scalars(_ranked_queued_run_id_query(limit=max(max_runs * 5, 25)))
@@ -873,6 +903,24 @@ class RunRepository:
                         "estimated_tokens",
                         "model estimated token budget reached",
                     ),
+                    (
+                        "provider_observed_tokens",
+                        provider_key,
+                        rate_window_tokens_by_provider,
+                        provider_observed_token_limits,
+                        estimated_tokens,
+                        "observed_plus_estimated_tokens",
+                        "provider observed token window reached",
+                    ),
+                    (
+                        "model_observed_tokens",
+                        model_key,
+                        rate_window_tokens_by_model,
+                        model_observed_token_limits,
+                        estimated_tokens,
+                        "observed_plus_estimated_tokens",
+                        "model observed token window reached",
+                    ),
                 )
             )
             if blocked_budget is not None:
@@ -953,6 +1001,8 @@ class RunRepository:
             if estimated_tokens > 0:
                 _increment(active_tokens_by_provider, provider_key, estimated_tokens)
                 _increment(active_tokens_by_model, model_key, estimated_tokens)
+                _increment(rate_window_tokens_by_provider, provider_key, estimated_tokens)
+                _increment(rate_window_tokens_by_model, model_key, estimated_tokens)
             dispatched_ids.append(run.run_id)
 
         self.session.flush()
@@ -960,6 +1010,28 @@ class RunRepository:
             dispatched_runs=[self.get_run(run_id) for run_id in dispatched_ids],
             capacity_blocked_runs=capacity_blocked,
         )
+
+    def _observed_model_provider_tokens_since(self, since: datetime) -> tuple[dict[str, int], dict[str, int]]:
+        tokens_by_provider: dict[str, int] = {}
+        tokens_by_model: dict[str, int] = {}
+        rows = self.session.scalars(
+            select(RunRow)
+            .where(RunRow.status.in_(_TERMINAL_STATUS_VALUES))
+            .where(RunRow.updated_at >= since)
+            .order_by(RunRow.updated_at, RunRow.run_id)
+        )
+        for row in rows:
+            usage = _model_provider_usage_for_run(self._run_record(row))
+            if usage is None:
+                continue
+            total_tokens = usage.get("total_tokens")
+            if not isinstance(total_tokens, int) or total_tokens <= 0:
+                continue
+            provider_key = _optional_string(usage.get("provider")) or _provider_capacity_key(row)
+            model_key = _optional_string(usage.get("model_name")) or _model_capacity_key(row)
+            _increment(tokens_by_provider, provider_key, total_tokens)
+            _increment(tokens_by_model, model_key, total_tokens)
+        return tokens_by_provider, tokens_by_model
 
     def list_scheduler_capacity_blocks(
         self,
@@ -3084,6 +3156,21 @@ def _scheduler_budget_metadata(row: RunRow) -> dict[str, Any]:
     if isinstance(scheduler_metadata, dict):
         return scheduler_metadata
     return {}
+
+
+def _model_provider_usage_for_run(run: RunRecord) -> dict[str, Any] | None:
+    for evaluator_result in reversed(run.all_evaluator_results()):
+        usage = model_provider_usage_from_metadata(evaluator_result.metadata)
+        if usage is not None:
+            return usage
+    return model_provider_usage_from_metadata(run.metadata)
+
+
+def _optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _float_metadata_value(value: Any) -> float:
