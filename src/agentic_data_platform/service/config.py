@@ -25,6 +25,8 @@ class ServiceSettings:
     web_session_secret: str = ""
     web_session_ttl_seconds: int = 28800
     model_provider_models: str = ""
+    run_event_redis_fanout_enabled: bool = True
+    run_event_redis_hot_buffer_size: int = 100
     sandbox_workspace_root: str = ".runtime/sandbox-workspaces"
     sandbox_host_workspace_root: str = ""
     harbor_task_upload_max_bytes: int = 10 * 1024 * 1024
@@ -78,6 +80,8 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         web_session_secret=_get(values, "WEB_SESSION_SECRET", ""),
         web_session_ttl_seconds=_get_int(values, "WEB_SESSION_TTL_SECONDS", 28800),
         model_provider_models=_get(values, "MODEL_PROVIDER_MODELS", ""),
+        run_event_redis_fanout_enabled=_get_bool(values, "RUN_EVENT_REDIS_FANOUT_ENABLED", True),
+        run_event_redis_hot_buffer_size=_get_int(values, "RUN_EVENT_REDIS_HOT_BUFFER_SIZE", 100),
         sandbox_workspace_root=_get(values, "SANDBOX_WORKSPACE_ROOT", ".runtime/sandbox-workspaces"),
         sandbox_host_workspace_root=_get(values, "SANDBOX_HOST_WORKSPACE_ROOT", ""),
         harbor_task_upload_max_bytes=_get_int(values, "HARBOR_TASK_UPLOAD_MAX_BYTES", 10 * 1024 * 1024),

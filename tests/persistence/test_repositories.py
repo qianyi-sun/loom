@@ -50,6 +50,10 @@ from agentic_data_platform.persistence.repositories import (
     _ranked_queued_run_id_query,
     _scheduler_dispatch_advisory_lock_statement,
 )
+from agentic_data_platform.service.run_event_fanout import (
+    InMemoryRunEventFanout,
+    configure_run_event_fanout,
+)
 
 
 class PersistenceRepositoryTest(unittest.TestCase):
@@ -59,6 +63,7 @@ class PersistenceRepositoryTest(unittest.TestCase):
 
     def tearDown(self):
         self.engine.dispose()
+        configure_run_event_fanout(None)
 
     def test_initial_migration_creates_core_backend_tables(self):
         inspector = inspect(self.engine)
@@ -195,6 +200,49 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual([item.run_id for item in listed], [run.run_id])
         self.assertEqual(events[0].event_type, "run.saved")
         self.assertEqual(events[0].payload, {"status": "succeeded"})
+
+    def test_status_event_fanout_publishes_only_after_commit(self):
+        fanout = InMemoryRunEventFanout()
+        configure_run_event_fanout(fanout)
+
+        with session_scope(self.engine) as session:
+            IdentityRepository(session).create_team(
+                team_id="pilot-project",
+                name="pilot group",
+            )
+            ProjectRepository(session).create_project(
+                project_id="pilot-project",
+                name="pilot group",
+                owner_team_id="pilot-project",
+            )
+            RunRepository(session).create_run(_queued_run(run_id="run_fanout_commit"))
+            self.assertEqual(fanout.signals_for_run("run_fanout_commit"), [])
+
+        signals = fanout.signals_for_run("run_fanout_commit")
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].run_id, "run_fanout_commit")
+        self.assertEqual(signals[0].event_type, "run.created")
+        self.assertGreater(signals[0].seq, 0)
+
+    def test_status_event_fanout_does_not_publish_after_rollback(self):
+        fanout = InMemoryRunEventFanout()
+        configure_run_event_fanout(fanout)
+
+        with self.assertRaises(RuntimeError):
+            with session_scope(self.engine) as session:
+                IdentityRepository(session).create_team(
+                    team_id="pilot-project",
+                    name="pilot group",
+                )
+                ProjectRepository(session).create_project(
+                    project_id="pilot-project",
+                    name="pilot group",
+                    owner_team_id="pilot-project",
+                )
+                RunRepository(session).create_run(_queued_run(run_id="run_fanout_rollback"))
+                raise RuntimeError("force rollback")
+
+        self.assertEqual(fanout.signals_for_run("run_fanout_rollback"), [])
 
     def test_run_repository_replaces_existing_run_snapshot(self):
         run = _completed_run()

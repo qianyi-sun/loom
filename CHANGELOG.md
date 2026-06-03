@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #157 Redis-assisted run-event fanout and hot buffers. API, scheduler,
+  worker parent, and worker child processes now configure a no-op-safe fanout
+  from `REDIS_URL`; run status events queue Redis wake-up signals only after
+  the surrounding DB transaction commits; `/runs/{run_id}/stream` still reads
+  committed events from Postgres but can wait on Redis instead of fixed sleep
+  polling when live fanout is enabled. `RUN_EVENT_REDIS_FANOUT_ENABLED` and
+  `RUN_EVENT_REDIS_HOT_BUFFER_SIZE` control the optional acceleration path.
 - Fixed #156 SQLite/CI scheduler dispatch lock lifetime. The non-Postgres
   process-local dispatch lock now stays held through the surrounding session
   commit or rollback, matching the PostgreSQL transaction-scoped advisory lock

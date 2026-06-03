@@ -29,6 +29,7 @@ from agentic_data_platform.service.harbor_task_resources import register_harbor_
 from agentic_data_platform.service.model_resources import register_model_routes
 from agentic_data_platform.service.ops_resources import register_ops_routes
 from agentic_data_platform.service.project_resources import register_project_routes
+from agentic_data_platform.service.run_event_fanout import build_run_event_fanout, configure_run_event_fanout
 from agentic_data_platform.service.run_resources import register_run_routes
 from agentic_data_platform.service.security import InternalAuthMiddleware, parse_internal_auth_tokens
 from agentic_data_platform.service.telemetry_resources import register_telemetry_routes
@@ -57,6 +58,7 @@ def create_app(
     app.state.database_engine = engine
     app.state.session_dependency = build_session_dependency(engine)
     app.state.artifact_store = build_service_artifact_store(service_settings)
+    app.state.run_event_fanout = configure_run_event_fanout(build_run_event_fanout(service_settings))
     parse_internal_auth_tokens(service_settings.internal_auth_tokens)
     app.add_middleware(
         InternalAuthMiddleware,

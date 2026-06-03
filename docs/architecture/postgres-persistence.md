@@ -208,7 +208,10 @@ events record `from_status`, `to_status`, `reason`, `actor_user_id`, and
 events have a monotonic integer primary key that is exposed as `seq` for
 durable replay. API clients can call `GET /runs/{run_id}/events?after_seq=N`
 or reconnect to `GET /runs/{run_id}/stream` to recover missed lifecycle events
-without hydrating full trajectories or artifact payloads.
+without hydrating full trajectories or artifact payloads. Redis live fanout is
+optional acceleration only: writers queue a small wake-up signal after commit,
+and stream readers still reread committed `run_status_events` rows before
+emitting SSE frames.
 `run_dashboard_projections` is the first durable projection table for dashboard
 read models. Each row stores one sanitized run projection payload, the source
 attempt id, the latest lifecycle event `seq`, current run status, terminal flag,

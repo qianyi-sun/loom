@@ -32,6 +32,7 @@ from agentic_data_platform.sandbox.docker_terminal import (
     SubprocessCommandRunner,
 )
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
+from agentic_data_platform.service.run_event_fanout import build_run_event_fanout, configure_run_event_fanout
 from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor, WorkerRunExecutor
 
 
@@ -346,6 +347,7 @@ def build_configured_worker(
     service_settings = settings or load_service_settings()
     if not service_settings.database_url:
         raise ValueError("DATABASE_URL is required for worker service")
+    configure_run_event_fanout(build_run_event_fanout(service_settings))
 
     engine = create_database_engine(service_settings.database_url, pool_pre_ping=True)
     if service_settings.worker_subprocess_isolation_enabled:

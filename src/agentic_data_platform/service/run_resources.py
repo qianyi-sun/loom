@@ -38,6 +38,7 @@ from agentic_data_platform.service.security import (
     require_project_role,
     require_same_actor,
 )
+from agentic_data_platform.service.run_event_fanout import NoopRunEventFanout, RunEventFanout
 
 
 class BenchmarkTaskInstanceRequest(BaseModel):
@@ -261,6 +262,7 @@ def register_run_routes(app: FastAPI, session_dependency) -> None:
                 once=once,
                 poll_interval_seconds=poll_interval_seconds,
                 timeout_seconds=timeout_seconds,
+                fanout=getattr(request.app.state, "run_event_fanout", None),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
@@ -632,9 +634,12 @@ def _run_event_stream(
     once: bool,
     poll_interval_seconds: float,
     timeout_seconds: float,
+    fanout: RunEventFanout | None = None,
+    sleep=time.sleep,
 ):
     next_after_seq = after_seq
     deadline = time.monotonic() + timeout_seconds
+    event_fanout = fanout or NoopRunEventFanout()
     while True:
         with session_scope(engine) as session:
             events = RunRepository(session).list_status_events(
@@ -648,10 +653,22 @@ def _run_event_stream(
             yield _sse_event(payload)
         if once:
             break
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            yield ": stream timeout\n\n"
+            break
+        wait_seconds = min(poll_interval_seconds, remaining_seconds)
+        if event_fanout.enabled:
+            event_fanout.wait_for_event(
+                run_id=run_id,
+                after_seq=next_after_seq,
+                timeout_seconds=wait_seconds,
+            )
+        else:
+            sleep(wait_seconds)
         if time.monotonic() >= deadline:
             yield ": stream timeout\n\n"
             break
-        time.sleep(poll_interval_seconds)
 
 
 def _sse_event(payload: dict[str, Any]) -> str:

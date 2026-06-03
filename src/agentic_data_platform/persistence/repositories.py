@@ -47,6 +47,7 @@ from agentic_data_platform.domain.run_records import (
     TerminalTurn,
 )
 from agentic_data_platform.domain.provider_usage import model_provider_usage_from_metadata
+from agentic_data_platform.events.run_event_fanout import queue_run_event_fanout_after_commit
 from agentic_data_platform.persistence.models import (
     ArtifactChunkRow,
     ArtifactRow,
@@ -2604,7 +2605,7 @@ class RunRepository:
         cleanup_error_reason: str | None = None,
         reason: str = "owned Docker sandbox container cleanup",
         request_id: str | None = None,
-    ) -> RunStatusEvent:
+    ) -> None:
         _require_non_empty("run_id", run_id)
         _require_non_empty("scheduler_id", scheduler_id)
         _require_non_empty("cleanup_status", cleanup_status)
@@ -2832,21 +2833,21 @@ class RunRepository:
         request_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        self.session.add(
-            RunStatusEventRow(
-                event_id=uuid4().hex,
-                run_id=run_id,
-                attempt_id=attempt_id,
-                event_type=event_type_value(event_type),
-                from_status=from_status.value if from_status is not None else None,
-                to_status=to_status.value,
-                reason=reason,
-                actor_user_id=actor_user_id,
-                request_id=request_id,
-                metadata_json=dict(metadata or {}),
-                created_at=utc_now(),
-            )
+        row = RunStatusEventRow(
+            event_id=uuid4().hex,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            event_type=event_type_value(event_type),
+            from_status=from_status.value if from_status is not None else None,
+            to_status=to_status.value,
+            reason=reason,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+            metadata_json=dict(metadata or {}),
+            created_at=utc_now(),
         )
+        self.session.add(row)
+        queue_run_event_fanout_after_commit(self.session, row)
 
     def _append_worker_lifecycle_events(
         self,

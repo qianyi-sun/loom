@@ -81,7 +81,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /runs` | List dashboard-ready run summaries with filters | `RunRepository.list_run_dashboard_summaries()` + `run_dashboard_projections` fallback |
 | `GET /runs/{run_id}` | Inspect one dashboard-ready run plus full trajectory and lifecycle events | `RunRepository.get_run_dashboard_summary()` + bounded `RunRepository.get_run()` detail fields + `RunRepository.list_status_events()` |
 | `GET /runs/{run_id}/events` | Replay durable run lifecycle/progress events after an optional `after_seq` watermark | `RunRepository.list_status_events(after_seq=...)` |
-| `GET /runs/{run_id}/stream` | Stream replayable run events as SSE, using the same Postgres event source as `/events` | `RunRepository.list_status_events(after_seq=...)` |
+| `GET /runs/{run_id}/stream` | Stream replayable run events as SSE, using Postgres as the durable event source plus optional Redis commit-signal fanout/hot buffers for live wakeups | `RunRepository.list_status_events(after_seq=...)` + optional `RedisRunEventFanout` |
 | `GET /runs/{run_id}/telemetry` | Inspect scoped run, worker, host, and sandbox health for live monitors | `RunRepository.get_run()` + stdlib host metrics |
 | `POST /runs/{run_id}/cancel` | Cancel queued/provisioning/running/evaluating runs | `RunRepository.cancel_run()` |
 | `POST /runs/{run_id}/retry` | Requeue failed/canceled runs as a new internal attempt | `RunRepository.retry_run()` |
@@ -257,11 +257,16 @@ serializing dashboard payloads.
   `GET /runs/{run_id}/events?after_seq=N` replays missed events from the same
   durable source, and `GET /runs/{run_id}/stream` emits SSE frames with
   `id: <seq>` so browser monitors can reconnect without losing status changes.
-  The stream also honors the browser `Last-Event-ID` header on reconnect. The
-  no-build `/app/` frontend now subscribes to the full current event taxonomy,
-  including capacity, chunk, upload, cleanup, recovery, and projection events,
-  and renders common safe metadata fields as timeline diagnostics rather than
-  relying only on raw event names.
+  The stream also honors the browser `Last-Event-ID` header on reconnect. When
+  `RUN_EVENT_REDIS_FANOUT_ENABLED=true` and `REDIS_URL` is configured, writers
+  queue a small Redis wake-up signal after the surrounding Postgres transaction
+  commits; stream readers can wait on that signal and a short per-run hot
+  buffer instead of fixed sleep polling, but they still reread committed events
+  from Postgres before emitting SSE frames. The no-build `/app/` frontend now
+  subscribes to the full current event taxonomy, including capacity, chunk,
+  upload, cleanup, recovery, and projection events, and renders common safe
+  metadata fields as timeline diagnostics rather than relying only on raw event
+  names.
 - Backend writers use `agentic_data_platform.domain.execution_events` as the
   v1 execution-event contract. Current run events cover `run.created`,
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
@@ -423,9 +428,8 @@ serializing dashboard payloads.
   so operators can distinguish real queue depth, capacity saturation, and
   completed API-model consumption.
   Workers then prefer `RunRepository.claim_next_dispatched_run(...)` before the
-  legacy queued-claim compatibility path. Redis remains available in the dev
-  stack for a later queue/cache backend, but it is not the current source of
-  truth.
+  legacy queued-claim compatibility path. Redis can accelerate live event
+  wakeups, but it is not the current queue or run-state source of truth.
 - #157 has started the durable live-event and projection migration. The current
   slices reuse `run_status_events.id` as the replay sequence, expose replay and
   SSE routes, keep telemetry polling available, persist terminal dashboard
@@ -439,9 +443,11 @@ serializing dashboard payloads.
   metadata in the run timeline. The first typed artifact/log/upload/evaluator/projection
   event slices record chunk, upload-expiry, upload-status-change, evaluator
   completion/failure, and projection refresh metadata without embedding
-  payloads. The remaining #157 work is Redis fanout, broader typed sandbox
-  resource-sample events, and larger future detail payloads that should be
-  object-store-backed rather than hydrated from high-volume child rows.
+  payloads. Redis fanout/hot buffers now cover live wakeups while keeping
+  Postgres replay authoritative. Remaining #157 work is broader typed
+  resource/event coverage as execution backends expand and larger future detail
+  payloads that should be object-store-backed rather than hydrated from
+  high-volume child rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
   deterministic deployment validation. The first OpenAI-compatible terminal

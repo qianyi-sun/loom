@@ -13,6 +13,7 @@ from agentic_data_platform.persistence import (
 from agentic_data_platform.persistence.migrations import upgrade_database
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
+from agentic_data_platform.service.run_event_fanout import RedisRunEventFanout
 
 
 class ServiceAppTest(unittest.TestCase):
@@ -28,6 +29,8 @@ class ServiceAppTest(unittest.TestCase):
                 "OBJECT_STORAGE_ACCESS_KEY": "loomdev",
                 "OBJECT_STORAGE_SECRET_KEY": "miniosecret",
                 "OBJECT_STORAGE_REGION": "us-west-2",
+                "RUN_EVENT_REDIS_FANOUT_ENABLED": "true",
+                "RUN_EVENT_REDIS_HOT_BUFFER_SIZE": "250",
                 "MODEL_PROVIDER_BASE_URL": "https://models.example/v1",
                 "MODEL_PROVIDER_API_KEY": "sk-model-secret",
                 "MODEL_PROVIDER_MODELS": "gpt-5,gpt-5-mini",
@@ -76,6 +79,8 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.object_storage_access_key, "loomdev")
         self.assertEqual(settings.object_storage_secret_key, "miniosecret")
         self.assertEqual(settings.object_storage_region, "us-west-2")
+        self.assertTrue(settings.run_event_redis_fanout_enabled)
+        self.assertEqual(settings.run_event_redis_hot_buffer_size, 250)
         self.assertEqual(settings.model_provider_base_url, "https://models.example/v1")
         self.assertEqual(settings.model_provider_api_key, "sk-model-secret")
         self.assertEqual(settings.model_provider_models, "gpt-5,gpt-5-mini")
@@ -327,6 +332,13 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(body["request_id"], "req-project-001")
         self.assertEqual(body["project"]["project_id"], "latent-skill-pilot")
         self.assertEqual(body["project"]["owner_team_id"], "pilot-project")
+
+    def test_create_app_configures_run_event_redis_fanout_without_connecting_eagerly(self):
+        client = TestClient(create_app(_settings()))
+
+        self.assertIsInstance(client.app.state.run_event_fanout, RedisRunEventFanout)
+        self.assertEqual(client.app.state.run_event_fanout.redis_url, "redis://redis:6379/0")
+        self.assertEqual(client.app.state.run_event_fanout.hot_buffer_size, 100)
 
 
 def _settings() -> ServiceSettings:

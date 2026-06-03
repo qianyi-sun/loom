@@ -36,6 +36,8 @@ from agentic_data_platform.persistence.models import ArtifactRow, EvaluatorResul
 from agentic_data_platform.persistence.repositories import IdentityRepository, ProjectRepository, RunRepository
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
+from agentic_data_platform.service.run_event_fanout import InMemoryRunEventFanout
+from agentic_data_platform.service.run_resources import _run_event_stream
 
 
 class RunResourcesTest(unittest.TestCase):
@@ -634,6 +636,33 @@ class RunResourcesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("event: run.created", response.text)
         self.assertIn("event: run.canceled", response.text)
+
+    def test_run_event_stream_waits_on_fanout_when_no_durable_events_are_available(self):
+        fanout = InMemoryRunEventFanout()
+        sleep_calls: list[float] = []
+
+        stream = _run_event_stream(
+            engine=self.engine,
+            run_id="run_001",
+            after_seq=0,
+            limit=100,
+            once=False,
+            poll_interval_seconds=0.25,
+            timeout_seconds=0.25,
+            fanout=fanout,
+            sleep=sleep_calls.append,
+        )
+
+        payload = next(stream)
+
+        self.assertEqual(payload, ": stream timeout\n\n")
+        self.assertEqual(len(fanout.wait_calls), 1)
+        waited_run_id, waited_after_seq, waited_timeout_seconds = fanout.wait_calls[0]
+        self.assertEqual(waited_run_id, "run_001")
+        self.assertEqual(waited_after_seq, 0)
+        self.assertGreater(waited_timeout_seconds, 0)
+        self.assertLessEqual(waited_timeout_seconds, 0.25)
+        self.assertEqual(sleep_calls, [])
 
     def test_create_run_uses_project_owner_team_instead_of_request_snapshot(self):
         payload = _run_create_payload(run_id="run_owner_team_001")

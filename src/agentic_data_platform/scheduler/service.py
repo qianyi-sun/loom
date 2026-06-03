@@ -15,6 +15,7 @@ from agentic_data_platform.sandbox.docker_terminal import (
     DockerOwnedContainerCleanupResult,
 )
 from agentic_data_platform.service.config import ServiceSettings, load_service_settings
+from agentic_data_platform.service.run_event_fanout import build_run_event_fanout, configure_run_event_fanout
 
 
 @dataclass(frozen=True)
@@ -312,6 +313,7 @@ def build_configured_scheduler(
     service_settings = settings or load_service_settings()
     if not service_settings.database_url:
         raise ValueError("DATABASE_URL is required for scheduler service")
+    configure_run_event_fanout(build_run_event_fanout(service_settings))
     return RunScheduler(
         engine=create_database_engine(service_settings.database_url, pool_pre_ping=True),
         scheduler_id=scheduler_id,

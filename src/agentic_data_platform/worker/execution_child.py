@@ -5,6 +5,7 @@ import json
 
 from agentic_data_platform.persistence import create_database_engine
 from agentic_data_platform.service.config import load_service_settings
+from agentic_data_platform.service.run_event_fanout import build_run_event_fanout, configure_run_event_fanout
 from agentic_data_platform.worker.service import build_configured_executor, execute_claimed_run
 
 
@@ -19,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_service_settings()
     if not settings.database_url:
         raise ValueError("DATABASE_URL is required for worker execution child")
+    configure_run_event_fanout(build_run_event_fanout(settings))
     engine = create_database_engine(settings.database_url, pool_pre_ping=True)
     try:
         result = execute_claimed_run(
