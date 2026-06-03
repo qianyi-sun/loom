@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #159/#160 required execution artifact upload diagnostics for terminal
+  benchmark runs. If the trajectory JSONL or final workspace snapshot cannot be
+  written after terminal commands complete, the run now fails at the artifact
+  upload boundary before evaluator execution, records failed artifact metadata,
+  and writes a failed `artifact` chunk with a redacted upload reason for bundle
+  and replay diagnostics.
 - Added #159/#160 evaluator-report upload diagnostics for terminal benchmark
   runs. If an evaluator returns a completed result but the evaluator report
   object cannot be written, the run now preserves the evaluator output and

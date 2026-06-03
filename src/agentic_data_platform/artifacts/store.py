@@ -330,6 +330,30 @@ class ArtifactPersistence:
             kind=ArtifactKind.TRAJECTORY,
         )
 
+    def failed_trajectory_ref(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        turns: list[TerminalTurn],
+        error: Exception,
+    ) -> ArtifactRef:
+        key = self.key_factory.trajectory_key(run_id, task_instance_id)
+        return _failed_artifact_ref(
+            artifact_id=f"{_safe_component(run_id)}-trajectory",
+            kind=ArtifactKind.TRAJECTORY,
+            storage_key=key,
+            media_type="application/x-ndjson",
+            reason=_artifact_upload_error_reason(error),
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": ArtifactContentType.TRAJECTORY_JSONL,
+                "turn_count": len(turns),
+                "object_writer": "trajectory",
+            },
+        )
+
     def persist_workspace_snapshot(
         self,
         *,
@@ -356,6 +380,30 @@ class ArtifactPersistence:
             stored,
             artifact_id=f"{_safe_component(run_id)}-workspace-snapshot",
             kind=ArtifactKind.WORKSPACE_SNAPSHOT,
+        )
+
+    def failed_workspace_snapshot_ref(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        snapshot: WorkspaceSnapshot,
+        error: Exception,
+    ) -> ArtifactRef:
+        key = self.key_factory.workspace_snapshot_key(run_id, task_instance_id)
+        return _failed_artifact_ref(
+            artifact_id=f"{_safe_component(run_id)}-workspace-snapshot",
+            kind=ArtifactKind.WORKSPACE_SNAPSHOT,
+            storage_key=key,
+            media_type="application/json",
+            reason=_artifact_upload_error_reason(error),
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": ArtifactContentType.WORKSPACE_SNAPSHOT_MANIFEST,
+                "file_count": len(snapshot.files),
+                "object_writer": "workspace_snapshot",
+            },
         )
 
     def persist_evaluator_report(

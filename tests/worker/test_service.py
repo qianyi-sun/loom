@@ -612,6 +612,149 @@ class WorkerServiceTest(unittest.TestCase):
             )
         )
 
+    def test_workspace_snapshot_upload_failure_records_artifact_boundary_failure(self):
+        payload = _run_create_payload("run_worker_workspace_upload_failure_001")
+        payload["metadata"] = {
+            "worker_commands": [
+                {
+                    "command": "python solve.py",
+                    "cwd": "/workspace",
+                    "model_call_id": "call-workspace-upload-failure-1",
+                }
+            ]
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                stdout="created receipts workbook\n",
+                stderr="",
+                write_files={"receipts.xlsx": "spreadsheet bytes\n"},
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-docker-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(FailingWorkspaceSnapshotStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-workspace-upload-failure-001")
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_workspace_upload_failure_001",
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        self.assertIsNone(result.evaluator_id)
+        self.assertGreaterEqual(len(chunks), 1)
+        failed_chunk = next(chunk for chunk in chunks if chunk.upload_status is ArtifactUploadStatus.FAILED)
+        self.assertIn("simulated workspace object store failure", failed_chunk.upload_error_reason)
+        self.assertNotIn("api_key=secret", failed_chunk.upload_error_reason)
+        self.assertEqual(failed_chunk.metadata["content_type"], "workspace_snapshot_manifest")
+        self.assertEqual(failed_chunk.metadata["object_writer"], "workspace_snapshot")
+        self.assertEqual(failed_chunk.metadata["file_count"], 1)
+
+        detail = self.client.get("/runs/run_worker_workspace_upload_failure_001")
+        self.assertEqual(detail.status_code, 200)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["run"]["status"], "failed")
+        self.assertIn("artifact upload failed for workspace_snapshot", detail_payload["run"]["failure_reason"])
+        self.assertNotIn("api_key=secret", detail_payload["run"]["failure_reason"])
+        self.assertIsNone(detail_payload["run"].get("evaluator"))
+        event_types = [event["event_type"] for event in detail_payload["lifecycle_events"]]
+        self.assertIn("artifact.chunk_recorded", event_types)
+        self.assertIn("artifact.upload_status_changed", event_types)
+
+        bundle = self.client.get("/runs/run_worker_workspace_upload_failure_001/artifact-bundle")
+        self.assertEqual(bundle.status_code, 200)
+        with zipfile.ZipFile(BytesIO(bundle.content)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+
+        self.assertGreaterEqual(manifest["artifact_chunk_count"], 1)
+        self.assertTrue(
+            any(
+                error.get("upload_status") == "failed"
+                and "simulated workspace object store failure" in error["upload_error_reason"]
+                and "api_key=secret" not in error["upload_error_reason"]
+                for error in manifest["artifact_chunk_content_errors"]
+            )
+        )
+
+    def test_trajectory_upload_failure_records_artifact_boundary_failure(self):
+        payload = _run_create_payload("run_worker_trajectory_upload_failure_001")
+        payload["metadata"] = {
+            "worker_commands": [
+                {
+                    "command": "python solve.py",
+                    "cwd": "/workspace",
+                    "model_call_id": "call-trajectory-upload-failure-1",
+                }
+            ]
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                stdout="created receipts workbook\n",
+                stderr="",
+                write_files={"receipts.xlsx": "spreadsheet bytes\n"},
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-docker-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(FailingTrajectoryStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-trajectory-upload-failure-001")
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_trajectory_upload_failure_001",
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "failed")
+        failed_chunk = next(chunk for chunk in chunks if chunk.upload_status is ArtifactUploadStatus.FAILED)
+        self.assertIn("simulated trajectory object store failure", failed_chunk.upload_error_reason)
+        self.assertNotIn("api_key=secret", failed_chunk.upload_error_reason)
+        self.assertEqual(failed_chunk.metadata["content_type"], "trajectory_jsonl")
+        self.assertEqual(failed_chunk.metadata["object_writer"], "trajectory")
+        self.assertEqual(failed_chunk.metadata["turn_count"], 1)
+
+        detail = self.client.get("/runs/run_worker_trajectory_upload_failure_001")
+        self.assertEqual(detail.status_code, 200)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["run"]["status"], "failed")
+        self.assertIn("artifact upload failed for trajectory", detail_payload["run"]["failure_reason"])
+        self.assertNotIn("api_key=secret", detail_payload["run"]["failure_reason"])
+
+        bundle = self.client.get("/runs/run_worker_trajectory_upload_failure_001/artifact-bundle")
+        self.assertEqual(bundle.status_code, 200)
+        with zipfile.ZipFile(BytesIO(bundle.content)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+
+        self.assertTrue(
+            any(
+                error.get("upload_status") == "failed"
+                and "simulated trajectory object store failure" in error["upload_error_reason"]
+                and "api_key=secret" not in error["upload_error_reason"]
+                for error in manifest["artifact_chunk_content_errors"]
+            )
+        )
+
     def test_sandbox_lifecycle_recorder_ignores_stale_execution_task(self):
         run = _run_create_payload("run_sandbox_lifecycle_stale_001")
         create_response = self.client.post("/runs", json=run)
@@ -1842,6 +1985,20 @@ class FailingEvaluatorReportStore(LocalArtifactStore):
     def put_bytes(self, key, payload, *, media_type, metadata=None):
         if "/evaluation/mock-judge-v0/report.json" in key:
             raise RuntimeError("simulated evaluator report object store failure: api_key=secret")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
+
+
+class FailingTrajectoryStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/trajectory/trajectory.jsonl" in key:
+            raise RuntimeError("simulated trajectory object store failure: api_key=secret")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
+
+
+class FailingWorkspaceSnapshotStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/workspace/snapshot.json" in key:
+            raise RuntimeError("simulated workspace object store failure: api_key=secret")
         return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
 
 

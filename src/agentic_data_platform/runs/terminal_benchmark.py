@@ -46,6 +46,29 @@ class TerminalBenchmarkRunResult:
     dashboard: dict[str, object]
 
 
+@dataclass(frozen=True)
+class ExecutionArtifactPersistenceResult:
+    trajectory_ref: ArtifactRef
+    workspace_ref: ArtifactRef
+    failed_refs: tuple[ArtifactRef, ...] = ()
+
+    @property
+    def failure_reason(self) -> str | None:
+        if not self.failed_refs:
+            return None
+        writers = [
+            str(ref.metadata.get("object_writer") or ref.kind.value)
+            for ref in self.failed_refs
+        ]
+        reasons = [
+            str(ref.metadata.get("upload_error_reason"))
+            for ref in self.failed_refs
+            if ref.metadata.get("upload_error_reason")
+        ]
+        reason_suffix = f": {'; '.join(reasons)}" if reasons else ""
+        return f"artifact upload failed for {', '.join(writers)}{reason_suffix}"
+
+
 class TerminalBenchmarkRunner:
     def __init__(
         self,
@@ -79,8 +102,8 @@ class TerminalBenchmarkRunner:
 
         timeout_seconds = int(request.registration.runner.resource_limits.get("timeout_seconds", 3600))
         failure_reason = self._execute_model_commands(run, request, timeout_seconds=timeout_seconds)
+        artifacts = self._persist_execution_artifacts(run, request)
         if failure_reason is not None:
-            self._persist_execution_artifacts(run, request)
             run.failure_reason = failure_reason
             run.transition_to(RunStatus.FAILED)
             return TerminalBenchmarkRunResult(
@@ -88,14 +111,20 @@ class TerminalBenchmarkRunner:
                 dashboard=RunDashboardProjection.from_run(run).to_dict(),
             )
 
-        run.transition_to(RunStatus.EVALUATING)
-        trajectory_ref, workspace_ref = self._persist_execution_artifacts(run, request)
+        if artifacts.failure_reason is not None:
+            run.failure_reason = artifacts.failure_reason
+            run.transition_to(RunStatus.FAILED)
+            return TerminalBenchmarkRunResult(
+                run=run,
+                dashboard=RunDashboardProjection.from_run(run).to_dict(),
+            )
 
+        run.transition_to(RunStatus.EVALUATING)
         evaluator_result = self.evaluator.evaluate(
             EvaluatorInput.from_run(
                 run,
-                trajectory_ref=trajectory_ref,
-                workspace_ref=workspace_ref,
+                trajectory_ref=artifacts.trajectory_ref,
+                workspace_ref=artifacts.workspace_ref,
                 artifact_refs=[],
                 rubric_id=request.rubric_id,
                 judge=request.judge,
@@ -132,20 +161,46 @@ class TerminalBenchmarkRunner:
         self,
         run: RunRecord,
         request: TerminalBenchmarkRunRequest,
-    ) -> tuple[ArtifactRef, ArtifactRef]:
-        trajectory_ref = self.artifact_persistence.persist_trajectory(
-            run_id=run.run_id,
-            task_instance_id=run.task.instance_id,
-            turns=run.trajectory,
-        )
-        workspace_ref = self.artifact_persistence.persist_workspace_snapshot(
-            run_id=run.run_id,
-            task_instance_id=run.task.instance_id,
-            snapshot=request.sandbox.capture_workspace(),
-        )
+    ) -> ExecutionArtifactPersistenceResult:
+        failed_refs: list[ArtifactRef] = []
+        try:
+            trajectory_ref = self.artifact_persistence.persist_trajectory(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                turns=run.trajectory,
+            )
+        except Exception as exc:
+            trajectory_ref = self.artifact_persistence.failed_trajectory_ref(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                turns=run.trajectory,
+                error=exc,
+            )
+            failed_refs.append(trajectory_ref)
+
+        workspace_snapshot = request.sandbox.capture_workspace()
+        try:
+            workspace_ref = self.artifact_persistence.persist_workspace_snapshot(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                snapshot=workspace_snapshot,
+            )
+        except Exception as exc:
+            workspace_ref = self.artifact_persistence.failed_workspace_snapshot_ref(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                snapshot=workspace_snapshot,
+                error=exc,
+            )
+            failed_refs.append(workspace_ref)
+
         run.attach_artifact(trajectory_ref)
         run.attach_artifact(workspace_ref)
-        return trajectory_ref, workspace_ref
+        return ExecutionArtifactPersistenceResult(
+            trajectory_ref=trajectory_ref,
+            workspace_ref=workspace_ref,
+            failed_refs=tuple(failed_refs),
+        )
 
     def _execute_model_commands(
         self,

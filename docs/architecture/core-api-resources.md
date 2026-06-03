@@ -341,15 +341,19 @@ serializing dashboard payloads.
   successful writes complete the row with real size/SHA-256, and object-store
   failures mark the row `failed` with a redacted reason without overriding the
   run's terminal status. Terminal log chunks append typed `log.chunk_recorded`
-  events. Original-wrapper generated artifact upload failures now follow the
-  same diagnostic surface after the wrapper result is saved: the run can remain
-  terminally succeeded when evaluation completed, while the failed generated
-  artifact is represented by failed artifact metadata and a failed `artifact`
-  chunk with a redacted upload reason. Terminal benchmark evaluator-report
-  upload failures are represented the same way after the evaluator returns:
-  evaluator output remains the run's evaluation result, while the report object
-  write failure is recorded as failed artifact metadata plus a failed
-  `artifact` chunk diagnostic. Non-log trajectory/artifact chunks append
+  events. Required terminal execution artifacts use the same failed-artifact
+  metadata when object writes fail: trajectory JSONL or workspace snapshot
+  upload failures mark the run failed at the artifact boundary before evaluator
+  execution, then persist a failed `artifact` chunk with the intended object
+  key and redacted reason. Original-wrapper generated artifact upload failures
+  now follow the same diagnostic surface after the wrapper result is saved: the
+  run can remain terminally succeeded when evaluation completed, while the
+  failed generated artifact is represented by failed artifact metadata and a
+  failed `artifact` chunk with a redacted upload reason. Terminal benchmark
+  evaluator-report upload failures are represented the same way after the
+  evaluator returns: evaluator output remains the run's evaluation result, while
+  the report object write failure is recorded as failed artifact metadata plus
+  a failed `artifact` chunk diagnostic. Non-log trajectory/artifact chunks append
   `artifact.chunk_recorded` events. When a chunk's upload state changes,
   `artifact.upload_status_changed` records the previous and current status with
   the same safe chunk/object identifiers. These events carry object metadata such
