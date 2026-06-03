@@ -13,6 +13,7 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
 
 from agentic_data_platform.domain.artifact_metadata import (
+    ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION,
     ArtifactChunkKind,
     ArtifactChunkMetadata,
     ArtifactContentType,
@@ -386,6 +387,31 @@ class ArtifactPersistence:
             kind=ArtifactKind.EVALUATOR_REPORT,
         )
 
+    def failed_evaluator_report_ref(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        result: EvaluatorResult,
+        error: Exception,
+    ) -> ArtifactRef:
+        key = self.key_factory.evaluator_report_key(run_id, task_instance_id, result.evaluator_id)
+        return _failed_artifact_ref(
+            artifact_id=f"{_safe_component(run_id)}-{_safe_component(result.evaluator_id)}-report",
+            kind=ArtifactKind.EVALUATOR_REPORT,
+            storage_key=key,
+            media_type="application/json",
+            reason=_artifact_upload_error_reason(error),
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": ArtifactContentType.EVALUATOR_REPORT,
+                "evaluator_id": result.evaluator_id,
+                "evaluator_status": result.status,
+                "object_writer": "evaluator_report",
+            },
+        )
+
     def persist_harbor_jobs_archive(
         self,
         *,
@@ -605,6 +631,32 @@ def _artifact_ref(stored: StoredArtifact, *, artifact_id: str, kind: ArtifactKin
     )
 
 
+def _failed_artifact_ref(
+    *,
+    artifact_id: str,
+    kind: ArtifactKind,
+    storage_key: str,
+    media_type: str,
+    reason: str,
+    metadata: dict[str, Any],
+) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_id=artifact_id,
+        kind=kind,
+        uri=f"unavailable://artifact-upload/{quote(storage_key, safe='')}",
+        media_type=media_type,
+        metadata={
+            "artifact_metadata_schema": ARTIFACT_OBJECT_METADATA_SCHEMA_VERSION,
+            **{key: _to_jsonable(value) for key, value in metadata.items() if value is not None},
+            "upload_status": ArtifactUploadStatus.FAILED.value,
+            "upload_error_reason": reason,
+            "storage_key": storage_key,
+            "artifact_chunk_kind": ArtifactChunkKind.ARTIFACT.value,
+            "artifact_chunk_sequence": 0,
+        },
+    )
+
+
 def _json_bytes(value: Any) -> bytes:
     return (json.dumps(_to_jsonable(value), indent=2, sort_keys=True) + "\n").encode("utf-8")
 
@@ -668,6 +720,24 @@ def _safe_relative_parts(value: str) -> tuple[str, ...]:
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise ValueError("artifact_path must not contain empty, current, or parent segments")
     return tuple(parts)
+
+
+def _artifact_upload_error_reason(error: Exception) -> str:
+    max_chars = 500
+    reason = _redact_failure_text(f"{type(error).__name__}: {error}".strip())
+    if len(reason) <= max_chars:
+        return reason
+    return reason[: max_chars - 3] + "..."
+
+
+def _redact_failure_text(value: str) -> str:
+    redacted = re.sub(
+        r"(?i)\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION)[A-Z0-9_]*=)[^\s,;]+",
+        r"\1[redacted]",
+        value,
+    )
+    redacted = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", redacted)
+    return re.sub(r"sk-[A-Za-z0-9_-]+", "[redacted]", redacted)
 
 
 def _validate_expiry(expires_in_seconds: int) -> None:

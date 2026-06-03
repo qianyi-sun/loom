@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #159/#160 evaluator-report upload diagnostics for terminal benchmark
+  runs. If an evaluator returns a completed result but the evaluator report
+  object cannot be written, the run now preserves the evaluator output and
+  records the report as failed artifact metadata plus a failed `artifact` chunk
+  with a redacted upload reason. Artifact bundles expose the failed chunk in
+  `artifact_chunk_content_errors` instead of converting evaluator success into a
+  worker failure.
 - Added #159/#160 original-wrapper artifact upload diagnostics. If an
   original SkillFlow/SkillLearnBench wrapper completes but one generated
   artifact cannot be written to object storage, the worker now preserves the

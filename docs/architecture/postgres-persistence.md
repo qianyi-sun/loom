@@ -312,8 +312,12 @@ also persisted after the run result: the failed artifact row records
 `upload_status=failed`, and a failed `artifact` chunk row preserves the intended
 object key, artifact path, runner contract, and redacted upload reason for
 bundle/replay diagnostics without changing a completed wrapper evaluation into
-a worker failure. Chunk writes append metadata-only `log.chunk_recorded`
-events for stdout/stderr chunks and `artifact.chunk_recorded` events for
+a worker failure. Terminal benchmark evaluator-report upload failures use the
+same pattern after evaluator output exists: Postgres preserves the evaluator
+result, records the report artifact as `upload_status=failed`, and writes a
+failed `artifact` chunk row with evaluator id/status plus the redacted upload
+reason. Chunk writes append metadata-only `log.chunk_recorded` events for
+stdout/stderr chunks and `artifact.chunk_recorded` events for
 trajectory/artifact chunks. Upload expiry also appends
 `artifact.upload_expired` alongside the recovery event. Chunk upload-state
 changes and expiry append `artifact.upload_status_changed` with previous/current

@@ -101,11 +101,19 @@ class TerminalBenchmarkRunner:
                 judge=request.judge,
             )
         )
-        evaluator_report_ref = self.artifact_persistence.persist_evaluator_report(
-            run_id=run.run_id,
-            task_instance_id=run.task.instance_id,
-            result=evaluator_result,
-        )
+        try:
+            evaluator_report_ref = self.artifact_persistence.persist_evaluator_report(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                result=evaluator_result,
+            )
+        except Exception as exc:
+            evaluator_report_ref = self.artifact_persistence.failed_evaluator_report_ref(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                result=evaluator_result,
+                error=exc,
+            )
         run.attach_artifact(evaluator_report_ref)
         run.attach_evaluator_result(evaluator_result)
 

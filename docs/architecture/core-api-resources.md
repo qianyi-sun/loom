@@ -345,7 +345,11 @@ serializing dashboard payloads.
   same diagnostic surface after the wrapper result is saved: the run can remain
   terminally succeeded when evaluation completed, while the failed generated
   artifact is represented by failed artifact metadata and a failed `artifact`
-  chunk with a redacted upload reason. Non-log trajectory/artifact chunks append
+  chunk with a redacted upload reason. Terminal benchmark evaluator-report
+  upload failures are represented the same way after the evaluator returns:
+  evaluator output remains the run's evaluation result, while the report object
+  write failure is recorded as failed artifact metadata plus a failed
+  `artifact` chunk diagnostic. Non-log trajectory/artifact chunks append
   `artifact.chunk_recorded` events. When a chunk's upload state changes,
   `artifact.upload_status_changed` records the previous and current status with
   the same safe chunk/object identifiers. These events carry object metadata such
