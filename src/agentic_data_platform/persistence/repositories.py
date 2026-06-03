@@ -643,6 +643,8 @@ class RunRepository:
         benchmark_limits: dict[str, int] | None = None,
         provider_cost_limits_usd: dict[str, float] | None = None,
         model_cost_limits_usd: dict[str, float] | None = None,
+        provider_observed_cost_limits_usd: dict[str, float] | None = None,
+        model_observed_cost_limits_usd: dict[str, float] | None = None,
         provider_token_limits: dict[str, int] | None = None,
         model_token_limits: dict[str, int] | None = None,
         provider_observed_token_limits: dict[str, int] | None = None,
@@ -663,6 +665,8 @@ class RunRepository:
             benchmark_limits=benchmark_limits,
             provider_cost_limits_usd=provider_cost_limits_usd,
             model_cost_limits_usd=model_cost_limits_usd,
+            provider_observed_cost_limits_usd=provider_observed_cost_limits_usd,
+            model_observed_cost_limits_usd=model_observed_cost_limits_usd,
             provider_token_limits=provider_token_limits,
             model_token_limits=model_token_limits,
             provider_observed_token_limits=provider_observed_token_limits,
@@ -686,6 +690,8 @@ class RunRepository:
         benchmark_limits: dict[str, int] | None = None,
         provider_cost_limits_usd: dict[str, float] | None = None,
         model_cost_limits_usd: dict[str, float] | None = None,
+        provider_observed_cost_limits_usd: dict[str, float] | None = None,
+        model_observed_cost_limits_usd: dict[str, float] | None = None,
         provider_token_limits: dict[str, int] | None = None,
         model_token_limits: dict[str, int] | None = None,
         provider_observed_token_limits: dict[str, int] | None = None,
@@ -711,6 +717,8 @@ class RunRepository:
                 benchmark_limits=benchmark_limits,
                 provider_cost_limits_usd=provider_cost_limits_usd,
                 model_cost_limits_usd=model_cost_limits_usd,
+                provider_observed_cost_limits_usd=provider_observed_cost_limits_usd,
+                model_observed_cost_limits_usd=model_observed_cost_limits_usd,
                 provider_token_limits=provider_token_limits,
                 model_token_limits=model_token_limits,
                 provider_observed_token_limits=provider_observed_token_limits,
@@ -737,6 +745,8 @@ class RunRepository:
         benchmark_limits: dict[str, int] | None = None,
         provider_cost_limits_usd: dict[str, float] | None = None,
         model_cost_limits_usd: dict[str, float] | None = None,
+        provider_observed_cost_limits_usd: dict[str, float] | None = None,
+        model_observed_cost_limits_usd: dict[str, float] | None = None,
         provider_token_limits: dict[str, int] | None = None,
         model_token_limits: dict[str, int] | None = None,
         provider_observed_token_limits: dict[str, int] | None = None,
@@ -756,6 +766,8 @@ class RunRepository:
         benchmark_limits = _positive_limits(benchmark_limits or {})
         provider_cost_limits_usd = _positive_float_limits(provider_cost_limits_usd or {})
         model_cost_limits_usd = _positive_float_limits(model_cost_limits_usd or {})
+        provider_observed_cost_limits_usd = _positive_float_limits(provider_observed_cost_limits_usd or {})
+        model_observed_cost_limits_usd = _positive_float_limits(model_observed_cost_limits_usd or {})
         provider_token_limits = _positive_limits(provider_token_limits or {})
         model_token_limits = _positive_limits(model_token_limits or {})
         provider_observed_token_limits = _positive_limits(provider_observed_token_limits or {})
@@ -768,21 +780,28 @@ class RunRepository:
         observed_tokens_by_model: dict[str, int] = {}
         observed_requests_by_provider: dict[str, int] = {}
         observed_requests_by_model: dict[str, int] = {}
+        observed_cost_by_provider: dict[str, float] = {}
+        observed_cost_by_model: dict[str, float] = {}
         if observed_usage_since is not None and (
             provider_observed_token_limits
             or model_observed_token_limits
             or provider_observed_request_limits
             or model_observed_request_limits
+            or provider_observed_cost_limits_usd
+            or model_observed_cost_limits_usd
         ):
             (
                 observed_tokens_by_provider,
                 observed_tokens_by_model,
                 observed_requests_by_provider,
                 observed_requests_by_model,
+                observed_cost_by_provider,
+                observed_cost_by_model,
             ) = self._observed_model_provider_usage_since(
                 observed_usage_since,
                 include_tokens=bool(provider_observed_token_limits or model_observed_token_limits),
                 include_requests=bool(provider_observed_request_limits or model_observed_request_limits),
+                include_cost=bool(provider_observed_cost_limits_usd or model_observed_cost_limits_usd),
             )
         active_statuses = {
             RunStatus.DISPATCHED.value,
@@ -808,6 +827,8 @@ class RunRepository:
         rate_window_tokens_by_model = dict(observed_tokens_by_model)
         rate_window_requests_by_provider = dict(observed_requests_by_provider)
         rate_window_requests_by_model = dict(observed_requests_by_model)
+        rate_window_cost_by_provider = dict(observed_cost_by_provider)
+        rate_window_cost_by_model = dict(observed_cost_by_model)
         for row in active_rows:
             provider_key = _provider_capacity_key(row)
             model_key = _model_capacity_key(row)
@@ -823,6 +844,8 @@ class RunRepository:
             if estimated_cost_usd > 0:
                 _increment_float(active_cost_by_provider, provider_key, estimated_cost_usd)
                 _increment_float(active_cost_by_model, model_key, estimated_cost_usd)
+                _increment_float(rate_window_cost_by_provider, provider_key, estimated_cost_usd)
+                _increment_float(rate_window_cost_by_model, model_key, estimated_cost_usd)
             if estimated_tokens > 0:
                 _increment(active_tokens_by_provider, provider_key, estimated_tokens)
                 _increment(active_tokens_by_model, model_key, estimated_tokens)
@@ -933,6 +956,24 @@ class RunRepository:
                         estimated_cost_usd,
                         "estimated_cost_usd",
                         "model estimated cost budget reached",
+                    ),
+                    (
+                        "provider_observed_cost_usd",
+                        provider_key,
+                        rate_window_cost_by_provider,
+                        provider_observed_cost_limits_usd,
+                        estimated_cost_usd,
+                        "observed_plus_estimated_cost_usd",
+                        "provider observed cost window reached",
+                    ),
+                    (
+                        "model_observed_cost_usd",
+                        model_key,
+                        rate_window_cost_by_model,
+                        model_observed_cost_limits_usd,
+                        estimated_cost_usd,
+                        "observed_plus_estimated_cost_usd",
+                        "model observed cost window reached",
                     ),
                     (
                         "provider_tokens",
@@ -1065,6 +1106,8 @@ class RunRepository:
             if estimated_cost_usd > 0:
                 _increment_float(active_cost_by_provider, provider_key, estimated_cost_usd)
                 _increment_float(active_cost_by_model, model_key, estimated_cost_usd)
+                _increment_float(rate_window_cost_by_provider, provider_key, estimated_cost_usd)
+                _increment_float(rate_window_cost_by_model, model_key, estimated_cost_usd)
             if estimated_tokens > 0:
                 _increment(active_tokens_by_provider, provider_key, estimated_tokens)
                 _increment(active_tokens_by_model, model_key, estimated_tokens)
@@ -1087,11 +1130,21 @@ class RunRepository:
         *,
         include_tokens: bool,
         include_requests: bool,
-    ) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
+        include_cost: bool,
+    ) -> tuple[
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+        dict[str, float],
+        dict[str, float],
+    ]:
         tokens_by_provider: dict[str, int] = {}
         tokens_by_model: dict[str, int] = {}
         requests_by_provider: dict[str, int] = {}
         requests_by_model: dict[str, int] = {}
+        cost_by_provider: dict[str, float] = {}
+        cost_by_model: dict[str, float] = {}
         rows = self.session.scalars(
             select(RunRow)
             .where(RunRow.status.in_(_TERMINAL_STATUS_VALUES))
@@ -1114,7 +1167,19 @@ class RunRepository:
                 if isinstance(request_count, int) and request_count > 0:
                     _increment(requests_by_provider, provider_key, request_count)
                     _increment(requests_by_model, model_key, request_count)
-        return tokens_by_provider, tokens_by_model, requests_by_provider, requests_by_model
+            if include_cost:
+                cost_usd = usage.get("cost_usd")
+                if not isinstance(cost_usd, bool) and isinstance(cost_usd, (int, float)) and cost_usd > 0:
+                    _increment_float(cost_by_provider, provider_key, float(cost_usd))
+                    _increment_float(cost_by_model, model_key, float(cost_usd))
+        return (
+            tokens_by_provider,
+            tokens_by_model,
+            requests_by_provider,
+            requests_by_model,
+            cost_by_provider,
+            cost_by_model,
+        )
 
     def list_scheduler_capacity_blocks(
         self,

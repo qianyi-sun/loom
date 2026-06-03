@@ -315,6 +315,61 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(result.capacity_blocked_runs[0]["projected_usage"], 11)
         self.assertEqual(candidate.status, RunStatus.QUEUED)
 
+    def test_scheduler_dispatches_from_service_settings_observed_cost_window(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_scheduler_observed_cost_recent",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=1_000,
+                    cost_usd=0.45,
+                )
+            )
+            session.get(RunRow, "run_scheduler_observed_cost_recent").updated_at = datetime.now(timezone.utc)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_scheduler_observed_cost_candidate",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_cost_usd=0.10,
+                )
+            )
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_global_max_active_runs=1,
+                scheduler_observed_usage_window_seconds=3600,
+                scheduler_provider_max_observed_cost_usd={"openai": 0.50},
+            ),
+        )
+
+        result = scheduler.dispatch_once(request_id="req-scheduler-observed-cost-001")
+
+        with session_scope(self.engine) as session:
+            candidate = RunRepository(session).get_run("run_scheduler_observed_cost_candidate")
+
+        self.assertEqual(result.dispatched_run_ids, [])
+        self.assertEqual(result.capacity_blocked_count, 1)
+        self.assertEqual(result.capacity_blocked_runs[0]["dimension"], "provider_observed_cost_usd")
+        self.assertEqual(result.capacity_blocked_runs[0]["metric"], "observed_plus_estimated_cost_usd")
+        self.assertAlmostEqual(result.capacity_blocked_runs[0]["projected_usage"], 0.55)
+        self.assertEqual(candidate.status, RunStatus.QUEUED)
+
     def test_scheduler_recovers_stale_dispatched_runs_from_service_settings(self):
         now = datetime.now(timezone.utc)
         stale_timestamp = now - timedelta(minutes=10)

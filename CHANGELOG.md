@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the next #156 scheduler observed-usage cost window gate. Dispatch can
+  now combine recent completed-run `provider_usage.cost_usd` telemetry with
+  trusted active/queued `metadata.scheduler.estimated_cost_usd` hints, then
+  block provider/model windows through
+  `SCHEDULER_PROVIDER_MAX_OBSERVED_COST_USD`,
+  `SCHEDULER_MODEL_MAX_OBSERVED_COST_USD`, and the existing
+  `SCHEDULER_OBSERVED_USAGE_WINDOW_SECONDS`. Blocked queued runs reuse
+  `scheduler.capacity_blocked` with `observed_plus_estimated_cost_usd`
+  diagnostics. This is a spend guardrail, not billing truth.
 - Added the next #156 scheduler observed-usage rate window gate for request
   counts. Provider usage normalization now accepts safe request/model-call
   aliases and aggregates `request_count`; dispatch can combine recent completed

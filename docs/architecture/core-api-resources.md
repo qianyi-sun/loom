@@ -417,14 +417,16 @@ serializing dashboard payloads.
   observed-usage windows can combine recent completed-run `provider_usage`
   telemetry with queued/active estimated hints before dispatch, using
   dimensions such as `provider_observed_tokens` with metric
-  `observed_plus_estimated_tokens` or `provider_observed_requests` with metric
-  `observed_plus_estimated_requests`.
+  `observed_plus_estimated_tokens`, `provider_observed_requests` with metric
+  `observed_plus_estimated_requests`, or `provider_observed_cost_usd` with
+  metric `observed_plus_estimated_cost_usd`.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.
   Cost/token/request budget blockers use dimensions such as `provider_cost_usd`,
-  `model_tokens`, `provider_observed_tokens`, or
-  `provider_observed_requests` and include the metric,
+  `model_tokens`, `provider_observed_tokens`,
+  `provider_observed_requests`, or `provider_observed_cost_usd` and include the
+  metric,
   candidate usage, projected usage, and configured limit in the same
   operator-visible payload. `/ops/metrics` reports visible blocked counts by
   dimension, a bounded run list, and scoped observed model-provider usage totals

@@ -63,6 +63,8 @@ class ServiceAppTest(unittest.TestCase):
                 "SCHEDULER_MODEL_MAX_OBSERVED_TOKENS": "gpt-5=400000,claude-sonnet-4=200000",
                 "SCHEDULER_PROVIDER_MAX_OBSERVED_REQUESTS": "openai=120,anthropic=60",
                 "SCHEDULER_MODEL_MAX_OBSERVED_REQUESTS": "gpt-5=80,claude-sonnet-4=40",
+                "SCHEDULER_PROVIDER_MAX_OBSERVED_COST_USD": "openai=5.50,anthropic=12.25",
+                "SCHEDULER_MODEL_MAX_OBSERVED_COST_USD": "gpt-5=2.75,claude-sonnet-4=6.50",
                 "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS": "420",
                 "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS": "900",
                 "SCHEDULER_STALE_ARTIFACT_UPLOAD_TIMEOUT_SECONDS": "1800",
@@ -127,6 +129,8 @@ class ServiceAppTest(unittest.TestCase):
         self.assertEqual(settings.scheduler_model_max_observed_tokens, {"gpt-5": 400000, "claude-sonnet-4": 200000})
         self.assertEqual(settings.scheduler_provider_max_observed_requests, {"openai": 120, "anthropic": 60})
         self.assertEqual(settings.scheduler_model_max_observed_requests, {"gpt-5": 80, "claude-sonnet-4": 40})
+        self.assertEqual(settings.scheduler_provider_max_observed_cost_usd, {"openai": 5.5, "anthropic": 12.25})
+        self.assertEqual(settings.scheduler_model_max_observed_cost_usd, {"gpt-5": 2.75, "claude-sonnet-4": 6.5})
         self.assertEqual(settings.scheduler_stale_dispatched_timeout_seconds, 420)
         self.assertEqual(settings.scheduler_stale_active_heartbeat_timeout_seconds, 900)
         self.assertEqual(settings.scheduler_stale_artifact_upload_timeout_seconds, 1800)

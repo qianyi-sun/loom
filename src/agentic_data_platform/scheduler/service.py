@@ -181,6 +181,8 @@ class RunScheduler:
                 benchmark_limits=self.settings.scheduler_benchmark_max_active_runs,
                 provider_cost_limits_usd=self.settings.scheduler_provider_max_estimated_cost_usd,
                 model_cost_limits_usd=self.settings.scheduler_model_max_estimated_cost_usd,
+                provider_observed_cost_limits_usd=self.settings.scheduler_provider_max_observed_cost_usd,
+                model_observed_cost_limits_usd=self.settings.scheduler_model_max_observed_cost_usd,
                 provider_token_limits=self.settings.scheduler_provider_max_estimated_tokens,
                 model_token_limits=self.settings.scheduler_model_max_estimated_tokens,
                 provider_observed_token_limits=self.settings.scheduler_provider_max_observed_tokens,
@@ -204,6 +206,8 @@ class RunScheduler:
             or self.settings.scheduler_model_max_observed_tokens
             or self.settings.scheduler_provider_max_observed_requests
             or self.settings.scheduler_model_max_observed_requests
+            or self.settings.scheduler_provider_max_observed_cost_usd
+            or self.settings.scheduler_model_max_observed_cost_usd
         ):
             return None
         return datetime.now(timezone.utc) - timedelta(seconds=self.settings.scheduler_observed_usage_window_seconds)

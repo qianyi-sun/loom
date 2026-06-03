@@ -1560,6 +1560,126 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[-1].metadata["metric"], "observed_plus_estimated_requests")
         self.assertEqual([block.run_id for block in current_blocks], ["run_dispatch_observed_requests_b"])
 
+    def test_run_repository_blocks_dispatch_by_recent_observed_cost_window(self):
+        now = datetime.now(timezone.utc)
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_dispatch_observed_cost_recent",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=1_000,
+                    cost_usd=0.40,
+                )
+            )
+            session.get(RunRow, "run_dispatch_observed_cost_recent").updated_at = now - timedelta(minutes=5)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_dispatch_observed_cost_old",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=1_000,
+                    cost_usd=10.0,
+                )
+            )
+            session.get(RunRow, "run_dispatch_observed_cost_old").updated_at = now - timedelta(hours=2)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_observed_cost_a",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_cost_usd=0.05,
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_observed_cost_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_cost_usd=0.10,
+                )
+            )
+
+            result = runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-observed-cost-window",
+                max_runs=2,
+                provider_observed_cost_limits_usd={"openai": 0.50},
+                observed_usage_since=now - timedelta(hours=1),
+                request_id="req-dispatch-observed-cost-001",
+            )
+            events = runs.list_status_events("run_dispatch_observed_cost_b")
+            current_blocks = runs.list_scheduler_capacity_blocks(project_ids=["pilot-project"])
+
+        self.assertEqual([run.run_id for run in result.dispatched_runs], ["run_dispatch_observed_cost_a"])
+        self.assertEqual([block.run_id for block in result.capacity_blocked_runs], ["run_dispatch_observed_cost_b"])
+        block = result.capacity_blocked_runs[0]
+        self.assertEqual(block.dimension, "provider_observed_cost_usd")
+        self.assertEqual(block.key, "openai")
+        self.assertEqual(block.metric, "observed_plus_estimated_cost_usd")
+        self.assertAlmostEqual(block.active_count, 0.45)
+        self.assertAlmostEqual(block.candidate_usage, 0.10)
+        self.assertAlmostEqual(block.projected_usage, 0.55)
+        self.assertAlmostEqual(block.limit, 0.50)
+        self.assertEqual(block.reason, "provider observed cost window reached")
+        self.assertEqual(events[-1].event_type, RunEventType.SCHEDULER_CAPACITY_BLOCKED.value)
+        self.assertEqual(events[-1].metadata["metric"], "observed_plus_estimated_cost_usd")
+        self.assertEqual([block.run_id for block in current_blocks], ["run_dispatch_observed_cost_b"])
+
+    def test_run_repository_blocks_dispatch_by_recent_observed_model_cost_window(self):
+        now = datetime.now(timezone.utc)
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_dispatch_observed_model_cost_recent",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=1_000,
+                    cost_usd=0.45,
+                )
+            )
+            session.get(RunRow, "run_dispatch_observed_model_cost_recent").updated_at = now - timedelta(minutes=5)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_observed_model_cost_candidate",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_cost_usd=0.10,
+                )
+            )
+
+            result = runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-observed-model-cost-window",
+                max_runs=1,
+                model_observed_cost_limits_usd={"gpt-5-mini": 0.50},
+                observed_usage_since=now - timedelta(hours=1),
+                request_id="req-dispatch-observed-model-cost-001",
+            )
+
+        self.assertEqual(result.dispatched_runs, [])
+        self.assertEqual(
+            [block.run_id for block in result.capacity_blocked_runs],
+            ["run_dispatch_observed_model_cost_candidate"],
+        )
+        block = result.capacity_blocked_runs[0]
+        self.assertEqual(block.dimension, "model_observed_cost_usd")
+        self.assertEqual(block.key, "gpt-5-mini")
+        self.assertEqual(block.metric, "observed_plus_estimated_cost_usd")
+        self.assertAlmostEqual(block.active_count, 0.45)
+        self.assertAlmostEqual(block.candidate_usage, 0.10)
+        self.assertAlmostEqual(block.projected_usage, 0.55)
+        self.assertAlmostEqual(block.limit, 0.50)
+        self.assertEqual(block.reason, "model observed cost window reached")
+
     def test_run_repository_ignores_non_finite_scheduler_budget_hints(self):
         with session_scope(self.engine) as session:
             _seed_latent_project(session)
@@ -2359,6 +2479,7 @@ def _completed_usage_run(
     model_name: str,
     total_tokens: int,
     request_count: int | None = None,
+    cost_usd: float | None = None,
 ) -> RunRecord:
     run = _completed_run(run_id=run_id)
     run.model = replace(run.model, provider=provider, model_name=model_name)
@@ -2370,6 +2491,8 @@ def _completed_usage_run(
     }
     if request_count is not None:
         usage["request_count"] = request_count
+    if cost_usd is not None:
+        usage["cost_usd"] = cost_usd
     for evaluator_result in run.evaluator_results:
         evaluator_result.metadata["provider_usage"] = dict(usage)
     if run.evaluator_result is not None:
