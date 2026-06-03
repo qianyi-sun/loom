@@ -21,11 +21,15 @@ DEPLOY_RUN_SCHEDULER_RACE_SMOKE="${DEPLOY_RUN_SCHEDULER_RACE_SMOKE:-1}"
 DEPLOY_RUN_CONTAINER_LEAK_AUDIT="${DEPLOY_RUN_CONTAINER_LEAK_AUDIT:-1}"
 DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS="${DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS:-3}"
 DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS="${DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS:-5}"
+DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS="${DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS:-6}"
+DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS="${DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS:-10}"
 DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS="${DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS:-60}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SANDBOX_HOST_WORKSPACE_ROOT="${SANDBOX_HOST_WORKSPACE_ROOT:-$ROOT_DIR/.runtime/sandbox-workspaces}"
 export SANDBOX_HOST_WORKSPACE_ROOT
+
+SMOKE_RUN_IDS=()
 
 log() {
   printf '[deploy-dev] %s\n' "$*"
@@ -75,6 +79,10 @@ new_smoke_run_id() {
   printf '%s_%s_%s' "$1" "$(date -u +%Y%m%d%H%M%S)" "$RANDOM"
 }
 
+record_smoke_run_id() {
+  SMOKE_RUN_IDS+=("$1")
+}
+
 run_container_leak_audit() {
   if [[ "$DEPLOY_RUN_CONTAINER_LEAK_AUDIT" != "1" ]]; then
     return 0
@@ -86,6 +94,27 @@ run_container_leak_audit() {
     --run-id "$run_id" \
     --max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS" \
     --poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS" </dev/null
+}
+
+run_aggregate_container_leak_audit() {
+  if [[ "$DEPLOY_RUN_CONTAINER_LEAK_AUDIT" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${#SMOKE_RUN_IDS[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local leak_audit_args=()
+  local run_id
+  for run_id in "${SMOKE_RUN_IDS[@]}"; do
+    leak_audit_args+=(--run-id "$run_id")
+  done
+
+  log "Checking aggregate Docker container leak audit for ${#SMOKE_RUN_IDS[@]} real smoke run(s)"
+  compose run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit \
+    "${leak_audit_args[@]}" \
+    --max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS" \
+    --poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS" </dev/null
 }
 
 run_compose_smoke() {
@@ -114,6 +143,7 @@ run_compose_smoke() {
   local worker_smoke_run_id
   worker_smoke_run_id="$(new_smoke_run_id worker_smoke)"
   compose run --rm --build -T worker-smoke python -m agentic_data_platform.worker.smoke --run-id "$worker_smoke_run_id" </dev/null
+  record_smoke_run_id "$worker_smoke_run_id"
   run_container_leak_audit "$worker_smoke_run_id"
 
   if [[ "$DEPLOY_RUN_HARBOR_SMOKE" == "1" ]]; then
@@ -121,6 +151,7 @@ run_compose_smoke() {
     local harbor_smoke_run_id
     harbor_smoke_run_id="$(new_smoke_run_id harbor_smoke)"
     compose run --rm --build -T -e HARBOR_SMOKE_RUN_ID="$harbor_smoke_run_id" harbor-smoke </dev/null
+    record_smoke_run_id "$harbor_smoke_run_id"
     run_container_leak_audit "$harbor_smoke_run_id"
   fi
 
@@ -149,6 +180,7 @@ run_compose_smoke() {
     local api_smoke_run_id
     api_smoke_run_id="$(new_smoke_run_id api_smoke)"
     compose run --rm --build -T -e API_SMOKE_RUN_ID="$api_smoke_run_id" api-smoke </dev/null
+    record_smoke_run_id "$api_smoke_run_id"
     run_container_leak_audit "$api_smoke_run_id"
   fi
 
@@ -157,8 +189,11 @@ run_compose_smoke() {
     local frontend_smoke_run_id
     frontend_smoke_run_id="$(new_smoke_run_id frontend_smoke)"
     compose run --rm --build -T -e FRONTEND_SMOKE_RUN_ID="$frontend_smoke_run_id" frontend-smoke </dev/null
+    record_smoke_run_id "$frontend_smoke_run_id"
     run_container_leak_audit "$frontend_smoke_run_id"
   fi
+
+  run_aggregate_container_leak_audit
 
   log "Current service status"
   compose ps
@@ -248,8 +283,12 @@ set -euo pipefail
 cd "$DEPLOY_PATH"
 ./scripts/setup-dev-env.sh
 export SANDBOX_HOST_WORKSPACE_ROOT="\${SANDBOX_HOST_WORKSPACE_ROOT:-$DEPLOY_PATH/.runtime/sandbox-workspaces}"
+smoke_run_ids=()
 new_smoke_run_id() {
   printf '%s_%s_%s' "\$1" "\$(date -u +%Y%m%d%H%M%S)" "\$RANDOM"
+}
+record_smoke_run_id() {
+  smoke_run_ids+=("\$1")
 }
 run_container_leak_audit() {
   if [[ "$DEPLOY_RUN_CONTAINER_LEAK_AUDIT" != "1" ]]; then
@@ -261,6 +300,23 @@ run_container_leak_audit() {
     --run-id "\$run_id" \
     --max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS" \
     --poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS" </dev/null
+}
+run_aggregate_container_leak_audit() {
+  if [[ "$DEPLOY_RUN_CONTAINER_LEAK_AUDIT" != "1" ]]; then
+    return 0
+  fi
+  if [[ "\${#smoke_run_ids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  leak_audit_args=()
+  for run_id in "\${smoke_run_ids[@]}"; do
+    leak_audit_args+=(--run-id "\$run_id")
+  done
+  printf '[deploy-dev] Checking aggregate Docker container leak audit for %s real smoke run(s)\n' "\${#smoke_run_ids[@]}"
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit \
+    "\${leak_audit_args[@]}" \
+    --max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS" \
+    --poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS" </dev/null
 }
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
@@ -278,11 +334,13 @@ fi
 printf '[deploy-dev] Checking worker queue execution\n'
 worker_smoke_run_id=\$(new_smoke_run_id worker_smoke)
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T worker-smoke python -m agentic_data_platform.worker.smoke --run-id "\$worker_smoke_run_id" </dev/null
+record_smoke_run_id "\$worker_smoke_run_id"
 run_container_leak_audit "\$worker_smoke_run_id"
 if [[ "$DEPLOY_RUN_HARBOR_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking real Harbor CLI local Docker smoke\n'
   harbor_smoke_run_id=\$(new_smoke_run_id harbor_smoke)
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T -e HARBOR_SMOKE_RUN_ID="\$harbor_smoke_run_id" harbor-smoke </dev/null
+  record_smoke_run_id "\$harbor_smoke_run_id"
   run_container_leak_audit "\$harbor_smoke_run_id"
 fi
 if [[ "$DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE" == "1" ]]; then
@@ -333,14 +391,17 @@ if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking authenticated API-created Docker sandbox run\n'
   api_smoke_run_id=\$(new_smoke_run_id api_smoke)
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T -e API_SMOKE_RUN_ID="\$api_smoke_run_id" api-smoke </dev/null
+  record_smoke_run_id "\$api_smoke_run_id"
   run_container_leak_audit "\$api_smoke_run_id"
 fi
 if [[ "$DEPLOY_RUN_FRONTEND_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking frontend login, launch, telemetry, and artifact download smoke\n'
   frontend_smoke_run_id=\$(new_smoke_run_id frontend_smoke)
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T -e FRONTEND_SMOKE_RUN_ID="\$frontend_smoke_run_id" frontend-smoke </dev/null
+  record_smoke_run_id "\$frontend_smoke_run_id"
   run_container_leak_audit "\$frontend_smoke_run_id"
 fi
+run_aggregate_container_leak_audit
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" ps
 EOF
 )

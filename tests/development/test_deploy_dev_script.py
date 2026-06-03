@@ -161,6 +161,44 @@ class DeployDevScriptTests(unittest.TestCase):
             script.index("run_container_leak_audit \"$frontend_smoke_run_id\""),
         )
 
+    def test_shared_dev_deploy_runs_aggregate_container_leak_audit_after_real_smokes(self) -> None:
+        script = _script_text()
+
+        self.assertIn(
+            'DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS="${DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS:-6}"',
+            script,
+        )
+        self.assertIn(
+            'DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS="${DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS:-10}"',
+            script,
+        )
+        self.assertIn("SMOKE_RUN_IDS=()", script)
+        self.assertIn("record_smoke_run_id \"$worker_smoke_run_id\"", script)
+        self.assertIn("record_smoke_run_id \"$harbor_smoke_run_id\"", script)
+        self.assertIn("record_smoke_run_id \"$api_smoke_run_id\"", script)
+        self.assertIn("record_smoke_run_id \"$frontend_smoke_run_id\"", script)
+        self.assertIn("Checking aggregate Docker container leak audit", script)
+        self.assertIn("run_aggregate_container_leak_audit", script)
+        self.assertIn('"${leak_audit_args[@]}"', script)
+        self.assertIn(
+            '--max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS"',
+            script,
+        )
+        self.assertIn(
+            '--poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS"',
+            script,
+        )
+        aggregate_call_index = script.rindex("run_aggregate_container_leak_audit")
+        self.assertLess(
+            script.index("run_container_leak_audit \"$frontend_smoke_run_id\""),
+            aggregate_call_index,
+        )
+        self.assertIn("smoke_run_ids=()", script)
+        self.assertIn("record_smoke_run_id \"\\$worker_smoke_run_id\"", script)
+        self.assertIn("record_smoke_run_id \"\\$harbor_smoke_run_id\"", script)
+        self.assertIn("record_smoke_run_id \"\\$api_smoke_run_id\"", script)
+        self.assertIn("record_smoke_run_id \"\\$frontend_smoke_run_id\"", script)
+
 
 if __name__ == "__main__":
     unittest.main()

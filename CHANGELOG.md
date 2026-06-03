@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added delayed aggregate #158/#160 container leak validation to shared-dev
+  deploys. `scripts/deploy-dev.sh` now records worker, Harbor, API, and
+  frontend smoke run ids and runs one final scheduler-side
+  `container_leak_audit` across the whole real-smoke set after the individual
+  post-smoke checks. The aggregate window defaults to six attempts ten seconds
+  apart through `DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_ATTEMPTS` and
+  `DEPLOY_CONTAINER_LEAK_AUDIT_FINAL_POLL_SECONDS`, catching delayed Docker
+  cleanup leaks that may appear only after multiple real worker runs.
 - Added #159/#160 Harbor ingestion upload diagnostics. Harbor CLI runner report,
   raw `jobs/` archive, and Harbor verifier report object-write failures now
   preserve completed verifier results when Harbor itself succeeded, while

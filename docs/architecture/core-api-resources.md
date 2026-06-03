@@ -512,7 +512,10 @@ serializing dashboard payloads.
   API/frontend smokes continue. It also assigns explicit run ids to worker,
   Harbor, API, and frontend smokes and runs a scheduler-side bounded container
   leak audit window after each smoke to fail deploys that leave platform-owned
-  Docker containers behind after slow teardown grace. Broader long-running
+  Docker containers behind after slow teardown grace. Shared-dev deploy now
+  also runs a delayed aggregate leak audit across the full real-smoke run set
+  after worker, Harbor, API, and frontend smokes finish, using a longer final
+  retry window to catch delayed cleanup regressions. Broader long-running
   runtime leak auditing remains #158/#160 follow-up work. A production
   LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
