@@ -193,16 +193,9 @@ class DockerOwnedContainerCleaner:
         if attempt_id is not None:
             _require_non_empty("attempt_id", attempt_id)
 
-        list_process = self.runner.run(
-            _docker_ps_owned_container_args(run_id=run_id, attempt_id=attempt_id),
-            timeout=self.timeout_seconds,
-        )
-        list_stdout = _coerce_output(list_process.stdout)
+        list_process = self._list_run_container_process(run_id=run_id, attempt_id=attempt_id)
         list_stderr = _coerce_output(list_process.stderr)
-        if list_process.returncode != 0:
-            raise RuntimeError(f"docker owned-container list failed: {list_stderr.strip()}")
-
-        container_ids = [line.strip() for line in list_stdout.splitlines() if line.strip()]
+        container_ids = _container_ids_from_docker_ps(list_process)
         if not container_ids:
             return DockerOwnedContainerCleanupResult(
                 run_id=run_id,
@@ -233,6 +226,35 @@ class DockerOwnedContainerCleaner:
             removal_exit_code=remove_process.returncode,
             stderr=remove_stderr,
         )
+
+    def list_run_containers(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str | None = None,
+    ) -> list[str]:
+        _require_non_empty("run_id", run_id)
+        if attempt_id is not None:
+            _require_non_empty("attempt_id", attempt_id)
+
+        return _container_ids_from_docker_ps(
+            self._list_run_container_process(run_id=run_id, attempt_id=attempt_id)
+        )
+
+    def _list_run_container_process(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        list_process = self.runner.run(
+            _docker_ps_owned_container_args(run_id=run_id, attempt_id=attempt_id),
+            timeout=self.timeout_seconds,
+        )
+        if list_process.returncode != 0:
+            list_stderr = _coerce_output(list_process.stderr)
+            raise RuntimeError(f"docker owned-container list failed: {list_stderr.strip()}")
+        return list_process
 
 
 class DockerTerminalSandbox:
@@ -535,6 +557,11 @@ def _docker_ps_owned_container_args(*, run_id: str, attempt_id: str | None = Non
     for item in filters:
         args.extend(["--filter", item])
     return args
+
+
+def _container_ids_from_docker_ps(process: subprocess.CompletedProcess[str]) -> list[str]:
+    list_stdout = _coerce_output(process.stdout)
+    return [line.strip() for line in list_stdout.splitlines() if line.strip()]
 
 
 def _changed_paths(

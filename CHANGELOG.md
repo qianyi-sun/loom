@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added a #158/#160 deploy-time real smoke container leak audit. Shared-dev
+  deployment now assigns deterministic run ids to worker, Harbor, API, and
+  frontend smoke runs, then runs
+  `agentic_data_platform.scheduler.container_leak_audit` from the scheduler
+  container after each smoke. The audit lists platform-owned Docker sandbox
+  containers by run label without deleting them and fails deployment if any
+  smoke run leaves labeled sandbox containers behind.
 - Added #159/#160 artifact bundle coverage for persisted artifact chunks.
   `/runs/{run_id}/artifact-bundle` now includes `artifact-chunks.json` with
   sanitized chunk metadata and downloads completed chunk payloads from the

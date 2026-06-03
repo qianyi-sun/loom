@@ -398,6 +398,19 @@ class DockerTerminalSandboxTest(unittest.TestCase):
         self.assertIn("label=com.agentic-data-platform.run_id=run_010", ps_args)
         self.assertIn("label=com.agentic-data-platform.attempt_id=run_010:attempt:2", ps_args)
 
+    def test_docker_owned_container_cleaner_can_list_without_removing(self):
+        runner = FakeDockerCleanupRunner(ps_stdout="container-one\n")
+        cleaner = DockerOwnedContainerCleaner(runner=runner)
+
+        container_ids = cleaner.list_run_containers(run_id="run_011")
+
+        self.assertEqual(container_ids, ["container-one"])
+        self.assertEqual(len(runner.calls), 1)
+        ps_args = runner.calls[0]["args"]
+        self.assertEqual(ps_args[:3], ["docker", "ps", "-aq"])
+        self.assertIn("label=com.agentic-data-platform.run_id=run_011", ps_args)
+        self.assertIn("label=com.agentic-data-platform.resource=sandbox-container", ps_args)
+
 
 def _workspace_from_args(args):
     volume_index = args.index("-v")

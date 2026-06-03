@@ -18,6 +18,7 @@ DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE="${DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_S
 DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE:-1}"
 DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE:-1}"
 DEPLOY_RUN_SCHEDULER_RACE_SMOKE="${DEPLOY_RUN_SCHEDULER_RACE_SMOKE:-1}"
+DEPLOY_RUN_CONTAINER_LEAK_AUDIT="${DEPLOY_RUN_CONTAINER_LEAK_AUDIT:-1}"
 DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS="${DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS:-60}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
@@ -68,6 +69,20 @@ run_scheduler_race_smoke() {
   compose run --rm -T scheduler python -m agentic_data_platform.scheduler.race_smoke --scheduler-id-prefix deploy-dev-race-smoke </dev/null
 }
 
+new_smoke_run_id() {
+  printf '%s_%s_%s' "$1" "$(date -u +%Y%m%d%H%M%S)" "$RANDOM"
+}
+
+run_container_leak_audit() {
+  if [[ "$DEPLOY_RUN_CONTAINER_LEAK_AUDIT" != "1" ]]; then
+    return 0
+  fi
+
+  local run_id="$1"
+  log "Checking Docker container leak audit for ${run_id}"
+  compose run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit --run-id "$run_id" </dev/null
+}
+
 run_compose_smoke() {
   local compose_config_output
   compose_config_output="$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)"
@@ -91,11 +106,17 @@ run_compose_smoke() {
   fi
 
   log "Checking worker queue execution"
-  compose run --rm --build -T worker-smoke </dev/null
+  local worker_smoke_run_id
+  worker_smoke_run_id="$(new_smoke_run_id worker_smoke)"
+  compose run --rm --build -T worker-smoke python -m agentic_data_platform.worker.smoke --run-id "$worker_smoke_run_id" </dev/null
+  run_container_leak_audit "$worker_smoke_run_id"
 
   if [[ "$DEPLOY_RUN_HARBOR_SMOKE" == "1" ]]; then
     log "Checking real Harbor CLI local Docker smoke"
-    compose run --rm --build -T harbor-smoke </dev/null
+    local harbor_smoke_run_id
+    harbor_smoke_run_id="$(new_smoke_run_id harbor_smoke)"
+    compose run --rm --build -T -e HARBOR_SMOKE_RUN_ID="$harbor_smoke_run_id" harbor-smoke </dev/null
+    run_container_leak_audit "$harbor_smoke_run_id"
   fi
 
   if [[ "$DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE" == "1" ]]; then
@@ -120,12 +141,18 @@ run_compose_smoke() {
 
   if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
     log "Checking authenticated API-created Docker sandbox run"
-    compose run --rm --build -T api-smoke </dev/null
+    local api_smoke_run_id
+    api_smoke_run_id="$(new_smoke_run_id api_smoke)"
+    compose run --rm --build -T -e API_SMOKE_RUN_ID="$api_smoke_run_id" api-smoke </dev/null
+    run_container_leak_audit "$api_smoke_run_id"
   fi
 
   if [[ "$DEPLOY_RUN_FRONTEND_SMOKE" == "1" ]]; then
     log "Checking frontend login, launch, telemetry, and artifact download smoke"
-    compose run --rm --build -T frontend-smoke </dev/null
+    local frontend_smoke_run_id
+    frontend_smoke_run_id="$(new_smoke_run_id frontend_smoke)"
+    compose run --rm --build -T -e FRONTEND_SMOKE_RUN_ID="$frontend_smoke_run_id" frontend-smoke </dev/null
+    run_container_leak_audit "$frontend_smoke_run_id"
   fi
 
   log "Current service status"
@@ -216,6 +243,17 @@ set -euo pipefail
 cd "$DEPLOY_PATH"
 ./scripts/setup-dev-env.sh
 export SANDBOX_HOST_WORKSPACE_ROOT="\${SANDBOX_HOST_WORKSPACE_ROOT:-$DEPLOY_PATH/.runtime/sandbox-workspaces}"
+new_smoke_run_id() {
+  printf '%s_%s_%s' "\$1" "\$(date -u +%Y%m%d%H%M%S)" "\$RANDOM"
+}
+run_container_leak_audit() {
+  if [[ "$DEPLOY_RUN_CONTAINER_LEAK_AUDIT" != "1" ]]; then
+    return 0
+  fi
+  run_id="\$1"
+  printf '[deploy-dev] Checking Docker container leak audit for %s\n' "\$run_id"
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit --run-id "\$run_id" </dev/null
+}
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" config >"\$compose_config_output"
@@ -230,10 +268,14 @@ if [[ "$DEPLOY_RUN_MIGRATIONS" == "1" ]]; then
   docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T migrate </dev/null
 fi
 printf '[deploy-dev] Checking worker queue execution\n'
-docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T worker-smoke </dev/null
+worker_smoke_run_id=\$(new_smoke_run_id worker_smoke)
+docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T worker-smoke python -m agentic_data_platform.worker.smoke --run-id "\$worker_smoke_run_id" </dev/null
+run_container_leak_audit "\$worker_smoke_run_id"
 if [[ "$DEPLOY_RUN_HARBOR_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking real Harbor CLI local Docker smoke\n'
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T harbor-smoke </dev/null
+  harbor_smoke_run_id=\$(new_smoke_run_id harbor_smoke)
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T -e HARBOR_SMOKE_RUN_ID="\$harbor_smoke_run_id" harbor-smoke </dev/null
+  run_container_leak_audit "\$harbor_smoke_run_id"
 fi
 if [[ "$DEPLOY_RUN_BENCHMARK_REAL_UPSTREAM_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking real upstream benchmark wrapper smoke\n'
@@ -281,11 +323,15 @@ if [[ "$DEPLOY_RUN_SCHEDULER_RACE_SMOKE" == "1" ]]; then
 fi
 if [[ "$DEPLOY_RUN_API_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking authenticated API-created Docker sandbox run\n'
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T api-smoke </dev/null
+  api_smoke_run_id=\$(new_smoke_run_id api_smoke)
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T -e API_SMOKE_RUN_ID="\$api_smoke_run_id" api-smoke </dev/null
+  run_container_leak_audit "\$api_smoke_run_id"
 fi
 if [[ "$DEPLOY_RUN_FRONTEND_SMOKE" == "1" ]]; then
   printf '[deploy-dev] Checking frontend login, launch, telemetry, and artifact download smoke\n'
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T frontend-smoke </dev/null
+  frontend_smoke_run_id=\$(new_smoke_run_id frontend_smoke)
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --build -T -e FRONTEND_SMOKE_RUN_ID="\$frontend_smoke_run_id" frontend-smoke </dev/null
+  run_container_leak_audit "\$frontend_smoke_run_id"
 fi
 docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" ps
 EOF

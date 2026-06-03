@@ -130,6 +130,27 @@ class DeployDevScriptTests(unittest.TestCase):
             script.index("Checking authenticated API-created Docker sandbox run"),
         )
 
+    def test_shared_dev_deploy_audits_real_smoke_run_container_leaks(self) -> None:
+        script = _script_text()
+
+        self.assertIn(
+            'DEPLOY_RUN_CONTAINER_LEAK_AUDIT="${DEPLOY_RUN_CONTAINER_LEAK_AUDIT:-1}"',
+            script,
+        )
+        self.assertIn("run_container_leak_audit", script)
+        self.assertIn("agentic_data_platform.scheduler.container_leak_audit", script)
+        self.assertIn("--run-id \"$worker_smoke_run_id\"", script)
+        self.assertIn("-e API_SMOKE_RUN_ID=\"$api_smoke_run_id\"", script)
+        self.assertIn("-e FRONTEND_SMOKE_RUN_ID=\"$frontend_smoke_run_id\"", script)
+        self.assertLess(
+            script.index("Checking authenticated API-created Docker sandbox run"),
+            script.index("run_container_leak_audit \"$api_smoke_run_id\""),
+        )
+        self.assertLess(
+            script.index("Checking frontend login, launch, telemetry, and artifact download smoke"),
+            script.index("run_container_leak_audit \"$frontend_smoke_run_id\""),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
