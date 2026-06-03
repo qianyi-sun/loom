@@ -1958,6 +1958,106 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertIn("completed_at", runner)
         self.assertEqual(events[-1].metadata["execution_task_id"], "run_worker_terminal_metadata:attempt:1")
 
+    def test_save_worker_result_records_metadata_only_artifact_bundle_available_event(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_worker_bundle_available"))
+            claimed = runs.claim_next_queued_run(worker_id="worker-a")
+            claimed.transition_to(RunStatus.RUNNING)
+            claimed.add_turn(
+                TerminalTurn(
+                    turn_index=0,
+                    command="python solve.py",
+                    cwd="/workspace",
+                    started_at=datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc),
+                    completed_at=datetime(2026, 6, 3, 12, 0, 2, tzinfo=timezone.utc),
+                    exit_code=0,
+                    stdout="created answer.xlsx\n",
+                    stderr="",
+                    changed_paths=["answer.xlsx"],
+                )
+            )
+            claimed.attach_artifact(
+                ArtifactRef(
+                    artifact_id="run_worker_bundle_available-trajectory",
+                    kind=ArtifactKind.TRAJECTORY,
+                    uri="minio://runs/run_worker_bundle_available/trajectory.jsonl?signature=secret",
+                    media_type="application/x-ndjson",
+                    sha256="5" * 64,
+                    size_bytes=512,
+                    metadata={
+                        "storage_key": "runs/run_worker_bundle_available/trajectory.jsonl",
+                        "signed_url": "https://minio.local/private?signature=secret",
+                    },
+                )
+            )
+            claimed.transition_to(RunStatus.EVALUATING)
+            claimed.attach_evaluator_result(
+                EvaluatorResult(
+                    evaluator_id="harbor-verifier-v1",
+                    mode="harbor_verifier",
+                    status="completed",
+                    score=1.0,
+                    metrics={"reward": 1.0},
+                    verbal_feedback="Do not persist full feedback in bundle events.",
+                    judge=None,
+                    artifact_refs=["minio://runs/run_worker_bundle_available/evaluation/report.json"],
+                )
+            )
+            claimed.transition_to(RunStatus.SUCCEEDED)
+
+            saved = runs.save_worker_result(
+                claimed,
+                worker_id="worker-a",
+                request_id="req-bundle-available-save",
+            )
+            runs.record_artifact_bundle_available_event(
+                saved,
+                worker_id="worker-a",
+                execution_task_id="run_worker_bundle_available:attempt:1",
+                request_id="req-bundle-available",
+            )
+            runs.record_artifact_bundle_available_event(
+                saved,
+                worker_id="worker-a",
+                execution_task_id="run_worker_bundle_available:attempt:1",
+                request_id="req-bundle-available-repeat",
+            )
+            events = runs.list_status_events("run_worker_bundle_available")
+
+        bundle_events = [
+            event for event in events if event.event_type == RunEventType.ARTIFACT_BUNDLE_AVAILABLE.value
+        ]
+        self.assertEqual(len(bundle_events), 1)
+        self.assertEqual(
+            [event.event_type for event in events],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.evaluating",
+                "evaluator.completed",
+                "run.succeeded",
+                "artifact.bundle_available",
+            ],
+        )
+        bundle_event = bundle_events[0]
+        self.assertEqual(bundle_event.from_status, RunStatus.SUCCEEDED)
+        self.assertEqual(bundle_event.to_status, RunStatus.SUCCEEDED)
+        self.assertEqual(bundle_event.request_id, "req-bundle-available")
+        self.assertEqual(bundle_event.metadata["execution_task_id"], "run_worker_bundle_available:attempt:1")
+        self.assertEqual(bundle_event.metadata["worker_id"], "worker-a")
+        self.assertEqual(bundle_event.metadata["bundle_endpoint"], "/runs/run_worker_bundle_available/artifact-bundle")
+        self.assertEqual(bundle_event.metadata["artifact_count"], 1)
+        self.assertEqual(bundle_event.metadata["trajectory_turn_count"], 1)
+        self.assertEqual(bundle_event.metadata["evaluator_result_count"], 1)
+        self.assertEqual(bundle_event.metadata["terminal_status"], "succeeded")
+        self.assertNotIn("storage_key", bundle_event.metadata)
+        self.assertNotIn("signed_url", bundle_event.metadata)
+        self.assertNotIn("verbal_feedback", bundle_event.metadata)
+        self.assertNotIn("metrics", bundle_event.metadata)
+
     def test_save_worker_result_records_evaluator_event_when_previous_status_already_evaluating(self):
         with session_scope(self.engine) as session:
             _seed_latent_project(session)

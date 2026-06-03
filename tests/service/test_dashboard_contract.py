@@ -159,6 +159,7 @@ class DashboardContractSmokeTest(unittest.TestCase):
                 "run.succeeded",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
 

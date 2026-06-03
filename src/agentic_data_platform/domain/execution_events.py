@@ -23,6 +23,7 @@ class RunEventType(str, Enum):
     WORKER_SUBPROCESS_COMPLETED = "worker.subprocess_completed"
     SCHEDULER_CAPACITY_BLOCKED = "scheduler.capacity_blocked"
     ARTIFACT_CHUNK_RECORDED = "artifact.chunk_recorded"
+    ARTIFACT_BUNDLE_AVAILABLE = "artifact.bundle_available"
     ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"
     ARTIFACT_UPLOAD_STATUS_CHANGED = "artifact.upload_status_changed"
     LOG_CHUNK_RECORDED = "log.chunk_recorded"

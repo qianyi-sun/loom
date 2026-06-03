@@ -101,6 +101,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.succeeded",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
         self.assertEqual(payload["lifecycle_events"][1]["metadata"]["worker_id"], "worker-test")
@@ -128,6 +129,19 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("artifact_refs", evaluator_event["metadata"])
         self.assertNotIn("verbal_feedback", evaluator_event["metadata"])
         self.assertNotIn("metrics", evaluator_event["metadata"])
+        upload_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "artifact.upload_status_changed"
+        )
+        bundle_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "artifact.bundle_available"
+        )
+        self.assertGreater(bundle_event["seq"], upload_event["seq"])
+        self.assertEqual(bundle_event["metadata"]["bundle_endpoint"], "/runs/run_worker_001/artifact-bundle")
+        self.assertEqual(bundle_event["metadata"]["artifact_count"], 3)
+        self.assertGreaterEqual(bundle_event["metadata"]["artifact_chunk_count"], 1)
+        self.assertNotIn("storage_key", bundle_event["metadata"])
+        self.assertNotIn("verbal_feedback", bundle_event["metadata"])
+        self.assertNotIn("metrics", bundle_event["metadata"])
 
     def test_worker_claims_scheduler_dispatched_run(self):
         create_response = self.client.post(
@@ -172,6 +186,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.succeeded",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
         self.assertEqual(detail.json()["lifecycle_events"][2]["from_status"], "dispatched")
@@ -1032,6 +1047,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.failed",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
         sandbox_events = [
@@ -1104,6 +1120,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.succeeded",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
 
@@ -1554,7 +1571,14 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 1)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "worker.heartbeat", "run.started", "run.failed"],
+            [
+                "run.created",
+                "run.claimed",
+                "worker.heartbeat",
+                "run.started",
+                "run.failed",
+                "artifact.bundle_available",
+            ],
         )
 
     def test_worker_preserves_harbor_diagnostics_when_verifier_ingestion_fails(self):
@@ -1845,6 +1869,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.succeeded",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
 
@@ -1969,6 +1994,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.failed",
                 "log.chunk_recorded",
                 "artifact.upload_status_changed",
+                "artifact.bundle_available",
             ],
         )
 

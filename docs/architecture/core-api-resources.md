@@ -271,9 +271,9 @@ serializing dashboard payloads.
   buffer instead of fixed sleep polling, but they still reread committed events
   from Postgres before emitting SSE frames. The no-build `/app/` frontend now
   subscribes to the full current event taxonomy, including capacity, chunk,
-  upload, cleanup, recovery, and projection events, and renders common safe
-  metadata fields as timeline diagnostics rather than relying only on raw event
-  names.
+  bundle-ready, upload, cleanup, recovery, and projection events, and renders
+  common safe metadata fields as timeline diagnostics rather than relying only
+  on raw event names.
 - Backend writers use `agentic_data_platform.domain.execution_events` as the
   v1 execution-event contract. Current run events cover `run.created`,
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
@@ -282,7 +282,8 @@ serializing dashboard payloads.
   `worker.heartbeat`, `worker.subprocess_started`,
   `worker.subprocess_completed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
-  `artifact.upload_expired`, `artifact.upload_status_changed`,
+  `artifact.bundle_available`, `artifact.upload_expired`,
+  `artifact.upload_status_changed`,
   `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
   `projection.refreshed`, `sandbox.container_started`,
   `sandbox.container_completed`, `sandbox.resource_sampled`, and
@@ -369,9 +370,13 @@ serializing dashboard payloads.
   /runs/{run_id}/artifact-chunks/content` downloads a
   completed chunk payload through the platform API by artifact id, chunk kind,
   and sequence; non-completed upload states return structured errors without
-  fetching object storage or exposing storage keys. Remaining #159 work is
-  broader object-writer integration and final bundle/recovery consistency
-  across additional upload paths.
+  fetching object storage or exposing storage keys. Once terminal artifact refs
+  and chunk diagnostics are persisted, workers append metadata-only
+  `artifact.bundle_available` events with the bundle endpoint plus artifact,
+  chunk, trajectory, and evaluator-result counts; those events deliberately
+  exclude storage keys, signed URLs, evaluator feedback, metrics, and payload
+  bytes. Remaining #159 work is broader object-writer integration and final
+  bundle/recovery consistency across additional upload paths.
 - Artifact bundle downloads are zip archives. The MVP bundle includes sanitized
   run metadata, trajectory JSONL, evaluator summary, artifact metadata,
   artifact chunk metadata, lifecycle events, and any artifact or completed chunk
@@ -463,9 +468,10 @@ serializing dashboard payloads.
   projection rows before falling back to hydrated run records. The browser
   frontend consumes the same typed event stream and displays scheduler
   blockers, worker liveness, sandbox command results and resource samples,
-  artifact upload state, evaluator summaries, cleanup, and projection refresh
-  metadata in the run timeline. The first typed artifact/log/upload/evaluator/projection
-  event slices record chunk, upload-expiry, upload-status-change, evaluator
+  artifact upload state, artifact bundle readiness, evaluator summaries,
+  cleanup, and projection refresh metadata in the run timeline. The first typed
+  artifact/log/upload/bundle/evaluator/projection event slices record chunk,
+  upload-expiry, upload-status-change, bundle-available, evaluator
   completion/failure, and projection refresh metadata without embedding
   payloads. Redis fanout/hot buffers now cover live wakeups while keeping
   Postgres replay authoritative. Remaining #157 work is broader typed

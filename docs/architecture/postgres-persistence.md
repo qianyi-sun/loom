@@ -336,7 +336,11 @@ by metadata reference while rejecting non-completed upload states before object
 storage access. Artifact bundle generation also reads the same chunk index:
 `artifact-chunks.json` records sanitized chunk metadata, completed chunk
 payloads are included under `artifact-chunks/<kind>/`, and non-completed chunks
-are represented as manifest errors without object-store reads.
+are represented as manifest errors without object-store reads. After terminal
+artifact refs and chunk diagnostics are persisted, workers append a same-status
+`artifact.bundle_available` event with only the bundle endpoint and summary
+counts; the event does not persist storage keys, signed URLs, evaluator
+feedback, metrics, or payload bytes.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 from uuid import uuid4
 
 from sqlalchemy import delete, event, func, select, text
@@ -2643,6 +2643,59 @@ class RunRepository:
             query = query.limit(limit)
         return [_artifact_chunk_metadata(row) for row in self.session.scalars(query)]
 
+    def record_artifact_bundle_available_event(
+        self,
+        run: RunRecord,
+        *,
+        worker_id: str | None = None,
+        execution_task_id: str | None = None,
+        request_id: str | None = None,
+    ) -> RunStatusEvent:
+        row = _required(self.session.get(RunRow, run.run_id), "run", run.run_id)
+        status = RunStatus(row.status)
+        if status not in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
+            raise ValueError("artifact bundle availability can only be recorded for terminal runs")
+
+        attempt = (
+            _required(self.session.get(RunAttemptRow, execution_task_id), "run attempt", execution_task_id)
+            if execution_task_id is not None
+            else self._latest_attempt_row(run.run_id)
+        )
+        if attempt.run_id != run.run_id:
+            raise ValueError("execution_task_id does not belong to run")
+
+        existing = self.session.scalar(
+            select(RunStatusEventRow)
+            .where(
+                RunStatusEventRow.run_id == run.run_id,
+                RunStatusEventRow.attempt_id == attempt.attempt_id,
+                RunStatusEventRow.event_type == RunEventType.ARTIFACT_BUNDLE_AVAILABLE.value,
+            )
+            .order_by(RunStatusEventRow.id)
+            .limit(1)
+        )
+        if existing is not None:
+            return _status_event_record(existing)
+
+        current_run = self._run_record(row)
+        artifact_chunks = self.list_artifact_chunks(run_id=run.run_id, attempt_id=attempt.attempt_id)
+        event_row = self._append_status_event(
+            run_id=run.run_id,
+            attempt_id=attempt.attempt_id,
+            event_type=RunEventType.ARTIFACT_BUNDLE_AVAILABLE,
+            from_status=status,
+            to_status=status,
+            request_id=request_id,
+            metadata=_artifact_bundle_available_event_metadata(
+                current_run,
+                artifact_chunks=artifact_chunks,
+                worker_id=worker_id,
+                execution_task_id=attempt.attempt_id,
+            ),
+        )
+        self.session.flush()
+        return _status_event_record(event_row)
+
     def get_artifact_chunk(
         self,
         *,
@@ -3034,7 +3087,7 @@ class RunRepository:
         actor_user_id: str | None = None,
         request_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> RunStatusEventRow:
         row = RunStatusEventRow(
             event_id=uuid4().hex,
             run_id=run_id,
@@ -3050,6 +3103,7 @@ class RunRepository:
         )
         self.session.add(row)
         queue_run_event_fanout_after_commit(self.session, row)
+        return row
 
     def _append_worker_lifecycle_events(
         self,
@@ -3614,6 +3668,46 @@ def _artifact_chunk_event_metadata(
         metadata["sha256"] = chunk.sha256
     if chunk.upload_error_reason is not None:
         metadata["upload_error_reason"] = chunk.upload_error_reason
+    return metadata
+
+
+def _artifact_bundle_available_event_metadata(
+    run: RunRecord,
+    *,
+    artifact_chunks: list[ArtifactChunkMetadata],
+    worker_id: str | None,
+    execution_task_id: str,
+) -> dict[str, Any]:
+    completed_chunk_count = sum(
+        1
+        for chunk in artifact_chunks
+        if _artifact_upload_status_value(chunk.upload_status) == ArtifactUploadStatus.COMPLETED.value
+    )
+    failed_chunk_count = sum(
+        1
+        for chunk in artifact_chunks
+        if _artifact_upload_status_value(chunk.upload_status) == ArtifactUploadStatus.FAILED.value
+    )
+    expired_chunk_count = sum(
+        1
+        for chunk in artifact_chunks
+        if _artifact_upload_status_value(chunk.upload_status) == ArtifactUploadStatus.EXPIRED.value
+    )
+    metadata: dict[str, Any] = {
+        "schema_version": "artifact-bundle-available-event-v1",
+        "execution_task_id": execution_task_id,
+        "bundle_endpoint": f"/runs/{quote(run.run_id, safe='')}/artifact-bundle",
+        "terminal_status": run.status.value,
+        "artifact_count": len(run.artifacts),
+        "artifact_chunk_count": len(artifact_chunks),
+        "completed_artifact_chunk_count": completed_chunk_count,
+        "failed_artifact_chunk_count": failed_chunk_count,
+        "expired_artifact_chunk_count": expired_chunk_count,
+        "trajectory_turn_count": len(run.trajectory),
+        "evaluator_result_count": len(run.all_evaluator_results()),
+    }
+    if worker_id is not None:
+        metadata["worker_id"] = worker_id
     return metadata
 
 

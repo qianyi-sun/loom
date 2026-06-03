@@ -300,6 +300,17 @@ class FrontendStaticLaunchTest(unittest.TestCase):
                   error_reason: "object store write failed",
                 },
               }),
+              bundle: lifecycleEventDisplay({
+                event_type: "artifact.bundle_available",
+                to_status: "succeeded",
+                metadata: {
+                  artifact_count: 3,
+                  artifact_chunk_count: 4,
+                  trajectory_turn_count: 1,
+                  evaluator_result_count: 1,
+                  bundle_endpoint: "/runs/run_static_001/artifact-bundle",
+                },
+              }),
             };
             console.log(JSON.stringify(result));
             """
@@ -334,6 +345,7 @@ class FrontendStaticLaunchTest(unittest.TestCase):
                 "worker.subprocess_completed",
                 "scheduler.capacity_blocked",
                 "artifact.chunk_recorded",
+                "artifact.bundle_available",
                 "artifact.upload_expired",
                 "artifact.upload_status_changed",
                 "log.chunk_recorded",
@@ -360,6 +372,10 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertEqual(payload["upload"]["title"], "Artifact upload failed")
         self.assertIn("stdout chunk 0", payload["upload"]["detail"])
         self.assertIn("object store write failed", payload["upload"]["detail"])
+        self.assertEqual(payload["bundle"]["title"], "Artifact bundle available")
+        self.assertIn("3 artifacts", payload["bundle"]["detail"])
+        self.assertIn("4 chunks", payload["bundle"]["detail"])
+        self.assertIn("1 turns", payload["bundle"]["detail"])
 
     def test_refresh_run_reads_paginated_trajectory_endpoint(self):
         node = shutil.which("node")

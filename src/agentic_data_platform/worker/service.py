@@ -542,6 +542,13 @@ def _save_worker_result(
         execution_task_id=execution_task_id,
         request_id=request_id,
     )
+    _record_artifact_bundle_available(
+        engine,
+        saved,
+        worker_id=worker_id,
+        execution_task_id=execution_task_id,
+        request_id=request_id,
+    )
     return saved
 
 
@@ -550,6 +557,25 @@ def _artifact_persistence_for_executor(executor: WorkerRunExecutor) -> ArtifactP
     if isinstance(persistence, ArtifactPersistence):
         return persistence
     return None
+
+
+def _record_artifact_bundle_available(
+    engine: Engine,
+    run,
+    *,
+    worker_id: str,
+    execution_task_id: str | None,
+    request_id: str | None,
+) -> None:
+    if not run.artifacts:
+        return
+    with session_scope(engine) as session:
+        RunRepository(session).record_artifact_bundle_available_event(
+            run,
+            worker_id=worker_id,
+            execution_task_id=execution_task_id,
+            request_id=request_id,
+        )
 
 
 def _record_terminal_log_chunks(

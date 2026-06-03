@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the next #157/#159 artifact event slice. Workers now append a
+  metadata-only `artifact.bundle_available` event after terminal artifact/chunk
+  diagnostics are persisted, giving replay/SSE/frontend monitors an explicit
+  signal that `/runs/{run_id}/artifact-bundle` is ready without exposing object
+  keys, signed URLs, evaluator feedback, or payload bytes.
 - Added delayed aggregate #158/#160 container leak validation to shared-dev
   deploys. `scripts/deploy-dev.sh` now records worker, Harbor, API, and
   frontend smoke run ids and runs one final scheduler-side

@@ -448,6 +448,7 @@ function runEventTypes() {
     "worker.subprocess_completed",
     "scheduler.capacity_blocked",
     "artifact.chunk_recorded",
+    "artifact.bundle_available",
     "artifact.upload_expired",
     "artifact.upload_status_changed",
     "log.chunk_recorded",
@@ -630,6 +631,20 @@ function lifecycleEventDisplay(event) {
       ]),
       status,
       tone: "danger",
+    };
+  }
+  if (eventType === "artifact.bundle_available") {
+    return {
+      title: "Artifact bundle available",
+      detail: compactText([
+        `${metadataValue(metadata.artifact_count, "0")} artifacts`,
+        `${metadataValue(metadata.artifact_chunk_count, "0")} chunks`,
+        `${metadataValue(metadata.trajectory_turn_count, "0")} turns`,
+        metadata.evaluator_result_count !== undefined &&
+          `${metadataValue(metadata.evaluator_result_count, "0")} evaluator outputs`,
+      ]),
+      status,
+      tone: "success",
     };
   }
   if (eventType === "evaluator.completed" || eventType === "evaluator.failed") {
