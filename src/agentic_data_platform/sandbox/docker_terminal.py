@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from agentic_data_platform.domain.run_records import TerminalTurn
 
@@ -53,6 +53,14 @@ class CommandRunner(Protocol):
         timeout: int,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        ...
+
+
+class SandboxLifecycleRecorder(Protocol):
+    def container_started(self, metadata: dict[str, Any]) -> None:
+        ...
+
+    def container_completed(self, metadata: dict[str, Any]) -> None:
         ...
 
 
@@ -228,12 +236,17 @@ class DockerTerminalSandbox:
         config: DockerTerminalSandboxConfig,
         *,
         runner: CommandRunner | None = None,
+        lifecycle_recorder: SandboxLifecycleRecorder | None = None,
     ) -> None:
         self.config = config
         self.runner = runner or SubprocessCommandRunner()
+        self.lifecycle_recorder = lifecycle_recorder
+        self._command_index = 0
         self.workspace_path = config.workspace_root / config.run_id
         self.host_workspace_path = (config.host_workspace_root or config.workspace_root) / config.run_id
+        self.cidfile_root = config.workspace_root / ".docker-cids" / config.run_id
         self.workspace_path.mkdir(parents=True, exist_ok=True)
+        self.cidfile_root.mkdir(parents=True, exist_ok=True)
 
     def execute(self, command: str, *, cwd: str | None = None, timeout_seconds: int | None = None) -> SandboxCommandResult:
         _require_non_empty("command", command)
@@ -243,25 +256,45 @@ class DockerTerminalSandbox:
         if timeout <= 0:
             raise ValueError("timeout_seconds must be positive")
 
+        sandbox_command_index = self._command_index
+        self._command_index += 1
         before = self._workspace_index()
         started_at = datetime.now(timezone.utc)
-        docker_args = self._docker_args(command, container_cwd)
+        cidfile_path = self.cidfile_root / f"command-{sandbox_command_index}.cid"
+        docker_args = self._docker_args(command, container_cwd, cidfile_path=cidfile_path)
 
         timed_out = False
+        labels = _docker_owned_container_labels(
+            run_id=self.config.run_id,
+            attempt_id=self.config.attempt_id,
+        )
+        resource_limits = {
+            "cpu_limit": self.config.cpu_limit,
+            "memory_mb": self.config.memory_mb,
+            "pids_limit": self.config.pids_limit,
+        }
         metadata: dict[str, object] = {
             "image": self.config.image,
             "timeout_seconds": timeout,
             "internet_access": self.config.internet_access,
-            "docker_labels": _docker_owned_container_labels(
-                run_id=self.config.run_id,
-                attempt_id=self.config.attempt_id,
-            ),
-            "resource_limits": {
-                "cpu_limit": self.config.cpu_limit,
-                "memory_mb": self.config.memory_mb,
-                "pids_limit": self.config.pids_limit,
-            },
+            "docker_labels": labels,
+            "resource_limits": resource_limits,
+            "sandbox_command_index": sandbox_command_index,
         }
+        if self.lifecycle_recorder is not None:
+            self.lifecycle_recorder.container_started(
+                {
+                    "sandbox_command_index": sandbox_command_index,
+                    "sandbox_status": "running",
+                    "image": self.config.image,
+                    "cwd": container_cwd,
+                    "timeout_seconds": timeout,
+                    "internet_access": self.config.internet_access,
+                    "docker_labels": labels,
+                    "resource_limits": resource_limits,
+                    "started_at": _datetime_json(started_at),
+                }
+            )
 
         try:
             process = self.runner.run(docker_args, timeout=timeout)
@@ -278,6 +311,27 @@ class DockerTerminalSandbox:
 
         completed_at = datetime.now(timezone.utc)
         changed_paths = _changed_paths(before, self._workspace_index())
+        container_id = _read_container_id(cidfile_path)
+        if container_id is not None:
+            metadata["container_id"] = container_id
+        _remove_file_if_present(cidfile_path)
+
+        if self.lifecycle_recorder is not None:
+            self.lifecycle_recorder.container_completed(
+                {
+                    "sandbox_command_index": sandbox_command_index,
+                    "sandbox_status": "timed_out" if timed_out else "completed",
+                    "image": self.config.image,
+                    "container_id": container_id,
+                    "exit_code": exit_code,
+                    "timed_out": timed_out,
+                    "changed_path_count": len(changed_paths),
+                    "timeout_seconds": timeout,
+                    "completed_at": _datetime_json(completed_at),
+                    "duration_ms": int((completed_at - started_at).total_seconds() * 1000),
+                    "resource_limits": resource_limits,
+                }
+            )
 
         return SandboxCommandResult(
             run_id=self.config.run_id,
@@ -307,11 +361,13 @@ class DockerTerminalSandbox:
             files=files,
         )
 
-    def _docker_args(self, command: str, cwd: str) -> list[str]:
+    def _docker_args(self, command: str, cwd: str, *, cidfile_path: Path) -> list[str]:
         args = [
             "docker",
             "run",
             "--rm",
+            "--cidfile",
+            str(cidfile_path),
             *[
                 label_arg
                 for key, value in _docker_owned_container_labels(
@@ -413,6 +469,25 @@ def _coerce_output(value: str | bytes | None) -> str:
         return value.decode("utf-8", errors="replace")
 
     return value
+
+
+def _read_container_id(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _remove_file_if_present(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def _datetime_json(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _require_non_empty(name: str, value: str) -> None:

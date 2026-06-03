@@ -1085,6 +1085,48 @@ class RunRepository:
         )
         self.session.flush()
 
+    def record_sandbox_container_lifecycle_event(
+        self,
+        run_id: str,
+        *,
+        event_type: RunEventType,
+        worker_id: str,
+        execution_task_id: str,
+        metadata: dict[str, Any],
+        request_id: str | None = None,
+    ) -> None:
+        _require_non_empty("worker_id", worker_id)
+        _require_non_empty("execution_task_id", execution_task_id)
+        if event_type not in {
+            RunEventType.SANDBOX_CONTAINER_STARTED,
+            RunEventType.SANDBOX_CONTAINER_COMPLETED,
+        }:
+            raise ValueError("event_type must be a sandbox container lifecycle event")
+        row = self._run_row_for_update(run_id)
+        attempt = self._latest_attempt_row(run_id)
+        self._validate_execution_task_row(
+            row,
+            attempt,
+            execution_task_id=execution_task_id,
+            worker_id=worker_id,
+        )
+        current_status = RunStatus(row.status)
+        safe_metadata = _sandbox_container_lifecycle_metadata(
+            metadata,
+            worker_id=worker_id,
+            execution_task_id=execution_task_id,
+        )
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt.attempt_id,
+            event_type=event_type,
+            from_status=current_status,
+            to_status=current_status,
+            request_id=request_id,
+            metadata=safe_metadata,
+        )
+        self.session.flush()
+
     def validate_current_execution_task(
         self,
         run_id: str,
@@ -3055,6 +3097,39 @@ def _artifact_upload_status_value(value: ArtifactUploadStatus | str) -> str:
     if isinstance(value, ArtifactUploadStatus):
         return value.value
     return ArtifactUploadStatus(value).value
+
+
+def _sandbox_container_lifecycle_metadata(
+    metadata: dict[str, Any],
+    *,
+    worker_id: str,
+    execution_task_id: str,
+) -> dict[str, Any]:
+    allowed_keys = {
+        "sandbox_command_index",
+        "sandbox_status",
+        "image",
+        "cwd",
+        "timeout_seconds",
+        "internet_access",
+        "docker_labels",
+        "resource_limits",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "container_id",
+        "exit_code",
+        "timed_out",
+        "changed_path_count",
+    }
+    safe = {
+        key: value
+        for key, value in metadata.items()
+        if key in allowed_keys and value is not None
+    }
+    safe["worker_id"] = worker_id
+    safe["execution_task_id"] = execution_task_id
+    return safe
 
 
 def _evaluator_result_row(*, run_id: str, attempt_id: str, result: EvaluatorResult) -> EvaluatorResultRow:

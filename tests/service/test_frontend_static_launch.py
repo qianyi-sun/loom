@@ -253,6 +253,8 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertIn("run.worker_subprocess_failed", payload["eventTypes"])
         self.assertIn("worker.subprocess_started", payload["eventTypes"])
         self.assertIn("worker.subprocess_completed", payload["eventTypes"])
+        self.assertIn("sandbox.container_started", payload["eventTypes"])
+        self.assertIn("sandbox.container_completed", payload["eventTypes"])
 
 
 def _node_harness(assertion_script: str) -> str:

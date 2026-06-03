@@ -122,13 +122,18 @@ store their canonical reason in `metadata_json.recovery` using
 follow-up reasons are `canceled_resource_cleanup` and
 `projection_refresh_failed`. Scheduler-driven Docker cleanup records
 same-status `sandbox.container_cleanup` events with container ids, removed ids,
-exit codes, cleanup status, and bounded cleanup error reasons. Subprocess
-worker parents record same-status `worker.subprocess_started` and
-`worker.subprocess_completed` events with only worker id, execution task id,
-child-entrypoint module, timeout, and return code. Worker result persistence
-records `evaluator.completed` or `evaluator.failed` events after the run enters
-`evaluating`; these events keep evaluator progress replayable while storing
-only summary metadata and safe artifact refs.
+exit codes, cleanup status, and bounded cleanup error reasons. Docker terminal
+workers record same-status `sandbox.container_started` and
+`sandbox.container_completed` events for each sandbox command with only worker
+id, execution task id, sandbox command index, image, resource limits, sandbox
+status, exit code, timeout flag, changed-path count, and cidfile container id
+when available. Subprocess worker parents record same-status
+`worker.subprocess_started` and `worker.subprocess_completed` events with only
+worker id, execution task id, child-entrypoint module, timeout, and return
+code. Worker result persistence records `evaluator.completed` or
+`evaluator.failed` events after the run enters `evaluating`; these events keep
+evaluator progress replayable while storing only summary metadata and safe
+artifact refs.
 Attempt-level execution metadata has a v1 contract in
 `agentic_data_platform.domain.execution_metadata`. The `execution.scheduler`
 block records scheduler id, lease status, backend key, project id, dispatch

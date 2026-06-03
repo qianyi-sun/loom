@@ -25,6 +25,8 @@ class RunEventType(str, Enum):
     ARTIFACT_UPLOAD_EXPIRED = "artifact.upload_expired"
     ARTIFACT_UPLOAD_STATUS_CHANGED = "artifact.upload_status_changed"
     LOG_CHUNK_RECORDED = "log.chunk_recorded"
+    SANDBOX_CONTAINER_STARTED = "sandbox.container_started"
+    SANDBOX_CONTAINER_COMPLETED = "sandbox.container_completed"
     SANDBOX_CONTAINER_CLEANUP = "sandbox.container_cleanup"
     EVALUATOR_COMPLETED = "evaluator.completed"
     EVALUATOR_FAILED = "evaluator.failed"

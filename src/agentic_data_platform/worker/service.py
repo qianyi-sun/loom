@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from sqlalchemy import Engine
@@ -87,6 +87,14 @@ class RunWorker:
             return None
 
         try:
+            executor = _executor_with_sandbox_lifecycle_recorder(
+                self.executor,
+                engine=self.engine,
+                run_id=claimed.run_id,
+                worker_id=self.worker_id,
+                execution_task_id=execution_task_id,
+                request_id=request_id,
+            )
             with WorkerHeartbeat(
                 engine=self.engine,
                 run_id=claimed.run_id,
@@ -95,7 +103,7 @@ class RunWorker:
                 interval_seconds=self.heartbeat_interval_seconds,
                 request_id=request_id,
             ):
-                completed = self.executor.execute(claimed)
+                completed = executor.execute(claimed)
         except Exception as exc:
             with session_scope(self.engine) as session:
                 failed = RunRepository(session).transition_run(
@@ -298,6 +306,14 @@ def execute_claimed_run(
             return _worker_result(repository.get_run(run_id))
 
     try:
+        executor = _executor_with_sandbox_lifecycle_recorder(
+            executor,
+            engine=engine,
+            run_id=run_id,
+            worker_id=worker_id,
+            execution_task_id=execution_task_id,
+            request_id=request_id,
+        )
         completed = executor.execute(claimed)
     except Exception as exc:
         with session_scope(engine) as session:
@@ -362,6 +378,66 @@ def build_configured_executor(settings: ServiceSettings) -> DockerTerminalWorker
             else None
         ),
         provider_registry=DevProviderConfigRegistry.from_settings(settings),
+    )
+
+
+class RepositorySandboxLifecycleRecorder:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        run_id: str,
+        worker_id: str,
+        execution_task_id: str,
+        request_id: str | None,
+    ) -> None:
+        self.engine = engine
+        self.run_id = run_id
+        self.worker_id = worker_id
+        self.execution_task_id = execution_task_id
+        self.request_id = request_id
+
+    def container_started(self, metadata: dict[str, object]) -> None:
+        self._record(RunEventType.SANDBOX_CONTAINER_STARTED, metadata)
+
+    def container_completed(self, metadata: dict[str, object]) -> None:
+        self._record(RunEventType.SANDBOX_CONTAINER_COMPLETED, metadata)
+
+    def _record(self, event_type: RunEventType, metadata: dict[str, object]) -> None:
+        with session_scope(self.engine) as session:
+            try:
+                RunRepository(session).record_sandbox_container_lifecycle_event(
+                    self.run_id,
+                    event_type=event_type,
+                    worker_id=self.worker_id,
+                    execution_task_id=self.execution_task_id,
+                    request_id=self.request_id,
+                    metadata=metadata,
+                )
+            except StaleExecutionTaskError:
+                return
+
+
+def _executor_with_sandbox_lifecycle_recorder(
+    executor: WorkerRunExecutor,
+    *,
+    engine: Engine,
+    run_id: str,
+    worker_id: str,
+    execution_task_id: str | None,
+    request_id: str | None,
+) -> WorkerRunExecutor:
+    if not isinstance(executor, DockerTerminalWorkerExecutor) or execution_task_id is None:
+        return executor
+    return replace(
+        executor,
+        sandbox_lifecycle_recorder=RepositorySandboxLifecycleRecorder(
+            engine=engine,
+            run_id=run_id,
+            worker_id=worker_id,
+            execution_task_id=execution_task_id,
+            request_id=request_id,
+        ),
     )
 
 

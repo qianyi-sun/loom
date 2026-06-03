@@ -442,6 +442,8 @@ function runEventTypes() {
     "run.worker_subprocess_failed",
     "worker.subprocess_started",
     "worker.subprocess_completed",
+    "sandbox.container_started",
+    "sandbox.container_completed",
   ];
 }
 

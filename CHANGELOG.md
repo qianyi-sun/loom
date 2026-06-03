@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #157/#158/#160 Docker terminal sandbox lifecycle events. The
+  worker-managed Docker terminal executor now records metadata-only
+  `sandbox.container_started` and `sandbox.container_completed` events for
+  each sandbox command through short repository transactions, and the browser
+  event stream helper recognizes those typed events. Docker runs use a cidfile
+  so completed events can include a container id when Docker provides one.
+  Event metadata stays bounded to worker/task ids, sandbox command index,
+  image, resource limits, status, timing, exit code, timeout flag, and
+  changed-path count; it does not persist command text, stdout/stderr, host
+  workspace paths, secrets, or payload bytes.
 - Fixed #156 shared-dev scheduler race smoke repeatability. Synthetic race
   smoke teams and projects now use a run-scoped display name, so repeated
   deploys against the same durable Postgres database no longer trip the

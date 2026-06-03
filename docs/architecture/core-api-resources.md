@@ -264,8 +264,8 @@ serializing dashboard payloads.
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
   `artifact.upload_expired`, `artifact.upload_status_changed`,
   `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
-  `projection.refreshed`, and
-  `sandbox.container_cleanup`.
+  `projection.refreshed`, `sandbox.container_started`,
+  `sandbox.container_completed`, and `sandbox.container_cleanup`.
   Evaluator events carry summary-only metadata such as evaluator id, mode,
   status, score, safe artifact refs, worker id, and execution task id; they do
   not embed full metrics, verbal feedback, judge prompts, or local file paths.
@@ -398,8 +398,8 @@ serializing dashboard payloads.
   artifact/log/upload/evaluator/projection
   event slices record chunk, upload-expiry, upload-status-change, evaluator
   completion/failure, and projection refresh metadata without embedding
-  payloads. The remaining #157 work is Redis fanout, broader typed
-  sandbox/resource events, and larger future detail payloads that should be
+  payloads. The remaining #157 work is Redis fanout, broader typed sandbox
+  resource-sample events, and larger future detail payloads that should be
   object-store-backed rather than hydrated from high-volume child rows.
 - The long-running worker now uses the Docker terminal sandbox executor for
   API-created runs, while `worker-smoke` keeps a fixture executor for
@@ -415,9 +415,17 @@ serializing dashboard payloads.
   `worker.subprocess_completed` events around the child process boundary for
   replay/SSE consumers; those events carry worker id, execution task id,
   child-entrypoint module, timeout, and return code without storing argv,
-  secrets, paths, or logs. Nonzero, timeout, and incomplete-result child failures include
-  bounded, redacted stdout/stderr tails in run failure metadata. Docker terminal
-  sandbox containers now carry platform/run/resource labels; scheduler recovery
+  secrets, paths, or logs. Nonzero, timeout, and incomplete-result child
+  failures include bounded, redacted stdout/stderr tails in run failure
+  metadata. Docker terminal sandbox execution records metadata-only
+  `sandbox.container_started` and `sandbox.container_completed` events for
+  each sandbox command through short repository transactions. These events
+  carry worker id, execution task id, sandbox command index, image, resource
+  limits, sandbox status, exit code, timeout flag, changed-path count, and a
+  Docker cidfile container id when available; they exclude command text,
+  stdout/stderr, host workspace paths, provider secrets, and payload bytes.
+  Docker terminal sandbox containers now carry platform/run/resource labels;
+  scheduler recovery
   can remove labeled containers for recovered active runs after closing its DB
   recovery transaction, records same-status `sandbox.container_cleanup`
   evidence, and the worker CLI keeps the manual operator cleanup path. Shared

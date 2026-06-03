@@ -55,6 +55,7 @@ from agentic_data_platform.sandbox.docker_terminal import (
     CommandRunner,
     DockerTerminalSandbox,
     DockerTerminalSandboxConfig,
+    SandboxLifecycleRecorder,
     SandboxCommandResult,
     SubprocessCommandRunner,
     WorkspaceFile,
@@ -91,6 +92,7 @@ class DockerTerminalWorkerExecutor:
     command_runner: CommandRunner | None = None
     harbor_command_runner: CommandRunner | None = None
     wrapper_command_runner: CommandRunner | None = None
+    sandbox_lifecycle_recorder: SandboxLifecycleRecorder | None = None
 
     def execute(self, run: RunRecord) -> RunRecord:
         self._resolve_provider_refs(run)
@@ -147,6 +149,7 @@ class DockerTerminalWorkerExecutor:
                         host_workspace_root=self.host_workspace_root,
                     ),
                     runner=self.command_runner,
+                    lifecycle_recorder=self.sandbox_lifecycle_recorder,
                 ),
             ),
         )

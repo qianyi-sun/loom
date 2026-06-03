@@ -20,7 +20,7 @@ from agentic_data_platform.providers.config import DevProviderConfigRegistry
 from agentic_data_platform.service.app import create_app
 from agentic_data_platform.service.config import ServiceSettings
 from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor, FixtureTerminalBenchmarkExecutor
-from agentic_data_platform.worker.service import RunWorker
+from agentic_data_platform.worker.service import RepositorySandboxLifecycleRecorder, RunWorker
 
 
 class WorkerServiceTest(unittest.TestCase):
@@ -368,6 +368,29 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["turn_count"], 1)
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 3)
         self.assertEqual(payload["run"]["evaluator"]["status"], "completed")
+        event_types = [event["event_type"] for event in payload["lifecycle_events"]]
+        self.assertIn("sandbox.container_started", event_types)
+        self.assertIn("sandbox.container_completed", event_types)
+        started_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "sandbox.container_started"
+        )
+        completed_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "sandbox.container_completed"
+        )
+        self.assertEqual(started_event["metadata"]["worker_id"], "worker-docker-test")
+        self.assertEqual(started_event["metadata"]["execution_task_id"], "run_worker_docker_001:attempt:1")
+        self.assertEqual(started_event["metadata"]["sandbox_command_index"], 0)
+        self.assertEqual(started_event["metadata"]["image"], "python:3.12-slim")
+        self.assertEqual(started_event["metadata"]["sandbox_status"], "running")
+        self.assertEqual(completed_event["metadata"]["sandbox_status"], "completed")
+        self.assertEqual(completed_event["metadata"]["container_id"], "container-run-worker-docker-001")
+        self.assertEqual(completed_event["metadata"]["exit_code"], 0)
+        self.assertFalse(completed_event["metadata"]["timed_out"])
+        self.assertEqual(completed_event["metadata"]["changed_path_count"], 1)
+        rendered_events = json.dumps([started_event, completed_event])
+        self.assertNotIn("python solve.py", rendered_events)
+        self.assertNotIn("created receipts workbook", rendered_events)
+        self.assertNotIn(str(temp_path), rendered_events)
 
     def test_docker_worker_records_stdout_and_stderr_chunks(self):
         payload = _run_create_payload("run_worker_log_chunks_001")
@@ -427,9 +450,47 @@ class WorkerServiceTest(unittest.TestCase):
                 (temp_path / "artifacts" / stderr_chunks[0].storage_key).read_text(),
                 stderr_payload,
             )
-
         self.assertIsNotNone(result)
         self.assertEqual(result.status, "succeeded")
+
+    def test_sandbox_lifecycle_recorder_ignores_stale_execution_task(self):
+        run = _run_create_payload("run_sandbox_lifecycle_stale_001")
+        create_response = self.client.post("/runs", json=run)
+        self.assertEqual(create_response.status_code, 201)
+        with session_scope(self.engine) as session:
+            repository = RunRepository(session)
+            repository.claim_next_queued_run(worker_id="worker-stale")
+            execution_task_id = repository.current_execution_task_id("run_sandbox_lifecycle_stale_001")
+            repository.cancel_run(
+                "run_sandbox_lifecycle_stale_001",
+                reason="replace stale sandbox attempt",
+                actor_user_id="[REDACTED_OWNER]",
+            )
+            repository.retry_run(
+                "run_sandbox_lifecycle_stale_001",
+                reason="new attempt replaces stale sandbox event",
+                actor_user_id="[REDACTED_OWNER]",
+            )
+
+        recorder = RepositorySandboxLifecycleRecorder(
+            engine=self.engine,
+            run_id="run_sandbox_lifecycle_stale_001",
+            worker_id="worker-stale",
+            execution_task_id=execution_task_id,
+            request_id="req-stale-sandbox-event",
+        )
+
+        recorder.container_completed(
+            {
+                "sandbox_command_index": 0,
+                "sandbox_status": "completed",
+                "exit_code": 0,
+            }
+        )
+
+        with session_scope(self.engine) as session:
+            events = RunRepository(session).list_status_events("run_sandbox_lifecycle_stale_001")
+        self.assertNotIn("sandbox.container_completed", [event.event_type for event in events])
 
     def test_docker_worker_uses_configured_api_model_provider_without_leaking_secret(self):
         payload = _run_create_payload("run_worker_api_provider_001")
@@ -658,8 +719,22 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 2)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.failed", "log.chunk_recorded"],
+            [
+                "run.created",
+                "run.claimed",
+                "sandbox.container_started",
+                "sandbox.container_completed",
+                "run.started",
+                "run.failed",
+                "log.chunk_recorded",
+            ],
         )
+        sandbox_events = [
+            event for event in payload["lifecycle_events"] if event["event_type"].startswith("sandbox.container_")
+        ]
+        rendered_sandbox_events = json.dumps(sandbox_events)
+        self.assertNotIn("python missing.py", rendered_sandbox_events)
+        self.assertNotIn("missing.py: not found", rendered_sandbox_events)
 
     def test_worker_executes_harbor_run_and_ingests_verifier_result(self):
         payload = _run_create_payload("run_worker_harbor_001")
@@ -1441,6 +1516,10 @@ class FakeDockerCommandRunner:
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append({"args": args, "timeout": timeout, "env": env})
         workspace = _workspace_from_docker_args(args)
+        if "--cidfile" in args:
+            cidfile = Path(args[args.index("--cidfile") + 1])
+            cidfile.parent.mkdir(parents=True, exist_ok=True)
+            cidfile.write_text("container-run-worker-docker-001\n")
         for relative_path, content in self.write_files.items():
             target = workspace / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
