@@ -1,6 +1,6 @@
 # Postgres Persistence Foundation
 
-Last updated: 2026-06-02
+Last updated: 2026-06-03
 
 Related trackers:
 
@@ -118,6 +118,12 @@ exceed configured budget windows. These blockers reuse
 `model_tokens`, metric names such as `estimated_cost_usd` or
 `estimated_tokens`, and `candidate_usage` / `projected_usage` fields for
 operator diagnostics. They are scheduler guardrails, not billing truth.
+Completed Harbor-backed runs can also carry observed model-provider usage under
+evaluator metadata as `provider_usage`. That metadata is normalized to safe
+numeric fields such as input/output/total tokens, cost, and duration, and is
+surfaced through dashboard projections and scoped `/ops/metrics` aggregates.
+It is the first actual usage telemetry source for future #156 rate windows, but
+it does not retroactively turn estimated dispatch hints into a billing ledger.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.

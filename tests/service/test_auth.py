@@ -5,11 +5,13 @@ from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.domain.run_records import (
     BenchmarkTaskInstance,
+    EvaluatorResult,
     ModelConfig,
     ModelMode,
     RunnerConfig,
     RunnerKind,
     RunRecord,
+    RunStatus,
     SandboxBackend,
 )
 from agentic_data_platform.persistence import (
@@ -218,6 +220,54 @@ class ServiceAuthTest(unittest.TestCase):
         self.assertEqual(other_metrics.json()["queue_depth"], 1)
         self.assertEqual(other_metrics.json()["visible_project_count"], 1)
 
+    def test_ops_metrics_aggregate_observed_model_provider_usage_by_project_scope(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.save_run(
+                _succeeded_run_with_provider_usage(
+                    "run_usage_latent_001",
+                    project_id="latent-skill-pilot",
+                    provider="openai-compatible",
+                    model_name="deepseek-v4-flash",
+                    input_tokens=1000,
+                    output_tokens=250,
+                    cost_usd=0.0125,
+                )
+            )
+            runs.save_run(
+                _succeeded_run_with_provider_usage(
+                    "run_usage_other_001",
+                    project_id="other-project",
+                    provider="openai-compatible",
+                    model_name="gpt-5-mini",
+                    input_tokens=9000,
+                    output_tokens=1000,
+                    cost_usd=0.2,
+                )
+            )
+
+        response = self.client.get(
+            "/ops/metrics",
+            headers=_auth("[REDACTED_OWNER]-token", request_id="req-usage-metrics-001"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["model_provider_usage"]["run_count"], 1)
+        self.assertEqual(payload["model_provider_usage"]["input_tokens"], 1000)
+        self.assertEqual(payload["model_provider_usage"]["output_tokens"], 250)
+        self.assertEqual(payload["model_provider_usage"]["total_tokens"], 1250)
+        self.assertAlmostEqual(payload["model_provider_usage"]["cost_usd"], 0.0125)
+        self.assertEqual(
+            payload["model_provider_usage_by_provider"]["openai-compatible"]["model_count"],
+            1,
+        )
+        self.assertEqual(
+            payload["model_provider_usage_by_model"]["deepseek-v4-flash"]["output_tokens"],
+            250,
+        )
+        self.assertNotIn("gpt-5-mini", payload["model_provider_usage_by_model"])
+
 
 def _app(engine):
     return create_app(
@@ -272,6 +322,49 @@ def _queued_run(run_id: str, *, project_id: str) -> RunRecord:
             metadata={},
         ),
     )
+
+
+def _succeeded_run_with_provider_usage(
+    run_id: str,
+    *,
+    project_id: str,
+    provider: str,
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+) -> RunRecord:
+    run = _queued_run(run_id, project_id=project_id)
+    run.transition_to(RunStatus.DISPATCHED)
+    run.transition_to(RunStatus.PROVISIONING)
+    run.transition_to(RunStatus.RUNNING)
+    run.transition_to(RunStatus.EVALUATING)
+    run.attach_evaluator_result(
+        EvaluatorResult(
+            evaluator_id="harbor-verifier",
+            mode="harbor_verifier",
+            status="completed",
+            score=1.0,
+            metrics={"reward": 1.0},
+            verbal_feedback="",
+            judge=None,
+            artifact_refs=[],
+            metadata={
+                "provider_usage": {
+                    "schema_version": "model-provider-usage-v1",
+                    "source": "harbor_atif_final_metrics",
+                    "provider": provider,
+                    "model_name": model_name,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "cost_usd": cost_usd,
+                }
+            },
+        )
+    )
+    run.transition_to(RunStatus.SUCCEEDED)
+    return run
 
 
 def _run_create_payload(run_id: str, *, created_by_user_id: str | None = "[REDACTED_OWNER]") -> dict:

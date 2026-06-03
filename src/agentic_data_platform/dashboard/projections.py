@@ -7,6 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from agentic_data_platform.domain.provider_usage import model_provider_usage_from_metadata
 from agentic_data_platform.domain.run_records import ArtifactRef, EvaluatorConfig, EvaluatorResult, RunRecord, RunStatus
 from agentic_data_platform.providers.config import redact_sensitive_metadata
 
@@ -144,6 +145,10 @@ def _evaluator_summary(result: EvaluatorResult) -> dict[str, Any]:
 
     if result.score is not None:
         payload["score"] = result.score
+
+    provider_usage = model_provider_usage_from_metadata(result.metadata)
+    if provider_usage is not None:
+        payload["model_provider_usage"] = provider_usage
 
     if result.failure_reason:
         payload["failure_reason"] = result.failure_reason

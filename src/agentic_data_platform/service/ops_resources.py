@@ -6,6 +6,7 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
 
+from agentic_data_platform.domain.provider_usage import aggregate_model_provider_usage
 from agentic_data_platform.domain.run_records import RunStatus
 from agentic_data_platform.persistence.repositories import RunRepository
 from agentic_data_platform.service.security import accessible_project_ids, require_authenticated_user
@@ -21,6 +22,7 @@ def register_ops_routes(app: FastAPI, session_dependency: Callable) -> None:
         counts = Counter(run.status.value for run in runs)
         capacity_blocked = repository.list_scheduler_capacity_blocks(project_ids=allowed_project_ids, limit=25)
         blocked_by_dimension = Counter(block.dimension for block in capacity_blocked)
+        provider_usage = aggregate_model_provider_usage(runs)
         return _with_request_id(
             request,
             {
@@ -30,6 +32,9 @@ def register_ops_routes(app: FastAPI, session_dependency: Callable) -> None:
                 "scheduler_capacity_blocked_count": len(capacity_blocked),
                 "scheduler_capacity_blocked_by_dimension": dict(blocked_by_dimension),
                 "scheduler_capacity_blocked_runs": [block.to_dict() for block in capacity_blocked],
+                "model_provider_usage": provider_usage["totals"],
+                "model_provider_usage_by_provider": provider_usage["by_provider"],
+                "model_provider_usage_by_model": provider_usage["by_model"],
             },
         )
 
@@ -80,5 +85,34 @@ _METRICS_EXAMPLE = {
             "benchmark_key": "terminal-bench@2.0",
         }
     ],
+    "model_provider_usage": {
+        "run_count": 3,
+        "input_tokens": 12000,
+        "output_tokens": 1800,
+        "total_tokens": 13800,
+        "cost_usd": 0.42,
+        "duration_seconds": 128.5,
+    },
+    "model_provider_usage_by_provider": {
+        "openai-compatible": {
+            "run_count": 3,
+            "input_tokens": 12000,
+            "output_tokens": 1800,
+            "total_tokens": 13800,
+            "cost_usd": 0.42,
+            "duration_seconds": 128.5,
+            "model_count": 2,
+        }
+    },
+    "model_provider_usage_by_model": {
+        "deepseek-v4-flash": {
+            "run_count": 2,
+            "input_tokens": 8000,
+            "output_tokens": 1200,
+            "total_tokens": 9200,
+            "cost_usd": 0.18,
+            "duration_seconds": 80.0,
+        }
+    },
     "request_id": "req_123",
 }

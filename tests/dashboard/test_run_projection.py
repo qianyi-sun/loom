@@ -127,6 +127,50 @@ class RunDashboardProjectionTest(unittest.TestCase):
         self.assertNotIn("raw-secret", rendered)
         self.assertNotIn("X-Amz-Signature", rendered)
 
+    def test_projection_exposes_safe_model_provider_usage_summary(self):
+        run = _minimal_run(status=RunStatus.SUCCEEDED)
+        run.evaluator_result = EvaluatorResult(
+            evaluator_id="harbor-verifier-v1",
+            mode="harbor_verifier",
+            status="completed",
+            score=1.0,
+            metrics={"reward": 1.0},
+            verbal_feedback="",
+            judge=None,
+            artifact_refs=[],
+            metadata={
+                "provider_usage": {
+                    "schema_version": "model-provider-usage-v1",
+                    "source": "harbor_atif_final_metrics",
+                    "provider": "openai-compatible",
+                    "model_name": "deepseek-v4-flash",
+                    "input_tokens": 1000,
+                    "output_tokens": 250,
+                    "total_tokens": 1250,
+                    "cost_usd": 0.0125,
+                    "api_key": "sk-secret",
+                }
+            },
+        )
+
+        payload = RunDashboardProjection.from_run(run).to_dict()
+        rendered = json.dumps(payload)
+
+        self.assertEqual(
+            payload["evaluator"]["model_provider_usage"],
+            {
+                "schema_version": "model-provider-usage-v1",
+                "source": "harbor_atif_final_metrics",
+                "provider": "openai-compatible",
+                "model_name": "deepseek-v4-flash",
+                "input_tokens": 1000,
+                "output_tokens": 250,
+                "total_tokens": 1250,
+                "cost_usd": 0.0125,
+            },
+        )
+        self.assertNotIn("sk-secret", rendered)
+
     def test_failed_run_projection_shows_failure_reason_and_evaluator_failure(self):
         run = _minimal_run(status=RunStatus.FAILED, failure_reason="sandbox command timed out")
         run.evaluator_result = EvaluatorResult(

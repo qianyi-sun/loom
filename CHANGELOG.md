@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added observed model-provider usage telemetry for Harbor-backed runs. Harbor
+  result ingestion now normalizes safe numeric usage fields such as input
+  tokens, output tokens, total tokens, cost, and duration from Harbor
+  `final_metrics` payloads into evaluator metadata; run projections expose the
+  sanitized `model_provider_usage` summary; and `/ops/metrics` reports
+  authenticated-project-scoped usage totals grouped by provider and model. This
+  is observed telemetry for #156 follow-on rate windows, not estimated dispatch
+  budget data or billing truth.
 - Added metadata-only `sandbox.resource_sampled` events for Docker terminal
   sandbox commands. The default managed Docker runner now samples
   `docker stats --no-stream` after the cidfile exposes the running container id,

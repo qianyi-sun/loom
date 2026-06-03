@@ -160,6 +160,15 @@ class HarborResultIngestorTest(unittest.TestCase):
             self.assertEqual(result.turns[1].model_call_id, "call_001")
             self.assertEqual(result.turns[0].metadata["trajectory_schema"], "ATIF-v1.5")
             self.assertEqual(result.evaluator_results[0].score, 1.0)
+            self.assertEqual(
+                result.evaluator_results[0].metadata["provider_usage"],
+                {
+                    "schema_version": "model-provider-usage-v1",
+                    "source": "harbor_atif_final_metrics",
+                    "model_name": "gpt-5-nano",
+                    "output_tokens": 12,
+                },
+            )
 
     def test_failure_diagnostics_promote_trial_exception_over_missing_reward(self):
         with tempfile.TemporaryDirectory() as temp_dir:

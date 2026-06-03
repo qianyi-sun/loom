@@ -1,6 +1,6 @@
 # Core API Resources
 
-Last updated: 2026-06-02
+Last updated: 2026-06-03
 
 Related trackers:
 
@@ -91,7 +91,7 @@ This is a dev-safe boundary, not the final production SSO design.
 | `GET /runs/{run_id}/artifact-bundle` | Download one sanitized zip containing manifest, run projection, trajectory, evaluation, artifact metadata, lifecycle events, and available artifact payload files from the configured object store | `RunDashboardProjection` + `RunRepository.list_status_events()` + `Artifacpilot groupjectStore` |
 | `GET /runs/{run_id}/evaluation` | Inspect latest evaluator summary and, when present, multiple evaluator outputs for a run | `RunRepository.get_run_dashboard_summary()` |
 | `GET /dashboard/progress` | Summarize accessible run progress for PM/research dashboards | `RunRepository.list_dashboard_progress_records()` + aggregate projection |
-| `GET /ops/metrics` | Return scoped run status counts, queue depth, and scheduler capacity-blocked diagnostics visible to the authenticated user | `RunRepository.list_runs()` + `RunRepository.list_scheduler_capacity_blocks()` |
+| `GET /ops/metrics` | Return scoped run status counts, queue depth, scheduler capacity-blocked diagnostics, and observed model-provider usage totals visible to the authenticated user | `RunRepository.list_runs()` + `RunRepository.list_scheduler_capacity_blocks()` |
 
 Static frontend assets are served at `GET /app/` by the same FastAPI service.
 The frontend is intentionally no-build for the first MVP slice so `shared dev`
@@ -124,9 +124,12 @@ endpoint intentionally does not embed trajectories.
 Evaluator projections expose `evaluator` as the latest primary summary for
 existing clients and `evaluator_results` as the full side-by-side collection
 when a run has multiple outputs such as Harbor verifier reward plus platform LLM
-judge feedback. `GET /runs/{run_id}/evaluation` keeps the old single-summary
-shape for single-evaluator runs and adds `evaluator_results` only when multiple
-results exist.
+judge feedback. When a runner or result ingestor reports observed model usage,
+the evaluator summary also exposes a sanitized `model_provider_usage` object
+with safe numeric fields such as tokens, cost, and duration. `GET
+/runs/{run_id}/evaluation` keeps the old single-summary shape for
+single-evaluator runs and adds `evaluator_results` only when multiple results
+exist.
 
 `GET /dashboard/progress` returns the PM summary surface. It accepts optional
 `project_id` and `owner_team` filters, enforces the same project viewer boundary
@@ -372,7 +375,10 @@ serializing dashboard payloads.
   request id, and event payload. The ops metrics endpoint exposes v0 run status
   counts, queue depth, visible project count, and scheduler capacity-blocked
   queued-run diagnostics after applying the authenticated user's project
-  membership boundary.
+  membership boundary. It also aggregates observed model-provider usage from
+  completed evaluator metadata by provider and model within the same project
+  scope. These usage totals are telemetry for operations and future rate
+  windows; they are distinct from scheduler estimated budget hints.
 - Request middleware emits `request_completed` service logs with request id,
   method, path, status code, and authenticated user id when present.
 
@@ -404,8 +410,9 @@ serializing dashboard payloads.
   Cost/token budget blockers use dimensions such as `provider_cost_usd` or
   `model_tokens` and include the metric, candidate usage, projected usage, and
   configured limit in the same operator-visible payload. `/ops/metrics` reports
-  visible blocked counts by dimension and a bounded run list so operators can
-  distinguish real queue depth from capacity saturation.
+  visible blocked counts by dimension, a bounded run list, and scoped observed
+  model-provider usage totals so operators can distinguish real queue depth,
+  capacity saturation, and completed API-model consumption.
   Workers then prefer `RunRepository.claim_next_dispatched_run(...)` before the
   legacy queued-claim compatibility path. Redis remains available in the dev
   stack for a later queue/cache backend, but it is not the current source of

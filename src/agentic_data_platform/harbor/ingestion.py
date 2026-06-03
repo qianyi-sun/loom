@@ -16,6 +16,7 @@ from agentic_data_platform.domain.run_records import (
     EvaluatorResult,
     TerminalTurn,
 )
+from agentic_data_platform.domain.provider_usage import normalize_model_provider_usage
 from agentic_data_platform.providers.config import redact_sensitive_metadata
 
 
@@ -83,7 +84,14 @@ class HarborResultIngestor:
         job_result = _read_json_object(job_dir / "result.json")
         trial_config = _read_json_object(trial_dir / "config.json")
         trial_result = _read_json_object(trial_dir / "result.json")
-        turns = _read_trajectory(trial_dir / "agent" / "trajectory.json")
+        trajectory_path = trial_dir / "agent" / "trajectory.json"
+        turns = _read_trajectory(trajectory_path)
+        provider_usage = _harbor_provider_usage(
+            job_config=job_config,
+            job_result=job_result,
+            trial_result=trial_result,
+            trajectory_path=trajectory_path,
+        )
 
         raw_jobs_ref = self.artifact_persistence.persist_harbor_jobs_archive(
             run_id=run_id,
@@ -103,6 +111,7 @@ class HarborResultIngestor:
             trial_dir=trial_dir,
             trial_config=trial_config,
             trial_result=trial_result,
+            provider_usage=provider_usage,
         )
         evaluator_report_ref = self.artifact_persistence.persist_evaluator_report(
             run_id=run_id,
@@ -116,6 +125,7 @@ class HarborResultIngestor:
             trial_config=trial_config,
             trial_result=trial_result,
             artifact_refs=[evaluator_report_ref.uri],
+            provider_usage=provider_usage,
         )
 
         artifacts = [
@@ -494,6 +504,7 @@ def _verifier_result(
     trial_config: dict[str, Any],
     trial_result: dict[str, Any],
     artifact_refs: list[str] | None = None,
+    provider_usage: dict[str, Any] | None = None,
 ) -> EvaluatorResult:
     reward_payload = _read_reward_payload(trial_dir=trial_dir, trial_result=trial_result)
     reward = reward_payload["reward"]
@@ -503,6 +514,14 @@ def _verifier_result(
         or trial_result.get("verifier_version")
         or "unknown"
     )
+    metadata: dict[str, Any] = {
+        "job_name": job_name,
+        "trial_name": trial_name,
+        "verifier_version": verifier_version,
+    }
+    if provider_usage is not None:
+        metadata["provider_usage"] = dict(provider_usage)
+
     return EvaluatorResult(
         evaluator_id="harbor-verifier",
         mode="harbor_verifier",
@@ -512,12 +531,73 @@ def _verifier_result(
         verbal_feedback="",
         judge=None,
         artifact_refs=list(artifact_refs or []),
-        metadata={
-            "job_name": job_name,
-            "trial_name": trial_name,
-            "verifier_version": verifier_version,
-        },
+        metadata=metadata,
     )
+
+
+def _harbor_provider_usage(
+    *,
+    job_config: dict[str, Any],
+    job_result: dict[str, Any],
+    trial_result: dict[str, Any],
+    trajectory_path: Path,
+) -> dict[str, Any] | None:
+    trajectory_payload = _optional_json_value(trajectory_path)
+    model_name = _model_name_from_trajectory(trajectory_payload) or _model_name_from_job_config(job_config)
+    provider = _provider_from_job_config(job_config)
+    candidates: list[tuple[str, Any]] = []
+    if isinstance(trajectory_payload, dict):
+        candidates.append(("harbor_atif_final_metrics", trajectory_payload.get("final_metrics")))
+    candidates.extend(
+        [
+            ("harbor_trial_final_metrics", trial_result.get("final_metrics")),
+            ("harbor_job_final_metrics", job_result.get("final_metrics")),
+        ]
+    )
+    for source, metrics in candidates:
+        if not isinstance(metrics, dict):
+            continue
+        usage = normalize_model_provider_usage(
+            metrics,
+            source=source,
+            provider=provider,
+            model_name=model_name,
+        )
+        if usage is not None:
+            return usage
+    return None
+
+
+def _model_name_from_trajectory(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    agent = payload.get("agent")
+    if not isinstance(agent, dict):
+        return None
+    return _optional_str(agent.get("model_name"))
+
+
+def _model_name_from_job_config(job_config: dict[str, Any]) -> str | None:
+    model = job_config.get("model")
+    if isinstance(model, str):
+        return _optional_str(model)
+    if isinstance(model, dict):
+        return (
+            _optional_str(model.get("model_name"))
+            or _optional_str(model.get("name"))
+            or _optional_str(model.get("id"))
+        )
+    return None
+
+
+def _provider_from_job_config(job_config: dict[str, Any]) -> str | None:
+    provider = _optional_str(job_config.get("provider"))
+    if provider is not None:
+        return provider
+    model = job_config.get("model")
+    if isinstance(model, dict):
+        return _optional_str(model.get("provider"))
+    return None
 
 
 def _read_reward_payload(*, trial_dir: Path, trial_result: dict[str, Any]) -> dict[str, Any]:
