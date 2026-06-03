@@ -26,13 +26,16 @@ All notable changes to this project will be documented in this file.
   commit or rollback, matching the PostgreSQL transaction-scoped advisory lock
   boundary and preventing CI scheduler race smoke over-dispatch from reading
   stale active capacity.
-- Added a #158/#160 deploy-time real smoke container leak audit. Shared-dev
-  deployment now assigns deterministic run ids to worker, Harbor, API, and
-  frontend smoke runs, then runs
+- Hardened the #158/#160 deploy-time real smoke container leak audit with a
+  bounded post-smoke audit window. Shared-dev deployment assigns deterministic
+  run ids to worker, Harbor, API, and frontend smoke runs, then runs
   `agentic_data_platform.scheduler.container_leak_audit` from the scheduler
-  container after each smoke. The audit lists platform-owned Docker sandbox
-  containers by run label without deleting them and fails deployment if any
-  smoke run leaves labeled sandbox containers behind.
+  container after each smoke. The audit now supports
+  `--max-attempts` / `--poll-interval-seconds`, and `scripts/deploy-dev.sh`
+  defaults to three checks five seconds apart via
+  `DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS` and
+  `DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS` before failing on remaining
+  labeled sandbox containers.
 - Added #159/#160 artifact bundle coverage for persisted artifact chunks.
   `/runs/{run_id}/artifact-bundle` now includes `artifact-chunks.json` with
   sanitized chunk metadata and downloads completed chunk payloads from the

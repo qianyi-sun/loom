@@ -137,9 +137,19 @@ class DeployDevScriptTests(unittest.TestCase):
             'DEPLOY_RUN_CONTAINER_LEAK_AUDIT="${DEPLOY_RUN_CONTAINER_LEAK_AUDIT:-1}"',
             script,
         )
+        self.assertIn(
+            'DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS="${DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS:-3}"',
+            script,
+        )
+        self.assertIn(
+            'DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS="${DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS:-5}"',
+            script,
+        )
         self.assertIn("run_container_leak_audit", script)
         self.assertIn("agentic_data_platform.scheduler.container_leak_audit", script)
         self.assertIn("--run-id \"$worker_smoke_run_id\"", script)
+        self.assertIn('--max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS"', script)
+        self.assertIn('--poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS"', script)
         self.assertIn("-e API_SMOKE_RUN_ID=\"$api_smoke_run_id\"", script)
         self.assertIn("-e FRONTEND_SMOKE_RUN_ID=\"$frontend_smoke_run_id\"", script)
         self.assertLess(

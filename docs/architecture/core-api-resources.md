@@ -489,11 +489,11 @@ serializing dashboard payloads.
   labeled container from a helper parent process, terminating that parent, and
   requiring scheduler recovery to remove the surviving container before
   API/frontend smokes continue. It also assigns explicit run ids to worker,
-  Harbor, API, and frontend smokes and runs a scheduler-side container leak
-  audit after each smoke to fail deploys that leave platform-owned Docker
-  containers behind. Broader long-running runtime leak auditing remains
-  #158/#160 follow-up work. A production LLM-judge evaluator provider remains
-  follow-up work.
+  Harbor, API, and frontend smokes and runs a scheduler-side bounded container
+  leak audit window after each smoke to fail deploys that leave platform-owned
+  Docker containers behind after slow teardown grace. Broader long-running
+  runtime leak auditing remains #158/#160 follow-up work. A production
+  LLM-judge evaluator provider remains follow-up work.
 - Provider configuration is still dev-scoped. The current implementation
   supports safe provider config references, env secret references, and redaction
   of raw secret-looking metadata. Production secret management should replace

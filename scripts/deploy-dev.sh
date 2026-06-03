@@ -19,6 +19,8 @@ DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_DOCKER_CLEANUP
 DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE="${DEPLOY_RUN_SCHEDULER_PARENT_DEATH_CLEANUP_SMOKE:-1}"
 DEPLOY_RUN_SCHEDULER_RACE_SMOKE="${DEPLOY_RUN_SCHEDULER_RACE_SMOKE:-1}"
 DEPLOY_RUN_CONTAINER_LEAK_AUDIT="${DEPLOY_RUN_CONTAINER_LEAK_AUDIT:-1}"
+DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS="${DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS:-3}"
+DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS="${DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS:-5}"
 DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS="${DEPLOY_STALE_ACTIVE_RECOVERY_SECONDS:-60}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
@@ -80,7 +82,10 @@ run_container_leak_audit() {
 
   local run_id="$1"
   log "Checking Docker container leak audit for ${run_id}"
-  compose run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit --run-id "$run_id" </dev/null
+  compose run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit \
+    --run-id "$run_id" \
+    --max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS" \
+    --poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS" </dev/null
 }
 
 run_compose_smoke() {
@@ -252,7 +257,10 @@ run_container_leak_audit() {
   fi
   run_id="\$1"
   printf '[deploy-dev] Checking Docker container leak audit for %s\n' "\$run_id"
-  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit --run-id "\$run_id" </dev/null
+  docker compose -p "$DEPLOY_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm -T scheduler python -m agentic_data_platform.scheduler.container_leak_audit \
+    --run-id "\$run_id" \
+    --max-attempts "$DEPLOY_CONTAINER_LEAK_AUDIT_ATTEMPTS" \
+    --poll-interval-seconds "$DEPLOY_CONTAINER_LEAK_AUDIT_POLL_SECONDS" </dev/null
 }
 compose_config_output=\$(mktemp /tmp/agentic-data-shared dev-compose.XXXXXX.yml)
 trap 'rm -f "\$compose_config_output"' EXIT

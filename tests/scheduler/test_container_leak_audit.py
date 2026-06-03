@@ -36,10 +36,50 @@ class ContainerLeakAuditTest(unittest.TestCase):
         self.assertEqual(result.leaked_container_count, 2)
         self.assertEqual(result.leaked_containers, {"run_leak_001": ["container-one", "container-two"]})
 
+    def test_audit_retries_until_transient_owned_containers_are_gone(self) -> None:
+        runner = FakeDockerListRunner({"run_slow_cleanup_001": ["container-one\n", ""]})
+        cleaner = DockerOwnedContainerCleaner(runner=runner)
+        sleeps: list[float] = []
+
+        result = audit_run_containers(
+            ["run_slow_cleanup_001"],
+            cleaner=cleaner,
+            max_attempts=2,
+            poll_interval_seconds=0.25,
+            sleeper=sleeps.append,
+        )
+
+        self.assertEqual(result.checked_run_count, 1)
+        self.assertEqual(result.audit_attempt_count, 2)
+        self.assertEqual(result.leaked_container_count, 0)
+        self.assertEqual(result.to_dict()["leaked_containers"], {})
+        self.assertEqual(sleeps, [0.25])
+        self.assertEqual(len(runner.calls), 2)
+
+    def test_audit_reports_final_leaks_after_bounded_attempts(self) -> None:
+        runner = FakeDockerListRunner({"run_leak_003": ["container-one\n", "container-one\n"]})
+        cleaner = DockerOwnedContainerCleaner(runner=runner)
+        sleeps: list[float] = []
+
+        result = audit_run_containers(
+            ["run_leak_003"],
+            cleaner=cleaner,
+            max_attempts=2,
+            poll_interval_seconds=0.5,
+            sleeper=sleeps.append,
+        )
+
+        self.assertEqual(result.audit_attempt_count, 2)
+        self.assertEqual(result.leaked_container_count, 1)
+        self.assertEqual(result.leaked_containers, {"run_leak_003": ["container-one"]})
+        self.assertEqual(sleeps, [0.5])
+        self.assertEqual(len(runner.calls), 2)
+
 
 class FakeDockerListRunner:
-    def __init__(self, containers_by_run_id: dict[str, str]) -> None:
+    def __init__(self, containers_by_run_id: dict[str, str | list[str]]) -> None:
         self.containers_by_run_id = containers_by_run_id
+        self.call_count_by_run_id: dict[str, int] = {}
         self.calls = []
 
     def run(self, args, *, timeout):
@@ -47,10 +87,15 @@ class FakeDockerListRunner:
         if args[:3] != ["docker", "ps", "-aq"]:
             raise AssertionError(f"unexpected docker command: {args}")
         run_id = _run_id_from_args(args)
+        value = self.containers_by_run_id.get(run_id, "")
+        if isinstance(value, list):
+            call_count = self.call_count_by_run_id.get(run_id, 0)
+            self.call_count_by_run_id[run_id] = call_count + 1
+            value = value[min(call_count, len(value) - 1)]
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
-            stdout=self.containers_by_run_id.get(run_id, ""),
+            stdout=value,
             stderr="",
         )
 
