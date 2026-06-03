@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +60,9 @@ class CommandRunner(Protocol):
 
 class SandboxLifecycleRecorder(Protocol):
     def container_started(self, metadata: dict[str, Any]) -> None:
+        ...
+
+    def resource_sampled(self, metadata: dict[str, Any]) -> None:
         ...
 
     def container_completed(self, metadata: dict[str, Any]) -> None:
@@ -296,11 +301,15 @@ class DockerTerminalSandbox:
                 }
             )
 
+        resource_sample: dict[str, object] | None = None
         try:
-            process = self.runner.run(docker_args, timeout=timeout)
-            exit_code = process.returncode
-            stdout = _coerce_output(process.stdout)
-            stderr = _coerce_output(process.stderr)
+            exit_code, stdout, stderr, resource_sample = self._run_docker_command_with_optional_resource_sample(
+                docker_args=docker_args,
+                timeout=timeout,
+                cidfile_path=cidfile_path,
+                sandbox_command_index=sandbox_command_index,
+                resource_limits=resource_limits,
+            )
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             exit_code = 124
@@ -314,6 +323,8 @@ class DockerTerminalSandbox:
         container_id = _read_container_id(cidfile_path)
         if container_id is not None:
             metadata["container_id"] = container_id
+        if resource_sample is not None:
+            metadata["resource_sample"] = resource_sample
         _remove_file_if_present(cidfile_path)
 
         if self.lifecycle_recorder is not None:
@@ -346,6 +357,87 @@ class DockerTerminalSandbox:
             timed_out=timed_out,
             metadata=metadata,
         )
+
+    def _run_docker_command_with_optional_resource_sample(
+        self,
+        *,
+        docker_args: list[str],
+        timeout: int,
+        cidfile_path: Path,
+        sandbox_command_index: int,
+        resource_limits: dict[str, object],
+    ) -> tuple[int, str, str, dict[str, object] | None]:
+        start = getattr(self.runner, "start", None)
+        if not callable(start):
+            process = self.runner.run(docker_args, timeout=timeout)
+            return process.returncode, _coerce_output(process.stdout), _coerce_output(process.stderr), None
+
+        started_monotonic = time.monotonic()
+        process = start(docker_args, env=None)
+        container_id = _wait_for_container_id(cidfile_path, process, timeout_seconds=min(2.0, max(0.1, timeout / 10)))
+        resource_sample = None
+        if container_id:
+            elapsed = time.monotonic() - started_monotonic
+            resource_sample = self._sample_container_resources(
+                container_id=container_id,
+                sandbox_command_index=sandbox_command_index,
+                resource_limits=resource_limits,
+                timeout_seconds=max(0.1, min(1.0, timeout - elapsed)),
+            )
+        elapsed = time.monotonic() - started_monotonic
+        remaining_timeout = max(0.1, timeout - elapsed)
+        try:
+            stdout, stderr = process.communicate(timeout=remaining_timeout)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(
+                cmd=docker_args,
+                timeout=timeout,
+                output=stdout,
+                stderr=stderr,
+            ) from exc
+        return int(process.returncode or 0), _coerce_output(stdout), _coerce_output(stderr), resource_sample
+
+    def _sample_container_resources(
+        self,
+        *,
+        container_id: str,
+        sandbox_command_index: int,
+        resource_limits: dict[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        sampled_at = datetime.now(timezone.utc)
+        base_metadata: dict[str, object] = {
+            "sandbox_command_index": sandbox_command_index,
+            "sandbox_status": "running",
+            "container_id": container_id,
+            "sampled_at": _datetime_json(sampled_at),
+            "resource_limits": resource_limits,
+        }
+        try:
+            process = self.runner.run(
+                ["docker", "stats", "--no-stream", "--format", "json", container_id],
+                timeout=timeout_seconds,
+            )
+            stdout = _coerce_output(process.stdout)
+            stderr = _coerce_output(process.stderr)
+            if process.returncode != 0:
+                raise RuntimeError(stderr.strip() or "docker stats failed")
+            sample = {
+                **base_metadata,
+                **_parse_docker_stats(stdout),
+                "sample_status": "completed",
+            }
+        except Exception as exc:  # Docker stats must not change command success/failure.
+            sample = {
+                **base_metadata,
+                "sample_status": "failed",
+                "sample_error_reason": _bounded_text(str(exc), limit=240),
+            }
+        if self.lifecycle_recorder is not None:
+            self.lifecycle_recorder.resource_sampled(sample)
+        return sample
 
     def capture_workspace(self) -> WorkspaceSnapshot:
         files = [
@@ -477,6 +569,130 @@ def _read_container_id(path: Path) -> str | None:
     except OSError:
         return None
     return value or None
+
+
+def _wait_for_container_id(path: Path, process: Any, *, timeout_seconds: float) -> str | None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() <= deadline:
+        container_id = _read_container_id(path)
+        if container_id:
+            return container_id
+        poll = getattr(process, "poll", None)
+        if callable(poll) and poll() is not None:
+            return _read_container_id(path)
+        time.sleep(0.05)
+    return _read_container_id(path)
+
+
+def _parse_docker_stats(payload: str) -> dict[str, object]:
+    line = next((item.strip() for item in payload.splitlines() if item.strip()), "")
+    if not line:
+        raise ValueError("docker stats returned no JSON payload")
+    raw = json.loads(line)
+    if not isinstance(raw, dict):
+        raise ValueError("docker stats payload must be a JSON object")
+
+    metadata: dict[str, object] = {}
+    cpu_percent = _parse_percent(raw.get("CPUPerc"))
+    if cpu_percent is not None:
+        metadata["cpu_percent"] = cpu_percent
+
+    memory_used, memory_limit = _parse_usage_pair(raw.get("MemUsage"))
+    if memory_used is not None:
+        metadata["memory_used_bytes"] = memory_used
+    if memory_limit is not None:
+        metadata["memory_limit_bytes"] = memory_limit
+
+    memory_percent = _parse_percent(raw.get("MemPerc"))
+    if memory_percent is not None:
+        metadata["memory_percent"] = memory_percent
+
+    net_input, net_output = _parse_usage_pair(raw.get("NetIO"))
+    if net_input is not None:
+        metadata["network_rx_bytes"] = net_input
+    if net_output is not None:
+        metadata["network_tx_bytes"] = net_output
+
+    block_input, block_output = _parse_usage_pair(raw.get("BlockIO"))
+    if block_input is not None:
+        metadata["block_read_bytes"] = block_input
+    if block_output is not None:
+        metadata["block_write_bytes"] = block_output
+
+    pids = _parse_int(raw.get("PIDs"))
+    if pids is not None:
+        metadata["pids"] = pids
+
+    return metadata
+
+
+def _parse_percent(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.endswith("%"):
+        text = text[:-1]
+    try:
+        return round(float(text), 4)
+    except ValueError:
+        return None
+
+
+def _parse_usage_pair(value: object) -> tuple[int | None, int | None]:
+    if value is None:
+        return None, None
+    parts = [part.strip() for part in str(value).split("/", maxsplit=1)]
+    first = _parse_size_bytes(parts[0]) if parts else None
+    second = _parse_size_bytes(parts[1]) if len(parts) > 1 else None
+    return first, second
+
+
+def _parse_size_bytes(value: object) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    number_text = ""
+    unit_text = ""
+    for char in text:
+        if char.isdigit() or char in {".", "-"}:
+            number_text += char
+        elif not char.isspace():
+            unit_text += char
+    try:
+        number = float(number_text)
+    except ValueError:
+        return None
+    units = {
+        "B": 1,
+        "kB": 1000,
+        "KB": 1000,
+        "KiB": 1024,
+        "MB": 1000**2,
+        "MiB": 1024**2,
+        "GB": 1000**3,
+        "GiB": 1024**3,
+        "TB": 1000**4,
+        "TiB": 1024**4,
+    }
+    multiplier = units.get(unit_text or "B")
+    if multiplier is None:
+        return None
+    return int(number * multiplier)
+
+
+def _parse_int(value: object) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _bounded_text(value: str, *, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def _remove_file_if_present(path: Path) -> None:

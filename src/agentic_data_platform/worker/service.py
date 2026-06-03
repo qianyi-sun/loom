@@ -401,6 +401,9 @@ class RepositorySandboxLifecycleRecorder:
     def container_started(self, metadata: dict[str, object]) -> None:
         self._record(RunEventType.SANDBOX_CONTAINER_STARTED, metadata)
 
+    def resource_sampled(self, metadata: dict[str, object]) -> None:
+        self._record(RunEventType.SANDBOX_RESOURCE_SAMPLED, metadata)
+
     def container_completed(self, metadata: dict[str, object]) -> None:
         self._record(RunEventType.SANDBOX_CONTAINER_COMPLETED, metadata)
 

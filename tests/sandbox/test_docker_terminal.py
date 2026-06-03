@@ -16,7 +16,7 @@ class FakeRunner:
         self.calls = []
         self.behaviors = []
 
-    def add_completed(self, *, returncode=0, stdout="", stderr="", write_files=None):
+    def add_completed(self, *, returncode=0, stdout="", stderr="", write_files=None, write_cidfile=None):
         self.behaviors.append(
             {
                 "type": "completed",
@@ -24,6 +24,7 @@ class FakeRunner:
                 "stdout": stdout,
                 "stderr": stderr,
                 "write_files": write_files or {},
+                "write_cidfile": write_cidfile,
             }
         )
 
@@ -37,11 +38,16 @@ class FakeRunner:
         if behavior["type"] == "timeout":
             raise subprocess.TimeoutExpired(args, timeout, output="partial out", stderr="partial err")
 
-        workspace = _workspace_from_args(args)
-        for relative_path, content in behavior["write_files"].items():
-            target = workspace / relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content)
+        if "-v" in args:
+            workspace = _workspace_from_args(args)
+            for relative_path, content in behavior["write_files"].items():
+                target = workspace / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+        if behavior.get("write_cidfile"):
+            cidfile = _cidfile_from_args(args)
+            cidfile.parent.mkdir(parents=True, exist_ok=True)
+            cidfile.write_text(str(behavior["write_cidfile"]))
 
         return subprocess.CompletedProcess(
             args=args,
@@ -49,6 +55,67 @@ class FakeRunner:
             stdout=behavior["stdout"],
             stderr=behavior["stderr"],
         )
+
+
+class FakeLifecycleRecorder:
+    def __init__(self):
+        self.events = []
+
+    def container_started(self, metadata):
+        self.events.append(("started", metadata))
+
+    def container_completed(self, metadata):
+        self.events.append(("completed", metadata))
+
+    def resource_sampled(self, metadata):
+        self.events.append(("resource_sampled", metadata))
+
+
+class FakeManagedRunner:
+    def __init__(self, *, stdout="", stderr="", stats_stdout="", write_cidfile=None, write_files=None):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.stats_stdout = stats_stdout
+        self.write_cidfile = write_cidfile
+        self.write_files = write_files or {}
+        self.calls = []
+
+    def start(self, args, *, env=None):
+        self.calls.append({"method": "start", "args": args, "env": env})
+        workspace = _workspace_from_args(args)
+        for relative_path, content in self.write_files.items():
+            target = workspace / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        if self.write_cidfile:
+            cidfile = _cidfile_from_args(args)
+            cidfile.parent.mkdir(parents=True, exist_ok=True)
+            cidfile.write_text(str(self.write_cidfile))
+        return FakeManagedProcess(stdout=self.stdout, stderr=self.stderr)
+
+    def run(self, args, *, timeout, env=None):
+        self.calls.append({"method": "run", "args": args, "timeout": timeout, "env": env})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=self.stats_stdout, stderr="")
+
+
+class FakeManagedProcess:
+    def __init__(self, *, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = None
+        self._final_returncode = returncode
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self, timeout=None):
+        self.returncode = self._final_returncode
+        return self.stdout, self.stderr
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
 
 
 class DockerTerminalSandboxTest(unittest.TestCase):
@@ -256,6 +323,48 @@ class DockerTerminalSandboxTest(unittest.TestCase):
         self.assertEqual(labels["com.agentic-data-platform.attempt_id"], "run_008:attempt:1")
         self.assertEqual(labels["com.agentic-data-platform.resource"], "sandbox-container")
 
+    def test_docker_command_records_resource_sample_from_container_stats(self):
+        runner = FakeManagedRunner(
+            stdout="ok\n",
+            write_cidfile="container-abc123\n",
+            stats_stdout=(
+                '{"CPUPerc":"12.34%","MemUsage":"45.5MiB / 512MiB",'
+                '"MemPerc":"8.89%","NetIO":"1.2kB / 3.4kB","BlockIO":"5.6MB / 7.8MB","PIDs":"4"}\n'
+            ),
+        )
+        recorder = FakeLifecycleRecorder()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sandbox = DockerTerminalSandbox(
+                DockerTerminalSandboxConfig(
+                    run_id="run_011",
+                    attempt_id="run_011:attempt:1",
+                    image="python:3.12-slim",
+                    workspace_root=Path(temp_dir),
+                    cpu_limit=2,
+                    memory_mb=512,
+                    timeout_seconds=30,
+                ),
+                runner=runner,
+                lifecycle_recorder=recorder,
+            )
+
+            result = sandbox.execute("python --version")
+
+        self.assertEqual(result.metadata["resource_sample"]["sample_status"], "completed")
+        self.assertEqual(result.metadata["resource_sample"]["cpu_percent"], 12.34)
+        self.assertEqual(result.metadata["resource_sample"]["memory_used_bytes"], 47710208)
+        self.assertEqual(result.metadata["resource_sample"]["memory_limit_bytes"], 536870912)
+        stats_args = runner.calls[1]["args"]
+        self.assertEqual(stats_args, ["docker", "stats", "--no-stream", "--format", "json", "container-abc123"])
+        sampled_event = next(event for event in recorder.events if event[0] == "resource_sampled")
+        self.assertEqual(sampled_event[1]["sandbox_command_index"], 0)
+        self.assertEqual(sampled_event[1]["sandbox_status"], "running")
+        self.assertEqual(sampled_event[1]["container_id"], "container-abc123")
+        self.assertEqual(sampled_event[1]["cpu_percent"], 12.34)
+        self.assertEqual(sampled_event[1]["memory_percent"], 8.89)
+        self.assertEqual(sampled_event[1]["pids"], 4)
+
     def test_docker_owned_container_cleaner_lists_and_removes_only_matching_run(self):
         runner = FakeDockerCleanupRunner(
             ps_stdout="container-one\ncontainer-two\n",
@@ -295,6 +404,11 @@ def _workspace_from_args(args):
     volume_spec = args[volume_index + 1]
     host_path = volume_spec.split(":", maxsplit=1)[0]
     return Path(host_path)
+
+
+def _cidfile_from_args(args):
+    cidfile_index = args.index("--cidfile")
+    return Path(args[cidfile_index + 1])
 
 
 def _labels_from_args(args):

@@ -386,11 +386,15 @@ class WorkerServiceTest(unittest.TestCase):
         event_types = [event["event_type"] for event in payload["lifecycle_events"]]
         self.assertIn("sandbox.container_started", event_types)
         self.assertIn("sandbox.container_completed", event_types)
+        self.assertIn("sandbox.resource_sampled", event_types)
         started_event = next(
             event for event in payload["lifecycle_events"] if event["event_type"] == "sandbox.container_started"
         )
         completed_event = next(
             event for event in payload["lifecycle_events"] if event["event_type"] == "sandbox.container_completed"
+        )
+        resource_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "sandbox.resource_sampled"
         )
         self.assertEqual(started_event["metadata"]["worker_id"], "worker-docker-test")
         self.assertEqual(started_event["metadata"]["execution_task_id"], "run_worker_docker_001:attempt:1")
@@ -402,7 +406,13 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(completed_event["metadata"]["exit_code"], 0)
         self.assertFalse(completed_event["metadata"]["timed_out"])
         self.assertEqual(completed_event["metadata"]["changed_path_count"], 1)
-        rendered_events = json.dumps([started_event, completed_event])
+        self.assertEqual(resource_event["metadata"]["sample_status"], "completed")
+        self.assertEqual(resource_event["metadata"]["container_id"], "container-run-worker-docker-001")
+        self.assertEqual(resource_event["metadata"]["cpu_percent"], 3.5)
+        self.assertEqual(resource_event["metadata"]["memory_used_bytes"], 268435456)
+        self.assertEqual(resource_event["metadata"]["memory_limit_bytes"], 536870912)
+        self.assertEqual(resource_event["metadata"]["pids"], 5)
+        rendered_events = json.dumps([started_event, completed_event, resource_event])
         self.assertNotIn("python solve.py", rendered_events)
         self.assertNotIn("created receipts workbook", rendered_events)
         self.assertNotIn(str(temp_path), rendered_events)
@@ -800,6 +810,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.claimed",
                 "worker.heartbeat",
                 "sandbox.container_started",
+                "sandbox.resource_sampled",
                 "sandbox.container_completed",
                 "run.started",
                 "run.failed",
@@ -808,7 +819,7 @@ class WorkerServiceTest(unittest.TestCase):
             ],
         )
         sandbox_events = [
-            event for event in payload["lifecycle_events"] if event["event_type"].startswith("sandbox.container_")
+            event for event in payload["lifecycle_events"] if event["event_type"].startswith("sandbox.")
         ]
         rendered_sandbox_events = json.dumps(sandbox_events)
         self.assertNotIn("python missing.py", rendered_sandbox_events)
@@ -1590,12 +1601,35 @@ class FakeDockerCommandRunner:
         stdout: str = "",
         stderr: str = "",
         write_files: dict[str, str] | None = None,
+        stats_stdout: str = (
+            '{"CPUPerc":"3.50%","MemUsage":"256MiB / 512MiB",'
+            '"MemPerc":"50.00%","NetIO":"0B / 0B","BlockIO":"0B / 0B","PIDs":"5"}\n'
+        ),
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.write_files = write_files or {}
+        self.stats_stdout = stats_stdout
         self.calls: list[dict[str, object]] = []
+
+    def start(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+    ):
+        self.calls.append({"args": args, "env": env, "method": "start"})
+        workspace = _workspace_from_docker_args(args)
+        if "--cidfile" in args:
+            cidfile = Path(args[args.index("--cidfile") + 1])
+            cidfile.parent.mkdir(parents=True, exist_ok=True)
+            cidfile.write_text("container-run-worker-docker-001\n")
+        for relative_path, content in self.write_files.items():
+            target = workspace / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return FakeDockerProcess(returncode=self.returncode, stdout=self.stdout, stderr=self.stderr)
 
     def run(
         self,
@@ -1605,6 +1639,13 @@ class FakeDockerCommandRunner:
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append({"args": args, "timeout": timeout, "env": env})
+        if args[:3] == ["docker", "stats", "--no-stream"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=self.stats_stdout,
+                stderr="",
+            )
         workspace = _workspace_from_docker_args(args)
         if "--cidfile" in args:
             cidfile = Path(args[args.index("--cidfile") + 1])
@@ -1620,6 +1661,26 @@ class FakeDockerCommandRunner:
             stdout=self.stdout,
             stderr=self.stderr,
         )
+
+
+class FakeDockerProcess:
+    def __init__(self, *, returncode: int, stdout: str, stderr: str) -> None:
+        self._returncode = returncode
+        self.returncode: int | None = None
+        self.stdout = stdout
+        self.stderr = stderr
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self.returncode = self._returncode
+        return self.stdout, self.stderr
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
 
 
 class FailingTerminalLogStore(LocalArtifactStore):

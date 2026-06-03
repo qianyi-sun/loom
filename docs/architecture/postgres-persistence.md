@@ -133,11 +133,14 @@ follow-up reasons are `canceled_resource_cleanup` and
 `projection_refresh_failed`. Scheduler-driven Docker cleanup records
 same-status `sandbox.container_cleanup` events with container ids, removed ids,
 exit codes, cleanup status, and bounded cleanup error reasons. Docker terminal
-workers record same-status `sandbox.container_started` and
-`sandbox.container_completed` events for each sandbox command with only worker
-id, execution task id, sandbox command index, image, resource limits, sandbox
-status, exit code, timeout flag, changed-path count, and cidfile container id
-when available. Subprocess worker parents record same-status
+workers record same-status `sandbox.container_started`,
+`sandbox.resource_sampled`, and `sandbox.container_completed` events for each
+sandbox command. Container events include only worker id, execution task id,
+sandbox command index, image, resource limits, sandbox status, exit code,
+timeout flag, changed-path count, and cidfile container id when available.
+Resource sample events include bounded normalized Docker stats such as CPU
+percent, memory used/limit/percent, IO byte counts, PID count, sample status,
+and sample timestamp, not raw stats JSON. Subprocess worker parents record same-status
 `worker.subprocess_started` and `worker.subprocess_completed` events with only
 worker id, execution task id, child-entrypoint module, timeout, and return
 code. Worker result persistence records `evaluator.completed` or

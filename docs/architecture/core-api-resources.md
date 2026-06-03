@@ -270,7 +270,8 @@ serializing dashboard payloads.
   `artifact.upload_expired`, `artifact.upload_status_changed`,
   `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
   `projection.refreshed`, `sandbox.container_started`,
-  `sandbox.container_completed`, and `sandbox.container_cleanup`.
+  `sandbox.container_completed`, `sandbox.resource_sampled`, and
+  `sandbox.container_cleanup`.
   Worker heartbeat events carry safe liveness metadata only: worker id,
   execution task id, process status, heartbeat status, and heartbeat timestamp.
   They do not embed command text, local paths, stdout/stderr, artifact payloads,
@@ -417,9 +418,9 @@ serializing dashboard payloads.
   `/runs/{run_id}/evaluation`, and `/dashboard/progress` prefer clean
   projection rows before falling back to hydrated run records. The browser
   frontend consumes the same typed event stream and displays scheduler
-  blockers, worker liveness, sandbox command results, artifact upload state,
-  evaluator summaries, cleanup, and projection refresh metadata in the run
-  timeline. The first typed artifact/log/upload/evaluator/projection
+  blockers, worker liveness, sandbox command results and resource samples,
+  artifact upload state, evaluator summaries, cleanup, and projection refresh
+  metadata in the run timeline. The first typed artifact/log/upload/evaluator/projection
   event slices record chunk, upload-expiry, upload-status-change, evaluator
   completion/failure, and projection refresh metadata without embedding
   payloads. The remaining #157 work is Redis fanout, broader typed sandbox
@@ -442,12 +443,18 @@ serializing dashboard payloads.
   secrets, paths, or logs. Nonzero, timeout, and incomplete-result child
   failures include bounded, redacted stdout/stderr tails in run failure
   metadata. Docker terminal sandbox execution records metadata-only
-  `sandbox.container_started` and `sandbox.container_completed` events for
-  each sandbox command through short repository transactions. These events
-  carry worker id, execution task id, sandbox command index, image, resource
-  limits, sandbox status, exit code, timeout flag, changed-path count, and a
-  Docker cidfile container id when available; they exclude command text,
-  stdout/stderr, host workspace paths, provider secrets, and payload bytes.
+  `sandbox.container_started`, `sandbox.resource_sampled`, and
+  `sandbox.container_completed` events for each sandbox command through short
+  repository transactions. Started/completed events carry worker id, execution
+  task id, sandbox command index, image, resource limits, sandbox status, exit
+  code, timeout flag, changed-path count, and a Docker cidfile container id
+  when available. Resource-sample events use the same current execution-task
+  validation and carry only bounded `docker stats --no-stream` fields such as
+  CPU percent, memory used/limit/percent, network/block IO byte counts, PID
+  count, sample status, and sampled timestamp. They exclude raw stats JSON,
+  command text, stdout/stderr, host workspace paths, provider secrets, and
+  payload bytes; stats failures are recorded as `sample_status=failed` without
+  changing the sandbox command result.
   Docker terminal sandbox containers now carry platform/run/resource labels;
   scheduler recovery
   can remove labeled containers for recovered active runs after closing its DB

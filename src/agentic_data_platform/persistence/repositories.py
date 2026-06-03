@@ -1232,6 +1232,7 @@ class RunRepository:
         if event_type not in {
             RunEventType.SANDBOX_CONTAINER_STARTED,
             RunEventType.SANDBOX_CONTAINER_COMPLETED,
+            RunEventType.SANDBOX_RESOURCE_SAMPLED,
         }:
             raise ValueError("event_type must be a sandbox container lifecycle event")
         row = self._run_row_for_update(run_id)
@@ -3346,6 +3347,18 @@ def _sandbox_container_lifecycle_metadata(
         "exit_code",
         "timed_out",
         "changed_path_count",
+        "sample_status",
+        "sampled_at",
+        "sample_error_reason",
+        "cpu_percent",
+        "memory_used_bytes",
+        "memory_limit_bytes",
+        "memory_percent",
+        "network_rx_bytes",
+        "network_tx_bytes",
+        "block_read_bytes",
+        "block_write_bytes",
+        "pids",
     }
     safe = {
         key: value

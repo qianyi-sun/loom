@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added metadata-only `sandbox.resource_sampled` events for Docker terminal
+  sandbox commands. The default managed Docker runner now samples
+  `docker stats --no-stream` after the cidfile exposes the running container id,
+  records bounded CPU, memory, IO, PID, and sample-status metadata through the
+  durable run-event stream, and keeps command text, stdout/stderr, host paths,
+  raw stats payloads, and secrets out of Postgres. Failed stats collection is
+  recorded as a diagnosable resource-sample event and does not change the
+  sandbox command result.
 - Expanded the no-build frontend's typed event consumption. The browser now
   subscribes to the full current run-event taxonomy over SSE, including
   scheduler capacity blockers, artifact/log chunk events, upload transitions,

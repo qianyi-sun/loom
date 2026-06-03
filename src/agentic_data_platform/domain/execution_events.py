@@ -28,6 +28,7 @@ class RunEventType(str, Enum):
     LOG_CHUNK_RECORDED = "log.chunk_recorded"
     SANDBOX_CONTAINER_STARTED = "sandbox.container_started"
     SANDBOX_CONTAINER_COMPLETED = "sandbox.container_completed"
+    SANDBOX_RESOURCE_SAMPLED = "sandbox.resource_sampled"
     SANDBOX_CONTAINER_CLEANUP = "sandbox.container_cleanup"
     EVALUATOR_COMPLETED = "evaluator.completed"
     EVALUATOR_FAILED = "evaluator.failed"

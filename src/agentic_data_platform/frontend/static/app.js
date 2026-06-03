@@ -453,6 +453,7 @@ function runEventTypes() {
     "log.chunk_recorded",
     "sandbox.container_started",
     "sandbox.container_completed",
+    "sandbox.resource_sampled",
     "sandbox.container_cleanup",
     "projection.refreshed",
   ];
@@ -527,29 +528,53 @@ function lifecycleEventDisplay(event) {
     };
   }
   if (eventType === "sandbox.container_started") {
+    const commandIndex = metadata.command_index ?? metadata.sandbox_command_index;
+    const containerId = metadata.docker_container_id ?? metadata.container_id;
     return {
       title: "Sandbox command started",
       detail: compactText([
-        `command ${metadataValue(metadata.command_index, "n/a")}`,
+        `command ${metadataValue(commandIndex, "n/a")}`,
         metadata.timeout_seconds && `timeout ${metadataValue(metadata.timeout_seconds, "")}s`,
-        metadata.docker_container_id && `container ${metadataValue(metadata.docker_container_id, "")}`,
+        containerId && `container ${metadataValue(containerId, "")}`,
       ]),
       status,
       tone: "info",
     };
   }
   if (eventType === "sandbox.container_completed") {
+    const commandIndex = metadata.command_index ?? metadata.sandbox_command_index;
+    const containerId = metadata.docker_container_id ?? metadata.container_id;
+    const duration = metadata.duration_seconds ?? (typeof metadata.duration_ms === "number" ? metadata.duration_ms / 1000 : undefined);
     return {
       title: "Sandbox command completed",
       detail: compactText([
-        `command ${metadataValue(metadata.command_index, "n/a")} exit ${metadataValue(metadata.exit_code, "n/a")}`,
+        `command ${metadataValue(commandIndex, "n/a")} exit ${metadataValue(metadata.exit_code, "n/a")}`,
         metadata.timeout || metadata.timed_out ? "timeout" : "",
-        metadata.duration_seconds && `${metadataValue(metadata.duration_seconds, "")}s`,
-        metadata.docker_container_id && `container ${metadataValue(metadata.docker_container_id, "")}`,
+        duration && `${metadataValue(duration, "")}s`,
+        containerId && `container ${metadataValue(containerId, "")}`,
         metadata.changed_path_count !== undefined && `changed paths ${metadataValue(metadata.changed_path_count, "")}`,
       ]),
       status,
       tone: metadata.status === "failed" || metadata.timeout || metadata.timed_out ? "danger" : "info",
+    };
+  }
+  if (eventType === "sandbox.resource_sampled") {
+    const commandIndex = metadata.command_index ?? metadata.sandbox_command_index;
+    const memoryUsed = formatBytes(metadata.memory_used_bytes);
+    const memoryLimit = formatBytes(metadata.memory_limit_bytes);
+    const sampleFailed = metadata.sample_status === "failed";
+    return {
+      title: "Sandbox resource sample",
+      detail: compactText([
+        `command ${metadataValue(commandIndex, "n/a")}`,
+        metadata.cpu_percent !== undefined && `CPU ${metadataValue(metadata.cpu_percent, "n/a")}%`,
+        memoryUsed && memoryLimit && `RAM ${memoryUsed}/${memoryLimit}`,
+        metadata.memory_percent !== undefined && `RAM% ${metadataValue(metadata.memory_percent, "n/a")}%`,
+        metadata.pids !== undefined && `PIDs ${metadataValue(metadata.pids, "n/a")}`,
+        metadata.sample_error_reason && metadataValue(metadata.sample_error_reason, ""),
+      ]),
+      status,
+      tone: sampleFailed ? "warning" : "info",
     };
   }
   if (eventType === "sandbox.container_cleanup") {
@@ -799,6 +824,21 @@ function formatRatio(value) {
 
 function formatPercent(value) {
   return typeof value === "number" ? `${Math.round(value * 100)}%` : "n/a";
+}
+
+function formatBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return "";
+  }
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = value;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  const rounded = Number.isInteger(amount) ? String(amount) : String(Number(amount.toFixed(1)));
+  return `${rounded}${units[unitIndex]}`;
 }
 
 function nonEmptyString(value, fallback) {

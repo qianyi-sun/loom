@@ -33,6 +33,7 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.LOG_CHUNK_RECORDED.value, "log.chunk_recorded")
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_STARTED.value, "sandbox.container_started")
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_COMPLETED.value, "sandbox.container_completed")
+        self.assertEqual(RunEventType.SANDBOX_RESOURCE_SAMPLED.value, "sandbox.resource_sampled")
         self.assertEqual(RunEventType.SANDBOX_CONTAINER_CLEANUP.value, "sandbox.container_cleanup")
         self.assertEqual(RunEventType.EVALUATOR_COMPLETED.value, "evaluator.completed")
         self.assertEqual(RunEventType.EVALUATOR_FAILED.value, "evaluator.failed")

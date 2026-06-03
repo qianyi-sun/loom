@@ -151,6 +151,7 @@ class DashboardContractSmokeTest(unittest.TestCase):
                 "run.claimed",
                 "worker.heartbeat",
                 "sandbox.container_started",
+                "sandbox.resource_sampled",
                 "sandbox.container_completed",
                 "run.started",
                 "run.evaluating",
@@ -343,13 +344,29 @@ class FakeDockerCommandRunner:
         stdout: str = "",
         stderr: str = "",
         write_files: dict[str, str] | None = None,
+        stats_stdout: str = '{"CPUPerc":"1.00%","MemUsage":"16MiB / 512MiB","MemPerc":"3.12%","PIDs":"2"}\n',
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.write_files = write_files or {}
+        self.stats_stdout = stats_stdout
+
+    def start(self, args: list[str], *, env=None):
+        workspace = _workspace_from_docker_args(args)
+        if "--cidfile" in args:
+            cidfile = Path(args[args.index("--cidfile") + 1])
+            cidfile.parent.mkdir(parents=True, exist_ok=True)
+            cidfile.write_text("container-dashboard-contract-001\n")
+        for relative_path, content in self.write_files.items():
+            target = workspace / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return FakeDockerProcess(returncode=self.returncode, stdout=self.stdout, stderr=self.stderr)
 
     def run(self, args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        if args[:3] == ["docker", "stats", "--no-stream"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=self.stats_stdout, stderr="")
         workspace = _workspace_from_docker_args(args)
         for relative_path, content in self.write_files.items():
             target = workspace / relative_path
@@ -361,6 +378,24 @@ class FakeDockerCommandRunner:
             stdout=self.stdout,
             stderr=self.stderr,
         )
+
+
+class FakeDockerProcess:
+    def __init__(self, *, returncode: int, stdout: str, stderr: str) -> None:
+        self._returncode = returncode
+        self.returncode: int | None = None
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self.returncode = self._returncode
+        return self.stdout, self.stderr
+
+    def kill(self) -> None:
+        self.returncode = -9
 
 
 def _workspace_from_docker_args(args: list[str]) -> Path:

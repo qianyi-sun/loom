@@ -274,6 +274,20 @@ class FrontendStaticLaunchTest(unittest.TestCase):
                   changed_path_count: 3,
                 },
               }),
+              resource: lifecycleEventDisplay({
+                event_type: "sandbox.resource_sampled",
+                to_status: "running",
+                metadata: {
+                  sandbox_command_index: 2,
+                  sample_status: "completed",
+                  cpu_percent: 12.34,
+                  memory_used_bytes: 47710208,
+                  memory_limit_bytes: 536870912,
+                  memory_percent: 8.89,
+                  pids: 4,
+                  container_id: "abcdef123456",
+                },
+              }),
               upload: lifecycleEventDisplay({
                 event_type: "artifact.upload_status_changed",
                 to_status: "succeeded",
@@ -325,6 +339,7 @@ class FrontendStaticLaunchTest(unittest.TestCase):
                 "log.chunk_recorded",
                 "sandbox.container_started",
                 "sandbox.container_completed",
+                "sandbox.resource_sampled",
                 "sandbox.container_cleanup",
                 "projection.refreshed",
             ],
@@ -337,6 +352,11 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertEqual(payload["sandbox"]["title"], "Sandbox command completed")
         self.assertIn("command 2 exit 0", payload["sandbox"]["detail"])
         self.assertIn("container abcdef123456", payload["sandbox"]["detail"])
+        self.assertEqual(payload["resource"]["title"], "Sandbox resource sample")
+        self.assertIn("command 2", payload["resource"]["detail"])
+        self.assertIn("CPU 12.34%", payload["resource"]["detail"])
+        self.assertIn("RAM 45.5MiB/512MiB", payload["resource"]["detail"])
+        self.assertIn("PIDs 4", payload["resource"]["detail"])
         self.assertEqual(payload["upload"]["title"], "Artifact upload failed")
         self.assertIn("stdout chunk 0", payload["upload"]["detail"])
         self.assertIn("object store write failed", payload["upload"]["detail"])
