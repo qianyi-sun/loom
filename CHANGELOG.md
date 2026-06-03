@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #156 scheduler estimated cost/token budget hooks. Dispatch can now use
+  trusted queued-run metadata hints under
+  `metadata.scheduler.estimated_cost_usd` and
+  `metadata.scheduler.estimated_tokens` together with provider/model budget
+  env settings to block runs before worker start when projected in-flight usage
+  would exceed the configured window. Budget blockers reuse
+  `scheduler.capacity_blocked` diagnostics with metric, candidate usage, and
+  projected usage fields; this is a scheduler guardrail, not billing truth.
 - Added #157/#158/#160 Docker terminal sandbox lifecycle events. The
   worker-managed Docker terminal executor now records metadata-only
   `sandbox.container_started` and `sandbox.container_completed` events for

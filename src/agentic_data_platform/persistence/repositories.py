@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -623,6 +624,10 @@ class RunRepository:
         model_limits: dict[str, int] | None = None,
         agent_limits: dict[str, int] | None = None,
         benchmark_limits: dict[str, int] | None = None,
+        provider_cost_limits_usd: dict[str, float] | None = None,
+        model_cost_limits_usd: dict[str, float] | None = None,
+        provider_token_limits: dict[str, int] | None = None,
+        model_token_limits: dict[str, int] | None = None,
         request_id: str | None = None,
     ) -> list[RunRecord]:
         return self.dispatch_queued_runs_with_diagnostics(
@@ -634,6 +639,10 @@ class RunRepository:
             model_limits=model_limits,
             agent_limits=agent_limits,
             benchmark_limits=benchmark_limits,
+            provider_cost_limits_usd=provider_cost_limits_usd,
+            model_cost_limits_usd=model_cost_limits_usd,
+            provider_token_limits=provider_token_limits,
+            model_token_limits=model_token_limits,
             request_id=request_id,
         ).dispatched_runs
 
@@ -648,6 +657,10 @@ class RunRepository:
         model_limits: dict[str, int] | None = None,
         agent_limits: dict[str, int] | None = None,
         benchmark_limits: dict[str, int] | None = None,
+        provider_cost_limits_usd: dict[str, float] | None = None,
+        model_cost_limits_usd: dict[str, float] | None = None,
+        provider_token_limits: dict[str, int] | None = None,
+        model_token_limits: dict[str, int] | None = None,
         request_id: str | None = None,
     ) -> DispatchQueuedRunsResult:
         _require_non_empty("scheduler_id", scheduler_id)
@@ -664,6 +677,10 @@ class RunRepository:
                 model_limits=model_limits,
                 agent_limits=agent_limits,
                 benchmark_limits=benchmark_limits,
+                provider_cost_limits_usd=provider_cost_limits_usd,
+                model_cost_limits_usd=model_cost_limits_usd,
+                provider_token_limits=provider_token_limits,
+                model_token_limits=model_token_limits,
                 request_id=request_id,
             )
         finally:
@@ -681,6 +698,10 @@ class RunRepository:
         model_limits: dict[str, int] | None = None,
         agent_limits: dict[str, int] | None = None,
         benchmark_limits: dict[str, int] | None = None,
+        provider_cost_limits_usd: dict[str, float] | None = None,
+        model_cost_limits_usd: dict[str, float] | None = None,
+        provider_token_limits: dict[str, int] | None = None,
+        model_token_limits: dict[str, int] | None = None,
         request_id: str | None = None,
     ) -> DispatchQueuedRunsResult:
         _require_non_empty("scheduler_id", scheduler_id)
@@ -691,6 +712,10 @@ class RunRepository:
         model_limits = _positive_limits(model_limits or {})
         agent_limits = _positive_limits(agent_limits or {})
         benchmark_limits = _positive_limits(benchmark_limits or {})
+        provider_cost_limits_usd = _positive_float_limits(provider_cost_limits_usd or {})
+        model_cost_limits_usd = _positive_float_limits(model_cost_limits_usd or {})
+        provider_token_limits = _positive_limits(provider_token_limits or {})
+        model_token_limits = _positive_limits(model_token_limits or {})
         active_statuses = {
             RunStatus.DISPATCHED.value,
             RunStatus.PROVISIONING.value,
@@ -707,13 +732,27 @@ class RunRepository:
         active_by_model: dict[str, int] = {}
         active_by_agent: dict[str, int] = {}
         active_by_benchmark: dict[str, int] = {}
+        active_cost_by_provider: dict[str, float] = {}
+        active_cost_by_model: dict[str, float] = {}
+        active_tokens_by_provider: dict[str, int] = {}
+        active_tokens_by_model: dict[str, int] = {}
         for row in active_rows:
+            provider_key = _provider_capacity_key(row)
+            model_key = _model_capacity_key(row)
             _increment(active_by_backend, _backend_capacity_key(row))
             _increment(active_by_project, row.project_id)
-            _increment(active_by_provider, _provider_capacity_key(row))
-            _increment(active_by_model, _model_capacity_key(row))
+            _increment(active_by_provider, provider_key)
+            _increment(active_by_model, model_key)
             _increment(active_by_agent, _agent_capacity_key(row))
             _increment(active_by_benchmark, _benchmark_capacity_key(row))
+            estimated_cost_usd = _scheduler_estimated_cost_usd(row)
+            estimated_tokens = _scheduler_estimated_tokens(row)
+            if estimated_cost_usd > 0:
+                _increment_float(active_cost_by_provider, provider_key, estimated_cost_usd)
+                _increment_float(active_cost_by_model, model_key, estimated_cost_usd)
+            if estimated_tokens > 0:
+                _increment(active_tokens_by_provider, provider_key, estimated_tokens)
+                _increment(active_tokens_by_model, model_key, estimated_tokens)
 
         ranked_candidate_ids = list(
             self.session.scalars(_ranked_queued_run_id_query(limit=max(max_runs * 5, 25)))
@@ -737,6 +776,8 @@ class RunRepository:
             model_key = _model_capacity_key(row)
             agent_key = _agent_capacity_key(row)
             benchmark_key = _benchmark_capacity_key(row)
+            estimated_cost_usd = _scheduler_estimated_cost_usd(row)
+            estimated_tokens = _scheduler_estimated_tokens(row)
             if len(dispatched_ids) >= remaining_global_capacity:
                 capacity_blocked.append(
                     self._record_scheduler_capacity_block(
@@ -756,6 +797,7 @@ class RunRepository:
                     )
                 )
                 continue
+
             blocked_dimension = _first_capacity_blocker(
                 (
                     ("backend", backend_key, active_by_backend, backend_limits, "backend capacity reached"),
@@ -789,6 +831,70 @@ class RunRepository:
                         model_key=model_key,
                         agent_key=agent_key,
                         benchmark_key=benchmark_key,
+                    )
+                )
+                continue
+
+            blocked_budget = _first_budget_blocker(
+                (
+                    (
+                        "provider_cost_usd",
+                        provider_key,
+                        active_cost_by_provider,
+                        provider_cost_limits_usd,
+                        estimated_cost_usd,
+                        "estimated_cost_usd",
+                        "provider estimated cost budget reached",
+                    ),
+                    (
+                        "model_cost_usd",
+                        model_key,
+                        active_cost_by_model,
+                        model_cost_limits_usd,
+                        estimated_cost_usd,
+                        "estimated_cost_usd",
+                        "model estimated cost budget reached",
+                    ),
+                    (
+                        "provider_tokens",
+                        provider_key,
+                        active_tokens_by_provider,
+                        provider_token_limits,
+                        estimated_tokens,
+                        "estimated_tokens",
+                        "provider estimated token budget reached",
+                    ),
+                    (
+                        "model_tokens",
+                        model_key,
+                        active_tokens_by_model,
+                        model_token_limits,
+                        estimated_tokens,
+                        "estimated_tokens",
+                        "model estimated token budget reached",
+                    ),
+                )
+            )
+            if blocked_budget is not None:
+                dimension, key, active_usage, limit, reason, metric, candidate_usage, projected_usage = blocked_budget
+                capacity_blocked.append(
+                    self._record_scheduler_capacity_block(
+                        row=row,
+                        scheduler_id=scheduler_id,
+                        dimension=dimension,
+                        key=key,
+                        active_count=active_usage,
+                        limit=limit,
+                        reason=reason,
+                        request_id=request_id,
+                        backend_key=backend_key,
+                        provider_key=provider_key,
+                        model_key=model_key,
+                        agent_key=agent_key,
+                        benchmark_key=benchmark_key,
+                        metric=metric,
+                        candidate_usage=candidate_usage,
+                        projected_usage=projected_usage,
                     )
                 )
                 continue
@@ -841,6 +947,12 @@ class RunRepository:
             _increment(active_by_model, model_key)
             _increment(active_by_agent, agent_key)
             _increment(active_by_benchmark, benchmark_key)
+            if estimated_cost_usd > 0:
+                _increment_float(active_cost_by_provider, provider_key, estimated_cost_usd)
+                _increment_float(active_cost_by_model, model_key, estimated_cost_usd)
+            if estimated_tokens > 0:
+                _increment(active_tokens_by_provider, provider_key, estimated_tokens)
+                _increment(active_tokens_by_model, model_key, estimated_tokens)
             dispatched_ids.append(run.run_id)
 
         self.session.flush()
@@ -886,8 +998,8 @@ class RunRepository:
         scheduler_id: str,
         dimension: str,
         key: str,
-        active_count: int,
-        limit: int,
+        active_count: int | float,
+        limit: int | float,
         reason: str,
         request_id: str | None,
         backend_key: str,
@@ -895,6 +1007,9 @@ class RunRepository:
         model_key: str,
         agent_key: str,
         benchmark_key: str,
+        metric: str = "active_runs",
+        candidate_usage: int | float | None = None,
+        projected_usage: int | float | None = None,
     ) -> SchedulerCapacityBlock:
         attempt = self._latest_attempt_row(row.run_id)
         observed_at = utc_now()
@@ -914,6 +1029,9 @@ class RunRepository:
             model_key=model_key,
             agent_key=agent_key,
             benchmark_key=benchmark_key,
+            metric=metric,
+            candidate_usage=candidate_usage,
+            projected_usage=projected_usage,
         )
         previous_signature = _capacity_block_signature_from_attempt(attempt)
         attempt.metadata_json = scheduler_capacity_blocked_metadata(attempt.metadata_json, block=block)
@@ -2770,6 +2888,14 @@ def _positive_limits(limits: dict[str, int]) -> dict[str, int]:
     return cleaned
 
 
+def _positive_float_limits(limits: dict[str, float]) -> dict[str, float]:
+    cleaned: dict[str, float] = {}
+    for key, value in limits.items():
+        if value > 0:
+            cleaned[key] = value
+    return cleaned
+
+
 def _scheduler_capacity_block_from_attempt(
     row: RunRow,
     attempt: RunAttemptRow,
@@ -2789,8 +2915,8 @@ def _scheduler_capacity_block_from_attempt(
             execution_task_id=str(blocked["execution_task_id"]),
             dimension=str(blocked["dimension"]),
             key=str(blocked["key"]),
-            active_count=int(blocked["active_count"]),
-            limit=int(blocked["limit"]),
+            active_count=_numeric_capacity_value(blocked["active_count"]),
+            limit=_numeric_capacity_value(blocked["limit"]),
             reason=str(blocked["reason"]),
             observed_at=observed_at,
             backend_key=str(blocked["backend_key"]),
@@ -2798,6 +2924,9 @@ def _scheduler_capacity_block_from_attempt(
             model_key=str(blocked["model_key"]),
             agent_key=str(blocked["agent_key"]),
             benchmark_key=str(blocked["benchmark_key"]),
+            metric=str(blocked.get("metric") or "active_runs"),
+            candidate_usage=_optional_numeric_capacity_value(blocked.get("candidate_usage")),
+            projected_usage=_optional_numeric_capacity_value(blocked.get("projected_usage")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -2817,9 +2946,12 @@ def _capacity_block_signature(blocked: dict[str, Any]) -> tuple[object, ...]:
     return (
         blocked.get("dimension"),
         blocked.get("key"),
+        blocked.get("metric") or "active_runs",
         blocked.get("active_count"),
         blocked.get("limit"),
         blocked.get("reason"),
+        blocked.get("candidate_usage"),
+        blocked.get("projected_usage"),
         blocked.get("backend_key"),
         blocked.get("provider_key"),
         blocked.get("model_key"),
@@ -2828,8 +2960,12 @@ def _capacity_block_signature(blocked: dict[str, Any]) -> tuple[object, ...]:
     )
 
 
-def _increment(counts: dict[str, int], key: str) -> None:
-    counts[key] = counts.get(key, 0) + 1
+def _increment(counts: dict[str, int], key: str, amount: int = 1) -> None:
+    counts[key] = counts.get(key, 0) + amount
+
+
+def _increment_float(counts: dict[str, float], key: str, amount: float) -> None:
+    counts[key] = counts.get(key, 0.0) + amount
 
 
 def _at_capacity(counts: dict[str, int], key: str, limits: dict[str, int]) -> bool:
@@ -2845,6 +2981,31 @@ def _first_capacity_blocker(
         active_count = counts.get(key, 0)
         if limit is not None and active_count >= limit:
             return dimension, key, active_count, limit, reason
+    return None
+
+
+def _first_budget_blocker(
+    checks: tuple[
+        tuple[
+            str,
+            str,
+            dict[str, int] | dict[str, float],
+            dict[str, int] | dict[str, float],
+            int | float,
+            str,
+            str,
+        ],
+        ...,
+    ],
+) -> tuple[str, str, int | float, int | float, str, str, int | float, int | float] | None:
+    for dimension, key, active_usage_by_key, limits, candidate_usage, metric, reason in checks:
+        limit = limits.get(key)
+        if limit is None or candidate_usage <= 0:
+            continue
+        active_usage = active_usage_by_key.get(key, 0)
+        projected_usage = active_usage + candidate_usage
+        if projected_usage > limit:
+            return dimension, key, active_usage, limit, reason, metric, candidate_usage, projected_usage
     return None
 
 
@@ -2892,6 +3053,56 @@ def _benchmark_capacity_key(row: RunRow) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return f"{row.benchmark_suite}@{row.benchmark_version}"
+
+
+def _scheduler_estimated_cost_usd(row: RunRow) -> float:
+    return max(_float_metadata_value(_scheduler_budget_metadata(row).get("estimated_cost_usd")), 0.0)
+
+
+def _scheduler_estimated_tokens(row: RunRow) -> int:
+    return max(int(_float_metadata_value(_scheduler_budget_metadata(row).get("estimated_tokens"))), 0)
+
+
+def _scheduler_budget_metadata(row: RunRow) -> dict[str, Any]:
+    run_metadata = dict(row.metadata_json or {})
+    scheduler_metadata = run_metadata.get("scheduler")
+    if isinstance(scheduler_metadata, dict):
+        return scheduler_metadata
+    return {}
+
+
+def _float_metadata_value(value: Any) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if isfinite(number) else 0.0
+    if isinstance(value, str) and value.strip():
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return 0.0
+        return number if isfinite(number) else 0.0
+    return 0.0
+
+
+def _numeric_capacity_value(value: Any) -> int | float:
+    if isinstance(value, bool):
+        raise ValueError("capacity value must be numeric")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    if isinstance(value, str) and value.strip():
+        number = float(value.strip())
+        return int(number) if number.is_integer() else number
+    raise ValueError("capacity value must be numeric")
+
+
+def _optional_numeric_capacity_value(value: Any) -> int | float | None:
+    if value is None:
+        return None
+    return _numeric_capacity_value(value)
 
 
 def _team_record(row: TeamRow) -> TeamRecord:

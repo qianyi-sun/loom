@@ -379,11 +379,19 @@ serializing dashboard payloads.
   transaction-scoped advisory lock so concurrent scheduler instances cannot make
   capacity decisions from stale active counts and over-dispatch different
   locked rows.
+  Scheduler dispatch can also apply provider/model estimated cost and token
+  budget hooks using trusted run metadata hints under
+  `metadata.scheduler.estimated_cost_usd` and
+  `metadata.scheduler.estimated_tokens`. These hooks are dispatch guardrails for
+  API spend/rate protection, not a billing ledger.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.
-  `/ops/metrics` reports visible blocked counts by dimension and a bounded run
-  list so operators can distinguish real queue depth from capacity saturation.
+  Cost/token budget blockers use dimensions such as `provider_cost_usd` or
+  `model_tokens` and include the metric, candidate usage, projected usage, and
+  configured limit in the same operator-visible payload. `/ops/metrics` reports
+  visible blocked counts by dimension and a bounded run list so operators can
+  distinguish real queue depth from capacity saturation.
   Workers then prefer `RunRepository.claim_next_dispatched_run(...)` before the
   legacy queued-claim compatibility path. Redis remains available in the dev
   stack for a later queue/cache backend, but it is not the current source of

@@ -145,6 +145,67 @@ class SchedulerServiceTest(unittest.TestCase):
         self.assertEqual(statuses["run_scheduler_expanded_capacity_a"], RunStatus.DISPATCHED)
         self.assertEqual(statuses["run_scheduler_expanded_capacity_b"], RunStatus.QUEUED)
 
+    def test_scheduler_dispatches_from_service_settings_budget_hooks(self):
+        with session_scope(self.engine) as session:
+            runs = RunRepository(session)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_scheduler_budget_a",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_cost_usd=0.40,
+                    estimated_tokens=20_000,
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_scheduler_budget_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="skillflow@2026-06-01",
+                    estimated_cost_usd=0.40,
+                    estimated_tokens=20_000,
+                )
+            )
+
+        scheduler = RunScheduler(
+            engine=self.engine,
+            scheduler_id="scheduler-test",
+            settings=ServiceSettings(
+                app_name="agentic-data-platform-test",
+                environment="test",
+                database_url="",
+                redis_url="",
+                object_storage_endpoint="",
+                object_storage_bucket="",
+                object_storage_access_key="",
+                object_storage_secret_key="",
+                object_storage_region="us-east-1",
+                scheduler_global_max_active_runs=2,
+                scheduler_provider_max_estimated_cost_usd={"openai": 0.50},
+            ),
+        )
+
+        result = scheduler.dispatch_once(request_id="req-scheduler-budget-001")
+
+        with session_scope(self.engine) as session:
+            statuses = {
+                run.run_id: run.status
+                for run in RunRepository(session).list_runs(project_id="pilot-project")
+                if run.run_id.startswith("run_scheduler_budget_")
+            }
+
+        self.assertEqual(result.dispatched_run_ids, ["run_scheduler_budget_a"])
+        self.assertEqual(result.capacity_blocked_count, 1)
+        self.assertEqual(result.capacity_blocked_runs[0]["dimension"], "provider_cost_usd")
+        self.assertEqual(result.capacity_blocked_runs[0]["metric"], "estimated_cost_usd")
+        self.assertAlmostEqual(result.capacity_blocked_runs[0]["projected_usage"], 0.80)
+        self.assertEqual(statuses["run_scheduler_budget_a"], RunStatus.DISPATCHED)
+        self.assertEqual(statuses["run_scheduler_budget_b"], RunStatus.QUEUED)
+
     def test_scheduler_recovers_stale_dispatched_runs_from_service_settings(self):
         now = datetime.now(timezone.utc)
         stale_timestamp = now - timedelta(minutes=10)

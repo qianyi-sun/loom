@@ -130,6 +130,38 @@ class ExecutionMetadataContractTest(unittest.TestCase):
         self.assertEqual(blocked["observed_at"], "2026-06-01T12:00:00Z")
         self.assertEqual(blocked["provider_key"], "openai")
 
+    def test_scheduler_capacity_block_can_describe_estimated_cost_budget(self):
+        blocked_at = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        block = SchedulerCapacityBlock(
+            run_id="run_001",
+            project_id="pilot-project",
+            scheduler_id="scheduler-a",
+            execution_task_id="run_001:attempt:1",
+            dimension="provider_cost_usd",
+            key="openai",
+            active_count=0.4,
+            limit=0.5,
+            reason="provider estimated cost budget reached",
+            observed_at=blocked_at,
+            backend_key="harbor-local-docker",
+            provider_key="openai",
+            model_key="gpt-5",
+            agent_key="codex",
+            benchmark_key="terminal-bench@2.0",
+            metric="estimated_cost_usd",
+            candidate_usage=0.4,
+            projected_usage=0.8,
+        )
+
+        payload = block.to_dict()
+
+        self.assertEqual(payload["dimension"], "provider_cost_usd")
+        self.assertEqual(payload["metric"], "estimated_cost_usd")
+        self.assertAlmostEqual(payload["active_count"], 0.4)
+        self.assertAlmostEqual(payload["limit"], 0.5)
+        self.assertAlmostEqual(payload["candidate_usage"], 0.4)
+        self.assertAlmostEqual(payload["projected_usage"], 0.8)
+
     def test_execution_metadata_rejects_missing_identifiers(self):
         with self.assertRaisesRegex(ValueError, "scheduler_id must be a non-empty string"):
             scheduler_lease_metadata(

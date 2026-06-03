@@ -42,6 +42,10 @@ class ServiceSettings:
     scheduler_model_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_agent_max_active_runs: dict[str, int] = field(default_factory=dict)
     scheduler_benchmark_max_active_runs: dict[str, int] = field(default_factory=dict)
+    scheduler_provider_max_estimated_cost_usd: dict[str, float] = field(default_factory=dict)
+    scheduler_model_max_estimated_cost_usd: dict[str, float] = field(default_factory=dict)
+    scheduler_provider_max_estimated_tokens: dict[str, int] = field(default_factory=dict)
+    scheduler_model_max_estimated_tokens: dict[str, int] = field(default_factory=dict)
     scheduler_stale_dispatched_timeout_seconds: int = 300
     scheduler_stale_active_heartbeat_timeout_seconds: int = 900
     scheduler_stale_artifact_upload_timeout_seconds: int = 1800
@@ -92,6 +96,16 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         scheduler_model_max_active_runs=_get_int_map(values, "SCHEDULER_MODEL_MAX_ACTIVE_RUNS"),
         scheduler_agent_max_active_runs=_get_int_map(values, "SCHEDULER_AGENT_MAX_ACTIVE_RUNS"),
         scheduler_benchmark_max_active_runs=_get_int_map(values, "SCHEDULER_BENCHMARK_MAX_ACTIVE_RUNS"),
+        scheduler_provider_max_estimated_cost_usd=_get_float_map(
+            values,
+            "SCHEDULER_PROVIDER_MAX_ESTIMATED_COST_USD",
+        ),
+        scheduler_model_max_estimated_cost_usd=_get_float_map(
+            values,
+            "SCHEDULER_MODEL_MAX_ESTIMATED_COST_USD",
+        ),
+        scheduler_provider_max_estimated_tokens=_get_int_map(values, "SCHEDULER_PROVIDER_MAX_ESTIMATED_TOKENS"),
+        scheduler_model_max_estimated_tokens=_get_int_map(values, "SCHEDULER_MODEL_MAX_ESTIMATED_TOKENS"),
         scheduler_stale_dispatched_timeout_seconds=_get_int(
             values,
             "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS",
@@ -155,4 +169,23 @@ def _get_int_map(values: Mapping[str, str], key: str) -> dict[str, int]:
         if not name:
             raise ValueError(f"{key} entries must include a non-empty name")
         parsed[name] = int(value.strip())
+    return parsed
+
+
+def _get_float_map(values: Mapping[str, str], key: str) -> dict[str, float]:
+    raw_value = _get(values, key, "")
+    if not raw_value:
+        return {}
+
+    parsed: dict[str, float] = {}
+    for item in raw_value.split(","):
+        if not item.strip():
+            continue
+        name, separator, value = item.partition("=")
+        if not separator:
+            raise ValueError(f"{key} entries must use name=value syntax")
+        name = name.strip()
+        if not name:
+            raise ValueError(f"{key} entries must include a non-empty name")
+        parsed[name] = float(value.strip())
     return parsed

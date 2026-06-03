@@ -51,6 +51,10 @@ class ServiceAppTest(unittest.TestCase):
                 "SCHEDULER_MODEL_MAX_ACTIVE_RUNS": "gpt-5=2,claude-sonnet-4=1",
                 "SCHEDULER_AGENT_MAX_ACTIVE_RUNS": "codex=2,aider=1",
                 "SCHEDULER_BENCHMARK_MAX_ACTIVE_RUNS": "terminal-bench@2.0=2,skillflow@2026-06-01=1",
+                "SCHEDULER_PROVIDER_MAX_ESTIMATED_COST_USD": "openai=0.50,anthropic=1.25",
+                "SCHEDULER_MODEL_MAX_ESTIMATED_COST_USD": "gpt-5=0.35,claude-sonnet-4=0.80",
+                "SCHEDULER_PROVIDER_MAX_ESTIMATED_TOKENS": "openai=250000,anthropic=100000",
+                "SCHEDULER_MODEL_MAX_ESTIMATED_TOKENS": "gpt-5=100000,claude-sonnet-4=50000",
                 "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS": "420",
                 "SCHEDULER_STALE_ACTIVE_HEARTBEAT_TIMEOUT_SECONDS": "900",
                 "SCHEDULER_STALE_ARTIFACT_UPLOAD_TIMEOUT_SECONDS": "1800",
@@ -104,6 +108,10 @@ class ServiceAppTest(unittest.TestCase):
             settings.scheduler_benchmark_max_active_runs,
             {"terminal-bench@2.0": 2, "skillflow@2026-06-01": 1},
         )
+        self.assertEqual(settings.scheduler_provider_max_estimated_cost_usd, {"openai": 0.5, "anthropic": 1.25})
+        self.assertEqual(settings.scheduler_model_max_estimated_cost_usd, {"gpt-5": 0.35, "claude-sonnet-4": 0.8})
+        self.assertEqual(settings.scheduler_provider_max_estimated_tokens, {"openai": 250000, "anthropic": 100000})
+        self.assertEqual(settings.scheduler_model_max_estimated_tokens, {"gpt-5": 100000, "claude-sonnet-4": 50000})
         self.assertEqual(settings.scheduler_stale_dispatched_timeout_seconds, 420)
         self.assertEqual(settings.scheduler_stale_active_heartbeat_timeout_seconds, 900)
         self.assertEqual(settings.scheduler_stale_artifact_upload_timeout_seconds, 1800)

@@ -68,6 +68,7 @@ _METRICS_EXAMPLE = {
             "execution_task_id": "run_123:attempt:1",
             "dimension": "provider",
             "key": "openai",
+            "metric": "active_runs",
             "active_count": 2,
             "limit": 2,
             "reason": "provider capacity reached",

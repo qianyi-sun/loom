@@ -177,6 +177,10 @@ class RunScheduler:
                 model_limits=self.settings.scheduler_model_max_active_runs,
                 agent_limits=self.settings.scheduler_agent_max_active_runs,
                 benchmark_limits=self.settings.scheduler_benchmark_max_active_runs,
+                provider_cost_limits_usd=self.settings.scheduler_provider_max_estimated_cost_usd,
+                model_cost_limits_usd=self.settings.scheduler_model_max_estimated_cost_usd,
+                provider_token_limits=self.settings.scheduler_provider_max_estimated_tokens,
+                model_token_limits=self.settings.scheduler_model_max_estimated_tokens,
                 request_id=request_id,
             )
         return SchedulerDispatchResult(

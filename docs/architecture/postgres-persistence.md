@@ -108,6 +108,16 @@ Blocked rows stay `queued`, store the current blocker under
 `run_attempts.metadata.execution.scheduler.capacity_blocked`, and emit
 `scheduler.capacity_blocked` only when the blocker signature changes, avoiding
 event spam from repeated scheduler loops.
+In addition to active-run count gates, dispatch can enforce provider/model
+estimated cost and token budget hooks. The repository reads trusted queued-run
+hints from `runs.metadata.scheduler.estimated_cost_usd` and
+`runs.metadata.scheduler.estimated_tokens`, sums in-flight dispatched/active
+usage by provider and model, and blocks a candidate when projected usage would
+exceed configured budget windows. These blockers reuse
+`capacity_blocked` with dimensions such as `provider_cost_usd` or
+`model_tokens`, metric names such as `estimated_cost_usd` or
+`estimated_tokens`, and `candidate_usage` / `projected_usage` fields for
+operator diagnostics. They are scheduler guardrails, not billing truth.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.
@@ -140,8 +150,9 @@ block records scheduler id, lease status, backend key, project id, dispatch
 time, `execution_task_id`, and any provider/model/agent/benchmark capacity keys
 used during dispatch. When a queued row is blocked by capacity, the same
 `execution.scheduler` block stores a `capacity_blocked` object with dimension,
-key, active count, limit, reason, scheduler id, observed time, and capacity
-keys. The `execution.runner` block records worker id, runner
+key, active count or active estimated usage, limit, reason, scheduler id,
+observed time, metric, optional candidate/projected usage, and capacity keys.
+The `execution.runner` block records worker id, runner
 process status, heartbeat status, claim time, latest heartbeat, and completion
 time when available. The older `worker` metadata block is still
 written for compatibility with current recovery code and historic rows.

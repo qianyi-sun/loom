@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+CapacityUsage = int | float
+
 
 EXECUTION_ATTEMPT_METADATA_SCHEMA_VERSION = "execution-attempt-metadata-v1"
 
@@ -34,8 +36,8 @@ class SchedulerCapacityBlock:
     execution_task_id: str
     dimension: str
     key: str
-    active_count: int
-    limit: int
+    active_count: CapacityUsage
+    limit: CapacityUsage
     reason: str
     observed_at: datetime
     backend_key: str
@@ -43,6 +45,9 @@ class SchedulerCapacityBlock:
     model_key: str
     agent_key: str
     benchmark_key: str
+    metric: str = "active_runs"
+    candidate_usage: CapacityUsage | None = None
+    projected_usage: CapacityUsage | None = None
 
     def __post_init__(self) -> None:
         for name, value in {
@@ -58,22 +63,28 @@ class SchedulerCapacityBlock:
             "model_key": self.model_key,
             "agent_key": self.agent_key,
             "benchmark_key": self.benchmark_key,
+            "metric": self.metric,
         }.items():
             _require_non_empty(name, value)
         if self.active_count < 0:
             raise ValueError("active_count must be non-negative")
         if self.limit <= 0:
             raise ValueError("limit must be positive")
+        if self.candidate_usage is not None and self.candidate_usage < 0:
+            raise ValueError("candidate_usage must be non-negative")
+        if self.projected_usage is not None and self.projected_usage < 0:
+            raise ValueError("projected_usage must be non-negative")
         _require_timezone("observed_at", self.observed_at)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "run_id": self.run_id,
             "project_id": self.project_id,
             "scheduler_id": self.scheduler_id,
             "execution_task_id": self.execution_task_id,
             "dimension": self.dimension,
             "key": self.key,
+            "metric": self.metric,
             "active_count": self.active_count,
             "limit": self.limit,
             "reason": self.reason,
@@ -84,6 +95,11 @@ class SchedulerCapacityBlock:
             "agent_key": self.agent_key,
             "benchmark_key": self.benchmark_key,
         }
+        if self.candidate_usage is not None:
+            payload["candidate_usage"] = self.candidate_usage
+        if self.projected_usage is not None:
+            payload["projected_usage"] = self.projected_usage
+        return payload
 
 
 def scheduler_lease_status_value(status: SchedulerLeaseStatus | str) -> str:
