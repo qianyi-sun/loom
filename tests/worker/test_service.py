@@ -94,6 +94,7 @@ class WorkerServiceTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
                 "evaluator.completed",
@@ -103,6 +104,16 @@ class WorkerServiceTest(unittest.TestCase):
             ],
         )
         self.assertEqual(payload["lifecycle_events"][1]["metadata"]["worker_id"], "worker-test")
+        heartbeat_event = next(
+            event for event in payload["lifecycle_events"] if event["event_type"] == "worker.heartbeat"
+        )
+        self.assertEqual(heartbeat_event["from_status"], "provisioning")
+        self.assertEqual(heartbeat_event["to_status"], "provisioning")
+        self.assertEqual(heartbeat_event["metadata"]["worker_id"], "worker-test")
+        self.assertEqual(heartbeat_event["metadata"]["execution_task_id"], "run_worker_001:attempt:1")
+        self.assertEqual(heartbeat_event["metadata"]["process_status"], "heartbeating")
+        self.assertEqual(heartbeat_event["metadata"]["heartbeat_status"], "running")
+        self.assertIn("last_heartbeat_at", heartbeat_event["metadata"])
         evaluator_event = next(
             event for event in payload["lifecycle_events"] if event["event_type"] == "evaluator.completed"
         )
@@ -154,6 +165,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.created",
                 "run.dispatched",
                 "run.claimed",
+                "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
                 "evaluator.completed",
@@ -211,6 +223,7 @@ class WorkerServiceTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
                 "evaluator.failed",
@@ -785,6 +798,7 @@ class WorkerServiceTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "sandbox.container_started",
                 "sandbox.container_completed",
                 "run.started",
@@ -856,6 +870,7 @@ class WorkerServiceTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
                 "evaluator.completed",
@@ -1312,7 +1327,7 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertEqual(payload["run"]["progress"]["artifact_count"], 1)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.failed"],
+            ["run.created", "run.claimed", "worker.heartbeat", "run.started", "run.failed"],
         )
 
     def test_worker_preserves_harbor_diagnostics_when_verifier_ingestion_fails(self):
@@ -1436,6 +1451,7 @@ class WorkerServiceTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "run.started",
                 "run.evaluating",
                 "evaluator.completed",
@@ -1493,6 +1509,7 @@ class WorkerServiceTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "run.started",
                 "run.failed",
                 "log.chunk_recorded",

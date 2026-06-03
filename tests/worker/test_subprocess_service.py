@@ -404,6 +404,7 @@ class SubprocessRunWorkerTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "worker.subprocess_started",
                 "run.canceled",
                 "run.retried",

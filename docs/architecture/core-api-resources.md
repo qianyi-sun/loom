@@ -260,12 +260,17 @@ serializing dashboard payloads.
   `run.dispatched`, `run.claimed`, `run.started`, `run.evaluating`,
   `run.succeeded`, `run.failed`, `run.canceled`, `run.retried`,
   `run.recovered`, `run.worker_failed`, `run.worker_subprocess_failed`,
-  `worker.subprocess_started`, `worker.subprocess_completed`,
+  `worker.heartbeat`, `worker.subprocess_started`,
+  `worker.subprocess_completed`,
   `scheduler.capacity_blocked`, `artifact.chunk_recorded`,
   `artifact.upload_expired`, `artifact.upload_status_changed`,
   `log.chunk_recorded`, `evaluator.completed`, `evaluator.failed`,
   `projection.refreshed`, `sandbox.container_started`,
   `sandbox.container_completed`, and `sandbox.container_cleanup`.
+  Worker heartbeat events carry safe liveness metadata only: worker id,
+  execution task id, process status, heartbeat status, and heartbeat timestamp.
+  They do not embed command text, local paths, stdout/stderr, artifact payloads,
+  or provider/evaluator secrets.
   Evaluator events carry summary-only metadata such as evaluator id, mode,
   status, score, safe artifact refs, worker id, and execution task id; they do
   not embed full metrics, verbal feedback, judge prompts, or local file paths.

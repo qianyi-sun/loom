@@ -251,6 +251,7 @@ class FrontendStaticLaunchTest(unittest.TestCase):
         self.assertEqual(payload["emptyWatermark"], 0)
         self.assertEqual(payload["streamUrl"], "/runs/run%2Flive%20001/stream?after_seq=5")
         self.assertIn("run.worker_subprocess_failed", payload["eventTypes"])
+        self.assertIn("worker.heartbeat", payload["eventTypes"])
         self.assertIn("worker.subprocess_started", payload["eventTypes"])
         self.assertIn("worker.subprocess_completed", payload["eventTypes"])
         self.assertIn("sandbox.container_started", payload["eventTypes"])

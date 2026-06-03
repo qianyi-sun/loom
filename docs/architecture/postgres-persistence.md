@@ -157,7 +157,9 @@ process status, heartbeat status, claim time, latest heartbeat, and completion
 time when available. The older `worker` metadata block is still
 written for compatibility with current recovery code and historic rows.
 `RunRepository.record_worker_heartbeat(...)` updates this metadata while
-execution is active, and
+execution is active and appends a same-status `worker.heartbeat` event with
+bounded liveness metadata so replay/SSE/bundle consumers can see worker
+progress before any stale-heartbeat recovery runs.
 `RunRepository.fail_stale_active_runs_by_heartbeat(...)` marks active runs with
 expired heartbeats as failed with a `run.recovered` event. Active recovery skips
 runs without heartbeat metadata so legacy or partially migrated rows are not

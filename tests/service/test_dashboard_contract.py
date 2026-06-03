@@ -149,6 +149,7 @@ class DashboardContractSmokeTest(unittest.TestCase):
             [
                 "run.created",
                 "run.claimed",
+                "worker.heartbeat",
                 "sandbox.container_started",
                 "sandbox.container_completed",
                 "run.started",

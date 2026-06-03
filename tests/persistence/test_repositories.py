@@ -1577,9 +1577,11 @@ class PersistenceRepositoryTest(unittest.TestCase):
                 "run_heartbeat_active",
                 worker_id="worker-a",
                 status=RunStatus.RUNNING,
+                execution_task_id="run_heartbeat_active:attempt:1",
                 request_id="req-heartbeat-001",
             )
             attempt = session.scalar(select(RunAttemptRow).where(RunAttemptRow.run_id == "run_heartbeat_active"))
+            events = runs.list_status_events("run_heartbeat_active")
 
         self.assertEqual(updated.status, RunStatus.PROVISIONING)
         runner = attempt.metadata_json["execution"]["runner"]
@@ -1590,6 +1592,17 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(attempt.metadata_json["worker"]["worker_id"], "worker-a")
         self.assertEqual(attempt.metadata_json["worker"]["heartbeat_status"], "running")
         self.assertIn("last_heartbeat_at", attempt.metadata_json["worker"])
+        self.assertEqual([event.event_type for event in events], ["run.created", "run.claimed", "worker.heartbeat"])
+        heartbeat_event = events[-1]
+        self.assertEqual(heartbeat_event.from_status, RunStatus.PROVISIONING)
+        self.assertEqual(heartbeat_event.to_status, RunStatus.PROVISIONING)
+        self.assertEqual(heartbeat_event.request_id, "req-heartbeat-001")
+        self.assertEqual(heartbeat_event.attempt_id, "run_heartbeat_active:attempt:1")
+        self.assertEqual(heartbeat_event.metadata["worker_id"], "worker-a")
+        self.assertEqual(heartbeat_event.metadata["execution_task_id"], "run_heartbeat_active:attempt:1")
+        self.assertEqual(heartbeat_event.metadata["heartbeat_status"], "running")
+        self.assertEqual(heartbeat_event.metadata["process_status"], RunnerProcessStatus.HEARTBEATING.value)
+        self.assertIn("last_heartbeat_at", heartbeat_event.metadata)
 
     def test_run_repository_records_terminal_runner_process_metadata(self):
         run = _queued_run(run_id="run_worker_terminal_metadata")

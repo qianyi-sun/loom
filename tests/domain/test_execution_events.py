@@ -23,6 +23,7 @@ class ExecutionEventContractTest(unittest.TestCase):
         self.assertEqual(RunEventType.RECOVERED.value, "run.recovered")
         self.assertEqual(RunEventType.WORKER_FAILED.value, "run.worker_failed")
         self.assertEqual(RunEventType.WORKER_SUBPROCESS_FAILED.value, "run.worker_subprocess_failed")
+        self.assertEqual(RunEventType.WORKER_HEARTBEAT.value, "worker.heartbeat")
         self.assertEqual(RunEventType.WORKER_SUBPROCESS_STARTED.value, "worker.subprocess_started")
         self.assertEqual(RunEventType.WORKER_SUBPROCESS_COMPLETED.value, "worker.subprocess_completed")
         self.assertEqual(RunEventType.SCHEDULER_CAPACITY_BLOCKED.value, "scheduler.capacity_blocked")

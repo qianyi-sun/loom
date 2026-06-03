@@ -1127,7 +1127,6 @@ class RunRepository:
         execution_task_id: str | None = None,
         request_id: str | None = None,
     ) -> RunRecord:
-        del request_id
         _require_non_empty("worker_id", worker_id)
         row = self._run_row_for_update(run_id)
         attempt = self._latest_attempt_row(run_id)
@@ -1156,6 +1155,21 @@ class RunRepository:
         )
         attempt.updated_at = now
         row.updated_at = now
+        self._append_status_event(
+            run_id=run_id,
+            attempt_id=attempt.attempt_id,
+            event_type=RunEventType.WORKER_HEARTBEAT,
+            from_status=run_status,
+            to_status=run_status,
+            request_id=request_id,
+            metadata={
+                "worker_id": worker_id,
+                "execution_task_id": attempt.attempt_id,
+                "process_status": RunnerProcessStatus.HEARTBEATING.value,
+                "heartbeat_status": heartbeat_status.value,
+                "last_heartbeat_at": _datetime_json(now),
+            },
+        )
         self.session.flush()
         return self.get_run(run_id)
 

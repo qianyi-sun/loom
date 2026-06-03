@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added metadata-only `worker.heartbeat` events to the durable run-event
+  stream. `RunRepository.record_worker_heartbeat(...)` now updates the existing
+  attempt heartbeat metadata and appends a same-status event with worker id,
+  execution task id, heartbeat status, process status, and heartbeat timestamp.
+  Replay/SSE/bundle consumers can now see active worker liveness evidence before
+  stale-heartbeat recovery, without storing paths, commands, logs, payloads, or
+  secrets.
 - Routed worker-written terminal stdout/stderr chunks through the #159 artifact
   chunk upload transaction APIs. Worker result persistence now commits the
   terminal run result first, starts each log chunk row before object storage
