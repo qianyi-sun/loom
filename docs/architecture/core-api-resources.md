@@ -316,10 +316,14 @@ serializing dashboard payloads.
   fake object metadata. Upload-state repository recovery can now expire stale
   `pending` or `started` rows to `expired` with a durable `run.recovered`
   event plus typed `artifact.upload_expired` and
-  `artifact.upload_status_changed` events. Worker result persistence now writes
-  object-backed terminal stdout/stderr chunks, records their metadata against
-  the current attempt's trajectory artifact, and appends typed
-  `log.chunk_recorded` events. Non-log trajectory/artifact chunks append
+  `artifact.upload_status_changed` events. Worker result persistence now commits
+  the terminal run result first, then writes object-backed terminal
+  stdout/stderr chunks through the same start/complete/fail transaction APIs:
+  each chunk gets a `started` metadata row before object storage is touched,
+  successful writes complete the row with real size/SHA-256, and object-store
+  failures mark the row `failed` with a redacted reason without overriding the
+  run's terminal status. Terminal log chunks append typed `log.chunk_recorded`
+  events. Non-log trajectory/artifact chunks append
   `artifact.chunk_recorded` events. When a chunk's upload state changes,
   `artifact.upload_status_changed` records the previous and current status with
   the same safe chunk/object identifiers. These events carry object metadata such

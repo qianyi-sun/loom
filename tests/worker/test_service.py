@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from agentic_data_platform.artifacts.store import ArtifactPersistence, LocalArtifactStore
-from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind
+from agentic_data_platform.domain.artifact_metadata import ArtifactChunkKind, ArtifactUploadStatus
 from agentic_data_platform.domain.run_records import EvaluatorResult, RunStatus
 from agentic_data_platform.persistence.database import create_database_engine, session_scope
 from agentic_data_platform.persistence.migrations import upgrade_database
@@ -99,6 +99,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
+                "artifact.upload_status_changed",
             ],
         )
         self.assertEqual(payload["lifecycle_events"][1]["metadata"]["worker_id"], "worker-test")
@@ -158,6 +159,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
+                "artifact.upload_status_changed",
             ],
         )
         self.assertEqual(detail.json()["lifecycle_events"][2]["from_status"], "dispatched")
@@ -453,6 +455,67 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.status, "succeeded")
 
+    def test_terminal_log_chunk_upload_failure_records_failed_chunk_without_overriding_run_result(self):
+        payload = _run_create_payload("run_worker_log_chunk_upload_failure_001")
+        payload["metadata"] = {
+            "worker_commands": [
+                {
+                    "command": "python solve.py",
+                    "cwd": "/workspace",
+                    "model_call_id": "call-log-upload-failure-1",
+                }
+            ]
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            command_runner = FakeDockerCommandRunner(
+                stdout="created receipts workbook\n",
+                stderr="",
+                write_files={"receipts.xlsx": "spreadsheet bytes\n"},
+            )
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-docker-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=ArtifactPersistence(FailingTerminalLogStore(temp_path / "artifacts")),
+                    workspace_root=temp_path / "workspaces",
+                    command_runner=command_runner,
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-log-upload-failure-001")
+
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_log_chunk_upload_failure_001"
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(len(chunks), 1)
+        chunk = chunks[0]
+        self.assertIs(chunk.chunk_kind, ArtifactChunkKind.STDOUT)
+        self.assertIs(chunk.upload_status, ArtifactUploadStatus.FAILED)
+        self.assertIsNone(chunk.size_bytes)
+        self.assertIsNone(chunk.sha256)
+        self.assertIn("simulated log object store failure", chunk.upload_error_reason)
+        self.assertEqual(chunk.metadata["turn_index"], 0)
+        self.assertEqual(chunk.metadata["stream"], "stdout")
+
+        detail = self.client.get("/runs/run_worker_log_chunk_upload_failure_001")
+        self.assertEqual(detail.status_code, 200)
+        event_types = [event["event_type"] for event in detail.json()["lifecycle_events"]]
+        self.assertIn("log.chunk_recorded", event_types)
+        self.assertIn("artifact.upload_status_changed", event_types)
+        transition_event = next(
+            event for event in detail.json()["lifecycle_events"] if event["event_type"] == "artifact.upload_status_changed"
+        )
+        self.assertEqual(transition_event["metadata"]["previous_upload_status"], "started")
+        self.assertEqual(transition_event["metadata"]["upload_status"], "failed")
+
     def test_sandbox_lifecycle_recorder_ignores_stale_execution_task(self):
         run = _run_create_payload("run_sandbox_lifecycle_stale_001")
         create_response = self.client.post("/runs", json=run)
@@ -727,6 +790,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "run.started",
                 "run.failed",
                 "log.chunk_recorded",
+                "artifact.upload_status_changed",
             ],
         )
         sandbox_events = [
@@ -797,6 +861,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
+                "artifact.upload_status_changed",
             ],
         )
 
@@ -1376,6 +1441,7 @@ class WorkerServiceTest(unittest.TestCase):
                 "evaluator.completed",
                 "run.succeeded",
                 "log.chunk_recorded",
+                "artifact.upload_status_changed",
             ],
         )
 
@@ -1424,7 +1490,14 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn("log", artifact_kinds)
         self.assertEqual(
             [event["event_type"] for event in payload["lifecycle_events"]],
-            ["run.created", "run.claimed", "run.started", "run.failed", "log.chunk_recorded"],
+            [
+                "run.created",
+                "run.claimed",
+                "run.started",
+                "run.failed",
+                "log.chunk_recorded",
+                "artifact.upload_status_changed",
+            ],
         )
 
 
@@ -1530,6 +1603,13 @@ class FakeDockerCommandRunner:
             stdout=self.stdout,
             stderr=self.stderr,
         )
+
+
+class FailingTerminalLogStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/logs/stdout/" in key or "/logs/stderr/" in key:
+            raise RuntimeError("simulated log object store failure")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
 
 
 def _workspace_from_docker_args(args: list[str]) -> Path:

@@ -279,16 +279,20 @@ and `started` rows as `expired`, records the previous upload status, scheduler
 id, expiry timestamp, and error reason in artifact metadata, and appends a
 same-status `run.recovered` event with `recovery=artifact_upload_expired`.
 The current service API exposes chunk metadata through
-`GET /runs/{run_id}/artifact-chunks`. Worker result persistence now writes
-object-backed terminal stdout/stderr chunks and records their metadata against
-the current attempt's trajectory artifact. Chunk writes append metadata-only
-`log.chunk_recorded` events for stdout/stderr chunks and
-`artifact.chunk_recorded` events for trajectory/artifact chunks. Upload expiry
-also appends `artifact.upload_expired` alongside the recovery event. Chunk
-upload-state changes and expiry append `artifact.upload_status_changed` with
-previous/current status metadata. The chunk content endpoint downloads completed
-chunk payloads by metadata reference while rejecting non-completed upload states
-before object storage access.
+`GET /runs/{run_id}/artifact-chunks`. Worker result persistence now commits the
+terminal run result before terminal log object writes, then records each
+stdout/stderr chunk through the chunk upload transaction APIs against the
+current attempt's trajectory artifact. Each terminal log chunk has a `started`
+row before object storage is touched, transitions to `completed` only with real
+object size/SHA-256, and transitions to `failed` with a redacted reason if the
+object write fails. Chunk writes append metadata-only `log.chunk_recorded`
+events for stdout/stderr chunks and `artifact.chunk_recorded` events for
+trajectory/artifact chunks. Upload expiry also appends
+`artifact.upload_expired` alongside the recovery event. Chunk upload-state
+changes and expiry append `artifact.upload_status_changed` with previous/current
+status metadata. The chunk content endpoint downloads completed chunk payloads
+by metadata reference while rejecting non-completed upload states before object
+storage access.
 
 Detailed endpoint notes live in
 `docs/architecture/core-api-resources.md`.

@@ -38,6 +38,36 @@ class StoredArtifact:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PendingArtifactChunkUpload:
+    run_id: str
+    attempt_id: str
+    artifact_id: str
+    chunk_kind: ArtifactChunkKind
+    chunk_sequence: int
+    storage_key: str
+    media_type: str
+    payload: bytes
+    object_metadata: dict[str, Any]
+    chunk_metadata: dict[str, Any]
+
+    def completed_metadata(self, stored: StoredArtifact) -> ArtifactChunkMetadata:
+        return ArtifactChunkMetadata(
+            run_id=self.run_id,
+            attempt_id=self.attempt_id,
+            artifact_id=self.artifact_id,
+            chunk_kind=self.chunk_kind,
+            chunk_sequence=self.chunk_sequence,
+            storage_key=stored.key,
+            media_type=stored.media_type,
+            size_bytes=stored.size_bytes,
+            sha256=stored.sha256,
+            upload_status=ArtifactUploadStatus.COMPLETED,
+            created_at=datetime.now(timezone.utc),
+            metadata=dict(self.chunk_metadata),
+        )
+
+
 @runtime_checkable
 class Artifacpilot groupjectStore(Protocol):
     def ensure_bucket(self) -> None:
@@ -485,6 +515,32 @@ class ArtifactPersistence:
         turns: list[TerminalTurn],
     ) -> list[ArtifactChunkMetadata]:
         chunks: list[ArtifactChunkMetadata] = []
+        for upload in self.build_terminal_log_chunk_uploads(
+            run_id=run_id,
+            task_instance_id=task_instance_id,
+            attempt_id=attempt_id,
+            trajectory_artifact_id=trajectory_artifact_id,
+            turns=turns,
+        ):
+            stored = self.store.put_bytes(
+                upload.storage_key,
+                upload.payload,
+                media_type=upload.media_type,
+                metadata=upload.object_metadata,
+            )
+            chunks.append(upload.completed_metadata(stored))
+        return chunks
+
+    def build_terminal_log_chunk_uploads(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        attempt_id: str,
+        trajectory_artifact_id: str,
+        turns: list[TerminalTurn],
+    ) -> list[PendingArtifactChunkUpload]:
+        uploads: list[PendingArtifactChunkUpload] = []
         sequence_by_stream = {
             ArtifactChunkKind.STDOUT: 0,
             ArtifactChunkKind.STDERR: 0,
@@ -498,49 +554,43 @@ class ArtifactPersistence:
                     continue
                 chunk_sequence = sequence_by_stream[chunk_kind]
                 sequence_by_stream[chunk_kind] += 1
-                stored = self.store.put_bytes(
-                    self.key_factory.terminal_log_chunk_key(
-                        run_id,
-                        task_instance_id,
-                        attempt_id,
-                        chunk_kind,
-                        chunk_sequence,
-                    ),
-                    text.encode("utf-8"),
-                    media_type="text/plain; charset=utf-8",
-                    metadata={
-                        "run_id": run_id,
-                        "task_instance_id": task_instance_id,
-                        "attempt_id": attempt_id,
-                        "artifact_id": trajectory_artifact_id,
-                        "chunk_kind": chunk_kind.value,
-                        "chunk_sequence": chunk_sequence,
-                        "turn_index": turn.turn_index,
-                        "stream": chunk_kind.value,
-                    },
-                )
-                chunks.append(
-                    ArtifactChunkMetadata(
+                object_metadata = {
+                    "run_id": run_id,
+                    "task_instance_id": task_instance_id,
+                    "attempt_id": attempt_id,
+                    "artifact_id": trajectory_artifact_id,
+                    "chunk_kind": chunk_kind.value,
+                    "chunk_sequence": chunk_sequence,
+                    "turn_index": turn.turn_index,
+                    "stream": chunk_kind.value,
+                }
+                chunk_metadata = {
+                    "turn_index": turn.turn_index,
+                    "stream": chunk_kind.value,
+                    "command": turn.command,
+                    "model_call_id": turn.model_call_id,
+                }
+                uploads.append(
+                    PendingArtifactChunkUpload(
                         run_id=run_id,
                         attempt_id=attempt_id,
                         artifact_id=trajectory_artifact_id,
                         chunk_kind=chunk_kind,
                         chunk_sequence=chunk_sequence,
-                        storage_key=stored.key,
-                        media_type=stored.media_type,
-                        size_bytes=stored.size_bytes,
-                        sha256=stored.sha256,
-                        upload_status=ArtifactUploadStatus.COMPLETED,
-                        created_at=datetime.now(timezone.utc),
-                        metadata={
-                            "turn_index": turn.turn_index,
-                            "stream": chunk_kind.value,
-                            "command": turn.command,
-                            "model_call_id": turn.model_call_id,
-                        },
+                        storage_key=self.key_factory.terminal_log_chunk_key(
+                            run_id,
+                            task_instance_id,
+                            attempt_id,
+                            chunk_kind,
+                            chunk_sequence,
+                        ),
+                        media_type="text/plain; charset=utf-8",
+                        payload=text.encode("utf-8"),
+                        object_metadata=object_metadata,
+                        chunk_metadata=chunk_metadata,
                     )
                 )
-        return chunks
+        return uploads
 
 
 def _artifact_ref(stored: StoredArtifact, *, artifact_id: str, kind: ArtifactKind) -> ArtifactRef:

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Routed worker-written terminal stdout/stderr chunks through the #159 artifact
+  chunk upload transaction APIs. Worker result persistence now commits the
+  terminal run result first, starts each log chunk row before object storage
+  writes, completes rows with real object size/SHA-256 after successful writes,
+  and marks failed rows with a redacted reason when object storage rejects a
+  chunk. This makes partial terminal log upload failures visible to #160
+  recovery and operators without overriding the platform run result.
 - Added #156 scheduler estimated cost/token budget hooks. Dispatch can now use
   trusted queued-run metadata hints under
   `metadata.scheduler.estimated_cost_usd` and

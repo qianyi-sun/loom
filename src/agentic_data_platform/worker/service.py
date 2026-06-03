@@ -36,6 +36,7 @@ from agentic_data_platform.worker.executors import DockerTerminalWorkerExecutor,
 
 
 SUBPROCESS_LOG_TAIL_MAX_CHARS = 1000
+ARTIFACT_UPLOAD_ERROR_MAX_CHARS = 500
 
 
 @dataclass(frozen=True)
@@ -514,14 +515,6 @@ def _save_worker_result(
                 execution_task_id=execution_task_id,
                 request_id=request_id,
             )
-            _record_terminal_log_chunks(
-                repository,
-                saved,
-                execution_task_id=execution_task_id,
-                artifact_persistence=artifact_persistence,
-                source_turns=run.trajectory,
-            )
-            return saved
         except StaleExecutionTaskError:
             return repository.get_run(run.run_id)
         except ValueError:
@@ -529,6 +522,15 @@ def _save_worker_result(
             if current.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED}:
                 return current
             raise
+    _record_terminal_log_chunks(
+        engine,
+        saved,
+        execution_task_id=execution_task_id,
+        artifact_persistence=artifact_persistence,
+        source_turns=run.trajectory,
+        request_id=request_id,
+    )
+    return saved
 
 
 def _artifact_persistence_for_executor(executor: WorkerRunExecutor) -> ArtifactPersistence | None:
@@ -539,12 +541,13 @@ def _artifact_persistence_for_executor(executor: WorkerRunExecutor) -> ArtifactP
 
 
 def _record_terminal_log_chunks(
-    repository: RunRepository,
+    engine: Engine,
     run,
     *,
     execution_task_id: str | None,
     artifact_persistence: ArtifactPersistence | None,
     source_turns: list[TerminalTurn],
+    request_id: str | None,
 ) -> None:
     if artifact_persistence is None or execution_task_id is None or not source_turns:
         return
@@ -554,14 +557,68 @@ def _record_terminal_log_chunks(
     )
     if trajectory_artifact is None:
         return
-    for chunk in artifact_persistence.persist_terminal_log_chunks(
+    for upload in artifact_persistence.build_terminal_log_chunk_uploads(
         run_id=run.run_id,
         task_instance_id=run.task.instance_id,
         attempt_id=execution_task_id,
         trajectory_artifact_id=trajectory_artifact.artifact_id,
         turns=source_turns,
     ):
-        repository.record_artifact_chunk(chunk)
+        try:
+            with session_scope(engine) as session:
+                RunRepository(session).start_artifact_chunk_upload(
+                    run_id=upload.run_id,
+                    attempt_id=upload.attempt_id,
+                    artifact_id=upload.artifact_id,
+                    chunk_kind=upload.chunk_kind,
+                    chunk_sequence=upload.chunk_sequence,
+                    storage_key=upload.storage_key,
+                    media_type=upload.media_type,
+                    metadata=upload.chunk_metadata,
+                    request_id=request_id,
+                )
+        except ValueError as exc:
+            if str(exc) == "completed artifact chunk upload cannot be restarted":
+                continue
+            raise
+
+        try:
+            stored = artifact_persistence.store.put_bytes(
+                upload.storage_key,
+                upload.payload,
+                media_type=upload.media_type,
+                metadata=upload.object_metadata,
+            )
+        except Exception as exc:
+            with session_scope(engine) as session:
+                RunRepository(session).fail_artifact_chunk_upload(
+                    run_id=upload.run_id,
+                    artifact_id=upload.artifact_id,
+                    chunk_kind=upload.chunk_kind,
+                    chunk_sequence=upload.chunk_sequence,
+                    reason=_artifact_upload_error_reason(exc),
+                    metadata={"upload_error_type": type(exc).__name__},
+                    request_id=request_id,
+                )
+            continue
+
+        with session_scope(engine) as session:
+            RunRepository(session).complete_artifact_chunk_upload(
+                run_id=upload.run_id,
+                artifact_id=upload.artifact_id,
+                chunk_kind=upload.chunk_kind,
+                chunk_sequence=upload.chunk_sequence,
+                size_bytes=stored.size_bytes,
+                sha256=stored.sha256,
+                request_id=request_id,
+            )
+
+
+def _artifact_upload_error_reason(exc: Exception) -> str:
+    reason = _redact_subprocess_output(f"{type(exc).__name__}: {exc}".strip())
+    if len(reason) <= ARTIFACT_UPLOAD_ERROR_MAX_CHARS:
+        return reason
+    return reason[: ARTIFACT_UPLOAD_ERROR_MAX_CHARS - 3] + "..."
 
 
 def _run_child_command_with_cancel_monitor(
