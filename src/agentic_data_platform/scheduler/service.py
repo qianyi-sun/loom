@@ -185,6 +185,8 @@ class RunScheduler:
                 model_token_limits=self.settings.scheduler_model_max_estimated_tokens,
                 provider_observed_token_limits=self.settings.scheduler_provider_max_observed_tokens,
                 model_observed_token_limits=self.settings.scheduler_model_max_observed_tokens,
+                provider_observed_request_limits=self.settings.scheduler_provider_max_observed_requests,
+                model_observed_request_limits=self.settings.scheduler_model_max_observed_requests,
                 observed_usage_since=observed_usage_since,
                 request_id=request_id,
             )
@@ -200,6 +202,8 @@ class RunScheduler:
         if not (
             self.settings.scheduler_provider_max_observed_tokens
             or self.settings.scheduler_model_max_observed_tokens
+            or self.settings.scheduler_provider_max_observed_requests
+            or self.settings.scheduler_model_max_observed_requests
         ):
             return None
         return datetime.now(timezone.utc) - timedelta(seconds=self.settings.scheduler_observed_usage_window_seconds)

@@ -1489,6 +1489,77 @@ class PersistenceRepositoryTest(unittest.TestCase):
         self.assertEqual(events[-1].metadata["metric"], "observed_plus_estimated_tokens")
         self.assertEqual([block.run_id for block in current_blocks], ["run_dispatch_observed_candidate"])
 
+    def test_run_repository_blocks_dispatch_by_recent_observed_request_window(self):
+        now = datetime.now(timezone.utc)
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_dispatch_observed_requests_recent",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=1_000,
+                    request_count=8,
+                )
+            )
+            session.get(RunRow, "run_dispatch_observed_requests_recent").updated_at = now - timedelta(minutes=5)
+            runs.save_run(
+                _completed_usage_run(
+                    run_id="run_dispatch_observed_requests_old",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    total_tokens=1_000,
+                    request_count=50,
+                )
+            )
+            session.get(RunRow, "run_dispatch_observed_requests_old").updated_at = now - timedelta(hours=2)
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_observed_requests_a",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="codex",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_requests=1,
+                )
+            )
+            runs.create_run(
+                _queued_capacity_run(
+                    run_id="run_dispatch_observed_requests_b",
+                    provider="openai",
+                    model_name="gpt-5-mini",
+                    agent_id="aider",
+                    benchmark_ref="terminal-bench@2.0",
+                    estimated_requests=2,
+                )
+            )
+
+            result = runs.dispatch_queued_runs_with_diagnostics(
+                scheduler_id="scheduler-observed-request-window",
+                max_runs=2,
+                provider_observed_request_limits={"openai": 10},
+                observed_usage_since=now - timedelta(hours=1),
+                request_id="req-dispatch-observed-requests-001",
+            )
+            events = runs.list_status_events("run_dispatch_observed_requests_b")
+            current_blocks = runs.list_scheduler_capacity_blocks(project_ids=["pilot-project"])
+
+        self.assertEqual([run.run_id for run in result.dispatched_runs], ["run_dispatch_observed_requests_a"])
+        self.assertEqual([block.run_id for block in result.capacity_blocked_runs], ["run_dispatch_observed_requests_b"])
+        block = result.capacity_blocked_runs[0]
+        self.assertEqual(block.dimension, "provider_observed_requests")
+        self.assertEqual(block.key, "openai")
+        self.assertEqual(block.metric, "observed_plus_estimated_requests")
+        self.assertEqual(block.active_count, 9)
+        self.assertEqual(block.candidate_usage, 2)
+        self.assertEqual(block.projected_usage, 11)
+        self.assertEqual(block.limit, 10)
+        self.assertEqual(block.reason, "provider observed request window reached")
+        self.assertEqual(events[-1].event_type, RunEventType.SCHEDULER_CAPACITY_BLOCKED.value)
+        self.assertEqual(events[-1].metadata["metric"], "observed_plus_estimated_requests")
+        self.assertEqual([block.run_id for block in current_blocks], ["run_dispatch_observed_requests_b"])
+
     def test_run_repository_ignores_non_finite_scheduler_budget_hints(self):
         with session_scope(self.engine) as session:
             _seed_latent_project(session)
@@ -2287,6 +2358,7 @@ def _completed_usage_run(
     provider: str,
     model_name: str,
     total_tokens: int,
+    request_count: int | None = None,
 ) -> RunRecord:
     run = _completed_run(run_id=run_id)
     run.model = replace(run.model, provider=provider, model_name=model_name)
@@ -2296,6 +2368,8 @@ def _completed_usage_run(
         "model_name": model_name,
         "total_tokens": total_tokens,
     }
+    if request_count is not None:
+        usage["request_count"] = request_count
     for evaluator_result in run.evaluator_results:
         evaluator_result.metadata["provider_usage"] = dict(usage)
     if run.evaluator_result is not None:
@@ -2411,6 +2485,7 @@ def _queued_capacity_run(
     benchmark_ref: str,
     estimated_cost_usd: float | None = None,
     estimated_tokens: int | None = None,
+    estimated_requests: int | None = None,
 ) -> RunRecord:
     run = _queued_run(run_id=run_id)
     run.model = replace(run.model, provider=provider, model_name=model_name)
@@ -2423,6 +2498,8 @@ def _queued_capacity_run(
         scheduler_metadata["estimated_cost_usd"] = estimated_cost_usd
     if estimated_tokens is not None:
         scheduler_metadata["estimated_tokens"] = estimated_tokens
+    if estimated_requests is not None:
+        scheduler_metadata["estimated_requests"] = estimated_requests
     if scheduler_metadata:
         run.metadata["scheduler"] = scheduler_metadata
     return run

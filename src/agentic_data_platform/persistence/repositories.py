@@ -647,6 +647,8 @@ class RunRepository:
         model_token_limits: dict[str, int] | None = None,
         provider_observed_token_limits: dict[str, int] | None = None,
         model_observed_token_limits: dict[str, int] | None = None,
+        provider_observed_request_limits: dict[str, int] | None = None,
+        model_observed_request_limits: dict[str, int] | None = None,
         observed_usage_since: datetime | None = None,
         request_id: str | None = None,
     ) -> list[RunRecord]:
@@ -665,6 +667,8 @@ class RunRepository:
             model_token_limits=model_token_limits,
             provider_observed_token_limits=provider_observed_token_limits,
             model_observed_token_limits=model_observed_token_limits,
+            provider_observed_request_limits=provider_observed_request_limits,
+            model_observed_request_limits=model_observed_request_limits,
             observed_usage_since=observed_usage_since,
             request_id=request_id,
         ).dispatched_runs
@@ -686,6 +690,8 @@ class RunRepository:
         model_token_limits: dict[str, int] | None = None,
         provider_observed_token_limits: dict[str, int] | None = None,
         model_observed_token_limits: dict[str, int] | None = None,
+        provider_observed_request_limits: dict[str, int] | None = None,
+        model_observed_request_limits: dict[str, int] | None = None,
         observed_usage_since: datetime | None = None,
         request_id: str | None = None,
     ) -> DispatchQueuedRunsResult:
@@ -709,6 +715,8 @@ class RunRepository:
                 model_token_limits=model_token_limits,
                 provider_observed_token_limits=provider_observed_token_limits,
                 model_observed_token_limits=model_observed_token_limits,
+                provider_observed_request_limits=provider_observed_request_limits,
+                model_observed_request_limits=model_observed_request_limits,
                 observed_usage_since=observed_usage_since,
                 request_id=request_id,
             )
@@ -733,6 +741,8 @@ class RunRepository:
         model_token_limits: dict[str, int] | None = None,
         provider_observed_token_limits: dict[str, int] | None = None,
         model_observed_token_limits: dict[str, int] | None = None,
+        provider_observed_request_limits: dict[str, int] | None = None,
+        model_observed_request_limits: dict[str, int] | None = None,
         observed_usage_since: datetime | None = None,
         request_id: str | None = None,
     ) -> DispatchQueuedRunsResult:
@@ -750,13 +760,29 @@ class RunRepository:
         model_token_limits = _positive_limits(model_token_limits or {})
         provider_observed_token_limits = _positive_limits(provider_observed_token_limits or {})
         model_observed_token_limits = _positive_limits(model_observed_token_limits or {})
+        provider_observed_request_limits = _positive_limits(provider_observed_request_limits or {})
+        model_observed_request_limits = _positive_limits(model_observed_request_limits or {})
         if observed_usage_since is not None and observed_usage_since.tzinfo is None:
             raise ValueError("observed_usage_since must be timezone-aware")
         observed_tokens_by_provider: dict[str, int] = {}
         observed_tokens_by_model: dict[str, int] = {}
-        if observed_usage_since is not None and (provider_observed_token_limits or model_observed_token_limits):
-            observed_tokens_by_provider, observed_tokens_by_model = self._observed_model_provider_tokens_since(
-                observed_usage_since
+        observed_requests_by_provider: dict[str, int] = {}
+        observed_requests_by_model: dict[str, int] = {}
+        if observed_usage_since is not None and (
+            provider_observed_token_limits
+            or model_observed_token_limits
+            or provider_observed_request_limits
+            or model_observed_request_limits
+        ):
+            (
+                observed_tokens_by_provider,
+                observed_tokens_by_model,
+                observed_requests_by_provider,
+                observed_requests_by_model,
+            ) = self._observed_model_provider_usage_since(
+                observed_usage_since,
+                include_tokens=bool(provider_observed_token_limits or model_observed_token_limits),
+                include_requests=bool(provider_observed_request_limits or model_observed_request_limits),
             )
         active_statuses = {
             RunStatus.DISPATCHED.value,
@@ -780,6 +806,8 @@ class RunRepository:
         active_tokens_by_model: dict[str, int] = {}
         rate_window_tokens_by_provider = dict(observed_tokens_by_provider)
         rate_window_tokens_by_model = dict(observed_tokens_by_model)
+        rate_window_requests_by_provider = dict(observed_requests_by_provider)
+        rate_window_requests_by_model = dict(observed_requests_by_model)
         for row in active_rows:
             provider_key = _provider_capacity_key(row)
             model_key = _model_capacity_key(row)
@@ -791,6 +819,7 @@ class RunRepository:
             _increment(active_by_benchmark, _benchmark_capacity_key(row))
             estimated_cost_usd = _scheduler_estimated_cost_usd(row)
             estimated_tokens = _scheduler_estimated_tokens(row)
+            estimated_requests = _scheduler_estimated_requests(row)
             if estimated_cost_usd > 0:
                 _increment_float(active_cost_by_provider, provider_key, estimated_cost_usd)
                 _increment_float(active_cost_by_model, model_key, estimated_cost_usd)
@@ -799,6 +828,9 @@ class RunRepository:
                 _increment(active_tokens_by_model, model_key, estimated_tokens)
                 _increment(rate_window_tokens_by_provider, provider_key, estimated_tokens)
                 _increment(rate_window_tokens_by_model, model_key, estimated_tokens)
+            if estimated_requests > 0:
+                _increment(rate_window_requests_by_provider, provider_key, estimated_requests)
+                _increment(rate_window_requests_by_model, model_key, estimated_requests)
 
         ranked_candidate_ids = list(
             self.session.scalars(_ranked_queued_run_id_query(limit=max(max_runs * 5, 25)))
@@ -824,6 +856,7 @@ class RunRepository:
             benchmark_key = _benchmark_capacity_key(row)
             estimated_cost_usd = _scheduler_estimated_cost_usd(row)
             estimated_tokens = _scheduler_estimated_tokens(row)
+            estimated_requests = _scheduler_estimated_requests(row)
             if len(dispatched_ids) >= remaining_global_capacity:
                 capacity_blocked.append(
                     self._record_scheduler_capacity_block(
@@ -937,6 +970,24 @@ class RunRepository:
                         "observed_plus_estimated_tokens",
                         "model observed token window reached",
                     ),
+                    (
+                        "provider_observed_requests",
+                        provider_key,
+                        rate_window_requests_by_provider,
+                        provider_observed_request_limits,
+                        estimated_requests,
+                        "observed_plus_estimated_requests",
+                        "provider observed request window reached",
+                    ),
+                    (
+                        "model_observed_requests",
+                        model_key,
+                        rate_window_requests_by_model,
+                        model_observed_request_limits,
+                        estimated_requests,
+                        "observed_plus_estimated_requests",
+                        "model observed request window reached",
+                    ),
                 )
             )
             if blocked_budget is not None:
@@ -1019,6 +1070,9 @@ class RunRepository:
                 _increment(active_tokens_by_model, model_key, estimated_tokens)
                 _increment(rate_window_tokens_by_provider, provider_key, estimated_tokens)
                 _increment(rate_window_tokens_by_model, model_key, estimated_tokens)
+            if estimated_requests > 0:
+                _increment(rate_window_requests_by_provider, provider_key, estimated_requests)
+                _increment(rate_window_requests_by_model, model_key, estimated_requests)
             dispatched_ids.append(run.run_id)
 
         self.session.flush()
@@ -1027,9 +1081,17 @@ class RunRepository:
             capacity_blocked_runs=capacity_blocked,
         )
 
-    def _observed_model_provider_tokens_since(self, since: datetime) -> tuple[dict[str, int], dict[str, int]]:
+    def _observed_model_provider_usage_since(
+        self,
+        since: datetime,
+        *,
+        include_tokens: bool,
+        include_requests: bool,
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
         tokens_by_provider: dict[str, int] = {}
         tokens_by_model: dict[str, int] = {}
+        requests_by_provider: dict[str, int] = {}
+        requests_by_model: dict[str, int] = {}
         rows = self.session.scalars(
             select(RunRow)
             .where(RunRow.status.in_(_TERMINAL_STATUS_VALUES))
@@ -1040,14 +1102,19 @@ class RunRepository:
             usage = _model_provider_usage_for_run(self._run_record(row))
             if usage is None:
                 continue
-            total_tokens = usage.get("total_tokens")
-            if not isinstance(total_tokens, int) or total_tokens <= 0:
-                continue
             provider_key = _optional_string(usage.get("provider")) or _provider_capacity_key(row)
             model_key = _optional_string(usage.get("model_name")) or _model_capacity_key(row)
-            _increment(tokens_by_provider, provider_key, total_tokens)
-            _increment(tokens_by_model, model_key, total_tokens)
-        return tokens_by_provider, tokens_by_model
+            if include_tokens:
+                total_tokens = usage.get("total_tokens")
+                if isinstance(total_tokens, int) and total_tokens > 0:
+                    _increment(tokens_by_provider, provider_key, total_tokens)
+                    _increment(tokens_by_model, model_key, total_tokens)
+            if include_requests:
+                request_count = usage.get("request_count")
+                if isinstance(request_count, int) and request_count > 0:
+                    _increment(requests_by_provider, provider_key, request_count)
+                    _increment(requests_by_model, model_key, request_count)
+        return tokens_by_provider, tokens_by_model, requests_by_provider, requests_by_model
 
     def list_scheduler_capacity_blocks(
         self,
@@ -3164,6 +3231,10 @@ def _scheduler_estimated_cost_usd(row: RunRow) -> float:
 
 def _scheduler_estimated_tokens(row: RunRow) -> int:
     return max(int(_float_metadata_value(_scheduler_budget_metadata(row).get("estimated_tokens"))), 0)
+
+
+def _scheduler_estimated_requests(row: RunRow) -> int:
+    return max(int(_float_metadata_value(_scheduler_budget_metadata(row).get("estimated_requests"))), 0)
 
 
 def _scheduler_budget_metadata(row: RunRow) -> dict[str, Any]:

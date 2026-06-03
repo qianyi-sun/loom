@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added the next #156 scheduler observed-usage rate window gate for request
+  counts. Provider usage normalization now accepts safe request/model-call
+  aliases and aggregates `request_count`; dispatch can combine recent completed
+  `provider_usage.request_count` telemetry with trusted queued/active
+  `metadata.scheduler.estimated_requests` hints, then block provider/model
+  windows through `SCHEDULER_PROVIDER_MAX_OBSERVED_REQUESTS`,
+  `SCHEDULER_MODEL_MAX_OBSERVED_REQUESTS`, and the existing
+  `SCHEDULER_OBSERVED_USAGE_WINDOW_SECONDS`. Blocked queued runs reuse
+  `scheduler.capacity_blocked` with `observed_plus_estimated_requests`
+  diagnostics. This is an RPM-style operator guardrail, not billing truth.
 - Added #157 Redis-assisted run-event fanout and hot buffers. API, scheduler,
   worker parent, and worker child processes now configure a no-op-safe fanout
   from `REDIS_URL`; run status events queue Redis wake-up signals only after

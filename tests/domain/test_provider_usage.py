@@ -11,6 +11,7 @@ class ProviderUsageTest(unittest.TestCase):
             {
                 "n_input_tokens": 1200,
                 "n_output_tokens": 345,
+                "n_model_calls": 7,
                 "total_cost_usd": 0.03125,
                 "latency_ms": 2500,
                 "api_key": "sk-secret",
@@ -30,6 +31,7 @@ class ProviderUsageTest(unittest.TestCase):
                 "input_tokens": 1200,
                 "output_tokens": 345,
                 "total_tokens": 1545,
+                "request_count": 7,
                 "cost_usd": 0.03125,
                 "duration_seconds": 2.5,
             },
@@ -42,6 +44,7 @@ class ProviderUsageTest(unittest.TestCase):
                 "prompt_tokens": -10,
                 "completion_tokens": math.inf,
                 "total_tokens": "nan",
+                "request_count": -2,
                 "cost_usd": -0.1,
                 "authorization": "Bearer secret",
             },

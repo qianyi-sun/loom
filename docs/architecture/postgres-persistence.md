@@ -122,14 +122,16 @@ exceed configured budget windows. These blockers reuse
 operator diagnostics. They are scheduler guardrails, not billing truth.
 Completed Harbor-backed runs can also carry observed model-provider usage under
 evaluator metadata as `provider_usage`. That metadata is normalized to safe
-numeric fields such as input/output/total tokens, cost, and duration, and is
-surfaced through dashboard projections and scoped `/ops/metrics` aggregates.
-Dispatch can optionally use those completed-run total-token observations as a
-recent provider/model window, adding active and candidate estimated-token hints
-before launching the next queued run. These blockers use dimensions such as
-`provider_observed_tokens` or `model_observed_tokens` with metric
-`observed_plus_estimated_tokens`. They still do not retroactively turn estimated
-dispatch hints into a billing ledger.
+numeric fields such as input/output/total tokens, request counts, cost, and
+duration, and is surfaced through dashboard projections and scoped
+`/ops/metrics` aggregates. Dispatch can optionally use those completed-run
+total-token or request-count observations as recent provider/model windows,
+adding active and candidate estimated-token or estimated-request hints before
+launching the next queued run. These blockers use dimensions such as
+`provider_observed_tokens`, `model_observed_tokens`,
+`provider_observed_requests`, or `model_observed_requests` with metrics
+`observed_plus_estimated_tokens` or `observed_plus_estimated_requests`. They
+still do not retroactively turn estimated dispatch hints into a billing ledger.
 `RunRepository.requeue_stale_dispatched_runs(...)` moves stale `dispatched`
 rows back to `queued` in bounded batches and records `run.recovered` events
 with scheduler id, recovery reason, and stale cutoff metadata.

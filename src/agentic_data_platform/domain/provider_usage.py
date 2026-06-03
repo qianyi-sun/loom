@@ -54,6 +54,18 @@ def normalize_model_provider_usage(
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
 
+    request_count = _non_negative_int_from_aliases(
+        metrics,
+        "request_count",
+        "requests",
+        "api_requests",
+        "api_request_count",
+        "model_calls",
+        "model_call_count",
+        "n_model_calls",
+        "llm_calls",
+        "llm_call_count",
+    )
     cost_usd = _non_negative_float_from_aliases(metrics, "cost_usd", "total_cost_usd")
     duration_seconds = _non_negative_float_from_aliases(
         metrics,
@@ -71,12 +83,21 @@ def normalize_model_provider_usage(
         usage["output_tokens"] = output_tokens
     if total_tokens is not None:
         usage["total_tokens"] = total_tokens
+    if request_count is not None:
+        usage["request_count"] = request_count
     if cost_usd is not None:
         usage["cost_usd"] = cost_usd
     if duration_seconds is not None:
         usage["duration_seconds"] = duration_seconds
 
-    observed_keys = {"input_tokens", "output_tokens", "total_tokens", "cost_usd", "duration_seconds"}
+    observed_keys = {
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "request_count",
+        "cost_usd",
+        "duration_seconds",
+    }
     if not any(key in usage for key in observed_keys):
         return None
     return usage
@@ -141,6 +162,7 @@ def _empty_usage_summary() -> dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
+        "request_count": 0,
         "cost_usd": 0.0,
         "duration_seconds": 0.0,
     }
@@ -148,7 +170,7 @@ def _empty_usage_summary() -> dict[str, Any]:
 
 def _add_usage(summary: dict[str, Any], usage: dict[str, Any]) -> None:
     summary["run_count"] += 1
-    for key in ("input_tokens", "output_tokens", "total_tokens"):
+    for key in ("input_tokens", "output_tokens", "total_tokens", "request_count"):
         value = usage.get(key)
         if isinstance(value, int):
             summary[key] += value

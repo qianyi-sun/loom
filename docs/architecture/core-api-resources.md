@@ -408,20 +408,23 @@ serializing dashboard payloads.
   transaction-scoped advisory lock so concurrent scheduler instances cannot make
   capacity decisions from stale active counts and over-dispatch different
   locked rows.
-  Scheduler dispatch can also apply provider/model estimated cost and token
-  budget hooks using trusted run metadata hints under
+  Scheduler dispatch can also apply provider/model estimated cost, token, and
+  request budget hooks using trusted run metadata hints under
   `metadata.scheduler.estimated_cost_usd` and
-  `metadata.scheduler.estimated_tokens`. These hooks are dispatch guardrails for
-  API spend/rate protection, not a billing ledger. A separate optional
-  observed-token window can combine recent completed-run `provider_usage`
-  telemetry with a queued candidate's estimated token hint before dispatch,
-  using dimensions such as `provider_observed_tokens` and metric
-  `observed_plus_estimated_tokens`.
+  `metadata.scheduler.estimated_tokens` plus the observed-window-only
+  `metadata.scheduler.estimated_requests`. These hooks are dispatch guardrails
+  for API spend/rate protection, not a billing ledger. Separate optional
+  observed-usage windows can combine recent completed-run `provider_usage`
+  telemetry with queued/active estimated hints before dispatch, using
+  dimensions such as `provider_observed_tokens` with metric
+  `observed_plus_estimated_tokens` or `provider_observed_requests` with metric
+  `observed_plus_estimated_requests`.
   Queued rows blocked by a cap record current
   `execution.scheduler.capacity_blocked` metadata and a
   `scheduler.capacity_blocked` event only when the blocker signature changes.
-  Cost/token budget blockers use dimensions such as `provider_cost_usd`,
-  `model_tokens`, or `provider_observed_tokens` and include the metric,
+  Cost/token/request budget blockers use dimensions such as `provider_cost_usd`,
+  `model_tokens`, `provider_observed_tokens`, or
+  `provider_observed_requests` and include the metric,
   candidate usage, projected usage, and configured limit in the same
   operator-visible payload. `/ops/metrics` reports visible blocked counts by
   dimension, a bounded run list, and scoped observed model-provider usage totals

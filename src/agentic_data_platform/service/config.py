@@ -51,6 +51,8 @@ class ServiceSettings:
     scheduler_observed_usage_window_seconds: int = 3600
     scheduler_provider_max_observed_tokens: dict[str, int] = field(default_factory=dict)
     scheduler_model_max_observed_tokens: dict[str, int] = field(default_factory=dict)
+    scheduler_provider_max_observed_requests: dict[str, int] = field(default_factory=dict)
+    scheduler_model_max_observed_requests: dict[str, int] = field(default_factory=dict)
     scheduler_stale_dispatched_timeout_seconds: int = 300
     scheduler_stale_active_heartbeat_timeout_seconds: int = 900
     scheduler_stale_artifact_upload_timeout_seconds: int = 1800
@@ -116,6 +118,8 @@ def load_service_settings(environ: Mapping[str, str] | None = None) -> ServiceSe
         scheduler_observed_usage_window_seconds=_get_int(values, "SCHEDULER_OBSERVED_USAGE_WINDOW_SECONDS", 3600),
         scheduler_provider_max_observed_tokens=_get_int_map(values, "SCHEDULER_PROVIDER_MAX_OBSERVED_TOKENS"),
         scheduler_model_max_observed_tokens=_get_int_map(values, "SCHEDULER_MODEL_MAX_OBSERVED_TOKENS"),
+        scheduler_provider_max_observed_requests=_get_int_map(values, "SCHEDULER_PROVIDER_MAX_OBSERVED_REQUESTS"),
+        scheduler_model_max_observed_requests=_get_int_map(values, "SCHEDULER_MODEL_MAX_OBSERVED_REQUESTS"),
         scheduler_stale_dispatched_timeout_seconds=_get_int(
             values,
             "SCHEDULER_STALE_DISPATCHED_TIMEOUT_SECONDS",
