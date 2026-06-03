@@ -1617,6 +1617,166 @@ class WorkerServiceTest(unittest.TestCase):
         self.assertIn('"api_key": "[redacted]"', rendered_bundle)
         self.assertNotIn("deepseek-secret", rendered_bundle)
 
+    def test_harbor_jobs_archive_upload_failure_preserves_verifier_result(self):
+        payload = _run_create_payload("run_worker_harbor_jobs_archive_upload_failed_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "task_template": "harbor-cli-smoke",
+                "agent": "oracle",
+                "model_name": "smoke/noop",
+                "environment": "docker",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            artifact_persistence = ArtifactPersistence(FailingHarborJobsArchiveStore(temp_path / "artifacts"))
+            self.client.app.state.artifact_store = artifact_persistence.store
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-jobs-archive-upload-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=artifact_persistence,
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=FakeHarborCommandRunner(),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-jobs-archive-upload-failed-001")
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_harbor_jobs_archive_upload_failed_001",
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                )
+            detail = self.client.get("/runs/run_worker_harbor_jobs_archive_upload_failed_001")
+            bundle = self.client.get("/runs/run_worker_harbor_jobs_archive_upload_failed_001/artifact-bundle")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.evaluator_id, "harbor-verifier")
+        self.assertEqual(detail.status_code, 200)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["run"]["status"], "succeeded")
+        self.assertEqual(detail_payload["run"]["evaluator"]["mode"], "harbor_verifier")
+        self.assertEqual(detail_payload["run"]["evaluator"]["score"], 1.0)
+
+        failed_chunk = next(chunk for chunk in chunks if chunk.upload_status is ArtifactUploadStatus.FAILED)
+        self.assertEqual(failed_chunk.metadata["content_type"], "harbor_jobs_archive")
+        self.assertEqual(failed_chunk.metadata["object_writer"], "harbor_jobs_archive")
+        self.assertIn("simulated Harbor jobs archive object store failure", failed_chunk.upload_error_reason)
+        self.assertNotIn("api_key=secret", failed_chunk.upload_error_reason)
+
+        event_types = [event["event_type"] for event in detail_payload["lifecycle_events"]]
+        self.assertIn("artifact.chunk_recorded", event_types)
+        self.assertIn("artifact.upload_status_changed", event_types)
+        self.assertEqual(bundle.status_code, 200)
+        with zipfile.ZipFile(BytesIO(bundle.content)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertTrue(
+            any(
+                error["upload_status"] == "failed"
+                and "simulated Harbor jobs archive object store failure" in error["upload_error_reason"]
+                and "api_key=secret" not in error["upload_error_reason"]
+                for error in manifest["artifact_chunk_content_errors"]
+            )
+        )
+
+    def test_harbor_runner_report_upload_failure_preserves_verifier_result(self):
+        payload = _run_create_payload("run_worker_harbor_runner_report_upload_failed_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "task_template": "harbor-cli-smoke",
+                "agent": "oracle",
+                "model_name": "smoke/noop",
+                "environment": "docker",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            artifact_persistence = ArtifactPersistence(FailingHarborRunnerReportStore(temp_path / "artifacts"))
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-runner-report-upload-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=artifact_persistence,
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=FakeHarborCommandRunner(),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-runner-report-upload-failed-001")
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_harbor_runner_report_upload_failed_001",
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.evaluator_id, "harbor-verifier")
+        failed_chunk = next(chunk for chunk in chunks if chunk.upload_status is ArtifactUploadStatus.FAILED)
+        self.assertEqual(failed_chunk.metadata["content_type"], "harbor_runner_report")
+        self.assertEqual(failed_chunk.metadata["object_writer"], "harbor_runner_report")
+        self.assertIn("simulated Harbor runner report object store failure", failed_chunk.upload_error_reason)
+        self.assertNotIn("api_key=secret", failed_chunk.upload_error_reason)
+
+    def test_harbor_evaluator_report_upload_failure_preserves_verifier_result(self):
+        payload = _run_create_payload("run_worker_harbor_evaluator_report_upload_failed_001")
+        payload["runner"]["metadata"] = {"runner_contract": "harbor-local-docker-v0"}
+        payload["evaluators"] = [{"evaluator_id": "harbor-verifier", "mode": "harbor_verifier"}]
+        payload["metadata"] = {
+            "harbor_run": {
+                "task_template": "harbor-cli-smoke",
+                "agent": "oracle",
+                "model_name": "smoke/noop",
+                "environment": "docker",
+                "extra_args": ["--n-tasks", "1", "--quiet"],
+            }
+        }
+        create_response = self.client.post("/runs", json=payload)
+        self.assertEqual(create_response.status_code, 201)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            artifact_persistence = ArtifactPersistence(FailingHarborEvaluatorReportStore(temp_path / "artifacts"))
+            worker = RunWorker(
+                engine=self.engine,
+                worker_id="worker-harbor-evaluator-report-upload-test",
+                executor=DockerTerminalWorkerExecutor(
+                    artifact_persistence=artifact_persistence,
+                    workspace_root=temp_path / "workspaces",
+                    harbor_command_runner=FakeHarborCommandRunner(),
+                ),
+            )
+
+            result = worker.run_once(request_id="req-worker-harbor-evaluator-report-upload-failed-001")
+            with session_scope(self.engine) as session:
+                chunks = RunRepository(session).list_artifact_chunks(
+                    run_id="run_worker_harbor_evaluator_report_upload_failed_001",
+                    chunk_kind=ArtifactChunkKind.ARTIFACT,
+                )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.evaluator_id, "harbor-verifier")
+        failed_chunk = next(chunk for chunk in chunks if chunk.upload_status is ArtifactUploadStatus.FAILED)
+        self.assertEqual(failed_chunk.metadata["content_type"], "evaluator_report")
+        self.assertEqual(failed_chunk.metadata["object_writer"], "evaluator_report")
+        self.assertEqual(failed_chunk.metadata["evaluator_id"], "harbor-verifier")
+        self.assertIn("simulated Harbor evaluator report object store failure", failed_chunk.upload_error_reason)
+        self.assertNotIn("api_key=secret", failed_chunk.upload_error_reason)
+
     def test_worker_executes_original_wrapper_run_and_attaches_result_artifacts(self):
         payload = _run_create_payload("run_worker_wrapper_001")
         payload["task"]["metadata"]["instruction_ref"] = "inline:task.metadata.instruction"
@@ -1999,6 +2159,27 @@ class FailingWorkspaceSnapshotStore(LocalArtifactStore):
     def put_bytes(self, key, payload, *, media_type, metadata=None):
         if "/workspace/snapshot.json" in key:
             raise RuntimeError("simulated workspace object store failure: api_key=secret")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
+
+
+class FailingHarborJobsArchiveStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/raw/harbor-jobs/" in key:
+            raise RuntimeError("simulated Harbor jobs archive object store failure: api_key=secret")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
+
+
+class FailingHarborRunnerReportStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/logs/harbor-runner.json" in key:
+            raise RuntimeError("simulated Harbor runner report object store failure: api_key=secret")
+        return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
+
+
+class FailingHarborEvaluatorReportStore(LocalArtifactStore):
+    def put_bytes(self, key, payload, *, media_type, metadata=None):
+        if "/evaluation/harbor-verifier/report.json" in key:
+            raise RuntimeError("simulated Harbor evaluator report object store failure: api_key=secret")
         return super().put_bytes(key, payload, media_type=media_type, metadata=metadata)
 
 

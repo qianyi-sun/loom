@@ -93,7 +93,8 @@ class HarborResultIngestor:
             trajectory_path=trajectory_path,
         )
 
-        raw_jobs_ref = self.artifact_persistence.persist_harbor_jobs_archive(
+        raw_jobs_ref = _persist_harbor_jobs_archive_ref(
+            self.artifact_persistence,
             run_id=run_id,
             task_instance_id=task_instance_id,
             job_name=job_name,
@@ -113,7 +114,8 @@ class HarborResultIngestor:
             trial_result=trial_result,
             provider_usage=provider_usage,
         )
-        evaluator_report_ref = self.artifact_persistence.persist_evaluator_report(
+        evaluator_report_ref = _persist_evaluator_report_ref(
+            self.artifact_persistence,
             run_id=run_id,
             task_instance_id=task_instance_id,
             result=verifier_result,
@@ -192,7 +194,8 @@ class HarborResultIngestor:
             _optional_json_object(job_dir / "result.json")
         )
         artifacts.append(
-            self.artifact_persistence.persist_harbor_jobs_archive(
+            _persist_harbor_jobs_archive_ref(
+                self.artifact_persistence,
                 run_id=run_id,
                 task_instance_id=task_instance_id,
                 job_name=job_dir.name,
@@ -249,6 +252,52 @@ class HarborResultIngestor:
             turns=turns,
             artifacts=artifacts,
             metadata=_failure_metadata(diagnostics),
+        )
+
+
+def _persist_harbor_jobs_archive_ref(
+    artifact_persistence: ArtifactPersistence,
+    *,
+    run_id: str,
+    task_instance_id: str,
+    job_name: str,
+    jobs_dir: Path,
+) -> ArtifactRef:
+    try:
+        return artifact_persistence.persist_harbor_jobs_archive(
+            run_id=run_id,
+            task_instance_id=task_instance_id,
+            job_name=job_name,
+            jobs_dir=jobs_dir,
+        )
+    except Exception as exc:
+        return artifact_persistence.failed_harbor_jobs_archive_ref(
+            run_id=run_id,
+            task_instance_id=task_instance_id,
+            job_name=job_name,
+            error=exc,
+        )
+
+
+def _persist_evaluator_report_ref(
+    artifact_persistence: ArtifactPersistence,
+    *,
+    run_id: str,
+    task_instance_id: str,
+    result: EvaluatorResult,
+) -> ArtifactRef:
+    try:
+        return artifact_persistence.persist_evaluator_report(
+            run_id=run_id,
+            task_instance_id=task_instance_id,
+            result=result,
+        )
+    except Exception as exc:
+        return artifact_persistence.failed_evaluator_report_ref(
+            run_id=run_id,
+            task_instance_id=task_instance_id,
+            result=result,
+            error=exc,
         )
 
 

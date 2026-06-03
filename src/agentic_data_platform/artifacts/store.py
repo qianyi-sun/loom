@@ -492,6 +492,30 @@ class ArtifactPersistence:
             kind=ArtifactKind.LOG,
         )
 
+    def failed_harbor_jobs_archive_ref(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        job_name: str,
+        error: Exception,
+    ) -> ArtifactRef:
+        key = self.key_factory.harbor_jobs_archive_key(run_id, task_instance_id, job_name)
+        return _failed_artifact_ref(
+            artifact_id=f"{_safe_component(run_id)}-{_safe_component(job_name)}-harbor-jobs",
+            kind=ArtifactKind.LOG,
+            storage_key=key,
+            media_type="application/gzip",
+            reason=_artifact_upload_error_reason(error),
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": ArtifactContentType.HARBOR_JOBS_ARCHIVE,
+                "job_name": job_name,
+                "object_writer": "harbor_jobs_archive",
+            },
+        )
+
     def persist_harbor_runner_report(
         self,
         *,
@@ -517,6 +541,31 @@ class ArtifactPersistence:
             stored,
             artifact_id=f"{_safe_component(run_id)}-harbor-runner-report",
             kind=ArtifactKind.LOG,
+        )
+
+    def failed_harbor_runner_report_ref(
+        self,
+        *,
+        run_id: str,
+        task_instance_id: str,
+        report: dict[str, Any],
+        error: Exception,
+    ) -> ArtifactRef:
+        key = self.key_factory.harbor_runner_report_key(run_id, task_instance_id)
+        return _failed_artifact_ref(
+            artifact_id=f"{_safe_component(run_id)}-harbor-runner-report",
+            kind=ArtifactKind.LOG,
+            storage_key=key,
+            media_type="application/json",
+            reason=_artifact_upload_error_reason(error),
+            metadata={
+                "run_id": run_id,
+                "task_instance_id": task_instance_id,
+                "content_type": ArtifactContentType.HARBOR_RUNNER_REPORT,
+                "exit_code": report.get("exit_code"),
+                "timed_out": report.get("timed_out", False),
+                "object_writer": "harbor_runner_report",
+            },
         )
 
     def persist_harbor_ingestion_diagnostics(

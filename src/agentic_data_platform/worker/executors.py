@@ -328,13 +328,21 @@ class DockerTerminalWorkerExecutor:
         run.transition_to(RunStatus.RUNNING)
 
         result = HarborCliRunnerBackend(command_runner=self.harbor_command_runner).run(spec)
-        run.attach_artifact(
-            self.artifact_persistence.persist_harbor_runner_report(
+        report = result.to_report()
+        try:
+            runner_report_ref = self.artifact_persistence.persist_harbor_runner_report(
                 run_id=run.run_id,
                 task_instance_id=run.task.instance_id,
-                report=result.to_report(),
+                report=report,
             )
-        )
+        except Exception as exc:
+            runner_report_ref = self.artifact_persistence.failed_harbor_runner_report_ref(
+                run_id=run.run_id,
+                task_instance_id=run.task.instance_id,
+                report=report,
+                error=exc,
+            )
+        run.attach_artifact(runner_report_ref)
         if result.exit_code != 0:
             run.failure_reason = _harbor_failure_reason(result)
             run.transition_to(RunStatus.FAILED)

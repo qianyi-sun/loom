@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added #159/#160 Harbor ingestion upload diagnostics. Harbor CLI runner report,
+  raw `jobs/` archive, and Harbor verifier report object-write failures now
+  preserve completed verifier results when Harbor itself succeeded, while
+  recording failed artifact metadata plus failed `artifact` chunks with
+  redacted upload reasons for bundle/replay attribution.
 - Added #157 paginated run trajectory reads. `GET /runs/{run_id}` now returns
   a bounded trajectory preview plus `trajectory_page` cursor metadata, while
   `GET /runs/{run_id}/trajectory` exposes cursor-paginated terminal turns for

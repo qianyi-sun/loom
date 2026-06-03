@@ -320,7 +320,12 @@ upload reason in a failed `artifact` chunk. Terminal benchmark evaluator-report
 upload failures use the same pattern after evaluator output exists: Postgres
 preserves the evaluator result, records the report artifact as
 `upload_status=failed`, and writes a failed `artifact` chunk row with evaluator
-id/status plus the redacted upload reason. Chunk writes append metadata-only
+id/status plus the redacted upload reason. Harbor CLI runner report, raw
+`jobs/` archive, and Harbor verifier report upload failures now follow the same
+artifact-boundary pattern after Harbor execution: Postgres preserves the
+completed verifier result, records the missing Harbor diagnostic/report object
+as `upload_status=failed`, and writes a failed `artifact` chunk row with the
+object writer and redacted upload reason. Chunk writes append metadata-only
 `log.chunk_recorded` events for
 stdout/stderr chunks and `artifact.chunk_recorded` events for
 trajectory/artifact chunks. Upload expiry also appends
