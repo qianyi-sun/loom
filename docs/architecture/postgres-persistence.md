@@ -101,7 +101,9 @@ order. PostgreSQL dispatch also takes a transaction-scoped
 candidates. That serializes capacity decisions across concurrent scheduler
 instances while still keeping row-level `SKIP LOCKED` behavior for candidate
 selection. Non-Postgres local tests use a process-local dispatch decision lock
-for the same in-process capacity invariant.
+for the same in-process capacity invariant, and that fallback lock is held
+until the surrounding SQLAlchemy session commits or rolls back so SQLite CI
+tests do not read stale active capacity between the dispatch write and commit.
 `RunRepository.dispatch_queued_runs_with_diagnostics(...)` uses the same
 transactional dispatch path but also returns queued runs blocked by capacity.
 Blocked rows stay `queued`, store the current blocker under

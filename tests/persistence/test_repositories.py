@@ -1,3 +1,4 @@
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,7 @@ from agentic_data_platform.persistence.repositories import (
     ProjectRepository,
     RunRepository,
     StaleExecutionTaskError,
+    _SCHEDULER_DISPATCH_PROCESS_LOCK,
     _queued_dispatch_candidate_lock_query,
     _ranked_queued_run_id_query,
     _scheduler_dispatch_advisory_lock_statement,
@@ -1538,6 +1540,35 @@ class PersistenceRepositoryTest(unittest.TestCase):
 
         self.assertIn("pg_advisory_xact_lock", lock_sql)
         self.assertIn("4117402174", lock_sql)
+
+    def test_run_repository_holds_sqlite_dispatch_lock_until_session_commit(self):
+        with session_scope(self.engine) as session:
+            _seed_latent_project(session)
+            runs = RunRepository(session)
+            runs.create_run(_queued_run(run_id="run_dispatch_lock_commit_0"))
+            runs.create_run(_queued_run(run_id="run_dispatch_lock_commit_1"))
+
+            runs.dispatch_queued_runs(scheduler_id="scheduler-a", max_runs=1)
+
+            acquired_before_commit: list[bool] = []
+
+            def try_acquire_from_competing_thread() -> None:
+                acquired = _SCHEDULER_DISPATCH_PROCESS_LOCK.acquire(blocking=False)
+                if acquired:
+                    _SCHEDULER_DISPATCH_PROCESS_LOCK.release()
+                acquired_before_commit.append(acquired)
+
+            thread = threading.Thread(target=try_acquire_from_competing_thread)
+            thread.start()
+            thread.join(timeout=5)
+
+            self.assertEqual(acquired_before_commit, [False])
+
+        acquired_after_commit = _SCHEDULER_DISPATCH_PROCESS_LOCK.acquire(blocking=False)
+        if acquired_after_commit:
+            _SCHEDULER_DISPATCH_PROCESS_LOCK.release()
+
+        self.assertTrue(acquired_after_commit)
 
     def test_run_repository_dispatch_skips_canceled_runs(self):
         with session_scope(self.engine) as session:

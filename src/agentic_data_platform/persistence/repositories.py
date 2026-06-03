@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, event, func, select, text
 from sqlalchemy.orm import Session
 
 from agentic_data_platform.dashboard.projections import RunDashboardProjection
@@ -72,7 +72,7 @@ _MAX_INLINE_TERMINAL_STREAM_BYTES = 64 * 1024
 _TRUNCATED_STREAM_MARKER = "\n[truncated: full stream is available in object-store artifacts]\n"
 _TERMINAL_STATUS_VALUES = {RunStatus.SUCCEEDED.value, RunStatus.FAILED.value, RunStatus.CANCELED.value}
 _SCHEDULER_DISPATCH_ADVISORY_LOCK_KEY = 4_117_402_174
-_SCHEDULER_DISPATCH_PROCESS_LOCK = threading.Lock()
+_SCHEDULER_DISPATCH_PROCESS_LOCK = threading.RLock()
 
 
 class StaleExecutionTaskError(ValueError):
@@ -141,7 +141,22 @@ def _acquire_scheduler_dispatch_lock(session: Session):
         session.execute(_scheduler_dispatch_advisory_lock_statement())
         return None
     _SCHEDULER_DISPATCH_PROCESS_LOCK.acquire()
-    return _SCHEDULER_DISPATCH_PROCESS_LOCK
+    _release_scheduler_dispatch_lock_after_transaction(session, _SCHEDULER_DISPATCH_PROCESS_LOCK)
+    return None
+
+
+def _release_scheduler_dispatch_lock_after_transaction(session: Session, dispatch_lock: threading.Lock) -> None:
+    released = False
+
+    def release_once(_session: Session) -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        dispatch_lock.release()
+
+    event.listen(session, "after_commit", release_once, once=True)
+    event.listen(session, "after_rollback", release_once, once=True)
 
 
 @dataclass(frozen=True)

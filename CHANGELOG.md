@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Fixed #156 SQLite/CI scheduler dispatch lock lifetime. The non-Postgres
+  process-local dispatch lock now stays held through the surrounding session
+  commit or rollback, matching the PostgreSQL transaction-scoped advisory lock
+  boundary and preventing CI scheduler race smoke over-dispatch from reading
+  stale active capacity.
 - Added a #158/#160 deploy-time real smoke container leak audit. Shared-dev
   deployment now assigns deterministic run ids to worker, Harbor, API, and
   frontend smoke runs, then runs
