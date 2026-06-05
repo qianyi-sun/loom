@@ -91,3 +91,28 @@ class TaskSchemaError(ConfigError):
 class CapabilityMismatchError(ConfigError):
     """A trial's `requires_caps` cannot be satisfied by any registered worker
     configuration."""
+
+
+# Failure classification ──────────────────────────────────────────────────────
+
+from loom.models.result import FailureReason  # noqa: E402
+
+
+def classify_failure(exc: BaseException) -> FailureReason:
+    """Map an uncaught exception in `Trial.run()` to a `FailureReason`.
+
+    Phase-local handlers (in `_run_step`) catch and record `StepError` before
+    this is reached, so most calls here are for env failures, framework
+    crashes, or the rare trial-level timeout. See spec §5.2.
+    """
+    if isinstance(exc, AgentSetupTimeoutError):
+        return FailureReason.AGENT_ERROR
+    if isinstance(exc, DriverError):
+        return FailureReason.ENV_START_FAILURE
+    if isinstance(exc, VerifierError):
+        return FailureReason.VERIFIER_ERROR
+    if isinstance(exc, TrajectoryFlushFailedError):
+        return FailureReason.TRAJECTORY_FLUSH_FAILED
+    if isinstance(exc, TimeoutError):
+        return FailureReason.AGENT_TIMEOUT
+    return FailureReason.INTERNAL_ERROR
