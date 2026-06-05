@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentic-data-platform"
+name = "loom"
 version = "0.0.0"
-description = "Shared platform contracts for agentic data generation and evaluation."
+description = "Loom — agent evaluation and training-data generation runtime."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -14,34 +14,44 @@ authors = [
 dependencies = [
   "alembic>=1.13,<2.0",
   "boto3>=1.34,<2.0",
-  "fastapi>=0.136,<0.137",
-  "harbor==0.9.0",
-  "httpx>=0.28,<0.29",
-  "httpx2>=2.3,<3.0",
-  "huggingface-hub>=0.36,<2.0",
+  "dirhash>=0.5,<1.0",
   "litellm>=1.70,<2.0",
-  "matplotlib>=3.9,<4.0",
-  "numpy>=2.0,<3.0",
-  "openpyxl>=3.1,<4.0",
   "psycopg[binary]>=3.2,<4.0",
-  "python-multipart>=0.0.9,<1.0",
-  "pyyaml>=6.0,<7.0",
-  "redis>=5.0,<6.0",
+  "pydantic>=2.6,<3.0",
+  "pydantic-settings>=2.2,<3.0",
   "sqlalchemy>=2.0,<3.0",
+  "structlog>=24.1,<25.0",
   "tenacity>=9.0,<10.0",
-  "uvicorn[standard]>=0.32,<1.0",
 ]
 
 [project.optional-dependencies]
-browser = [
-  "playwright>=1.60,<2.0",
+dev = [
+  "mypy>=1.10,<2.0",
+  "pytest>=8.0,<9.0",
+  "pytest-asyncio>=0.23,<1.0",
+  "ruff>=0.5,<1.0",
+  "testcontainers[postgres]>=4.4,<5.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["loom*"]
 
-[tool.setuptools.package-data]
-"agentic_data_platform.benchmarks" = ["patches/*.patch"]
-"agentic_data_platform.benchmarks.catalogs" = ["*.json"]
-"agentic_data_platform.frontend.static" = ["*.html", "*.css", "*.js"]
-"agentic_data_platform.persistence" = ["alembic/*.py", "alembic/versions/*.py"]
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/loom"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
