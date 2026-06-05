@@ -104,3 +104,46 @@ class StepConfig(BaseModel):
     min_reward: dict[str, float] | float | None = None
     network: StepNetworkPlan | None = None
     healthcheck: HealthcheckSpec | None = None
+
+
+from typing import Literal
+
+from pydantic import model_validator
+
+from loom.models.types import MultiStepRewardStrategy
+
+
+class MultiStepConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    reward_strategy: MultiStepRewardStrategy = "mean"
+    weights: dict[str, float] | None = None
+
+    @model_validator(mode="after")
+    def _weights_required_for_weighted(self) -> MultiStepConfig:
+        if self.reward_strategy == "weighted" and not self.weights:
+            raise ValueError(
+                "reward_strategy='weighted' requires non-empty `weights`",
+            )
+        return self
+
+
+class TaskConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    schema_version: Literal["1"] = "1"
+    task: TaskMetadata
+    environment: EnvironmentConfig
+    agent: AgentDefaults
+    verifier: VerifierDefaults
+    steps: list[StepConfig] = []
+    multi_step: MultiStepConfig | None = None
+
+
+def normalize_steps(cfg: TaskConfig) -> TaskConfig:
+    """Implicit single-step synthesis (spec §4.1).
+
+    Tasks without explicit `steps` get a single synthesized step named "main"
+    so the trial loop has exactly one code path to follow.
+    """
+    if cfg.steps:
+        return cfg
+    return cfg.model_copy(update={"steps": [StepConfig(name="main")]})
