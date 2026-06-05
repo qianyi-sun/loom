@@ -7,9 +7,9 @@ metadata + environment + per-step config + multi-step aggregation strategy.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
@@ -19,6 +19,7 @@ from loom.models.types import (
     OS,
     GPUVendor,
     ModelSpec,
+    MultiStepRewardStrategy,
     NetworkPolicyKind,
     VerifierEnvMode,
 )
@@ -104,13 +105,6 @@ class StepConfig(BaseModel):
     min_reward: dict[str, float] | float | None = None
     network: StepNetworkPlan | None = None
     healthcheck: HealthcheckSpec | None = None
-
-
-from typing import Literal
-
-from pydantic import model_validator
-
-from loom.models.types import MultiStepRewardStrategy
 
 
 class MultiStepConfig(BaseModel):
