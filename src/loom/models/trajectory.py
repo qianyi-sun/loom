@@ -61,3 +61,85 @@ class TrialStartEvent(_EventBase):
     task_id: str
     agent_name: str
     agent_mode: Literal["out-of-box", "in-box"]
+
+
+# Trial-level ──────────────────────────────────────────────────────────────────
+
+class TrialEndEvent(_EventBase):
+    kind: Literal[EventKind.TRIAL_END] = EventKind.TRIAL_END
+    final_state: Literal["succeeded", "failed", "cancelled"]
+    reward: dict[str, float] | None = None
+    failure_reason: str | None = None
+
+
+class TrialErrorEvent(_EventBase):
+    kind: Literal[EventKind.TRIAL_ERROR] = EventKind.TRIAL_ERROR
+    error_type: str
+    message: str
+    traceback: str
+
+
+class TrialCancelledEvent(_EventBase):
+    kind: Literal[EventKind.TRIAL_CANCELLED] = EventKind.TRIAL_CANCELLED
+    cancellation_requested_at: datetime
+    observed_at: datetime
+
+
+# Step-level ───────────────────────────────────────────────────────────────────
+
+class StepStartEvent(_EventBase):
+    kind: Literal[EventKind.STEP_START] = EventKind.STEP_START
+    instruction_excerpt: str
+
+
+class StepEndEvent(_EventBase):
+    kind: Literal[EventKind.STEP_END] = EventKind.STEP_END
+    summary: dict[str, float] | None = None
+    error_phase: Literal["prepare", "agent", "artifacts", "verifier"] | None = None
+
+
+# Environment-level ────────────────────────────────────────────────────────────
+
+class EnvStartEvent(_EventBase):
+    kind: Literal[EventKind.ENV_START] = EventKind.ENV_START
+    image_ref: str
+    build_time_sec: float
+
+
+class EnvReadyEvent(_EventBase):
+    kind: Literal[EventKind.ENV_READY] = EventKind.ENV_READY
+    healthcheck_attempts: int
+
+
+class EnvStopEvent(_EventBase):
+    kind: Literal[EventKind.ENV_STOP] = EventKind.ENV_STOP
+    duration_sec: float
+    exit_status: int | None = None
+
+
+class EnvExecEvent(_EventBase):
+    kind: Literal[EventKind.ENV_EXEC] = EventKind.ENV_EXEC
+    cmd: str
+    user: str | int | None
+    cwd: str | None
+    return_code: int
+    stdout_bytes: int
+    stderr_bytes: int
+    truncated: bool
+    duration_sec: float
+
+
+# File ops ─────────────────────────────────────────────────────────────────────
+
+class FileUploadEvent(_EventBase):
+    kind: Literal[EventKind.FILE_UPLOAD] = EventKind.FILE_UPLOAD
+    src_size_bytes: int
+    dst_path: str
+    duration_sec: float
+
+
+class FileDownloadEvent(_EventBase):
+    kind: Literal[EventKind.FILE_DOWNLOAD] = EventKind.FILE_DOWNLOAD
+    src_path: str
+    dst_size_bytes: int
+    duration_sec: float
