@@ -143,3 +143,67 @@ class FileDownloadEvent(_EventBase):
     src_path: str
     dst_size_bytes: int
     duration_sec: float
+
+
+# Agent — LLM call (training-data load-bearing per spec §4.4.1) ────────────────
+
+from typing import Any  # noqa: E402  (intentionally local to keep top imports tight)
+
+from loom.models.types import ModelSpec  # noqa: E402
+
+
+class ChatMessage(BaseModel):
+    """OpenAI-compatible chat message used in LLMCallEvent.messages / .response."""
+    model_config = ConfigDict(frozen=True, extra="allow")  # allow provider-specific fields
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | list[dict[str, Any]] | None = None
+    name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+
+
+class ToolSpec(BaseModel):
+    """Tool definition sent in LLMCallEvent.tools."""
+    model_config = ConfigDict(frozen=True, extra="allow")
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] = {}
+
+
+class LLMCallEvent(_EventBase):
+    """The training-data load-bearing event (spec §4.4.1)."""
+    kind: Literal[EventKind.LLM_CALL] = EventKind.LLM_CALL
+
+    # Model identification (frozen at call time)
+    model: ModelSpec
+    rate_card_hash: str
+
+    # Input
+    system_prompt: str | None
+    messages: list[ChatMessage]
+    tools: list[ToolSpec] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+
+    # Output
+    response: ChatMessage
+    finish_reason: str
+
+    # Usage — RAW, NOT derived (spec H5)
+    input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(ge=0)
+    cache_write_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    thinking_tokens: int = Field(ge=0)
+    provider_extras: dict[str, int]                 # NAMED counters (int-valued)
+
+    # Derived (recomputable)
+    cost_usd_snapshot: float = Field(ge=0)
+
+    # Timing
+    duration_sec: float = Field(ge=0)
+    streamed: bool
+    time_to_first_token_sec: float | None
+
+    # Attribution
+    gateway_request_id: str
+    cache_keys: list[str] = []
