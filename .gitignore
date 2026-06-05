@@ -39,3 +39,4 @@ logs/
 .idea/
 .vscode/
 .claude/settings.local.json
+.venv/
