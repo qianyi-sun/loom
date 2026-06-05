@@ -231,3 +231,33 @@ Use this section as we make hard calls during implementation.
 | 2026-06-05 | Three former improvements rejected after RFC0001 read: R2 (subagents), R3 (step granularity), R4 (multimodal — soft) | ATIF v1.7 already addresses them |
 | 2026-06-05 | Skills (D1), multi-backend (D2), adapters (D3), leaderboard (D4) deferred from v1 | Scope discipline; not on critical path |
 | 2026-06-05 | v1 scope: H1 + H2 + H3 (Docker only) + H4-lite + H5; ~1.5k LOC target | Smallest version that captures the essence and validates our improvements |
+| 2026-06-05 | Round-3 audit completed (concrete agents, verifier zoo, TrialResult schema, network policy plumbing); 4 new warts logged in addendum below | Final contract-validation pass before spec writing |
+| 2026-06-05 | All 7 Loom implementation plans written + committed; runtime-core spec is implementation-ready | See `docs/superpowers/plans/2026-06-05-loom-cross-plan-review.md` |
+
+---
+
+## Addendum — Round-3 audit findings (concrete-contract validation)
+
+Round 3 read Harbor's *concrete* implementations (Oracle/Terminus2/InstalledBase agents, the single concrete Verifier, full TrialResult schema, network policy + healthcheck plumbing) to find warts that only appear when the abstract contracts meet real code. Findings:
+
+### W1. Agent contract is loose on streaming vs batching
+**Evidence:** `agents/oracle.py` builds the trajectory post-hoc and assigns in `finally`. `agents/terminus_2/terminus_2.py` streams into `self._trajectory_steps` as it goes. The `BaseAgent` Protocol does not enforce either pattern.
+**Loom fix (already in the spec):** Make streaming *emergent* from the architecture rather than enforced on the agent — Gateway-backed LLM calls emit events as they happen; in-box CLIs write to `/loom/trajectory.jsonl` and the host tails. No "step_end check" theater on the Protocol.
+
+### W2. MCP servers are wired as prose injection, not a typed channel
+**Evidence:** Terminus2 appends MCP server descriptions into the instruction string (`"MCP Servers:\n..."`), not as a typed field.
+**Loom fix:** Spec §2.1 defines `mcp: Sequence[MCPConnection]` as a typed channel passed to `AgentRuntime.run()`. Plan 1 Task 7 implements `MCPConnection` with a transport-aware validator. Plan 3 Tasks 5, 6 thread it through `LiteLLMAgent` and `ClaudeCodeAgent`.
+
+### W3. Verifier interface is anemic
+**Evidence:** `harbor/verifier/verifier.py` is the only concrete verifier. `VerifierResult.rewards: dict[str, float|int] | None` — that's it. Failures leak as exceptions (`MissingTestDirError`, `ParsingError`, `VerifierOutputNotFound`).
+**Loom fix:** Spec §2.4 defines rich `VerifierResult { rewards, checks: list[CheckResult], confidence, structured, error: VerifierError }`. The `VerifierError` is a struct field, not a raised exception. Plan 1 Task 19 implements; Plan 3 Tasks 7–12 use across five concrete verifiers.
+
+### W4. `TrialResult` has accidental redundancy and orphaned trajectory
+**Evidence:** Harbor's `TrialResult` has both `agent_result` and `verifier_result` at the trial level AND in `step_results[0]`. Trajectory is NOT in TrialResult — referenced only by `trial_uri`. Timing fields duplicated at trial + step levels.
+**Loom fix:** Spec §4.5 — trial-level `agent_result`/`verifier_result` removed; `steps: list[StepResult]` is the single source of truth. Trajectory pointers (`trajectory_uri`, `atif_uri`, `atif_schema_version`) are first-class fields on `TrialResult`, not orphaned. Plan 1 Tasks 17–18 implement.
+
+### Confirmed by round-3 (no fix needed)
+
+- **H3 Driver protocol scope** — `set_network_policy` and `run_healthcheck` *should* stay on the Driver. Harbor's `TrialNetworkPlan` is pure data resolved by the orchestrator; the *application* of policy is backend-specific (iptables for Docker, provider APIs elsewhere). The Driver decides *how*; the orchestrator decides *when*. Plan 2 Tasks 11–13 implement this split for `DockerDriver`.
+
+These four warts are the final inputs that shaped Spec §2.1, §2.4, §4.5 to their committed form.
