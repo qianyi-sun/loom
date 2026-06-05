@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Project context and architecture
-    url: https://github.com/carinrc/agentic-data-platform/tree/dev/docs
-    about: Read the current project docs before opening broad scope or architecture issues.
+  - name: Loom design spec
+    url: https://github.com/carinrc/agentic-data-platform/blob/dev/docs/superpowers/specs/2026-06-05-loom-runtime-core-design.md
+    about: Read the Loom runtime core design before opening broad scope or architecture issues.
+  - name: Loom implementation plans
+    url: https://github.com/carinrc/agentic-data-platform/tree/dev/docs/superpowers/plans
+    about: The seven implementation plans + cross-plan review.
