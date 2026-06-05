@@ -207,3 +207,72 @@ class LLMCallEvent(_EventBase):
     # Attribution
     gateway_request_id: str
     cache_keys: list[str] = []
+
+
+# Agent (continued) + verifier + network + sys ────────────────────────────────
+
+from typing import Annotated  # noqa: E402
+
+from loom.models.verifier import CheckResult, VerifierResult  # noqa: E402
+
+
+class ToolUseEvent(_EventBase):
+    kind: Literal[EventKind.TOOL_USE] = EventKind.TOOL_USE
+    tool_name: str
+    args: dict[str, Any]
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    duration_sec: float = Field(ge=0)
+
+
+class AgentThoughtEvent(_EventBase):
+    kind: Literal[EventKind.AGENT_THOUGHT] = EventKind.AGENT_THOUGHT
+    content: str
+    tokens: int | None = None
+
+
+class VerifierStartEvent(_EventBase):
+    kind: Literal[EventKind.VERIFIER_START] = EventKind.VERIFIER_START
+    verifier_name: str
+    env_mode: Literal["shared", "separate"]
+
+
+class VerifierEndEvent(_EventBase):
+    kind: Literal[EventKind.VERIFIER_END] = EventKind.VERIFIER_END
+    result: VerifierResult
+
+
+class VerifierCheckEvent(_EventBase):
+    kind: Literal[EventKind.VERIFIER_CHECK] = EventKind.VERIFIER_CHECK
+    check: CheckResult
+
+
+class NetworkPolicyChangeEvent(_EventBase):
+    kind: Literal[EventKind.NETWORK_POLICY_CHANGE] = EventKind.NETWORK_POLICY_CHANGE
+    from_policy: dict[str, Any]
+    to_policy: dict[str, Any]
+    phase: Literal["agent", "verifier", "baseline_restore"]
+
+
+class WorkerLostClaimEvent(_EventBase):
+    kind: Literal[EventKind.WORKER_LOST_CLAIM] = EventKind.WORKER_LOST_CLAIM
+    original_worker_id: UUID
+    detected_at: datetime
+
+
+class WorkerDrainInterruptedEvent(_EventBase):
+    kind: Literal[EventKind.WORKER_DRAIN_INTERRUPTED] = EventKind.WORKER_DRAIN_INTERRUPTED
+    drain_timeout_sec: float
+
+
+TrajectoryEvent = Annotated[
+    TrialStartEvent | TrialEndEvent | TrialErrorEvent | TrialCancelledEvent
+    | StepStartEvent | StepEndEvent
+    | EnvStartEvent | EnvReadyEvent | EnvStopEvent | EnvExecEvent
+    | FileUploadEvent | FileDownloadEvent
+    | LLMCallEvent | ToolUseEvent | AgentThoughtEvent
+    | VerifierStartEvent | VerifierEndEvent | VerifierCheckEvent
+    | NetworkPolicyChangeEvent
+    | WorkerLostClaimEvent | WorkerDrainInterruptedEvent,
+    Field(discriminator="kind"),
+]
