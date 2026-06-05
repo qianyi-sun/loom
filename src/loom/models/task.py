@@ -67,3 +67,40 @@ class VerifierDefaults(BaseModel):
     timeout_sec: float = Field(default=300, gt=0)
     env_mode: VerifierEnvMode = "shared"
     user: str | int | None = None
+
+
+class AgentOverrides(BaseModel):
+    """Per-step partial override of AgentDefaults. None fields inherit task default."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    model: ModelSpec | None = None
+    timeout_sec: float | None = None
+    user: str | int | None = None
+    extra_mcp_servers: list[MCPConnection] | None = None
+
+
+class VerifierOverrides(BaseModel):
+    """Per-step partial override of VerifierDefaults."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    name: str | None = None
+    args: dict[str, Any] | None = None
+    timeout_sec: float | None = None
+    env_mode: VerifierEnvMode | None = None
+    user: str | int | None = None
+
+
+class StepNetworkPlan(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    agent_phase: NetworkPolicy | None = None
+    verifier_phase: NetworkPolicy | None = None
+
+
+class StepConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    name: str
+    instruction_file: PurePosixPath = PurePosixPath("instruction.md")
+    agent: AgentOverrides | None = None
+    verifier: VerifierOverrides | None = None
+    artifacts: list[str] = []                                       # POSIX globs
+    min_reward: dict[str, float] | float | None = None
+    network: StepNetworkPlan | None = None
+    healthcheck: HealthcheckSpec | None = None
