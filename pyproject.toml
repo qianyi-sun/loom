@@ -44,7 +44,11 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF"]
-ignore = ["E501"]
+# E501: line length handled by formatter.
+# RUF001-003: ambiguous Unicode chars in identifiers/docstrings/comments —
+#   the spec and plan docs use × (multiplication sign) and similar
+#   notation in code docstrings/comments intentionally.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"
