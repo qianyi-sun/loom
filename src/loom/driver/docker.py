@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
+import tarfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -210,13 +212,60 @@ class DockerDriver:
             duration_sec=duration,
         )
 
-    async def upload(self, src: Path, dst: PurePosixPath) -> None:  # Task 10
+    async def upload(self, src: Path, dst: PurePosixPath) -> None:
         self._require_running()
-        raise NotImplementedError("upload lands in Task 10")
+        assert self._container is not None
+        if not src.is_file():
+            raise FileNotFoundError(f"upload source {src} is not a regular file")
 
-    async def download(self, src: PurePosixPath, dst: Path) -> None:  # Task 10
+        def _build_tar() -> bytes:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w") as tf:
+                info = tarfile.TarInfo(name=dst.name)
+                data = src.read_bytes()
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+            return buf.getvalue()
+
+        tar_bytes = await asyncio.to_thread(_build_tar)
+
+        # Ensure parent dir exists in the container.
+        await self.exec(f"mkdir -p {dst.parent.as_posix()}", user="root")
+
+        def _put() -> None:
+            assert self._container is not None
+            ok = self._container.put_archive(path=str(dst.parent), data=tar_bytes)
+            if not ok:
+                raise DriverError(f"put_archive returned False for {dst}")
+
+        await asyncio.to_thread(_put)
+
+    async def download(self, src: PurePosixPath, dst: Path) -> None:
         self._require_running()
-        raise NotImplementedError("download lands in Task 10")
+        assert self._container is not None
+
+        def _get() -> bytes:
+            assert self._container is not None
+            try:
+                stream, _stat = self._container.get_archive(str(src))
+            except NotFound as exc:
+                raise FileNotFoundError(f"{src} not found in container") from exc
+            return b"".join(stream)
+
+        data = await asyncio.to_thread(_get)
+
+        def _extract() -> None:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r") as tf:
+                members = tf.getmembers()
+                if not members:
+                    raise DriverError(f"empty tarball returned for {src}")
+                fobj = tf.extractfile(members[0])
+                if fobj is None:
+                    raise DriverError(f"could not extract {src} from tarball")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(fobj.read())
+
+        await asyncio.to_thread(_extract)
 
     async def set_network_policy(self, policy: NetworkPolicy) -> None:  # Task 13
         self._require_running()
