@@ -90,6 +90,15 @@ class RateCardCache:
                 self._fetched_at = now
             return self._table
 
+    def invalidate(self) -> None:
+        """Drop the cached table so the next get() refetches.
+
+        Used by the admin upsert path so a freshly-uploaded card is visible
+        without waiting for the TTL.
+        """
+        self._table = None
+        self._fetched_at = 0.0
+
     async def _fetch_latest(self) -> RateCardTable:
         async with self.session_factory() as session:
             row = (await session.execute(

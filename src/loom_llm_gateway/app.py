@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
-from loom_llm_gateway.routes import chat, health
+from loom_llm_gateway.routes import admin, chat, health
 
 
 def create_app(settings: GatewaySettings) -> FastAPI:
@@ -33,6 +33,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(chat.router)
+    app.include_router(admin.router)
     return app
 
 
