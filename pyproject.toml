@@ -60,6 +60,12 @@ strict = true
 files = ["src/loom"]
 plugins = ["pydantic.mypy"]
 
+# boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package
+# is heavy. We treat boto3 as untyped at the import boundary.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
