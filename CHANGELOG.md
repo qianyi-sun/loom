@@ -7,6 +7,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 5 — Control Plane (2026-06-06, tag `loom-control-plane-v0.5`).**
+  Authoritative writer for trial state + worker registry. New sibling
+  service `loom_control_plane` alongside `loom_llm_gateway`. Highlights:
+  - `loom.auth`: hoisted from `loom_llm_gateway.auth` so both services
+    share the same bearer-token verification helper (re-export shim
+    kept for compat).
+  - `loom_control_plane.config`: `LOOM_CP_`-prefixed BaseSettings.
+  - `loom_control_plane.scheduler.requires_caps`: pure transform from
+    `TaskConfig` → `RequiredCapabilities` (unions baseline + step phase
+    network policies; submitters never specify caps directly).
+  - `loom_control_plane.scheduler.claim`: single SQL CTE + UPDATE with
+    `FOR UPDATE SKIP LOCKED` implementing DRF — `in_flight_count /
+    fair_share_weight`, then `submit_priority`, then oldest
+    `submitted_at`. Mounted_fs intentionally omitted in v1.
+  - `loom_control_plane.scheduler.crash_detector`: background sweep
+    that reclaims trials from workers whose `last_seen_at` is older
+    than `expiry_sec` (back to queued + 30s backoff via
+    `next_attempt_at`). Lifespan-managed with shielded cancellation.
+  - Routes:
+    - `POST /trials` — auth + task lookup + caps derivation + defensive
+      team_quota upsert + trial INSERT.
+    - `POST /trials/claim` — bearer (worker:claim) → flatten caps →
+      claim_one → 200 trial config or 204.
+    - `POST /workers/register` + `POST /workers/{id}/heartbeat`.
+    - `PATCH /trials/{id}/state` — fenced by `(id, worker_id)` predicate;
+      409 if worker has lost claim.
+    - `PATCH /trials/{id}/trajectory_index` — fenced trajectory_index
+      JSONB write.
+    - `POST /artifacts/upload-url` — presigned MinIO URL; team-id
+      resolution from token (team) or trial row (worker).
+    - `POST /trials/{id}/cancel` — source-state-aware (only
+      queued/claimed/running → cancelled).
+    - `GET /trials/{id}` — full trial fetch with cross-team 403.
+    - `GET /trials/{id}/trajectory` — 302 redirect to presigned
+      get_object URL.
+    - `POST /admin/worker-tokens` + `DELETE /admin/worker-tokens/{prefix}`
+      — admin-scope-gated token issue/revoke.
+  - `loom_control_plane.metrics`: Prometheus enumeration (Counters,
+    Gauges, Histogram) per spec §7.3.
+  - 270 unit+contract tests + integration suite green; lint + mypy
+    strict clean across 82 source files.
 - **Plan 4 — LLM Gateway (2026-06-06, tag `loom-llm-gateway-v0.4`).**
   Sibling service `loom_llm_gateway` (top-level package alongside
   `loom`): OpenAI-compatible chat endpoint with bearer auth, rate-card
