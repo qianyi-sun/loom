@@ -87,6 +87,24 @@ def test_admin_upsert_is_idempotent(admin_app):  # type: ignore[no-untyped-def]
         assert r2.status_code == 201
 
 
+def test_admin_rejects_malformed_payload(admin_app):  # type: ignore[no-untyped-def]
+    """Regression for Bug 2: a payload that won't validate as RateCardTable
+    must be rejected with 400 BEFORE it lands in the DB. Otherwise the
+    rate-card cache breaks for every chat request until an admin uploads
+    a valid card."""
+    app, raw_admin = admin_app
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/rate-cards",
+            headers={"Authorization": f"Bearer {raw_admin}"},
+            json={
+                "id": "card-malformed",
+                "entries": [{"provider": "anthropic"}],  # missing model + rates
+            },
+        )
+        assert r.status_code == 400
+
+
 def test_non_admin_rejected(admin_app):  # type: ignore[no-untyped-def]
     app, _ = admin_app
     with TestClient(app) as client:

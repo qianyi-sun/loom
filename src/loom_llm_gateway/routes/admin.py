@@ -6,10 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert
 
 from loom.db.schema import RateCard
 from loom_llm_gateway.auth import verify_bearer_token
+from loom_llm_gateway.rate_card import RateCardTable
 
 router = APIRouter(prefix="/admin")
 
@@ -31,7 +33,19 @@ async def upsert_rate_card(
     if not card_id or "entries" not in payload:
         raise HTTPException(status_code=400, detail="id + entries required")
 
+    # Bug 2 fix: validate the payload BEFORE persisting. A bad payload would
+    # otherwise land in the DB and break every subsequent chat request when
+    # the rate-card cache tries to construct RateCardTable from it.
     now = datetime.now(UTC)
+    try:
+        RateCardTable.model_validate({
+            "id": card_id,
+            "captured_at": now,
+            "entries": payload["entries"],
+        })
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+
     async with request.app.state.session_factory() as session:
         stmt = insert(RateCard).values(
             id=card_id, captured_at=now, table=payload,

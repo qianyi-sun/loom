@@ -63,6 +63,25 @@ def test_unknown_model_raises():
         lookup_entry(table, spec)
 
 
+def test_tier_specific_spec_falls_back_to_generic_entry():
+    """Regression for Bug 5: when no entry matches the requested tier, the
+    generic (tier=None) entry should win over any tier-mismatch entry. The
+    old scoring tied at 0 and returned the first candidate arbitrarily."""
+    table = RateCardTable(
+        id="card-fallback", captured_at=datetime.now(UTC),
+        entries=[
+            _entry(tier="long-context", input_=12.0),  # specialized, wrong tier
+            _entry(tier=None, input_=3.0),             # generic baseline
+        ],
+    )
+    spec = ModelSpec(
+        provider="anthropic", name="claude-opus-4-7", tier="1m-context",
+    )
+    chosen = lookup_entry(table, spec)
+    assert chosen.tier is None
+    assert chosen.input_per_mtok == 3.0
+
+
 def test_hash_table_is_stable():
     """Same content → same hash, regardless of captured_at."""
     a = RateCardTable(id="x", captured_at=datetime.now(UTC), entries=[_entry()])

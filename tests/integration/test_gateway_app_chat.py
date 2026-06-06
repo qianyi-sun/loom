@@ -124,7 +124,10 @@ def test_chat_rejects_missing_loom_block(app, seed_data):  # type: ignore[no-unt
             },
         )
         assert r.status_code == 400
-        assert "loom" in r.json()["detail"].lower()
+        # detail is now a structured Pydantic error list — the loom field
+        # missing shows up in one of the error locations.
+        detail = r.json()["detail"]
+        assert any("loom" in str(err.get("loc", [])).lower() for err in detail)
 
 
 def test_chat_rejects_bad_token(app, seed_data):  # type: ignore[no-untyped-def]
@@ -143,6 +146,94 @@ def test_chat_rejects_bad_token(app, seed_data):  # type: ignore[no-untyped-def]
             },
         )
         assert r.status_code == 401
+
+
+def test_chat_rejects_team_id_mismatch(app, seed_data):  # type: ignore[no-untyped-def]
+    """Regression for Bug 1: a client-supplied loom.team_id that doesn't
+    match the bearer token's team_id must be rejected. Otherwise team A
+    can attribute spend to team B by lying in the body."""
+    _, raw_token = seed_data
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(uuid4()),  # wrong team
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+        assert r.status_code == 403
+        assert "team_id" in r.json()["detail"]
+
+
+def test_chat_rejects_missing_model_with_400(app, seed_data):  # type: ignore[no-untyped-def]
+    """Regression for Bug 3: missing required `model` field → 400, not 500."""
+    team_id, raw_token = seed_data
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+        assert r.status_code == 400
+
+
+def test_chat_strips_reserved_body_kwargs(app, seed_data):  # type: ignore[no-untyped-def]
+    """Regression for Bug 4: a body containing reserved kwargs (api_key,
+    timeout) must not duplicate-shadow the route's explicit named args."""
+    team_id, raw_token = seed_data
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+                # Reserved keys that used to cause TypeError → 500.
+                "api_key": "client-attempt-to-override",
+                "timeout": 9999,
+            },
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_chat_rejects_unsupported_provider(app, seed_data):  # type: ignore[no-untyped-def]
+    """Regression for Bug 6: an unknown provider in model="X/Y" → 400 with
+    a clear allowed-providers list, instead of silently passing api_key=None."""
+    team_id, raw_token = seed_data
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "custom-co/foo-bar",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+        assert r.status_code == 400
+        assert "unsupported provider" in r.json()["detail"]
 
 
 def test_chat_rejects_unknown_model_with_400(app, seed_data):  # type: ignore[no-untyped-def]

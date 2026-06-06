@@ -44,7 +44,17 @@ class RateCardTable(BaseModel):
 
 
 def lookup_entry(table: RateCardTable, spec: ModelSpec) -> RateCardEntry:
-    """Match by (provider, model, tier?, region?) — most-specific wins."""
+    """Match by (provider, model, tier?, region?) — most-specific wins, with
+    a graceful tier=None / region=None fallback.
+
+    Scoring per field (tier, region):
+    - exact match (both non-None, equal): +3
+    - both None (generic spec + generic entry): +2
+    - spec is non-None, entry is None (generic-tier fallback for a
+      tier-specific spec): +1
+    - mismatch (both non-None, different values): -2
+    - spec is None, entry is non-None (irrelevant specialization): 0
+    """
     candidates = [
         e for e in table.entries
         if e.provider == spec.provider and e.model == spec.name
@@ -54,13 +64,19 @@ def lookup_entry(table: RateCardTable, spec: ModelSpec) -> RateCardEntry:
             f"no entry for {spec.provider}/{spec.name}",
         )
 
+    def _pair_score(spec_v: str | None, entry_v: str | None) -> int:
+        if spec_v is None and entry_v is None:
+            return 2
+        if spec_v is not None and entry_v == spec_v:
+            return 3
+        if spec_v is not None and entry_v is None:
+            return 1  # generic fallback for tier-specific spec
+        if spec_v is None and entry_v is not None:
+            return 0
+        return -2     # both non-None, different
+
     def _score(e: RateCardEntry) -> int:
-        score = 0
-        if e.tier == spec.tier:
-            score += 2 if spec.tier else 1
-        if e.region == spec.region:
-            score += 2 if spec.region else 1
-        return score
+        return _pair_score(spec.tier, e.tier) + _pair_score(spec.region, e.region)
 
     return max(candidates, key=_score)
 
