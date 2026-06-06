@@ -1,0 +1,115 @@
+from collections.abc import AsyncGenerator
+from pathlib import Path, PurePosixPath
+from uuid import uuid4
+
+import pytest
+
+from loom.agent.oracle import OracleAgent
+from loom.driver.base import StartOptions
+from loom.driver.fake import FakeDriver, command_table_handler
+from loom.models.exec import ExecResult
+from loom.trajectory.storage import FakeObjectStore
+from loom.trajectory.writer import TrajectoryWriter
+
+
+@pytest.fixture
+def store() -> FakeObjectStore:
+    return FakeObjectStore()
+
+
+@pytest.fixture
+async def writer(
+    tmp_path: Path, store: FakeObjectStore,
+) -> AsyncGenerator[TrajectoryWriter, None]:
+    w = TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl", store=store,
+        bucket="trajectories", key=f"t/{uuid4()}/events.jsonl",
+        min_part_bytes=0,  # tiny test events; let final flush land cleanly
+    )
+    async with w:
+        yield w
+
+
+@pytest.fixture
+def task_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "task"
+    d.mkdir()
+    (d / "task.toml").write_text('schema_version = "1"\n')
+    (d / "instruction.md").write_text("hello\n")
+    sol = d / "solution"
+    sol.mkdir()
+    (sol / "solve.sh").write_text("#!/bin/sh\necho solved\n")
+    (sol / "solve.sh").chmod(0o755)
+    return d
+
+
+async def test_oracle_runs_solve_script(
+    writer: TrajectoryWriter, task_dir: Path,
+):
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"solved\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    driver = FakeDriver(exec_handler=handler)
+    await driver.start(options=StartOptions())
+
+    trial_id = uuid4()
+    agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
+    await agent.run(
+        instruction="hello", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert PurePosixPath("/workspace/solve.sh") in driver.filesystem
+    assert driver.filesystem[PurePosixPath("/workspace/solve.sh")].startswith(b"#!/bin/sh")
+
+    from loom.models.trajectory import EventKind
+    from loom.trajectory.reader import TrajectoryReader
+    reader = TrajectoryReader(writer.local_path)
+    exec_events = list(reader.iter_kind(EventKind.ENV_EXEC))
+    assert len(exec_events) == 1
+    assert exec_events[0].trial_id == trial_id
+
+
+async def test_oracle_missing_solve_raises(writer: TrajectoryWriter, tmp_path: Path):
+    bad = tmp_path / "task-no-sol"
+    bad.mkdir()
+    (bad / "task.toml").write_text('schema_version = "1"\n')
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+    agent = OracleAgent(task_dir=bad, trial_id=uuid4())
+    with pytest.raises(FileNotFoundError, match=r"solve\.sh"):
+        await agent.run(
+            instruction="x", env=driver, trajectory=writer,
+            mcp=[], skills_dir=None, step_id="main",
+        )
+
+
+async def test_oracle_nonzero_exit_raises(writer: TrajectoryWriter, task_dir: Path):
+    """Spec: a non-zero exit from solve.sh must surface as AgentError so the
+    trial fails with AGENT_ERROR rather than silently 'succeeding'."""
+    from loom.errors import AgentError
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=2, stdout=b"", stderr=b"oops",
+            truncated=False, duration_sec=0.01,
+        ),
+    })
+    driver = FakeDriver(exec_handler=handler)
+    await driver.start(options=StartOptions())
+    agent = OracleAgent(task_dir=task_dir, trial_id=uuid4())
+    with pytest.raises(AgentError, match="rc=2"):
+        await agent.run(
+            instruction="x", env=driver, trajectory=writer,
+            mcp=[], skills_dir=None, step_id="main",
+        )
+
+
+def test_oracle_mode_and_metadata():
+    agent = OracleAgent(task_dir=Path("/nonexistent"), trial_id=uuid4())
+    assert agent.mode == "out-of-box"
+    assert agent.name == "oracle"
+    assert agent.model is None
+    assert "linux" in agent.supports_os
