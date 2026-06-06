@@ -111,3 +111,36 @@ async def cancel_trial(
             detail="trial is in a terminal state (succeeded/failed/cancelled)",
         )
     return {"trial_id": str(row["id"]), "state": row["state"]}
+
+
+@router.get("/trials/{trial_id}")
+async def get_trial(
+    trial_id: UUID,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="not authorized")
+
+    async with request.app.state.session_factory() as session:
+        row = (await session.execute(
+            select(TrialRow).where(TrialRow.id == trial_id),
+        )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    if ctx.team_id is not None and row.team_id != ctx.team_id:
+        raise HTTPException(status_code=403, detail="trial belongs to another team")
+
+    return {
+        "id": str(row.id), "team_id": str(row.team_id), "task_id": row.task_id,
+        "state": row.state, "failure_reason": row.failure_reason,
+        "submitted_at": row.submitted_at.isoformat(),
+        "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "attempt_count": row.attempt_count,
+        "result": row.result,
+        "trajectory_index": row.trajectory_index,
+    }
