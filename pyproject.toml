@@ -20,6 +20,7 @@ dependencies = [
   "fastapi>=0.110,<1.0",
   "jsonschema>=4.21,<5.0",
   "litellm>=1.70,<2.0",
+  "prometheus-client>=0.19,<1.0",
   "psycopg[binary]>=3.2,<4.0",
   "pydantic>=2.6,<3.0",
   "pydantic-settings>=2.2,<3.0",
