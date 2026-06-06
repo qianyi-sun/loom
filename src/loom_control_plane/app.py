@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_control_plane.config import ControlPlaneSettings
-from loom_control_plane.routes import health, trials
+from loom_control_plane.routes import health, trials, workers
 from loom_control_plane.scheduler.crash_detector import run_crash_detector_loop
 
 
@@ -57,4 +57,5 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(trials.router)
+    app.include_router(workers.router)
     return app

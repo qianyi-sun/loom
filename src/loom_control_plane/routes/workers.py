@@ -1,0 +1,115 @@
+"""Worker-facing endpoints: claim, register, heartbeat."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from sqlalchemy import insert, update
+
+from loom.auth import verify_bearer_token
+from loom.db.schema import Worker
+from loom_control_plane.scheduler.claim import claim_one
+
+router = APIRouter()
+
+
+@router.post("/trials/claim")
+async def claim_trial(
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> Response:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or "worker:claim" not in ctx.scopes:
+        raise HTTPException(status_code=401, detail="not authorized to claim")
+
+    try:
+        worker_id = UUID(payload["worker_id"])
+        caps = payload["caps"]
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"worker_id + caps required: {exc}",
+        ) from exc
+
+    worker_os = sorted({c["os"] for c in caps})
+    worker_gpu = sorted({c["gpu_vendor"] for c in caps})
+    worker_network = sorted({
+        p for c in caps for p in c["network_policies"]
+    })
+
+    async with request.app.state.session_factory() as session:
+        row = await claim_one(
+            session,
+            worker_id=worker_id,
+            worker_os=worker_os, worker_gpu_vendors=worker_gpu,
+            worker_network_policies=worker_network,
+        )
+        await session.commit()
+
+    if row is None:
+        return Response(status_code=204)
+
+    return JSONResponse({
+        "trial_id": str(row["id"]),
+        "team_id": str(row["team_id"]),
+        "task_id": row["task_id"],
+        "config": row["config"],
+        "requires_caps": row["requires_caps"],
+        "attempt_count": row["attempt_count"],
+        "state": "claimed",
+    })
+
+
+@router.post("/workers/register")
+async def register_worker(
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or "worker:report" not in ctx.scopes:
+        raise HTTPException(status_code=401, detail="not authorized to register")
+
+    worker_id = uuid4()
+    async with request.app.state.session_factory() as session:
+        await session.execute(insert(Worker).values(
+            id=worker_id,
+            hostname=payload.get("hostname", "unknown"),
+            version=payload.get("version", "unknown"),
+            capabilities=payload["capabilities"],
+            registered_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            status="active",
+        ))
+        await session.commit()
+
+    return {
+        "worker_id": str(worker_id),
+        "heartbeat_interval_sec": 5,
+        "claim_poll_interval_sec": 1.0,
+        "drain_timeout_sec": 600,
+    }
+
+
+@router.post("/workers/{worker_id}/heartbeat")
+async def heartbeat(
+    worker_id: UUID,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or "worker:report" not in ctx.scopes:
+        raise HTTPException(status_code=401, detail="not authorized")
+    async with request.app.state.session_factory() as session:
+        await session.execute(update(Worker).where(Worker.id == worker_id).values(
+            last_seen_at=datetime.now(UTC),
+        ))
+        await session.commit()
+    return {"status": "ok"}
