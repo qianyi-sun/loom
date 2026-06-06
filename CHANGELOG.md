@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 4 — LLM Gateway (2026-06-06, tag `loom-llm-gateway-v0.4`).**
+  Sibling service `loom_llm_gateway` (top-level package alongside
+  `loom`): OpenAI-compatible chat endpoint with bearer auth, rate-card
+  lookup + cost computation, LiteLLM passthrough, admin rate-card
+  upsert. Plus the worker-side `HttpLLMGatewayClient` that LiteLLMAgent
+  now talks to in production. 262 unit+contract tests + 41 integration
+  tests; lint + mypy strict clean across 64 source files. Highlights:
+  - `loom_llm_gateway.config`: pydantic-settings BaseSettings with
+    `LOOM_GW_` env prefix; SecretStr for provider keys.
+  - `loom_llm_gateway.auth`: bearer token verification (hash lookup
+    against `tokens` table, expiry + revocation check).
+  - `loom_llm_gateway.rate_card`: Pydantic models, most-specific
+    (provider/model/tier/region) lookup, TTL-refresh in-memory cache
+    with explicit `invalidate()`, stable `hash_table` (excludes
+    captured_at) + `compute_cost_usd`.
+  - `loom_llm_gateway.litellm_wrapper`: `acompletion` thin wrapper +
+    `parse_litellm_response` mapping provider-specific usage counters
+    (Anthropic cache_creation/cache_read, thinking_tokens) into typed
+    fields + `provider_extras` dict[str, int].
+  - `loom_llm_gateway.routes`: `health`, `chat` (POST /v1/chat/completions
+    with required `loom` block + cost computation + rate_card_hash on
+    response), `admin` (POST /admin/rate-cards INSERT…ON CONFLICT,
+    invalidates cache).
+  - `loom_llm_gateway.app`: FastAPI factory with lifespan ctxmgr owning
+    the async engine + session factory + RateCardCache; `python -m
+    loom_llm_gateway` entry point.
+  - `loom.agent.http_gateway_client.HttpLLMGatewayClient`: worker-side
+    HTTP client implementing the `LLMGatewayClient` Protocol from Plan 3.
 - **Plan 3 — Agent + Verifier + Trial (2026-06-05, tag `loom-agent-verifier-trial-v0.3`).**
   Three agent runtimes, five verifiers, and the Trial.run() orchestrator
   that wires it all together. 245 unit/contract tests, 26 integration
