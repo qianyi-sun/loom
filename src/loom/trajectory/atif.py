@@ -7,9 +7,24 @@ reasoning content.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from loom.models.trajectory import (
+    AgentThoughtEvent,
+    ChatMessage,
+    LLMCallEvent,
+    StepStartEvent,
+    ToolUseEvent,
+    TrajectoryEvent,
+    TrialEndEvent,
+    TrialErrorEvent,
+    TrialStartEvent,
+    VerifierEndEvent,
+)
 
 
 class AtifMetadata(BaseModel):
@@ -64,3 +79,136 @@ class AtifTrajectory(BaseModel):
     session_id: str
     metadata: AtifMetadata
     steps: list[AtifStep]
+
+
+def project_to_atif(
+    events: Iterable[TrajectoryEvent],
+    *,
+    task_id: str,
+    agent_name: str,
+    agent_version: str,
+) -> AtifTrajectory:
+    """Pure transform: Loom event log → ATIF v1.7 document (spec §4.8).
+
+    Re-runnable for ATIF schema bumps. Reads from a local file via
+    TrajectoryReader; never touches MinIO directly.
+    """
+    step_order: list[str] = []
+    step_calls: dict[str, list[LLMCallEvent]] = {}
+    step_tools: dict[str, list[ToolUseEvent]] = {}
+    step_thoughts: dict[str, list[AgentThoughtEvent]] = {}
+
+    metadata_fields: dict[str, Any] = {
+        "task_id": task_id,
+        "agent_name": agent_name,
+        "agent_version": agent_version,
+    }
+    session_id = str(uuid4())
+    trajectory_id = str(uuid4())
+
+    def _bucket(step_id: str) -> None:
+        if step_id not in step_calls:
+            step_order.append(step_id)
+            step_calls[step_id] = []
+            step_tools[step_id] = []
+            step_thoughts[step_id] = []
+
+    for event in events:
+        if isinstance(event, TrialStartEvent):
+            session_id = str(event.trial_id)
+        elif isinstance(event, StepStartEvent):
+            _bucket(event.step_id)
+        elif isinstance(event, LLMCallEvent):
+            _bucket(event.step_id)
+            step_calls[event.step_id].append(event)
+        elif isinstance(event, ToolUseEvent):
+            _bucket(event.step_id)
+            step_tools[event.step_id].append(event)
+        elif isinstance(event, AgentThoughtEvent):
+            _bucket(event.step_id)
+            step_thoughts[event.step_id].append(event)
+        elif isinstance(event, VerifierEndEvent):
+            metadata_fields["verifier_rewards"] = dict(event.result.rewards)
+        elif isinstance(event, TrialEndEvent):
+            metadata_fields["final_state"] = event.final_state
+            if event.reward is not None:
+                metadata_fields["reward"] = dict(event.reward)
+            if event.failure_reason is not None:
+                metadata_fields["error"] = {"failure_reason": event.failure_reason}
+        elif isinstance(event, TrialErrorEvent):
+            metadata_fields["error"] = {
+                "type": event.error_type,
+                "message": event.message,
+            }
+
+    steps = [
+        _project_step(
+            step_id,
+            step_calls.get(step_id, []),
+            step_tools.get(step_id, []),
+            step_thoughts.get(step_id, []),
+        )
+        for step_id in step_order
+    ]
+
+    return AtifTrajectory(
+        trajectory_id=trajectory_id,
+        session_id=session_id,
+        metadata=AtifMetadata(**metadata_fields),
+        steps=steps,
+    )
+
+
+def _project_step(
+    step_id: str,
+    calls: list[LLMCallEvent],
+    tools: list[ToolUseEvent],
+    thoughts: list[AgentThoughtEvent],
+) -> AtifStep:
+    n = len(calls)
+    tool_calls: list[dict[str, Any]] | None = (
+        [
+            {"name": t.tool_name, "args": t.args, "result": t.result, "error": t.error}
+            for t in tools
+        ]
+        if tools
+        else None
+    )
+
+    if n == 0:
+        # llm_call_count == 0: messages/metrics/reasoning must be absent.
+        return AtifStep(
+            step_id=step_id,
+            llm_call_count=0,
+            is_copied_context=False,
+            tool_calls=tool_calls,
+        )
+
+    metrics = AtifStepMetrics(
+        input_tokens=sum(c.input_tokens for c in calls),
+        output_tokens=sum(c.output_tokens for c in calls),
+        cached_input_tokens=sum(c.cached_input_tokens for c in calls),
+        cache_write_tokens=sum(c.cache_write_tokens for c in calls),
+        thinking_tokens=sum(c.thinking_tokens for c in calls),
+        cost_usd=sum(c.cost_usd_snapshot for c in calls),
+    )
+
+    last_call = calls[-1]
+    chat_messages: list[ChatMessage] = []
+    if last_call.system_prompt:
+        chat_messages.append(ChatMessage(role="system", content=last_call.system_prompt))
+    chat_messages.extend(last_call.messages)
+    chat_messages.append(last_call.response)
+    messages = [m.model_dump() for m in chat_messages]
+
+    reasoning = "\n---\n".join(t.content for t in thoughts) if thoughts else None
+
+    return AtifStep(
+        step_id=step_id,
+        llm_call_count=n,
+        is_copied_context=False,
+        messages=messages,
+        reasoning_content=reasoning,
+        tool_calls=tool_calls,
+        metrics=metrics,
+    )
