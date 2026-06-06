@@ -6,10 +6,14 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter
 
 from loom.models.trajectory import EventKind, TrajectoryEvent
+
+if TYPE_CHECKING:
+    from loom.trajectory.excerpt import ExcerptStrategy
 
 _event_adapter: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 
@@ -38,3 +42,15 @@ class TrajectoryReader:
         for event in self.iter_all():
             buf.append(event)
         return list(buf)
+
+    def excerpt(
+        self,
+        strategy: ExcerptStrategy,
+        *,
+        max_tokens: int,
+    ) -> list[TrajectoryEvent]:
+        """Apply `strategy` to all events, then prune oldest-first to fit max_tokens."""
+        from loom.trajectory.excerpt import apply_strategy, trim_to_budget
+        events = list(self.iter_all())
+        selected = apply_strategy(events, strategy)
+        return trim_to_budget(selected, max_tokens=max_tokens)
