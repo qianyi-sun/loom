@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from loom.errors import AgentError
 from loom.models.networking import NetworkPolicy
@@ -27,7 +28,9 @@ from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.phase_network import phase_network
-from loom.trial.trial import TrialContext
+
+if TYPE_CHECKING:
+    from loom.trial.trial import TrialContext
 
 
 async def run_step(
