@@ -29,7 +29,7 @@ async def test_writer_writes_local_first(tmp_path: Path, store: FakeObjectStore)
     writer = TrajectoryWriter(
         local_path=local, store=store,
         bucket="trajectories", key="t/abc/events.jsonl",
-        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600,
+        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600, min_part_bytes=0,
     )
     async with writer:
         await writer.append(_event(0))
@@ -44,7 +44,7 @@ async def test_writer_flush_on_event_count(tmp_path: Path, store: FakeObjectStor
     writer = TrajectoryWriter(
         local_path=local, store=store,
         bucket="trajectories", key="t/x/events.jsonl",
-        flush_event_count=3, flush_bytes=10_000_000, flush_sec=3600,
+        flush_event_count=3, flush_bytes=10_000_000, flush_sec=3600, min_part_bytes=0,
     )
     async with writer:
         for i in range(3):
@@ -57,7 +57,7 @@ async def test_writer_flush_on_close(tmp_path: Path, store: FakeObjectStore):
     writer = TrajectoryWriter(
         local_path=local, store=store,
         bucket="trajectories", key="t/x/events.jsonl",
-        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600,
+        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600, min_part_bytes=0,
     )
     async with writer:
         await writer.append(_event(0))
@@ -82,7 +82,7 @@ async def test_writer_aborts_on_error(tmp_path: Path, store: FakeObjectStore):
     writer = TrajectoryWriter(
         local_path=local, store=store,
         bucket="trajectories", key="t/x/events.jsonl",
-        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600,
+        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600, min_part_bytes=0,
     )
     with pytest.raises(RuntimeError, match="boom"):
         async with writer:

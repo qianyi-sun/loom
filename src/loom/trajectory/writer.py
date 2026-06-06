@@ -26,9 +26,10 @@ from loom.errors import TrajectoryFlushFailedError
 from loom.models.trajectory import TrajectoryEvent
 from loom.trajectory.storage import MultipartUpload, ObjectStore
 
-DEFAULT_FLUSH_BYTES = 1024 * 1024            # 1 MB
-DEFAULT_FLUSH_EVENT_COUNT = 100
-DEFAULT_FLUSH_SEC = 10.0
+S3_MIN_PART_BYTES = 5 * 1024 * 1024          # S3/MinIO multipart floor (5 MiB)
+DEFAULT_FLUSH_BYTES = 8 * 1024 * 1024        # 8 MB (comfortably above floor)
+DEFAULT_FLUSH_EVENT_COUNT = 1000
+DEFAULT_FLUSH_SEC = 30.0
 DEFAULT_FLUSH_RETRIES = 3
 
 
@@ -46,6 +47,7 @@ class TrajectoryWriter:
         flush_event_count: int = DEFAULT_FLUSH_EVENT_COUNT,
         flush_sec: float = DEFAULT_FLUSH_SEC,
         flush_retries: int = DEFAULT_FLUSH_RETRIES,
+        min_part_bytes: int = S3_MIN_PART_BYTES,
     ) -> None:
         self._local_path = local_path
         self._store = store
@@ -55,6 +57,9 @@ class TrajectoryWriter:
         self._flush_event_count = flush_event_count
         self._flush_sec = flush_sec
         self._flush_retries = flush_retries
+        # S3/MinIO multipart floor — every non-final part must clear this.
+        # The final flush at close() ignores it (last-part has no minimum).
+        self._min_part_bytes = min_part_bytes
 
         self._buf: list[bytes] = []
         self._buf_bytes = 0
@@ -102,6 +107,12 @@ class TrajectoryWriter:
             await self._flush()
 
     def _should_flush(self) -> bool:
+        # Mid-trial flushes become non-final multipart parts; S3/MinIO rejects
+        # any non-final part below ~5 MiB. Gate every trigger behind that
+        # floor — close() drains the remainder as the final part regardless
+        # of size.
+        if self._buf_bytes < self._min_part_bytes:
+            return False
         if self._buf_bytes >= self._flush_bytes:
             return True
         if len(self._buf) >= self._flush_event_count:
