@@ -46,6 +46,18 @@ async def test_download_missing_raises(docker_driver, tmp_path: Path):  # type: 
         await docker_driver.download(PurePosixPath("/missing"), tmp_path / "x")
 
 
+async def test_download_directory_raises_not_silent(docker_driver, tmp_path: Path):  # type: ignore[no-untyped-def]
+    """Regression for Risk 2: get_archive on a directory returns the whole
+    subtree as a multi-entry tar. Driver.download is single-file only;
+    silently extracting just one entry would be a quiet data loss."""
+    from loom.errors import DriverError
+    await docker_driver.exec("mkdir -p /workspace/multi && "
+                             "echo a > /workspace/multi/a.txt && "
+                             "echo b > /workspace/multi/b.txt")
+    with pytest.raises(DriverError, match="directory"):
+        await docker_driver.download(PurePosixPath("/workspace/multi"), tmp_path / "out")
+
+
 async def test_upload_creates_nested_parent(docker_driver, tmp_path: Path):  # type: ignore[no-untyped-def]
     """Spec §2.2: upload() must create parent dirs as needed."""
     src = tmp_path / "in.txt"

@@ -8,8 +8,9 @@ reasoning content.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from hashlib import sha256
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -24,7 +25,14 @@ from loom.models.trajectory import (
     TrialErrorEvent,
     TrialStartEvent,
     VerifierEndEvent,
+    VerifierStartEvent,
 )
+
+# Bumped whenever project_to_atif's logic changes such that a re-projection
+# of the same events would no longer be byte-identical. Mixed into the
+# deterministic trajectory_id hash so re-runs after a logic change are
+# distinguishable from prior runs.
+PROJECTION_VERSION = "1"
 
 
 class AtifMetadata(BaseModel):
@@ -90,8 +98,11 @@ def project_to_atif(
 ) -> AtifTrajectory:
     """Pure transform: Loom event log → ATIF v1.7 document (spec §4.8).
 
-    Re-runnable for ATIF schema bumps. Reads from a local file via
-    TrajectoryReader; never touches MinIO directly.
+    Deterministic: same input + same projection version → byte-identical
+    output (modulo dict ordering). Re-runnable for ATIF schema bumps.
+
+    Raises ValueError if no TrialStartEvent is encountered — the trial_id
+    is the canonical session_id and we don't invent one.
     """
     step_order: list[str] = []
     step_calls: dict[str, list[LLMCallEvent]] = {}
@@ -103,8 +114,7 @@ def project_to_atif(
         "agent_name": agent_name,
         "agent_version": agent_version,
     }
-    session_id = str(uuid4())
-    trajectory_id = str(uuid4())
+    trial_id: UUID | None = None
 
     def _bucket(step_id: str) -> None:
         if step_id not in step_calls:
@@ -115,7 +125,7 @@ def project_to_atif(
 
     for event in events:
         if isinstance(event, TrialStartEvent):
-            session_id = str(event.trial_id)
+            trial_id = event.trial_id
         elif isinstance(event, StepStartEvent):
             _bucket(event.step_id)
         elif isinstance(event, LLMCallEvent):
@@ -127,6 +137,9 @@ def project_to_atif(
         elif isinstance(event, AgentThoughtEvent):
             _bucket(event.step_id)
             step_thoughts[event.step_id].append(event)
+        elif isinstance(event, VerifierStartEvent):
+            # Last verifier_name wins if multiple verifier passes.
+            metadata_fields["verifier_name"] = event.verifier_name
         elif isinstance(event, VerifierEndEvent):
             metadata_fields["verifier_rewards"] = dict(event.result.rewards)
         elif isinstance(event, TrialEndEvent):
@@ -141,6 +154,12 @@ def project_to_atif(
                 "message": event.message,
             }
 
+    if trial_id is None:
+        raise ValueError(
+            "project_to_atif: no TrialStartEvent in event log — refusing to "
+            "invent a session_id. Truncated/corrupt trajectory?",
+        )
+
     steps = [
         _project_step(
             step_id,
@@ -150,6 +169,13 @@ def project_to_atif(
         )
         for step_id in step_order
     ]
+
+    session_id = str(trial_id)
+    # Deterministic: derived from session_id + projection version. Same
+    # input → same trajectory_id, every run.
+    trajectory_id = sha256(
+        f"loom-atif/{PROJECTION_VERSION}/{session_id}".encode(),
+    ).hexdigest()
 
     return AtifTrajectory(
         trajectory_id=trajectory_id,

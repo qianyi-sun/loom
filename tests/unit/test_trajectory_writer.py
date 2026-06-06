@@ -92,6 +92,29 @@ async def test_writer_aborts_on_error(tmp_path: Path, store: FakeObjectStore):
     assert ("trajectories", "t/x/events.jsonl") not in store.objects
 
 
+async def test_writer_close_reraises_final_flush_failure(tmp_path: Path):
+    """Regression: a final-flush failure on the success path must escape, not
+    be silently swallowed by an abort. Otherwise the caller thinks the
+    trajectory shipped to MinIO when only the local file has it."""
+
+    class BrokenStore(FakeObjectStore):
+        async def upload_part(self, upload, *, part_number, body) -> None:  # type: ignore[no-untyped-def]
+            raise RuntimeError("upload broken")
+
+    local = tmp_path / "events.jsonl"
+    store = BrokenStore()
+    writer = TrajectoryWriter(
+        local_path=local, store=store,
+        bucket="t", key="k",
+        flush_event_count=1000, flush_bytes=10_000_000, flush_sec=3600, min_part_bytes=0,
+        flush_retries=1,
+    )
+    from loom.errors import TrajectoryFlushFailedError
+    with pytest.raises(TrajectoryFlushFailedError):
+        async with writer:
+            await writer.append(_event(0))
+
+
 async def test_writer_append_after_close_raises(tmp_path: Path, store: FakeObjectStore):
     local = tmp_path / "events.jsonl"
     writer = TrajectoryWriter(

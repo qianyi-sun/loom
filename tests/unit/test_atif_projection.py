@@ -13,6 +13,7 @@ from loom.models.trajectory import (
     ToolUseEvent,
     TrialEndEvent,
     TrialStartEvent,
+    VerifierStartEvent,
 )
 from loom.models.types import ModelSpec
 from loom.trajectory.atif import project_to_atif
@@ -147,6 +148,44 @@ def test_idempotency():
     b = project_to_atif(iter(events_b), task_id="t", agent_name="oracle", agent_version="1.0")
     assert a.metadata == b.metadata
     assert a.steps == b.steps
+
+
+def test_trajectory_id_is_deterministic_from_session_id():
+    """Same input → same trajectory_id, every call."""
+    events = [
+        TrialStartEvent(**_ev(0), task_id="t", agent_name="oracle", agent_mode="out-of-box"),
+        StepStartEvent(**_ev(1), instruction_excerpt="x"),
+        StepEndEvent(**_ev(2), summary={}),
+        TrialEndEvent(**_ev(3), final_state="succeeded"),
+    ]
+    a = project_to_atif(iter(events), task_id="t", agent_name="oracle", agent_version="1.0")
+    b = project_to_atif(iter(events), task_id="t", agent_name="oracle", agent_version="1.0")
+    assert a.trajectory_id == b.trajectory_id
+    assert a.session_id == b.session_id
+
+
+def test_missing_trial_start_raises():
+    """Truncated event log without TrialStartEvent must NOT silently
+    fabricate a session_id."""
+    events = [
+        StepStartEvent(**_ev(1), instruction_excerpt="x"),
+        StepEndEvent(**_ev(2), summary={}),
+    ]
+    with pytest.raises(ValueError, match="no TrialStartEvent"):
+        project_to_atif(iter(events), task_id="t", agent_name="oracle", agent_version="1.0")
+
+
+def test_verifier_name_threaded_into_metadata():
+    """VerifierStartEvent.verifier_name must land in AtifMetadata."""
+    events = [
+        TrialStartEvent(**_ev(0), task_id="t", agent_name="oracle", agent_mode="out-of-box"),
+        StepStartEvent(**_ev(1), instruction_excerpt="x"),
+        VerifierStartEvent(**_ev(2), verifier_name="pytest-runner", env_mode="shared"),
+        StepEndEvent(**_ev(3), summary={}),
+        TrialEndEvent(**_ev(4), final_state="succeeded"),
+    ]
+    atif = project_to_atif(iter(events), task_id="t", agent_name="oracle", agent_version="1.0")
+    assert atif.metadata.verifier_name == "pytest-runner"
 
 
 def test_multi_step():

@@ -74,33 +74,36 @@ class DockerDriver:
             )
 
         opts = options or StartOptions()
-        self._client = docker.from_env()
-
-        await asyncio.to_thread(self._ensure_image, opts)
-
-        self._container = await asyncio.to_thread(
-            self._client.containers.run,
-            self.image,
-            command=_KEEPALIVE_CMD,
-            name=self.container_name,
-            detach=True,
-            tty=False,
-            stdin_open=False,
-            working_dir=str(self.workspace),
-            remove=False,
-            # NET_ADMIN lets the workload modify iptables inside its own netns.
-            # Bounded to the container's network namespace — host iptables
-            # is unaffected. Required for Allowlist + NoNetwork policies.
-            cap_add=["NET_ADMIN"],
-        )
-        await self._wait_until_running()
-        # Mark running BEFORE applying baseline policy — set_network_policy()
-        # calls _require_running() which checks self._state.
-        self._state = "running"
         try:
+            self._client = docker.from_env()
+            await asyncio.to_thread(self._ensure_image, opts)
+
+            self._container = await asyncio.to_thread(
+                self._client.containers.run,
+                self.image,
+                command=_KEEPALIVE_CMD,
+                name=self.container_name,
+                detach=True,
+                tty=False,
+                stdin_open=False,
+                working_dir=str(self.workspace),
+                remove=False,
+                # NET_ADMIN lets the workload modify iptables inside its own
+                # netns. Bounded to the container's network namespace — host
+                # iptables is unaffected. Required for Allowlist + NoNetwork.
+                cap_add=["NET_ADMIN"],
+            )
+            await self._wait_until_running()
+            # Mark running BEFORE applying baseline policy —
+            # set_network_policy() calls _require_running() which checks state.
+            self._state = "running"
             await self.set_network_policy(self.network_policy_baseline)
-        except Exception:
-            # Roll back state so stop() can clean up.
+        except BaseException:
+            # Any failure during start() must NOT leak the partially-created
+            # container/client. Self-clean before re-raising so the caller
+            # isn't obligated to also call stop() on a failed start.
+            with contextlib.suppress(Exception):
+                await self._teardown(delete=True)
             self._state = "stopped"
             raise
 
@@ -132,18 +135,26 @@ class DockerDriver:
     async def stop(self, *, delete: bool = True) -> None:
         # Idempotent. Only running→stopped is a real transition; calling stop()
         # from 'constructed' leaves state intact so start() can still fire.
+        await self._teardown(delete=delete)
+        if self._state == "running":
+            self._state = "stopped"
+
+    async def _teardown(self, *, delete: bool) -> None:
+        """Shared docker-resource cleanup used by stop() and start()'s failure
+        path. Each step has its own suppress so a stop() error doesn't skip
+        the remove() — the plan-shown stop() bundled them and leaked
+        stopped-but-not-removed containers when stop() raised."""
         if self._container is not None:
             with contextlib.suppress(APIError, NotFound):
                 await asyncio.to_thread(self._container.stop, timeout=10)
-                if delete:
+            if delete:
+                with contextlib.suppress(APIError, NotFound):
                     await asyncio.to_thread(self._container.remove, force=True)
             self._container = None
         if self._client is not None:
             with contextlib.suppress(Exception):
                 self._client.close()
             self._client = None
-        if self._state == "running":
-            self._state = "stopped"
 
     def _require_running(self) -> None:
         if self._state != "running" or self._container is None:
@@ -161,7 +172,11 @@ class DockerDriver:
         timeout_sec: float | None = None,
     ) -> ExecResult:
         self._require_running()
-        assert self._container is not None
+        # Capture the container handle now. If stop() races in concurrently
+        # while we're suspended in to_thread, self._container becomes None
+        # but our local `container` is still valid for the in-flight call.
+        container = self._container
+        assert container is not None
 
         exec_kwargs: dict[str, Any] = {
             "cmd": ["/bin/sh", "-c", cmd],
@@ -183,8 +198,7 @@ class DockerDriver:
         started = loop.time()
 
         def _sync() -> tuple[int, bytes, bytes]:
-            assert self._container is not None
-            result = self._container.exec_run(**exec_kwargs)
+            result = container.exec_run(**exec_kwargs)
             output = result.output
             if isinstance(output, tuple):
                 stdout, stderr = output
@@ -219,7 +233,8 @@ class DockerDriver:
 
     async def upload(self, src: Path, dst: PurePosixPath) -> None:
         self._require_running()
-        assert self._container is not None
+        container = self._container
+        assert container is not None
         if not src.is_file():
             raise FileNotFoundError(f"upload source {src} is not a regular file")
 
@@ -238,8 +253,7 @@ class DockerDriver:
         await self.exec(f"mkdir -p {dst.parent.as_posix()}", user="root")
 
         def _put() -> None:
-            assert self._container is not None
-            ok = self._container.put_archive(path=str(dst.parent), data=tar_bytes)
+            ok = container.put_archive(path=str(dst.parent), data=tar_bytes)
             if not ok:
                 raise DriverError(f"put_archive returned False for {dst}")
 
@@ -247,12 +261,12 @@ class DockerDriver:
 
     async def download(self, src: PurePosixPath, dst: Path) -> None:
         self._require_running()
-        assert self._container is not None
+        container = self._container
+        assert container is not None
 
         def _get() -> bytes:
-            assert self._container is not None
             try:
-                stream, _stat = self._container.get_archive(str(src))
+                stream, _stat = container.get_archive(str(src))
             except NotFound as exc:
                 raise FileNotFoundError(f"{src} not found in container") from exc
             return b"".join(stream)
@@ -261,10 +275,18 @@ class DockerDriver:
 
         def _extract() -> None:
             with tarfile.open(fileobj=io.BytesIO(data), mode="r") as tf:
-                members = tf.getmembers()
-                if not members:
-                    raise DriverError(f"empty tarball returned for {src}")
-                fobj = tf.extractfile(members[0])
+                # File members only — get_archive on a directory returns the
+                # whole subtree as a tar with many entries. The Driver spec
+                # is single-file; refuse silently-lossy multi-member extracts.
+                file_members = [m for m in tf.getmembers() if m.isfile()]
+                if not file_members:
+                    raise DriverError(f"no regular files in tarball for {src}")
+                if len(file_members) > 1:
+                    raise DriverError(
+                        f"{src} is a directory (tarball had {len(file_members)} "
+                        f"files); Driver.download is single-file only",
+                    )
+                fobj = tf.extractfile(file_members[0])
                 if fobj is None:
                     raise DriverError(f"could not extract {src} from tarball")
                 dst.parent.mkdir(parents=True, exist_ok=True)

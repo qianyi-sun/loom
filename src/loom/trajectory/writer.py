@@ -152,14 +152,17 @@ class TrajectoryWriter:
         if self._closed:
             return
         self._closed = True
+        # Capture a final-flush failure so we can abort cleanly THEN re-raise.
+        # Silently swallowing it would make the caller's `async with writer:`
+        # return normally even though MinIO has nothing.
+        final_flush_exc: TrajectoryFlushFailedError | None = None
         try:
             if self._local_file is not None:
                 if self._buf and not error:
-                    # Final buffer drain on the success path.
                     try:
                         await self._flush()
-                    except TrajectoryFlushFailedError:
-                        # Already escalated upstream by caller — abort below.
+                    except TrajectoryFlushFailedError as exc:
+                        final_flush_exc = exc
                         error = True
                 await self._local_file.close()
         finally:
@@ -174,7 +177,10 @@ class TrajectoryWriter:
                     try:
                         await self._store.complete_multipart_upload(self._upload)
                     except Exception as exc:
+                        self._upload = None
                         raise TrajectoryFlushFailedError(
                             f"complete multipart failed: {exc!r}",
                         ) from exc
                 self._upload = None
+        if final_flush_exc is not None:
+            raise final_flush_exc
