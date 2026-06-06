@@ -1,9 +1,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from loom_worker.config import WorkerSettings
-
 
 _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_CONTROL_PLANE_URL",
@@ -24,7 +24,7 @@ def _clear_envs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_required_fields_missing_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         WorkerSettings(_env_file=None)
 
 

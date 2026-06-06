@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Plan 6 — Worker (2026-06-06, tag `loom-worker-v0.6`).** Long-lived
+  worker process that claims trials from the Control Plane and runs them
+  in-process via `Trial.run()`. New top-level package `src/loom_worker`
+  with `python -m loom_worker` entry point. Highlights:
+  - `loom_worker.config.WorkerSettings`: `LOOM_WORKER_`-prefixed
+    BaseSettings with SecretStr token + MinIO creds.
+  - `loom_worker.control_plane_client.HttpControlPlaneClient`: async
+    `register` / `claim` / `heartbeat` / `patch_state` /
+    `patch_trajectory_index`. 409 (fence) surfaces as `False` from the
+    bool-returning methods.
+  - `loom_worker.heartbeat.HeartbeatThread`: dedicated daemon OS thread
+    insulated from the asyncio loop. Swallows tick exceptions so a
+    transient PATCH failure can't kill the heartbeat. (Internal Event
+    renamed `_stop_event` after collision with Thread's private `_stop`.)
+  - `loom_worker.orphan_cleanup.cleanup_orphan_trajectories`: startup
+    sweep of the local trajectory cache — deletes JSONL files for trials
+    that are terminal, unknown, or owned by a different worker.
+  - `loom_worker.runner_pool.RunnerPool`: `asyncio.Semaphore`-gated
+    spawn/in_flight/wait_all/cancel_all primitive.
+  - `loom_worker.trial_runner.LocalTrialRunner`: wires a TrialContext
+    from a claim payload + factories and invokes Plan 3's `Trial.run`
+    with a state-patch callback that logs fence rejections and swallows
+    transient errors.
+  - `loom_worker.signal_handler`: installs SIGTERM/SIGINT handlers that
+    flip a `ShutdownState.shutting_down` flag.
+  - `loom_worker.main_loop.run_worker`: register → orphan cleanup →
+    heartbeat thread → claim+spawn loop → drain (timeout → cancel_all).
+  - **Known v1 limitation:** the Plan 5 claim endpoint returns the
+    trial's `config` (TrialConfig) but not the full `TaskConfig` body —
+    `_fetch_task_config` raises NotImplementedError pointing at Plan 7,
+    so the worker is effectively a register + heartbeat skeleton until
+    Plan 7 expands the claim payload.
+  - 286 unit+contract + 117 integration tests + 1 skip (E2E); lint +
+    mypy strict clean across 92 source files.
+
 ### Fixed
 - **Plan 5 post-review hardening (2026-06-06).** Fixes for 6 findings from
   the post-Plan-5 self-audit, plus regression tests for each.
