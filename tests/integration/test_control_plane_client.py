@@ -1,0 +1,231 @@
+"""Integration: HttpControlPlaneClient against a real Plan 5 app over
+ASGITransport (no network). ASGITransport doesn't run lifespan, so we
+populate app.state manually — same pattern as test_http_gateway_client.py
+in Plan 4."""
+
+import hashlib
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
+
+import boto3
+import httpx
+import pytest
+from botocore.config import Config
+from sqlalchemy import create_engine, delete, insert
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
+from loom.db.schema import Task, Team, TeamQuota, Token, Trial, Worker
+from loom_control_plane.app import create_app
+from loom_control_plane.config import ControlPlaneSettings
+from loom_worker.control_plane_client import HttpControlPlaneClient
+
+_CAPS = [{
+    "os": "linux",
+    "gpu_vendor": "none",
+    "network_policies": ["public"],
+    "dynamic_network_policy": True,
+    "mounted_fs": True,
+    "resource_modes": ["auto"],
+}]
+
+
+@pytest.fixture
+async def cp_setup(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+) -> AsyncIterator[tuple[object, str]]:
+    """Returns (app, raw_token) with state populated and a fresh worker token."""
+    for k, v in {
+        "LOOM_CP_DB_URL": postgres_url,
+        "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
+        "LOOM_CP_MINIO_ACCESS_KEY": "x",
+        "LOOM_CP_MINIO_SECRET_KEY": "y",
+        "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
+    }.items():
+        monkeypatch.setenv(k, v)
+    settings = ControlPlaneSettings(_env_file=None)
+    app = create_app(settings)
+
+    async_engine = create_async_engine(str(settings.db_url))
+    app.state.settings = settings
+    app.state.session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    app.state.minio_client = boto3.client(
+        "s3",
+        endpoint_url=settings.minio_endpoint,
+        aws_access_key_id=settings.minio_access_key.get_secret_value(),
+        aws_secret_access_key=settings.minio_secret_key.get_secret_value(),
+        region_name=settings.minio_region,
+        config=Config(signature_version="s3v4"),
+    )
+
+    raw = f"loom_w_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    session_local = sessionmaker(sync_engine)
+    with session_local() as s:
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw.encode()).digest(),
+            type="worker",
+            scopes=["worker:claim", "worker:report", "worker:index"],
+            team_id=None,
+            issued_at=datetime.now(UTC), expires_at=None,
+        ))
+        s.commit()
+    try:
+        yield app, raw
+    finally:
+        await async_engine.dispose()
+        with session_local() as s:
+            s.execute(delete(Trial))
+            s.execute(delete(Worker))
+            s.execute(delete(Token))
+            s.execute(delete(TeamQuota))
+            s.execute(delete(Team))
+            s.execute(delete(Task))
+            s.commit()
+        sync_engine.dispose()
+
+
+async def _client(app: object, raw: str) -> tuple[HttpControlPlaneClient, httpx.AsyncClient]:
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    http = httpx.AsyncClient(transport=transport, base_url="http://cp")
+    cp = HttpControlPlaneClient(base_url="http://cp", token=raw, _client=http)
+    return cp, http
+
+
+async def test_register_returns_worker_id(cp_setup):  # type: ignore[no-untyped-def]
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        assert "worker_id" in info
+        UUID(info["worker_id"])
+        assert info["heartbeat_interval_sec"] > 0
+    finally:
+        await http.aclose()
+
+
+async def test_claim_returns_none_when_empty(cp_setup):  # type: ignore[no-untyped-def]
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+        assert await cp.claim(worker_id=wid, caps=_CAPS) is None
+    finally:
+        await http.aclose()
+
+
+async def test_heartbeat(cp_setup):  # type: ignore[no-untyped-def]
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+        await cp.heartbeat(wid)
+    finally:
+        await http.aclose()
+
+
+async def test_patch_state_returns_true_when_owner(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="claimed",
+                worker_id=wid,
+            ))
+        engine.dispose()
+
+        assert await cp.patch_state(
+            trial_id=trial_id, worker_id=wid, state="running",
+        ) is True
+    finally:
+        await http.aclose()
+
+
+async def test_patch_state_returns_false_when_fenced(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    """Trial belongs to a different worker → 409 → False."""
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        other_worker = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Worker).values(
+                id=other_worker, hostname="o", version="v", capabilities=[],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC), status="active",
+            ))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="claimed",
+                worker_id=other_worker,
+            ))
+        engine.dispose()
+
+        assert await cp.patch_state(
+            trial_id=trial_id, worker_id=wid, state="running",
+        ) is False
+    finally:
+        await http.aclose()
+
+
+async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="running",
+                worker_id=wid,
+            ))
+        engine.dispose()
+
+        assert await cp.patch_trajectory_index(
+            trial_id=trial_id, worker_id=wid,
+            uri="s3://trajectories/x.jsonl", bytes_written=42,
+        ) is True
+    finally:
+        await http.aclose()
