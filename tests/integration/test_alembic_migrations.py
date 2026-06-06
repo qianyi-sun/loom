@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -21,8 +22,9 @@ def postgres_url():
         )
         os.environ["LOOM_DB_URL"] = url
         repo_root = Path(__file__).resolve().parents[2]
+        # Use the venv's alembic via `python -m alembic` so PATH doesn't matter.
         subprocess.run(
-            ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
             cwd=repo_root, check=True,
         )
         yield url
