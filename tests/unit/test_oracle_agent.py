@@ -74,13 +74,16 @@ async def test_oracle_runs_solve_script(
 
 
 async def test_oracle_missing_solve_raises(writer: TrajectoryWriter, tmp_path: Path):
+    """Missing solve.sh is a user-setup error → AgentError, so step_runner
+    catches it as phase=agent and classify_failure → AGENT_ERROR (Bug 5)."""
+    from loom.errors import AgentError
     bad = tmp_path / "task-no-sol"
     bad.mkdir()
     (bad / "task.toml").write_text('schema_version = "1"\n')
     driver = FakeDriver()
     await driver.start(options=StartOptions())
     agent = OracleAgent(task_dir=bad, trial_id=uuid4())
-    with pytest.raises(FileNotFoundError, match=r"solve\.sh"):
+    with pytest.raises(AgentError, match=r"solve\.sh"):
         await agent.run(
             instruction="x", env=driver, trajectory=writer,
             mcp=[], skills_dir=None, step_id="main",

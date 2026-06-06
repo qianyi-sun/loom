@@ -121,6 +121,24 @@ async def test_run_tolerates_missing_jsonl(writer: TrajectoryWriter):
     assert list(reader.iter_all()) == []
 
 
+async def test_malformed_jsonl_raises_agent_error(writer: TrajectoryWriter):
+    """Regression for Bug 6: a malformed JSONL line from the in-box CLI used
+    to raise pydantic.ValidationError → classified as INTERNAL_ERROR. Now
+    wrapped as AgentError → AGENT_ERROR."""
+    from loom.errors import AgentError
+
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+    driver.filesystem[PurePosixPath("/loom/trajectory.jsonl")] = b'{"not": "valid event"}\n'
+    agent = ClaudeCodeAgent(team_id="t", trial_id=uuid4())
+    await agent.setup(env=driver)
+    with pytest.raises(AgentError, match="malformed"):
+        await agent.run(
+            instruction="hi", env=driver, trajectory=writer,
+            mcp=[], skills_dir=None, step_id="main",
+        )
+
+
 def test_metadata():
     agent = ClaudeCodeAgent(team_id="t", trial_id=uuid4())
     assert agent.mode == "in-box"

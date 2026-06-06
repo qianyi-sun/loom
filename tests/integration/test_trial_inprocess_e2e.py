@@ -92,6 +92,138 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
     ) in store.objects
 
 
+async def test_trial_run_driver_start_failure_classified(
+    hello_task: Path, tmp_path: Path,
+):
+    """Regression for Bug 1: a DriverError from start() used to escape
+    Trial.run unhandled. Now classified into FailureReason.ENV_START_FAILURE
+    and surfaced via TrialResult."""
+    from loom.driver.base import StartOptions
+    from loom.errors import DriverError
+    from loom.models.result import FailureReason
+
+    class _BoomDriver(FakeDriver):
+        async def start(self, *, options: StartOptions | None = None) -> None:
+            raise DriverError("simulated start failure")
+
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=TrialConfig(),
+        driver=_BoomDriver(),
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_AlwaysPassVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    result = await Trial(ctx=ctx).run()
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.ENV_START_FAILURE
+
+
+async def test_trial_run_state_patch_failure_doesnt_kill_trial(
+    hello_task: Path, tmp_path: Path,
+):
+    """Regression for Bug 2: a state_patch HTTP error used to propagate out
+    of Trial.run. Now logged + continued."""
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=TrialConfig(),
+        driver=FakeDriver(exec_handler=handler),
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_AlwaysPassVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+
+    async def _boom_patch(state: str, reason: str | None) -> None:
+        raise RuntimeError(f"simulated PATCH 5xx for state={state}")
+
+    result = await Trial(ctx=ctx, state_patch=_boom_patch).run()
+    # Trial reached SUCCEEDED even though both PATCH calls raised.
+    assert result.state == TrialState.SUCCEEDED
+
+
+async def test_trial_run_cancellation_stashes_result(
+    hello_task: Path, tmp_path: Path,
+):
+    """Regression for Bug 4: cancellation re-raises CancelledError, so the
+    in-flight TrialResult used to be lost. Now stashed on trial.result so the
+    caller can recover state=CANCELLED + partial steps + atif_uri."""
+    import asyncio
+
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+
+    class _SlowAgent:
+        mode = "out-of-box"
+        name = "slow"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(60)  # cancelled out from under us
+
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=TrialConfig(),
+        driver=FakeDriver(),
+        agent=_SlowAgent(),  # type: ignore[arg-type]
+        verifier=_AlwaysPassVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    trial = Trial(ctx=ctx)
+    task_handle = asyncio.create_task(trial.run())
+    await asyncio.sleep(0.1)
+    task_handle.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_handle
+    # Bug 4 fix: result available via trial.result
+    assert trial.result is not None
+    assert trial.result.state == TrialState.CANCELLED
+
+
 async def test_trial_run_agent_error_marks_failed(hello_task: Path, tmp_path: Path):
     """Agent error → trial state FAILED; failure_reason is set."""
     task = TaskConfig(

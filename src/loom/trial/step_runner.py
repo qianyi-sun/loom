@@ -131,6 +131,16 @@ async def run_step(
                     message=f"verifier exceeded {verifier_timeout}s",
                     occurred_at=datetime.now(UTC),
                 )
+        except Exception as exc:
+            # Bug 3 fix: previously only TimeoutError was caught. A
+            # VerifierError (registry mismatch) or driver failure mid-verify
+            # would escape step_runner entirely, bypassing per-step error
+            # tracking and step_end emission. Mirror the agent-phase pattern.
+            if sr_error is None:
+                sr_error = StepError(
+                    phase="verifier", reason="exception",
+                    message=str(exc), occurred_at=datetime.now(UTC),
+                )
 
     sr_finished = datetime.now(UTC)
     step_result = StepResult(

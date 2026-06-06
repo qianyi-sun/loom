@@ -86,6 +86,10 @@ class Trial:
 
     ctx: TrialContext
     state_patch: StatePatchCallback | None = None
+    # Bug 4 fix: stash the TrialResult here so callers can recover it after
+    # a CancelledError propagates out of run(). Populated by run() once the
+    # in-flight result skeleton has been built.
+    result: TrialResult | None = None
 
     async def run(self) -> TrialResult:
         result = TrialResult(
@@ -103,8 +107,15 @@ class Trial:
             state=TrialState.RUNNING,
             started_at=datetime.now(UTC),
         )
+        self.result = result
         if self.state_patch is not None:
-            await self.state_patch("running", None)
+            # Bug 2 fix: PATCH errors must not propagate out of Trial.run.
+            # Plan 6's worker has its own reclaim/retry — losing one heartbeat
+            # is recoverable; raising here orphans the local state machine.
+            try:
+                await self.state_patch("running", None)
+            except Exception:
+                logger.exception("state PATCH (running) failed; continuing")
 
         baseline: NetworkPolicy = (
             self.ctx.trial_config.baseline_network_policy_override
@@ -124,18 +135,24 @@ class Trial:
 
         try:
             async with writer:
-                await self.ctx.driver.start(options=StartOptions(
-                    force_build=self.ctx.trial_config.force_build,
-                ))
-                await writer.append(TrialStartEvent(
-                    emitted_at=datetime.now(UTC),
-                    trial_id=self.ctx.trial_id, step_id="__trial__",
-                    seq=seq.next(),
-                    task_id=self.ctx.task_id,
-                    agent_name=self.ctx.agent.name,
-                    agent_mode=self.ctx.agent.mode,
-                ))
+                driver_started = False
                 try:
+                    # Bug 1 fix: driver.start() + TrialStartEvent must land
+                    # inside the broad-Exception catch so ENV_START_FAILURE
+                    # (DriverError) becomes a classified TrialResult instead
+                    # of propagating raw out of Trial.run.
+                    await self.ctx.driver.start(options=StartOptions(
+                        force_build=self.ctx.trial_config.force_build,
+                    ))
+                    driver_started = True
+                    await writer.append(TrialStartEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.ctx.trial_id, step_id="__trial__",
+                        seq=seq.next(),
+                        task_id=self.ctx.task_id,
+                        agent_name=self.ctx.agent.name,
+                        agent_mode=self.ctx.agent.mode,
+                    ))
                     if isinstance(self.ctx.agent, InBoxAgentRuntime):
                         await self.ctx.agent.setup(env=self.ctx.driver)
 
@@ -150,38 +167,51 @@ class Trial:
                 except asyncio.CancelledError:
                     cancelled = True
                     result.state = TrialState.CANCELLED
-                    await writer.append(TrialCancelledEvent(
-                        emitted_at=datetime.now(UTC),
-                        trial_id=self.ctx.trial_id, step_id="__trial__",
-                        seq=seq.next(),
-                        cancellation_requested_at=datetime.now(UTC),
-                        observed_at=datetime.now(UTC),
-                    ))
+                    try:
+                        await writer.append(TrialCancelledEvent(
+                            emitted_at=datetime.now(UTC),
+                            trial_id=self.ctx.trial_id, step_id="__trial__",
+                            seq=seq.next(),
+                            cancellation_requested_at=datetime.now(UTC),
+                            observed_at=datetime.now(UTC),
+                        ))
+                    except Exception:
+                        logger.exception("failed to append TrialCancelledEvent")
                 except Exception as exc:
                     result.state = TrialState.FAILED
                     result.failure_reason = classify_failure(exc)
-                    await writer.append(TrialErrorEvent(
+                    try:
+                        await writer.append(TrialErrorEvent(
+                            emitted_at=datetime.now(UTC),
+                            trial_id=self.ctx.trial_id, step_id="__trial__",
+                            seq=seq.next(),
+                            error_type=type(exc).__name__,
+                            message=str(exc),
+                            traceback=_format_tb(exc),
+                        ))
+                    except Exception:
+                        # Early-start failure leaves the writer with no
+                        # TrialStartEvent; appending an error event can
+                        # itself fail. Don't mask the real failure.
+                        logger.exception("failed to append TrialErrorEvent")
+                finally:
+                    if driver_started:
+                        await asyncio.shield(
+                            self.ctx.driver.stop(delete=self.ctx.trial_config.delete_env),
+                        )
+                try:
+                    await writer.append(TrialEndEvent(
                         emitted_at=datetime.now(UTC),
                         trial_id=self.ctx.trial_id, step_id="__trial__",
                         seq=seq.next(),
-                        error_type=type(exc).__name__,
-                        message=str(exc),
-                        traceback=_format_tb(exc),
+                        final_state=result.state.value,
+                        reward=result.reward,
+                        failure_reason=(
+                            result.failure_reason.value if result.failure_reason else None
+                        ),
                     ))
-                finally:
-                    await asyncio.shield(
-                        self.ctx.driver.stop(delete=self.ctx.trial_config.delete_env),
-                    )
-                await writer.append(TrialEndEvent(
-                    emitted_at=datetime.now(UTC),
-                    trial_id=self.ctx.trial_id, step_id="__trial__",
-                    seq=seq.next(),
-                    final_state=result.state.value,
-                    reward=result.reward,
-                    failure_reason=(
-                        result.failure_reason.value if result.failure_reason else None
-                    ),
-                ))
+                except Exception:
+                    logger.exception("failed to append TrialEndEvent")
         finally:
             try:
                 atif_uri = await asyncio.wait_for(
@@ -209,6 +239,9 @@ class Trial:
             result.finished_at = datetime.now(UTC)
 
             if self.state_patch is not None:
+                # Bug 2 fix: catch general exceptions too — TimeoutError was
+                # the only original except clause, leaving HTTP errors,
+                # connection drops, etc. to propagate out of Trial.run.
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(self.state_patch(
@@ -220,6 +253,10 @@ class Trial:
                 except TimeoutError:
                     logger.warning(
                         "state PATCH timed out; crash detector will reclaim",
+                    )
+                except Exception:
+                    logger.exception(
+                        "state PATCH (terminal) failed; crash detector will reclaim",
                     )
 
             if cancelled:

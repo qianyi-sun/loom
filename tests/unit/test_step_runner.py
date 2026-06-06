@@ -133,6 +133,38 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
     assert EventKind.STEP_END in kinds
 
 
+async def test_run_step_records_verifier_exception(context: TrialContext):
+    """Regression for Bug 3: previously only TimeoutError was caught around
+    the verifier. A VerifierError used to escape step_runner entirely,
+    bypassing per-step error tracking and the StepEndEvent emission."""
+    from loom.errors import VerifierError
+
+    class _BoomVerifier:
+        name = "boom"
+
+        async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+            raise VerifierError("simulated")
+
+    context.verifier = _BoomVerifier()  # type: ignore[assignment]
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+    async with writer:
+        sr = await run_step(
+            ctx=context, step=context.task_config.steps[0],
+            trajectory=writer, baseline_policy=Public(),
+        )
+    assert sr.error is not None
+    assert sr.error.phase == "verifier"
+    assert sr.error.reason == "exception"
+    reader = TrajectoryReader(context.local_trajectory_path)
+    kinds = [e.kind for e in reader.iter_all()]
+    assert EventKind.STEP_END in kinds
+
+
 async def test_run_step_skip_verifier(context: TrialContext):
     """trial_config.skip_verifier=True omits the verifier phase entirely."""
     context.trial_config = TrialConfig(skip_verifier=True)

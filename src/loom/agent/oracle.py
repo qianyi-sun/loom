@@ -55,7 +55,11 @@ class OracleAgent:
     ) -> None:
         local_solve = self.task_dir / "solution" / _SOLVE_SCRIPT_NAME
         if not local_solve.is_file():
-            raise FileNotFoundError(
+            # Bug 5 fix: raise AgentError so step_runner catches it as a
+            # phase=agent StepError (and classify_failure maps to AGENT_ERROR
+            # if it ever propagates) — FileNotFoundError used to skip both
+            # filters and become INTERNAL_ERROR.
+            raise AgentError(
                 f"OracleAgent requires {local_solve}; not found",
             )
 

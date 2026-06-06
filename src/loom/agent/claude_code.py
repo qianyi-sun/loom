@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import UUID
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from loom.driver.base import Driver
 from loom.errors import AgentError
@@ -99,5 +99,15 @@ class ClaudeCodeAgent:
                     line = raw.strip()
                     if not line:
                         continue
-                    event = _event_adapter.validate_json(line)
+                    try:
+                        event = _event_adapter.validate_json(line)
+                    except ValidationError as exc:
+                        # Bug 6 fix: a malformed JSONL line from the in-box
+                        # CLI is an agent failure (user shipped a buggy CLI),
+                        # not an INTERNAL_ERROR. Wrap so classify_failure
+                        # maps to AGENT_ERROR.
+                        raise AgentError(
+                            f"claude wrote a malformed trajectory line: "
+                            f"{line[:200]!r} ({exc.error_count()} errors)",
+                        ) from exc
                     await trajectory.append(event)
