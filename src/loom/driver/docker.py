@@ -21,7 +21,7 @@ from typing import Any
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
-from loom.driver.base import StartOptions
+from loom.driver.base import MAX_EXEC_STREAM_BYTES, StartOptions
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -144,7 +144,7 @@ class DockerDriver:
                 f"DockerDriver in state {self._state!r}",
             )
 
-    async def exec(  # Task 9 implements
+    async def exec(
         self,
         cmd: str,
         *,
@@ -154,7 +154,61 @@ class DockerDriver:
         timeout_sec: float | None = None,
     ) -> ExecResult:
         self._require_running()
-        raise NotImplementedError("exec lands in Task 9")
+        assert self._container is not None
+
+        exec_kwargs: dict[str, Any] = {
+            "cmd": ["/bin/sh", "-c", cmd],
+            "stdout": True,
+            "stderr": True,
+            "tty": False,
+            "detach": False,
+            "stream": False,
+            "demux": True,
+        }
+        if user is not None:
+            exec_kwargs["user"] = str(user)
+        if cwd is not None:
+            exec_kwargs["workdir"] = str(cwd)
+        if env is not None:
+            exec_kwargs["environment"] = dict(env)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        def _sync() -> tuple[int, bytes, bytes]:
+            assert self._container is not None
+            result = self._container.exec_run(**exec_kwargs)
+            output = result.output
+            if isinstance(output, tuple):
+                stdout, stderr = output
+            else:
+                stdout, stderr = output, b""
+            return int(result.exit_code), stdout or b"", stderr or b""
+
+        if timeout_sec is not None:
+            exit_code, stdout, stderr = await asyncio.wait_for(
+                asyncio.to_thread(_sync), timeout=timeout_sec,
+            )
+        else:
+            exit_code, stdout, stderr = await asyncio.to_thread(_sync)
+
+        duration = loop.time() - started
+
+        truncated = False
+        if len(stdout) > MAX_EXEC_STREAM_BYTES:
+            stdout = stdout[:MAX_EXEC_STREAM_BYTES]
+            truncated = True
+        if len(stderr) > MAX_EXEC_STREAM_BYTES:
+            stderr = stderr[:MAX_EXEC_STREAM_BYTES]
+            truncated = True
+
+        return ExecResult(
+            return_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            truncated=truncated,
+            duration_sec=duration,
+        )
 
     async def upload(self, src: Path, dst: PurePosixPath) -> None:  # Task 10
         self._require_running()
