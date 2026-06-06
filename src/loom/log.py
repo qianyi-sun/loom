@@ -82,7 +82,11 @@ def bind_trial_context(
 ) -> Iterator[None]:
     """Bind trial-correlation fields onto every log emitted in the with-block.
 
-    Multiple binds nest — exiting unbinds only the fields this call bound.
+    v1 semantics: exiting clears ALL contextvars, not just the fields this
+    call bound. Do NOT nest `bind_trial_context` calls — the inner exit will
+    wipe fields the outer scope set. v2 may switch to
+    `unbind_contextvars(*fields)` for true nested-scope support; for now,
+    callers should bind everything they need at the outermost layer.
     """
     fields: dict[str, Any] = {}
     if trial_id is not None:
@@ -98,4 +102,5 @@ def bind_trial_context(
     try:
         yield
     finally:
+        # v1: blunt clear. See docstring caveat about nesting.
         clear_contextvars()

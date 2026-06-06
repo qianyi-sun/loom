@@ -32,6 +32,35 @@ def test_log_includes_correlation_fields(captured_log_output: StringIO):
     assert record["step_id"] == "main"
 
 
+def test_nested_binds_are_not_supported_in_v1(captured_log_output: StringIO):
+    """v1 semantics: exiting an inner bind clears ALL contextvars.
+
+    Pins the documented limitation so a future refactor either preserves it
+    intentionally or updates this test alongside the impl + docstring.
+    """
+    outer = uuid4()
+    inner_worker = uuid4()
+    log = structlog.get_logger("loom.test")
+
+    with bind_trial_context(trial_id=outer, step_id="main"):
+        with bind_trial_context(worker_id=inner_worker):
+            log.info("inside")
+        log.info("outer_after_inner")
+
+    lines = [line for line in captured_log_output.getvalue().splitlines() if line.strip()]
+    records = [json.loads(line) for line in lines]
+
+    # Inside the nested block: all three fields present.
+    assert records[0]["trial_id"] == str(outer)
+    assert records[0]["step_id"] == "main"
+    assert records[0]["worker_id"] == str(inner_worker)
+
+    # After the inner exits, the outer-scope fields are GONE — v1 semantics.
+    assert "trial_id" not in records[1]
+    assert "step_id" not in records[1]
+    assert "worker_id" not in records[1]
+
+
 def test_context_isolation_between_calls(captured_log_output: StringIO):
     trial_a = uuid4()
     trial_b = uuid4()
