@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from loom.driver.base import StartOptions
+from loom.driver.base import MAX_EXEC_STREAM_BYTES, StartOptions
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverNotStartedError,
@@ -126,3 +126,55 @@ class FakeDriver:
         self._require_running()
         if self.healthcheck_stub is not None:
             self.healthcheck_stub(hc)
+
+
+def command_table_handler(
+    table: dict[str, ExecResult],
+    *,
+    default: ExecResult | None = None,
+) -> ExecHandler:
+    """Build an exec_handler that returns pre-recorded results for known
+    commands. Unmatched commands return `default` (or a no-op success).
+
+    Truncation: if a recorded ExecResult exceeds MAX_EXEC_STREAM_BYTES, the
+    handler enforces the cap as a real driver would (stdout/stderr clipped,
+    `truncated=True`).
+    """
+    fallback = default or ExecResult(
+        return_code=0, stdout=b"", stderr=b"",
+        truncated=False, duration_sec=0.0,
+    )
+
+    def _handler(
+        cmd: str,
+        user: str | int | None,
+        cwd: PurePosixPath | None,
+        env: Mapping[str, str] | None,
+    ) -> ExecResult:
+        recorded = table.get(cmd, fallback)
+        return _enforce_caps(recorded)
+
+    return _handler
+
+
+def _enforce_caps(r: ExecResult) -> ExecResult:
+    """Trim stdout/stderr to MAX_EXEC_STREAM_BYTES, flipping `truncated` to True
+    if either stream was clipped."""
+    stdout = r.stdout
+    stderr = r.stderr
+    truncated = r.truncated
+    if len(stdout) > MAX_EXEC_STREAM_BYTES:
+        stdout = stdout[:MAX_EXEC_STREAM_BYTES]
+        truncated = True
+    if len(stderr) > MAX_EXEC_STREAM_BYTES:
+        stderr = stderr[:MAX_EXEC_STREAM_BYTES]
+        truncated = True
+    if truncated == r.truncated and stdout is r.stdout and stderr is r.stderr:
+        return r
+    return ExecResult(
+        return_code=r.return_code,
+        stdout=stdout,
+        stderr=stderr,
+        truncated=truncated,
+        duration_sec=r.duration_sec,
+    )
