@@ -13,6 +13,30 @@ from loom.db.schema import Trial as TrialRow
 router = APIRouter()
 
 
+def _validate_key(key: str) -> None:
+    """Bug 2 fix: reject path-traversal / absolute / NUL-byte keys.
+
+    S3/MinIO doesn't dereference `..` as filesystem traversal, but a key
+    like `../../other_team/secret.json` is a literal string that bypasses
+    the intended `{team}/{trial}/` prefix on the wire — a team A token
+    could presign PUTs against team B's namespace.
+    """
+    if not key:
+        raise HTTPException(status_code=400, detail="key must be non-empty")
+    if "\x00" in key:
+        raise HTTPException(status_code=400, detail="key must not contain NUL")
+    if key.startswith("/"):
+        raise HTTPException(
+            status_code=400, detail="key must be relative (no leading /)",
+        )
+    for segment in key.split("/"):
+        if segment in ("", "..", "."):
+            raise HTTPException(
+                status_code=400,
+                detail="key must not contain '..', '.', or empty segments",
+            )
+
+
 @router.post("/artifacts/upload-url")
 async def mint_artifact_upload_url(
     request: Request,
@@ -33,23 +57,30 @@ async def mint_artifact_upload_url(
         raise HTTPException(
             status_code=400, detail=f"trial_id + key required: {exc}",
         ) from exc
+    _validate_key(key)
+
     settings = request.app.state.settings
     bucket = "artifacts"
 
-    # team_id resolution: team tokens carry team_id directly (and only see
-    # their team's trials); worker tokens have team_id=None and must look it
-    # up from the trial row. Without this, worker uploads would mint keys
-    # with a literal "None" prefix — broken URLs and orphaned objects.
+    # Bug 6 fix: for team tokens, additionally verify the trial belongs to
+    # that team — otherwise a team A token could mint upload URLs that land
+    # under team A's own prefix but using team B's trial_id, polluting the
+    # cross-team artifact index.
+    async with request.app.state.session_factory() as session:
+        trial_team = (await session.execute(
+            select(TrialRow.team_id).where(TrialRow.id == trial_id),
+        )).scalar_one_or_none()
+
     if ctx.team_id is not None:
+        if trial_team is None or trial_team != ctx.team_id:
+            raise HTTPException(
+                status_code=403, detail="trial belongs to another team",
+            )
         team_id = ctx.team_id
     else:
-        async with request.app.state.session_factory() as session:
-            row = (await session.execute(
-                select(TrialRow.team_id).where(TrialRow.id == trial_id),
-            )).scalar_one_or_none()
-        if row is None:
+        if trial_team is None:
             raise HTTPException(status_code=404, detail="trial not found")
-        team_id = row
+        team_id = trial_team
     full_key = f"{team_id}/{trial_id}/{key}"
 
     url = request.app.state.minio_client.generate_presigned_url(

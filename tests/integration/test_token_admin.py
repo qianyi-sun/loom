@@ -83,3 +83,53 @@ def test_issue_without_admin_scope_rejected(app, admin_seed):  # type: ignore[no
             json={"expires_in_days": 1},
         )
         assert r.status_code == 403
+
+
+@pytest.mark.parametrize("bad_prefix", [
+    "abc",  # too short
+    "ZZZZ",  # non-hex (uppercase, and also non-hex letters)
+    "abcg",  # 'g' not hex
+    "ab--",  # punctuation
+    "abc!",  # punctuation
+    "a" * 65,  # too long
+])
+def test_revoke_rejects_invalid_prefix(  # type: ignore[no-untyped-def]
+    app, admin_seed, bad_prefix,
+):
+    """Bug 3 regression: revoke prefix must be 4-64 hex chars. Anything
+    else — including the empty / wildcard / punctuation that would feed
+    straight into a SQL LIKE — must be rejected with 400 BEFORE the
+    UPDATE runs."""
+    with TestClient(app) as client:
+        r = client.delete(
+            f"/admin/worker-tokens/{bad_prefix}",
+            headers={"Authorization": f"Bearer {admin_seed}"},
+        )
+        assert r.status_code == 400, r.text
+
+
+def test_revoke_doesnt_affect_unrelated_tokens(  # type: ignore[no-untyped-def]
+    app, admin_seed,
+):
+    """Bug 3 regression: a precise prefix must only revoke matching tokens
+    (not all of them). We issue two worker tokens, revoke one by its
+    prefix, then confirm the admin token is still usable."""
+    with TestClient(app) as client:
+        r1 = client.post(
+            "/admin/worker-tokens",
+            headers={"Authorization": f"Bearer {admin_seed}"},
+            json={"expires_in_days": 1},
+        )
+        prefix_1 = r1.json()["token_hash_prefix"]
+        r2 = client.delete(
+            f"/admin/worker-tokens/{prefix_1}",
+            headers={"Authorization": f"Bearer {admin_seed}"},
+        )
+        assert r2.status_code == 200
+        # admin token still works
+        r3 = client.post(
+            "/admin/worker-tokens",
+            headers={"Authorization": f"Bearer {admin_seed}"},
+            json={"expires_in_days": 1},
+        )
+        assert r3.status_code == 201

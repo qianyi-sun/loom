@@ -8,10 +8,12 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import insert, update
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Worker
+from loom.models.capabilities import Capabilities
 from loom_control_plane.scheduler.claim import claim_one
 
 router = APIRouter()
@@ -76,13 +78,33 @@ async def register_worker(
     if ctx is None or "worker:report" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized to register")
 
+    # Bug 5 fix: validate each capabilities entry against the Capabilities
+    # Pydantic model so garbage (typo'd OS, unknown gpu_vendor, etc.) is
+    # rejected at the boundary rather than silently mis-matching DRF claim
+    # queries later.
+    raw_caps = payload.get("capabilities")
+    if not isinstance(raw_caps, list) or not raw_caps:
+        raise HTTPException(
+            status_code=400,
+            detail="capabilities must be a non-empty list",
+        )
+    try:
+        validated_caps = [
+            Capabilities.model_validate(c).model_dump(mode="json")
+            for c in raw_caps
+        ]
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"invalid capabilities: {exc.errors()}",
+        ) from exc
+
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
         await session.execute(insert(Worker).values(
             id=worker_id,
             hostname=payload.get("hostname", "unknown"),
             version=payload.get("version", "unknown"),
-            capabilities=payload["capabilities"],
+            capabilities=validated_caps,
             registered_at=datetime.now(UTC),
             last_seen_at=datetime.now(UTC),
             status="active",

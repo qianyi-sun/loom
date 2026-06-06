@@ -112,3 +112,74 @@ def test_state_patch_terminal_state(app, state_seed):  # type: ignore[no-untyped
         )
         assert r.status_code == 200
         assert r.json()["state"] == "succeeded"
+
+
+def test_state_patch_rejects_invalid_state(app, state_seed):  # type: ignore[no-untyped-def]
+    """Bug 1 regression: garbage state strings rejected with 400."""
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    with TestClient(app) as client:
+        r = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={"worker_id": str(worker_a), "state": "bogus"},
+        )
+        assert r.status_code == 400
+        assert "invalid state" in r.json()["detail"]
+
+
+def test_state_patch_rejects_invalid_failure_reason(app, state_seed):  # type: ignore[no-untyped-def]
+    """Bug 1 regression: failure_reason validated against enum."""
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    with TestClient(app) as client:
+        r = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={
+                "worker_id": str(worker_a),
+                "state": "failed",
+                "failure_reason": "made_up",
+            },
+        )
+        assert r.status_code == 400
+        assert "failure_reason" in r.json()["detail"]
+
+
+def test_state_patch_rejects_succeeded_when_queued(  # type: ignore[no-untyped-def]
+    app, state_seed, postgres_url,
+):
+    """Bug 4 regression: succeeded only from claimed/running, not queued.
+
+    We mutate the seeded trial's state back to 'queued' and confirm the PATCH
+    to 'succeeded' is refused with 409 even though the fencing predicate
+    matches the worker.
+    """
+    from sqlalchemy import create_engine, text
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    eng = create_engine(postgres_url)
+    with eng.begin() as conn:
+        conn.execute(
+            text("UPDATE trials SET state = 'queued' WHERE id = :id"),
+            {"id": trial_id},
+        )
+    eng.dispose()
+    with TestClient(app) as client:
+        r = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={"worker_id": str(worker_a), "state": "succeeded"},
+        )
+        assert r.status_code == 409
+
+
+def test_state_patch_rejects_unreachable_target(app, state_seed):  # type: ignore[no-untyped-def]
+    """Bug 4 regression: targets not in _ALLOWED_FROM (e.g. 'queued',
+    'claimed') cannot be reached via PATCH and must return 400."""
+    trial_id, worker_a, _, raw_a, _ = state_seed
+    with TestClient(app) as client:
+        r = client.patch(
+            f"/trials/{trial_id}/state",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={"worker_id": str(worker_a), "state": "queued"},
+        )
+        assert r.status_code == 400
+        assert "cannot be reached" in r.json()["detail"]

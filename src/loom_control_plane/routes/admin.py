@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -14,6 +15,11 @@ from loom.auth import verify_bearer_token
 from loom.db.schema import Token
 
 router = APIRouter(prefix="/admin")
+
+# Bug 3 fix: revoke prefix must be hex (the same charset `encode(.., 'hex')`
+# emits) and at least 4 chars long, otherwise `%` or `` would revoke every
+# token in the table.
+_HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 
 
 @router.post("/worker-tokens", status_code=201)
@@ -62,6 +68,11 @@ async def revoke_token(
         ctx = await verify_bearer_token(session, authorization)
     if ctx is None or "admin:tokens" not in ctx.scopes:
         raise HTTPException(status_code=403, detail="missing scope")
+    if not _HEX_PREFIX_RE.fullmatch(prefix):
+        raise HTTPException(
+            status_code=400,
+            detail="prefix must be 4-64 hex characters",
+        )
     async with request.app.state.session_factory() as session:
         await session.execute(
             text("""

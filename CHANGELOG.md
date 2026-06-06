@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Plan 5 post-review hardening (2026-06-06).** Fixes for 6 findings from
+  the post-Plan-5 self-audit, plus regression tests for each.
+  - **Bug 1 (HIGH):** `PATCH /trials/{id}/state` now validates `state`
+    against the `TrialState` enum and `failure_reason` against the
+    `FailureReason` enum at the route boundary. Previously arbitrary
+    strings would land in the DB column.
+  - **Bug 2 (HIGH):** `POST /artifacts/upload-url` now rejects keys with
+    `..` / `.` / empty segments / leading `/` / NUL bytes. Previously a
+    team A token could presign a PUT against team B's namespace on the
+    wire even though the key path looked team-A-scoped.
+  - **Bug 3 (HIGH):** `DELETE /admin/worker-tokens/{prefix}` now requires
+    `prefix` to be 4–64 hex characters. Previously `%` or punctuation
+    fell through to the `LIKE :prefix` clause and could revoke every
+    token in the table.
+  - **Bug 4 (MEDIUM):** state PATCH source-state-restricted per target
+    via SQL `AND state = ANY(:allowed_from)` — no more
+    `succeeded → queued` reversals, no more unreachable targets like
+    `queued` / `claimed`.
+  - **Bug 5 (MEDIUM):** `POST /workers/register` now validates each
+    `capabilities` entry via `loom.models.capabilities.Capabilities`
+    (extra=forbid). Typo'd OS / GPU vendor / network policy values are
+    rejected with 400 instead of silently never matching any DRF claim.
+  - **Bug 6 (MEDIUM):** `POST /artifacts/upload-url` with a team token
+    now additionally checks the requested `trial_id` belongs to that
+    team (403 otherwise). Worker tokens still resolve team from the
+    trial row.
+  - 17 new integration regression tests added across
+    `test_state_patch_fenced.py`, `test_signed_urls.py`,
+    `test_token_admin.py`, and a new `test_worker_register.py`.
+  - Full suite green: 270 unit+contract + 108 integration; lint + mypy
+    strict clean across 82 source files. Tag `loom-control-plane-v0.5`
+    moved forward to this fix commit.
+
 ### Added
 - **Plan 5 — Control Plane (2026-06-06, tag `loom-control-plane-v0.5`).**
   Authoritative writer for trial state + worker registry. New sibling
