@@ -273,6 +273,28 @@ class DockerDriver:
         # in real iptables enforcement.
         return
 
-    async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None:  # Task 11
+    async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None:
         self._require_running()
-        raise NotImplementedError("healthcheck lands in Task 11")
+        if hc is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline_start_period = loop.time() + hc.start_period_sec
+        consecutive_failures = 0
+        while True:
+            in_grace = loop.time() < deadline_start_period
+            try:
+                r = await self.exec(hc.command, timeout_sec=hc.timeout_sec)
+                if r.return_code == 0:
+                    return
+                logger.debug("healthcheck non-zero exit", extra={"rc": r.return_code})
+            except TimeoutError:
+                logger.debug("healthcheck timed out")
+            if not in_grace:
+                consecutive_failures += 1
+                if consecutive_failures > hc.retries:
+                    raise DriverError(
+                        f"Healthcheck failed after {hc.retries} consecutive "
+                        f"retries: {hc.command!r}",
+                    )
+            await asyncio.sleep(hc.interval_sec)
