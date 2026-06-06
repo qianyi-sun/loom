@@ -30,11 +30,11 @@ def test_allowlist_records_domains_and_cidrs():
     assert any(r.action == "DROP" for r in plan.outbound_drops)
 
 
-def test_render_public_yields_loopback_only():
+def test_render_public_is_empty():
+    """Public = no enforcement → no iptables commands, so vanilla images
+    (without iptables installed) still work."""
     cmds = render_iptables_commands(compute_iptables_rules(Public()))
-    assert any("OUTPUT -o lo" in c for c in cmds)
-    # No default drop on Public
-    assert not any("iptables -P OUTPUT DROP" in c for c in cmds)
+    assert cmds == []
 
 
 def test_render_no_network_sets_default_drop():
@@ -45,6 +45,8 @@ def test_render_no_network_sets_default_drop():
 def test_render_allowlist_resolves_domains_at_apply_time():
     plan = compute_iptables_rules(Allowlist(domains=("example.com",), cidrs=("10.0.0.0/8",)))
     cmds = render_iptables_commands(plan)
-    assert any("getent hosts example.com" in c for c in cmds)
+    assert any("getent ahosts example.com" in c for c in cmds)
+    # Resolved IPs pinned to /etc/hosts so subsequent connects skip DNS.
+    assert any("/etc/hosts" in c for c in cmds)
     assert any("-d 10.0.0.0/8" in c for c in cmds)
     assert any("iptables -P OUTPUT DROP" in c for c in cmds)

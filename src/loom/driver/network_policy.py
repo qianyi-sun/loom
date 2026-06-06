@@ -58,7 +58,14 @@ def compute_iptables_rules(policy: NetworkPolicy) -> IptablesPlan:
 
 def render_iptables_commands(plan: IptablesPlan) -> list[str]:
     """Render a plan as a list of shell commands suitable for `sh -c` inside
-    a container. Loopback + ESTABLISHED traffic always allowed."""
+    a container.
+
+    For a Public-equivalent plan (no drops, no allows) we return an empty
+    list so vanilla images without iptables installed still work. Containers
+    running NoNetwork or Allowlist policies must have iptables present.
+    """
+    if not plan.outbound_drops and not plan.allowed_domains and not plan.allowed_cidrs:
+        return []
     cmds: list[str] = []
     if plan.flush:
         cmds.append("iptables -F OUTPUT || true")
@@ -68,9 +75,16 @@ def render_iptables_commands(plan: IptablesPlan) -> list[str]:
     for cidr in plan.allowed_cidrs:
         cmds.append(f"iptables -A OUTPUT -d {cidr} -j ACCEPT")
     for domain in plan.allowed_domains:
+        # Resolve at apply-time, pin to /etc/hosts so subsequent connections
+        # don't need DNS (which would be blocked by the default DROP), and
+        # ACCEPT the resolved IPs. Use `getent ahosts` (vs `hosts`) so we
+        # see all A and AAAA records, then filter to IPv4 only — ip6tables
+        # is a separate tool; IPv6 enforcement is a future iteration.
         cmds.append(
-            f"for ip in $(getent hosts {domain} | awk '{{print $1}}'); do "
-            f'iptables -A OUTPUT -d "$ip" -j ACCEPT; done',
+            f'for ip in $(getent ahosts {domain} | awk \'$2 == "STREAM" && $1 !~ /:/ {{print $1}}\' | sort -u); do '
+            f'grep -q "$ip {domain}" /etc/hosts || echo "$ip {domain}" >> /etc/hosts; '
+            f'iptables -A OUTPUT -d "$ip" -j ACCEPT; '
+            f"done",
         )
     for rule in plan.outbound_drops:
         if rule.action == "DROP":

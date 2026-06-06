@@ -24,6 +24,7 @@ import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
 from loom.driver.base import MAX_EXEC_STREAM_BYTES, StartOptions
+from loom.driver.network_policy import compute_iptables_rules, render_iptables_commands
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -87,6 +88,10 @@ class DockerDriver:
             stdin_open=False,
             working_dir=str(self.workspace),
             remove=False,
+            # NET_ADMIN lets the workload modify iptables inside its own netns.
+            # Bounded to the container's network namespace — host iptables
+            # is unaffected. Required for Allowlist + NoNetwork policies.
+            cap_add=["NET_ADMIN"],
         )
         await self._wait_until_running()
         # Mark running BEFORE applying baseline policy — set_network_policy()
@@ -267,11 +272,23 @@ class DockerDriver:
 
         await asyncio.to_thread(_extract)
 
-    async def set_network_policy(self, policy: NetworkPolicy) -> None:  # Task 13
+    async def set_network_policy(self, policy: NetworkPolicy) -> None:
         self._require_running()
-        # Placeholder no-op so start() can apply the baseline. Task 13 wires
-        # in real iptables enforcement.
-        return
+        plan = compute_iptables_rules(policy)
+        cmds = render_iptables_commands(plan)
+        if not cmds:
+            # Public-equivalent: no enforcement needed. Skip the exec so
+            # containers without iptables installed still work.
+            self.network_policy_baseline = policy
+            return
+        script = " && ".join(cmds)
+        r = await self.exec(script, user="root", timeout_sec=30)
+        if r.return_code != 0:
+            raise DriverError(
+                f"network policy apply failed: rc={r.return_code} "
+                f"stderr={r.stderr[:512]!r}",
+            )
+        self.network_policy_baseline = policy
 
     async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None:
         self._require_running()
