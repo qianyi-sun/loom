@@ -1,0 +1,74 @@
+"""Admin token endpoints."""
+
+from __future__ import annotations
+
+import hashlib
+import secrets
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from sqlalchemy import insert, text
+
+from loom.auth import verify_bearer_token
+from loom.db.schema import Token
+
+router = APIRouter(prefix="/admin")
+
+
+@router.post("/worker-tokens", status_code=201)
+async def issue_worker_token(
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or "admin:tokens" not in ctx.scopes:
+        raise HTTPException(status_code=403, detail="missing scope admin:tokens")
+
+    raw_bytes = secrets.token_bytes(32)
+    raw = "loom_w_" + raw_bytes.hex()
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at: datetime | None = None
+    days = payload.get("expires_in_days")
+    if days is not None:
+        expires_at = datetime.now(UTC) + timedelta(days=int(days))
+
+    async with request.app.state.session_factory() as session:
+        await session.execute(insert(Token).values(
+            token_hash=token_hash,
+            type="worker",
+            scopes=["worker:claim", "worker:report", "worker:index"],
+            team_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=expires_at,
+        ))
+        await session.commit()
+
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash.hex()[:8],
+    }
+
+
+@router.delete("/worker-tokens/{prefix}")
+async def revoke_token(
+    prefix: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or "admin:tokens" not in ctx.scopes:
+        raise HTTPException(status_code=403, detail="missing scope")
+    async with request.app.state.session_factory() as session:
+        await session.execute(
+            text("""
+                UPDATE tokens SET revoked_at = NOW()
+                 WHERE encode(token_hash, 'hex') LIKE :prefix
+            """),
+            {"prefix": prefix + "%"},
+        )
+        await session.commit()
+    return {"status": "revoked"}

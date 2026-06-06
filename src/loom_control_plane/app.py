@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.routes import (
+    admin,
     artifacts,
     health,
     state,
@@ -68,4 +69,5 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)
+    app.include_router(admin.router)
     return app

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from loom.auth import verify_bearer_token
@@ -75,3 +75,39 @@ async def submit_trial(
         "state": "queued",
         "submitted_at": submitted_at.isoformat(),
     }
+
+
+_CANCEL_SQL = text("""
+UPDATE trials
+   SET state = 'cancelled',
+       cancellation_requested_at = NOW()
+ WHERE id = (:trial_id)::uuid
+   AND team_id = (:team_id)::uuid
+   AND state IN ('queued', 'claimed', 'running')
+ RETURNING id, state;
+""")
+
+
+@router.post("/trials/{trial_id}/cancel")
+async def cancel_trial(
+    trial_id: UUID,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None or ctx.team_id is None:
+        raise HTTPException(status_code=401, detail="not authorized")
+
+    async with request.app.state.session_factory() as session:
+        row = (await session.execute(_CANCEL_SQL, {
+            "trial_id": trial_id, "team_id": ctx.team_id,
+        })).mappings().one_or_none()
+        await session.commit()
+
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail="trial is in a terminal state (succeeded/failed/cancelled)",
+        )
+    return {"trial_id": str(row["id"]), "state": row["state"]}
