@@ -115,6 +115,40 @@ class Worker(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class Campaign(Base):
+    """One row per submitted campaign (Plan 19).
+
+    The runner fans out a campaign's `task_filter` into N trial
+    submissions and back-links each via `trials.campaign_id`. State
+    transitions: submitted → running → finished | cancelled.
+    """
+    __tablename__ = "campaigns"
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_filter: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    trial_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'submitted'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    created_by_token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_trial_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+    )
+
+
 class Trial(Base):
     __tablename__ = "trials"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -140,6 +174,15 @@ class Trial(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     trajectory_index: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Plan 19: campaign back-link + idempotency key. campaign_id is
+    # NULL for hand-submitted trials. idempotency_key uniqueness is
+    # enforced via a partial unique index (`trials_idempotency_key_uidx`).
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("campaigns.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Token(Base):
