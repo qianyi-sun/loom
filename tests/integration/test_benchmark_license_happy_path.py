@@ -24,9 +24,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, Team, TeamQuota
+from loom.db.schema import Benchmark, Team, TeamQuota, Token
 from loom.db.schema import Task as TaskRow
-from loom.db.schema import Token
 from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.import_cmd import run_import
 from loom_control_plane.app import create_app

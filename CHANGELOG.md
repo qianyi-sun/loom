@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 16 — `verify` CLI + system smoke tests + license-allowlist
+  closure (2026-06-07, tag `loom-benchmarks-v0.16`).** Closes the
+  benchmark-integrations arc. New `src/loom_benchmark_tool/oracle_runner.py`
+  shells out to `docker run` / `cp` / `exec` to spin up a per-task
+  image, run `solution/solve.sh` if present, then invoke
+  `pytest tests/` or `verifier/run.sh` — returns an `OracleResult`
+  dataclass with pass/return-code/stdout-tail/stderr-tail. New
+  `ObjectStore.list_task_prefixes` ships on both Fake + Minio
+  (anchored on `task.toml` keys so multi-segment instance_ids like
+  HumanEval's `HumanEval/0` round-trip correctly). `verify_cmd.py`
+  replaces Plan 14's `NotImplementedError` skeleton with a working
+  pipeline: list → sample (deterministic via seeded random) → download
+  → validate `task.toml` against `TaskConfig` → run Oracle → aggregate
+  report. `__main__` prints a summary + per-failure stderr_tail and
+  exits non-zero on any failure. Two new system smoke tests under
+  `tests/system/` exercise the docker-compose stack end-to-end:
+  `test_benchmark_humaneval_smoke.py` (default-on, ≤10 min) and
+  `test_benchmark_swe_bench_smoke.py` (opt-in via
+  `LOOM_RUN_SWE_BENCH_SMOKE=1` because per-instance images are ~5 GB).
+  `compose_stack` fixture extended to surface `db_url` +
+  `minio_access_key` + `minio_secret_key` so smoke tests can drive
+  `run_import` directly. New integration test
+  `test_benchmark_license_happy_path.py` proves the full Plan-13
+  guardrail story: a benchmark-imported MIT task POSTs cleanly under
+  the default allowlist; an LCB task (CC-BY-NC-4.0 per the Plan 15
+  audit) 403s — the latter is the regression guard for any future
+  attempt to re-tag LCB as MIT. 408 unit+contract+property pass (+5
+  new); ruff + mypy strict clean across 107 source files.
 - **Plan 15 — Twelve more benchmark adapters (2026-06-07, tag
   `loom-benchmark-adapters-v0.15`).** Brings the v1 slate from 1 to 13
   adapters (HumanEval shipped Plan 14): SWE-Bench Verified, SWE-Bench
