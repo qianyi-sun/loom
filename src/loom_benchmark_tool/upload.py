@@ -12,7 +12,22 @@ from loom.trajectory.storage import ObjectStore
 async def upload_task_dir(
     *, store: ObjectStore, bucket: str, prefix: str, task_dir: Path,
 ) -> int:
-    """Returns the number of objects uploaded."""
+    """Returns the number of objects uploaded.
+
+    Refuses empty `prefix` (would spray the entire task dir under the
+    bucket root) and refuses any prefix segment that is `..` or starts
+    at an absolute root — mirrors the `ObjectStore.download_prefix`
+    contract so the round-trip is symmetric."""
+    if not prefix:
+        raise ValueError(
+            "upload_task_dir requires a non-empty prefix; refusing to "
+            "spray task files under bucket root",
+        )
+    if ".." in Path(prefix).parts or prefix.startswith("/"):
+        raise ValueError(
+            f"upload_task_dir prefix {prefix!r} contains traversal or "
+            f"absolute root; reject",
+        )
     if not prefix.endswith("/"):
         prefix = prefix + "/"
     count = 0

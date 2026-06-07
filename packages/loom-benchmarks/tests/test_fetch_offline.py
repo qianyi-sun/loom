@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 from loom_benchmarks.base import UpstreamSource
-from loom_benchmarks.fetch import cache_key, fetch_upstream
+from loom_benchmarks.fetch import _looks_like_sha, cache_key, fetch_upstream
 
 
 def test_cache_key_stable() -> None:
@@ -110,6 +110,79 @@ def test_fetch_refresh_redownloads(
     fetch_upstream(src, cache_root=tmp_path)
     fetch_upstream(src, cache_root=tmp_path, refresh=True)
     assert len(calls) == 2
+
+
+def test_looks_like_sha_recognizes_short_and_full() -> None:
+    assert _looks_like_sha("abc1234")
+    assert _looks_like_sha("d0d4f3c2c8a5a2e6e3e2f6b3f7e2c5c9c8b9d4e7")
+    assert not _looks_like_sha("main")
+    assert not _looks_like_sha("v1.0")
+    assert not _looks_like_sha("HEAD")
+    assert not _looks_like_sha("ABCDEF1")  # uppercase: not a SHA
+    assert not _looks_like_sha("xyz1234")
+
+
+def test_git_fetch_uses_init_fetch_checkout_for_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SHA revision must go through git init + fetch + checkout,
+    not `git clone --branch <sha>` which silently fails."""
+    import subprocess as _sp
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kw: object) -> object:
+        calls.append(cmd)
+
+        class _R:
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+    monkeypatch.setattr(
+        "loom_benchmarks.fetch.subprocess.run", _fake_run,
+    )
+
+    src = UpstreamSource(
+        kind="git",
+        locator="https://example.com/repo.git",
+        revision="d0d4f3c2c8a5a2e6e3e2f6b3f7e2c5c9c8b9d4e7",
+    )
+    fetch_upstream(src, cache_root=tmp_path)
+    # 4 calls: init, remote add, fetch, checkout — NOT a single `clone`.
+    cmds = [c[0:2] for c in calls]
+    assert ["git", "init"] in cmds
+    assert ["git", "remote"] in cmds
+    assert ["git", "fetch"] in cmds
+    assert ["git", "checkout"] in cmds
+    assert not any(c[:2] == ["git", "clone"] for c in calls)
+
+
+def test_git_fetch_uses_clone_for_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kw: object) -> object:
+        calls.append(cmd)
+
+        class _R:
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(
+        "loom_benchmarks.fetch.subprocess.run", _fake_run,
+    )
+
+    src = UpstreamSource(
+        kind="git",
+        locator="https://example.com/repo.git",
+        revision="main",
+    )
+    fetch_upstream(src, cache_root=tmp_path)
+    assert len(calls) == 1
+    assert calls[0][:4] == ["git", "clone", "--depth", "1"]
+    assert "--branch" in calls[0]
+    assert "main" in calls[0]
 
 
 def test_unknown_kind_rejected(tmp_path: Path) -> None:

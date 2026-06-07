@@ -19,6 +19,7 @@ Steps per invocation:
 
 from __future__ import annotations
 
+import re
 import tempfile
 import tomllib
 from pathlib import Path
@@ -33,6 +34,25 @@ from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.upload import upload_task_dir
+
+# Permissive but bounded: forward-slashes are fine (HumanEval IDs are
+# `HumanEval/0`); reject anything that could traverse out of the
+# benchmark namespace or smuggle in a control char / NUL / shell-special
+# byte that would break the S3 prefix or TOML interpolation downstream.
+_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9._/+\-]+$")
+
+
+def _validate_instance_id(instance_id: str) -> None:
+    if not _INSTANCE_ID_RE.match(instance_id):
+        raise ValueError(
+            f"instance_id {instance_id!r} contains characters outside "
+            f"[A-Za-z0-9._/+\\-]; reject to keep S3 prefix + task_id safe",
+        )
+    parts = instance_id.split("/")
+    if "" in parts or ".." in parts or "." in parts:
+        raise ValueError(
+            f"instance_id {instance_id!r} contains empty / .. / . segments; reject",
+        )
 
 
 def _normalize_db_url(url: str) -> str:
@@ -94,6 +114,7 @@ async def run_import(
             if limit is not None and count >= limit:
                 break
             count += 1
+            _validate_instance_id(inst.instance_id)
             with tempfile.TemporaryDirectory() as tmp:
                 out_dir = Path(tmp) / inst.instance_id.replace("/", "__")
                 out_dir.mkdir(parents=True, exist_ok=True)

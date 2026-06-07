@@ -31,7 +31,7 @@ from loom_benchmarks.base import (
     ConvertedTask,
     UpstreamSource,
 )
-from loom_benchmarks.util import sha256_of_dir
+from loom_benchmarks.util import sha256_of_dir, toml_string
 
 
 class HumanEvalAdapter:
@@ -97,13 +97,17 @@ class HumanEvalAdapter:
             + "\n\ndef test_check() -> None:\n    check(candidate)\n",
         )
 
-        # task.toml — agent=oracle, verifier=pytest.
+        # task.toml — agent=oracle, verifier=pytest. Quote with
+        # `toml_string` so any quote / backslash / newline in the
+        # upstream instance_id can't break the TOML literal.
+        toml_id = toml_string(task_id)
+        toml_name = toml_string(f"HumanEval — {instance.instance_id}")
         (out_dir / "task.toml").write_text(textwrap.dedent(f"""
             schema_version = "1"
 
             [task]
-            id = "{task_id}"
-            name = "HumanEval — {instance.instance_id}"
+            id = {toml_id}
+            name = {toml_name}
 
             [environment]
             os = "linux"

@@ -116,6 +116,39 @@ def download_files_from_record(
     return written
 
 
+def toml_string(value: str) -> str:
+    """Render `value` as a TOML basic string literal (incl. quotes).
+
+    Adapters that interpolate user-supplied or upstream-supplied data
+    into `task.toml` should pass it through this helper instead of an
+    f-string, so a `"` or `\\` or newline in an instance_id can't break
+    the TOML document. Mirrors the TOML 1.0 escape table.
+    """
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\r":
+            out.append("\\r")
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 def sha256_of_dir(directory: Path) -> str:
     """Stable hash of (relpath, content) for every file under `directory`.
 

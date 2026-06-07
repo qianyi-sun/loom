@@ -14,6 +14,7 @@ from loom_benchmarks.util import (
     pytest_from_unittest,
     sha256_of_dir,
     structured_verifier_script,
+    toml_string,
 )
 
 
@@ -103,6 +104,32 @@ def test_download_files_from_record(
     )
     assert len(paths) == 1
     assert paths[0].read_bytes() == b"binary-blob"
+
+
+def test_toml_string_quotes_basic_ascii() -> None:
+    import tomllib
+    rendered = f"x = {toml_string('hello world')}\n"
+    assert tomllib.loads(rendered) == {"x": "hello world"}
+
+
+def test_toml_string_escapes_quote_and_backslash() -> None:
+    import tomllib
+    nasty = 'a"b\\c'
+    rendered = f"x = {toml_string(nasty)}\n"
+    assert tomllib.loads(rendered) == {"x": nasty}
+
+
+def test_toml_string_escapes_control_chars() -> None:
+    import tomllib
+    nasty = "line\nwith\ttab\rand\x00null"
+    rendered = f"x = {toml_string(nasty)}\n"
+    assert tomllib.loads(rendered) == {"x": nasty}
+
+
+def test_toml_string_round_trips_unicode() -> None:
+    import tomllib
+    rendered = f"x = {toml_string('café — 测试')}\n"
+    assert tomllib.loads(rendered) == {"x": "café — 测试"}
 
 
 def test_download_files_from_record_skips_missing_fields(

@@ -14,6 +14,7 @@ downloads. `refresh=True` wipes the cache for one source.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 import tarfile
@@ -24,6 +25,17 @@ import datasets  # type: ignore[import-untyped]
 import httpx
 
 from loom_benchmarks.base import UpstreamSource
+
+# `git clone --branch <ref>` accepts tags + branches but NOT raw commit
+# SHAs. When the revision looks like a full or short SHA we fall back to
+# `git init && git fetch <sha> && git checkout FETCH_HEAD` so adapters
+# that pin by content-addressed commit (the spec's recommended default)
+# don't silently end up cloning HEAD instead.
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _looks_like_sha(rev: str) -> bool:
+    return bool(_SHA_RE.match(rev))
 
 
 def cache_key(src: UpstreamSource) -> str:
@@ -53,11 +65,29 @@ def fetch_upstream(
             src.locator, src.subset, revision=src.revision, cache_dir=str(target),
         )
     elif src.kind == "git":
-        cmd = ["git", "clone", "--depth", "1"]
-        if src.revision:
-            cmd += ["--branch", src.revision]
-        cmd += [src.locator, str(target / "repo")]
-        subprocess.run(cmd, check=True)
+        repo_dir = target / "repo"
+        if src.revision and _looks_like_sha(src.revision):
+            # SHA pin: init → fetch the exact object → checkout.
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", src.locator],
+                cwd=repo_dir, check=True,
+            )
+            subprocess.run(
+                ["git", "fetch", "--depth", "1", "origin", src.revision],
+                cwd=repo_dir, check=True,
+            )
+            subprocess.run(
+                ["git", "checkout", "-q", "FETCH_HEAD"],
+                cwd=repo_dir, check=True,
+            )
+        else:
+            cmd = ["git", "clone", "--depth", "1"]
+            if src.revision:
+                cmd += ["--branch", src.revision]
+            cmd += [src.locator, str(repo_dir)]
+            subprocess.run(cmd, check=True)
     elif src.kind == "https-tarball":
         resp = httpx.get(src.locator, timeout=120.0, follow_redirects=True)
         resp.raise_for_status()

@@ -29,7 +29,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `FakeObjectStore`. `verify` is a documented Plan-16 placeholder.
   336 unit+contract+property + 155 integration (+2 from new e2e + 1
   from Plan 13 audit follow-ups); ruff + mypy strict clean across 106
-  source files (+23 from new tool + package).
+  source files (+23 from new tool + package). **Audit follow-ups
+  (same-day):** instance_id allowlist + segment-traversal check at
+  import time (rejects `..`, leading/trailing `/`, NUL, control
+  chars, shell-special bytes); `upload_task_dir` refuses empty,
+  traversal, or absolute prefixes (parity with Plan 13's
+  `download_prefix`); new `toml_string` helper escapes quote /
+  backslash / control / NUL when interpolating upstream-supplied
+  values into `task.toml` (HumanEvalAdapter uses it for `id` + `name`);
+  git fetcher detects commit-SHA revisions and falls back to
+  `git init && fetch <sha> && checkout FETCH_HEAD` so adapters can
+  pin by content-addressed SHA (the spec's recommended default);
+  `python -m loom_benchmark_tool import` flags fall back to env
+  vars (`LOOM_DB_URL`, `LOOM_MINIO_*`) so MinIO secrets don't leak
+  through `ps`. 374 unit+contract+property pass (+9 new safety tests +
+  7 in package).
 - **Plan 13 — Bundle store + license tracking (2026-06-07, tag `loom-bundle-store-v0.13`).**
   Foundation for Plan 14's benchmark integrations. Schema migration
   0004 adds: `benchmarks` table (id = human-readable PK for `ON
