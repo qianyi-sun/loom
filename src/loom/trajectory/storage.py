@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol, cast
 
 import boto3
@@ -49,6 +50,19 @@ class ObjectStore(Protocol):
     async def presign_put(
         self, *, bucket: str, key: str, expires_sec: int,
     ) -> str: ...
+
+    async def download_prefix(
+        self, *, bucket: str, prefix: str, out_dir: Path,
+    ) -> int:
+        """List every object under `prefix` in `bucket` and stream each to
+        `out_dir` preserving the relative path. Returns the count of
+        objects downloaded.
+
+        Used by the worker's `_materialize_task_dir` to pull a benchmark-
+        imported task's fixture content (task.toml + instruction.md +
+        solution/ + tests/ + environment/) from MinIO before the trial
+        runs. Plan 13 Task 2 / agent integrations spec §6.3."""
+        ...
 
 
 @dataclass
@@ -94,6 +108,26 @@ class FakeObjectStore:
         self, *, bucket: str, key: str, expires_sec: int,
     ) -> str:
         return f"https://fake/{bucket}/{key}?expires_sec={expires_sec}"
+
+    async def download_prefix(
+        self, *, bucket: str, prefix: str, out_dir: Path,
+    ) -> int:
+        """Stream every (bucket, key) where key startswith `prefix` into
+        `out_dir`, preserving the suffix path. Used by the worker's
+        materialize_task_dir test path."""
+        count = 0
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for (b, k), body in self.objects.items():
+            if b != bucket or not k.startswith(prefix):
+                continue
+            rel = k[len(prefix):].lstrip("/")
+            if not rel:
+                continue
+            dest = out_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(body)
+            count += 1
+        return count
 
 
 class MinioObjectStore:
@@ -187,4 +221,28 @@ class MinioObjectStore:
                 Params={"Bucket": bucket, "Key": key},
                 ExpiresIn=expires_sec,
             ))
+        return await asyncio.to_thread(_do)
+
+    async def download_prefix(
+        self, *, bucket: str, prefix: str, out_dir: Path,
+    ) -> int:
+        """List + download every object under `prefix`. Uses S3's paginator
+        because large benchmarks (SWE-Bench Verified is ~500 instances)
+        may have thousands of objects per task; the default list_objects
+        returns 1000-key pages."""
+        def _do() -> int:
+            paginator = self._client.get_paginator("list_objects_v2")
+            count = 0
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    rel = key[len(prefix):].lstrip("/")
+                    if not rel:
+                        continue
+                    dest = out_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    self._client.download_file(bucket, key, str(dest))
+                    count += 1
+            return count
         return await asyncio.to_thread(_do)
