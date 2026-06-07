@@ -15,7 +15,7 @@ import contextlib
 import io
 import logging
 import tarfile
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -23,7 +23,7 @@ from typing import Any
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
-from loom.driver.base import MAX_EXEC_STREAM_BYTES, StartOptions
+from loom.driver.base import MAX_EXEC_STREAM_BYTES, ExecHandle, StartOptions
 from loom.driver.network_policy import compute_iptables_rules, render_iptables_commands
 from loom.errors import (
     DriverAlreadyStartedError,
@@ -229,6 +229,123 @@ class DockerDriver:
             stderr=stderr,
             truncated=truncated,
             duration_sec=duration,
+        )
+
+    async def exec_streaming(
+        self,
+        argv: list[str],
+        *,
+        env_vars: dict[str, str],
+        cwd: PurePosixPath,
+        user: str | int | None = None,
+    ) -> ExecHandle:
+        self._require_running()
+        assert self._client is not None
+        assert self._container is not None
+        api = self._client.api  # docker.APIClient — low-level
+        # Capture the container id once so the _kill closure doesn't
+        # re-read self._container (which may be None after stop()).
+        container_id = self._container.id
+
+        exec_create_kwargs: dict[str, Any] = {
+            "container": container_id,
+            "cmd": argv,
+            "environment": [f"{k}={v}" for k, v in env_vars.items()],
+            "workdir": str(cwd),
+            "tty": False,
+            "stdout": True,
+            "stderr": True,
+        }
+        if user is not None:
+            exec_create_kwargs["user"] = str(user)
+
+        exec_info = await asyncio.to_thread(api.exec_create, **exec_create_kwargs)
+        exec_id = exec_info["Id"]
+
+        # `exec_start(stream=True, demux=True)` returns a SYNC generator of
+        # (stdout_chunk, stderr_chunk) tuples (either side may be None for
+        # a chunk that only carries the other stream).
+        raw_stream = await asyncio.to_thread(
+            api.exec_start, exec_id, stream=True, demux=True,
+        )
+
+        stdout_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+        stderr_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _drain_blocking() -> None:
+            try:
+                for chunk in raw_stream:
+                    out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
+                    if out_chunk:
+                        loop.call_soon_threadsafe(stdout_q.put_nowait, out_chunk)
+                    if err_chunk:
+                        loop.call_soon_threadsafe(stderr_q.put_nowait, err_chunk)
+            finally:
+                loop.call_soon_threadsafe(stdout_q.put_nowait, None)
+                loop.call_soon_threadsafe(stderr_q.put_nowait, None)
+
+        reader_task = asyncio.create_task(asyncio.to_thread(_drain_blocking))
+
+        async def _drain(q: asyncio.Queue[bytes | None]) -> AsyncIterator[bytes]:
+            while True:
+                chunk = await q.get()
+                if chunk is None:
+                    return
+                yield chunk
+
+        async def _poll_exit() -> int:
+            # Poll exec_inspect until Running becomes false. Used as a
+            # fallback when the stream iterator doesn't close cleanly
+            # (e.g., after SIGKILL).
+            backoff = 0.05
+            while True:
+                info = await asyncio.to_thread(api.exec_inspect, exec_id)
+                if not info.get("Running"):
+                    return int(info.get("ExitCode") or 0)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 1.5, 0.5)
+
+        async def _wait() -> int:
+            # Race the stream-drain against a polled exec_inspect.
+            # Stream-drain wins on normal exits; the poller wins after
+            # SIGKILL when the iterator blocks indefinitely.
+            poll_task = asyncio.create_task(_poll_exit())
+            done, pending = await asyncio.wait(
+                {reader_task, poll_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            if poll_task in done:
+                return poll_task.result()
+            # Normal path: reader finished; fetch the exit code.
+            info = await asyncio.to_thread(api.exec_inspect, exec_id)
+            return int(info.get("ExitCode") or 0)
+
+        async def _kill() -> None:
+            # docker exec has no direct kill API; exec_inspect's Pid field
+            # is the HOST's view and is useless from inside the container's
+            # PID namespace. Best-effort: pkill matching the joined argv.
+            # May or may not succeed depending on whether `pkill -f` is
+            # available (busybox without procps doesn't ship it). The
+            # ExecHandle.kill() contract documents this as best-effort.
+            try:
+                target = " ".join(argv)
+                killer = await asyncio.to_thread(
+                    api.exec_create,
+                    container=container_id,
+                    cmd=["sh", "-c", f"pkill -9 -f {target!r} 2>/dev/null; true"],
+                )
+                await asyncio.to_thread(api.exec_start, killer["Id"], detach=True)
+            except (APIError, NotFound):
+                pass
+
+        return ExecHandle(
+            pid=0,  # docker exec doesn't surface a host-side PID we trust
+            stdout=_drain(stdout_q),
+            stderr=_drain(stderr_q),
+            _wait=_wait,
+            _kill=_kill,
         )
 
     async def upload(self, src: Path, dst: PurePosixPath) -> None:

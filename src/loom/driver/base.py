@@ -50,6 +50,14 @@ class ExecHandle:
         return await self._wait()
 
     async def kill(self) -> None:
+        """Best-effort signal to the running process. Implementations
+        SHOULD make a reasonable attempt to terminate the process; they
+        do NOT guarantee a fast exit. Callers wanting a hard deadline
+        should wrap `wait()` in `asyncio.wait_for(..., timeout=...)` and
+        accept that `wait()` may not resolve before the deadline expires.
+        For docker-backed drivers, killing a docker exec across PID
+        namespaces is unreliable — the cleanest path to bounded execution
+        is a `timeout` flag inside the agent command itself."""
         await self._kill()
 
 
