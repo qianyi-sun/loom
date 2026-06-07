@@ -55,8 +55,8 @@ async def svc_with_worker_token(
 
     raw = f"loom_w_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
-    SL = sessionmaker(sync_engine)
-    with SL() as s:
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="worker",
@@ -71,7 +71,7 @@ async def svc_with_worker_token(
     finally:
         await app.state.http_client.aclose()
         await engine.dispose()
-        with SL() as s:
+        with sl() as s:
             s.execute(delete(Token))
             s.commit()
         sync_engine.dispose()

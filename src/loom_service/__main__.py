@@ -14,7 +14,7 @@ from loom_service.config import LoomServiceSettings
 
 
 def main() -> None:
-    settings = LoomServiceSettings()  # type: ignore[call-arg]
+    settings = LoomServiceSettings()
     app = create_app(settings)
     uvicorn.run(
         app,

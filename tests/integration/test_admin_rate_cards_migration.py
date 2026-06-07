@@ -30,8 +30,8 @@ def seeded_tokens(postgres_url: str) -> Iterator[None]:
     cfg = _alembic_cfg(postgres_url)
     command.downgrade(cfg, "0004")
     engine = create_engine(postgres_url)
-    SL = sessionmaker(engine)
-    with SL() as s:
+    sl = sessionmaker(engine)
+    with sl() as s:
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(b"a").digest(),
             type="admin", scopes=["admin:tokens"], team_id=None,
@@ -52,7 +52,7 @@ def seeded_tokens(postgres_url: str) -> Iterator[None]:
     try:
         yield
     finally:
-        with SL() as s:
+        with sl() as s:
             s.execute(delete(Token))
             s.commit()
         engine.dispose()
@@ -65,8 +65,8 @@ def test_migration_grants_new_scope(
     cfg = _alembic_cfg(postgres_url)
     command.upgrade(cfg, "0005")
     engine = create_engine(postgres_url)
-    SL = sessionmaker(engine)
-    with SL() as s:
+    sl = sessionmaker(engine)
+    with sl() as s:
         rows = s.execute(select(Token)).scalars().all()
     by_hash = {r.token_hash: list(r.scopes) for r in rows}
     a = hashlib.sha256(b"a").digest()
@@ -94,8 +94,8 @@ def test_migration_idempotent(
             "WHERE 'admin:tokens' = ANY(scopes) "
             "AND NOT ('admin:rate_cards' = ANY(scopes))",
         )
-    SL = sessionmaker(engine)
-    with SL() as s:
+    sl = sessionmaker(engine)
+    with sl() as s:
         rows = s.execute(select(Token)).scalars().all()
     for r in rows:
         if "admin:tokens" in r.scopes:
@@ -110,8 +110,8 @@ def test_migration_downgrade_removes_scope(
     command.upgrade(cfg, "0005")
     command.downgrade(cfg, "0004")
     engine = create_engine(postgres_url)
-    SL = sessionmaker(engine)
-    with SL() as s:
+    sl = sessionmaker(engine)
+    with sl() as s:
         rows = s.execute(select(Token)).scalars().all()
     for r in rows:
         assert "admin:rate_cards" not in r.scopes

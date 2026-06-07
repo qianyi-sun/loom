@@ -56,8 +56,8 @@ async def svc_setup(
     team_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
-    SL = sessionmaker(sync_engine)
-    with SL() as s:
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
@@ -73,7 +73,7 @@ async def svc_setup(
     finally:
         await app.state.http_client.aclose()
         await engine.dispose()
-        with SL() as s:
+        with sl() as s:
             s.execute(delete(Token))
             from loom.db.schema import TeamQuota
             s.execute(delete(TeamQuota))

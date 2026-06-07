@@ -23,7 +23,7 @@ def test_env_vars_parse(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(k, v)
     s = LoomServiceSettings(_env_file=None)
     assert s.bind_port == 8090
-    assert s.bind_host == "0.0.0.0"  # noqa: S104
+    assert s.bind_host == "0.0.0.0"
     assert s.log_level == "info"
     assert s.minio_access_key.get_secret_value() == "k"
     assert s.minio_secret_key.get_secret_value() == "s"
@@ -46,7 +46,7 @@ def test_extra_forbid_on_dict_init(monkeypatch: pytest.MonkeyPatch) -> None:
     # Reading the base env succeeds.
     LoomServiceSettings(_env_file=None)
     # But adding an extra key via constructor kwargs fails.
-    with pytest.raises(Exception):  # noqa: B017, PT011
+    with pytest.raises(Exception):  # noqa: B017
         LoomServiceSettings(_env_file=None, unknown_field="x")  # type: ignore[call-arg]
 
 
@@ -57,5 +57,5 @@ def test_required_fields_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("LOOM_SVC_DB_URL", raising=False)
-    with pytest.raises(Exception):  # noqa: B017, PT011
+    with pytest.raises(Exception):  # noqa: B017
         LoomServiceSettings(_env_file=None)

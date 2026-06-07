@@ -27,7 +27,7 @@ class LoomServiceSettings(BaseSettings):
     control_plane_url: HttpUrl
     gateway_url: HttpUrl
 
-    bind_host: str = "0.0.0.0"  # noqa: S104  (intentional bind-all)
+    bind_host: str = "0.0.0.0"
     bind_port: int = 8090
     log_level: LogLevel = "info"
 

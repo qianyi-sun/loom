@@ -7,6 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 17 — `loom_service` skeleton + tokens routes + `admin:rate_cards`
+  scope (2026-06-07, tag `loom-service-skeleton-v0.17`).** First of a
+  6-plan service-layer arc (17-22) that exposes a thin REST API +
+  SPA on top of the v0.7 runtime core. New `src/loom_service/`
+  package: `LoomServiceSettings` (env-prefix `LOOM_SVC_`, defaults
+  port 8090), FastAPI factory + lifespan opening async SQLAlchemy
+  engine + boto3 S3 + httpx Control-Plane client. `python -m
+  loom_service` boots uvicorn directly. `GET /api/v1/health` ships in
+  Task 2. `auth_guards.py` exports `require_human_or_admin` (rejects
+  worker tokens + step-session JWTs with 403), `is_admin` /
+  `require_scope` / `require_team_or_admin`. `/api/v1/tokens`
+  exposes the full CRUD surface: GET list (team callers see own team
+  only; admin sees all), POST mint (team callers restricted to
+  `team`-type with scopes ⊆ `{read:own, submit}`; admin may mint
+  anything cross-team), DELETE revoke by 8-hex-char prefix. Migration
+  `0005` adds `admin:rate_cards` to existing `admin:tokens` holders
+  (idempotent, downgradeable) so Plan 20's `/admin/rate-cards` write
+  routes can require it cleanly without a manual grant. 376
+  unit+contract+property pass (+15 auth guard + 3 config); 174
+  integration pass (+10 tokens + 3 migration + 1 health); ruff + mypy
+  strict clean across 115 source files.
 - **Plan 16 — `verify` CLI + system smoke tests + license-allowlist
   closure (2026-06-07, tag `loom-benchmarks-v0.16`).** Closes the
   benchmark-integrations arc. New `src/loom_benchmark_tool/oracle_runner.py`
