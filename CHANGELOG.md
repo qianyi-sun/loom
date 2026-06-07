@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 10 — `loom-launcher` PyPI package (2026-06-07, tag `loom-launcher-v0.10`).**
+  New in-repo package at `packages/loom-launcher/` (sibling pyproject)
+  shipping the `AgentAdapter` Protocol, four capture primitives
+  (`stream_stdout_jsonl`, `tail_log_file`, `poll_local_http`, `tail_pty`),
+  and a name→instance registry with collision detection. The package
+  duplicates `ExecHandle` and `ModelSpec` from `loom.driver.base` /
+  `loom.models.types` (Plan 11's `SubprocessAgent._bridge()` adapts
+  between them) so the PyPI distribution doesn't pull in unrelated
+  server-side deps. `ExecHandle.sandbox: SandboxAccess | None` is the
+  Plan 9 amendment A11.2 hook that lets `tail_log_file` and
+  `poll_local_http` reach inside the sandbox container without
+  importing `loom.driver.base.Driver`. `HelloAdapter` ships as a
+  placeholder reference for contract tests. 21 launcher tests
+  (registry + 3 capture primitives + HelloAdapter round-trip) green;
+  ruff + mypy strict clean across 10 launcher source files. Loom main
+  repo 324 unit+contract+property + 99 source files unchanged.
 - **Plan 9 — Gateway multi-dialect + step JWT (2026-06-07, tag `loom-gateway-multidialect-v0.9`).**
   Three new Gateway dialect endpoints (`POST /v1/messages` Anthropic,
   `POST /v1/responses` OpenAI Responses, `POST /v1beta/models/{model_path}`

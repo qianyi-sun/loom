@@ -1,0 +1,88 @@
+"""poll_local_http — fetch events from an HTTP endpoint inside the sandbox.
+
+Used by adapters whose agent runs a local server inside the sandbox
+(openhands launches `openhands.server` on a fixed port). We can't reach
+the container's loopback directly from the worker, so we exec `curl`
+inside the sandbox and parse the output. Slower than streaming stdout
+but the right shape for server-style agents.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from collections.abc import AsyncIterator
+
+from loom_launcher.adapter import ExecHandle, TrajectoryEventLike
+from loom_launcher.capture.stdout_jsonl import _DictEvent
+
+logger = logging.getLogger(__name__)
+
+
+async def poll_local_http(
+    handle: ExecHandle,
+    *,
+    port: int,
+    path: str = "/events",
+    poll_interval_sec: float = 0.5,
+) -> AsyncIterator[TrajectoryEventLike]:
+    """Yield events by repeatedly fetching `http://localhost:{port}{path}`
+    inside the sandbox until `handle.wait()` resolves.
+
+    Assumes the endpoint returns a JSON array of new events on each poll
+    (the openhands `/events?since=N` pattern). We track the last seen
+    index locally.
+    """
+    if handle.sandbox is None:
+        raise RuntimeError(
+            "poll_local_http requires ExecHandle.sandbox to be populated",
+        )
+
+    seen = 0
+
+    async def _drain_once() -> AsyncIterator[TrajectoryEventLike]:
+        nonlocal seen
+        url = f"http://localhost:{port}{path}?since={seen}"
+        rc, stdout = await handle.sandbox.exec_oneshot(  # type: ignore[union-attr]
+            ["curl", "-fsS", url], timeout_sec=5.0,
+        )
+        if rc != 0:
+            # Endpoint not ready yet (typical during the first ~1s); skip.
+            return
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "poll_local_http: %s returned non-JSON (%d bytes): %s",
+                url, len(stdout), exc,
+            )
+            return
+        if not isinstance(payload, list):
+            logger.warning(
+                "poll_local_http: %s returned %s, expected list",
+                url, type(payload).__name__,
+            )
+            return
+        seen += len(payload)
+        for item in payload:
+            if isinstance(item, dict):
+                yield _DictEvent(item)
+
+    wait_task = asyncio.create_task(handle.wait())
+    try:
+        while not wait_task.done():
+            async for event in _drain_once():
+                yield event
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(wait_task), timeout=poll_interval_sec,
+                )
+            except TimeoutError:
+                pass
+        # One final poll after the agent exits.
+        async for event in _drain_once():
+            yield event
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()
