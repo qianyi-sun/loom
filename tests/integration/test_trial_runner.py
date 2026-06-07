@@ -86,7 +86,7 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
         task_dir=hello_task,
         trial_config=TrialConfig(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model:
+        agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
@@ -127,7 +127,7 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
         task_dir=hello_task,
         trial_config=TrialConfig(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model:
+        agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),
@@ -161,7 +161,7 @@ async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
         task_dir=hello_task,
         trial_config=TrialConfig(),
         driver_factory=_driver_factory(handler),
-        agent_factory=lambda task_dir, _gw, _model:
+        agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
         object_store=FakeObjectStore(),

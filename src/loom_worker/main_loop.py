@@ -213,7 +213,11 @@ async def _spawn_trial(
         driver_factory=lambda: DockerDriver(
             image=task_config.environment.docker_image or "alpine",
         ),
-        agent_factory=_default_agent_factory(team_id, trial_id),
+        agent_factory=_default_agent_factory(
+            team_id, trial_id,
+            cp_client=cp_client,
+            gateway_url=str(settings.gateway_url),
+        ),
         verifier_factory=lambda: PytestVerifier(),
         object_store=object_store,
         gateway_client=gateway_client,
@@ -235,23 +239,70 @@ async def _spawn_trial(
 
 
 def _default_agent_factory(
-    team_id: UUID, trial_id: UUID,
+    team_id: UUID,
+    trial_id: UUID,
+    *,
+    cp_client: HttpControlPlaneClient,
+    gateway_url: str,
 ) -> AgentFactory:
+    """Build the agent factory used by LocalTrialRunner. Routes by
+    `agent_name` (read from `task_config.agent.name`):
+
+    - "oracle"            → OracleAgent (solution/solve.sh baseline)
+    - "litellm"           → LiteLLMAgent (v0.7 tool-loop runtime)
+    - "claude-code-inbox" → v0.7 ClaudeCodeAgent (in-box runtime, kept
+      for backwards compat under the renamed name; the new subprocess
+      "claude-code" adapter lives in loom-launcher)
+    - anything else       → SubprocessAgent wrapping the loom-launcher
+      adapter of that name. Raises ValueError if the name is unknown
+      (i.e. no v0.7 runtime and no registered adapter).
+    """
     def make(
-        task_dir: Path, gateway: LLMGatewayClient, model: ModelSpec | None,
+        task_dir: Path,
+        gateway: LLMGatewayClient,
+        model: ModelSpec | None,
+        agent_name: str,
     ) -> AgentRuntime:
         agent: AgentRuntime
-        if model is not None:
+        if agent_name == "oracle":
+            agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
+        elif agent_name == "litellm":
+            if model is None:
+                raise ValueError(
+                    "litellm agent requires task.agent.model to be set",
+                )
             # mypy: LiteLLMAgent.model is ModelSpec while the AgentRuntime
             # protocol declares ModelSpec | None; covariant on a mutable
-            # attribute trips invariance. Both are structurally compatible
-            # for our purposes.
+            # attribute trips invariance. Both are structurally compatible.
             agent = LiteLLMAgent(  # type: ignore[assignment]
                 model=model, gateway=gateway,
                 team_id=str(team_id), trial_id=trial_id,
             )
         else:
-            agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
+            # Try the loom-launcher registry. Imports are lazy so the
+            # launcher dep stays optional for sites that only run
+            # oracle/litellm.
+            from loom_launcher import get_adapter
+
+            from loom.agent.subprocess import SubprocessAgent
+            adapter = get_adapter(agent_name)
+            if adapter is None:
+                raise ValueError(
+                    f"unknown agent.name {agent_name!r} — not a v0.7 runtime "
+                    f"and not registered in loom-launcher",
+                )
+            if model is None:
+                raise ValueError(
+                    f"{agent_name} requires task.agent.model to be set",
+                )
+            # Same Protocol-variance situation as LiteLLMAgent above:
+            # SubprocessAgent.model is ModelSpec while AgentRuntime.model
+            # is ModelSpec | None. Structurally compatible.
+            agent = SubprocessAgent(  # type: ignore[assignment]
+                adapter=adapter, model=model,
+                cp_client=cp_client, gateway_url=gateway_url,
+                team_id=team_id, trial_id=trial_id,
+            )
         return agent
     return make
 

@@ -42,6 +42,7 @@ class _FakeCPClient:
 
 class _FakeSettings:
     trajectory_cache_dir = Path("/tmp/loom-test-cleanup-cache")
+    gateway_url = "http://gw:9100"
 
 
 async def _drive_spawn(runner_target: object) -> Path:

@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 11 — SubprocessAgent + worker integration (2026-06-07, tag `loom-subprocess-agent-v0.11`).**
+  `loom.agent.subprocess.SubprocessAgent` wraps any
+  `loom_launcher.AgentAdapter` as an `AgentRuntime` satisfying
+  `loom.agent.base.AgentRuntime`. Three bridge functions adapt the
+  loom and loom-launcher type universes (Driver↔SandboxAccess,
+  ExecHandle↔ExecHandle, ModelSpec↔ModelSpec — amendment A11.2).
+  `HttpControlPlaneClient.mint_step_token` + `.get_trial_llm_calls`
+  (amendment A11.1) shipped; the latter is the finalize-time read the
+  worker uses to project LLMCallEvents into the trajectory before ATIF
+  projection. `_default_agent_factory` routes by `task_config.agent.name`:
+  oracle / litellm / claude-code-inbox / any registered launcher
+  adapter. `TrajectoryWriter.write_raw_dict()` is the permissive,
+  no-validation writer SubprocessAgent uses to forward adapter events
+  (Plan 12 adapters emit valid shapes; v1.5 reintroduces validation).
+  324 unit+contract+property + 146 integration green; 100 source files
+  clean.
 - **Plan 10 — `loom-launcher` PyPI package (2026-06-07, tag `loom-launcher-v0.10`).**
   New in-repo package at `packages/loom-launcher/` (sibling pyproject)
   shipping the `AgentAdapter` Protocol, four capture primitives

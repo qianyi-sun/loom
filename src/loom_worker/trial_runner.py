@@ -31,7 +31,15 @@ logger = logging.getLogger(__name__)
 # transition, False if the worker has lost its claim (fenced).
 StatePatchCallback = Callable[[str, str | None], Awaitable[bool]]
 
-AgentFactory = Callable[[Path, LLMGatewayClient, "ModelSpec | None"], AgentRuntime]
+# Factory signature: (task_dir, gateway, model, agent_name) → AgentRuntime.
+# agent_name is read from task_config.agent.name; the factory routes:
+#   "oracle"             → OracleAgent
+#   "litellm" (or model) → LiteLLMAgent
+#   "claude-code-inbox"  → ClaudeCodeAgent (v0.7 in-box; renamed per spec)
+#   <launcher adapter>   → SubprocessAgent wrapping the adapter
+AgentFactory = Callable[
+    [Path, LLMGatewayClient, "ModelSpec | None", str], AgentRuntime,
+]
 
 
 @dataclass
@@ -56,7 +64,10 @@ class LocalTrialRunner:
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
         model = self.task_config.agent.model
-        agent = self.agent_factory(self.task_dir, self.gateway_client, model)
+        agent = self.agent_factory(
+            self.task_dir, self.gateway_client, model,
+            self.task_config.agent.name,
+        )
         verifier = self.verifier_factory()
 
         ctx = TrialContext(
