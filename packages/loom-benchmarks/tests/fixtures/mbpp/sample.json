@@ -1,0 +1,14 @@
+[
+  {
+    "task_id": 11,
+    "text": "Write a function to remove first and last occurrence of a given character from the string.",
+    "code": "def remove_Occ(s, ch):\n    for i in range(len(s)):\n        if s[i] == ch:\n            s = s[:i] + s[i+1:]\n            break\n    for i in range(len(s) - 1, -1, -1):\n        if s[i] == ch:\n            s = s[:i] + s[i+1:]\n            break\n    return s\n",
+    "test_setup_code": "",
+    "test_list": [
+      "assert remove_Occ(\"hello\",\"l\") == \"heo\"",
+      "assert remove_Occ(\"abcda\",\"a\") == \"bcd\"",
+      "assert remove_Occ(\"PHP\",\"P\") == \"H\""
+    ],
+    "challenge_test_list": []
+  }
+]
