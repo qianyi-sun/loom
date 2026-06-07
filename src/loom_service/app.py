@@ -22,6 +22,7 @@ from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
     atif,
     benchmarks,
+    campaigns,
     health,
     tasks,
     tokens,
@@ -68,4 +69,5 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(atif.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(benchmarks.router, prefix="/api/v1")
+    app.include_router(campaigns.router, prefix="/api/v1")
     return app
