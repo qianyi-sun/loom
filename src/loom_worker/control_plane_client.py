@@ -137,6 +137,53 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
+    async def mint_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+    ) -> str:
+        """Mint a step-scoped JWT the agent presents to the Gateway as its
+        bearer token (Plan 11 + Plan 9 Task 4). Returns the raw
+        `loom_step_<jwt>` string."""
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                "/admin/step-tokens", headers=self._headers,
+                json={
+                    "team_id": str(team_id),
+                    "trial_id": str(trial_id),
+                    "step_id": step_id,
+                    "ttl_sec": ttl_sec,
+                },
+            )
+            r.raise_for_status()
+            body = r.json()
+            return str(body["token"])
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def get_trial_llm_calls(self, trial_id: UUID) -> list[dict[str, Any]]:
+        """Fetch every `llm_calls` row the Gateway recorded against this
+        trial (Plan 11 amendment A11.1). Called by the worker at finalize
+        to project LLMCallEvents into the trial's local trajectory JSONL
+        before ATIF projection runs."""
+        client, owned = self._http()
+        try:
+            r = await client.get(
+                f"/trials/{trial_id}/llm-calls", headers=self._headers,
+            )
+            r.raise_for_status()
+            body = r.json()
+            items: list[dict[str, Any]] = body.get("items", [])
+            return items
+        finally:
+            if owned:
+                await client.aclose()
+
     async def patch_trajectory_index(
         self,
         *,

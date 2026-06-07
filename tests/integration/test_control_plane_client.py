@@ -229,6 +229,79 @@ async def test_get_task_bundle_returns_config(  # type: ignore[no-untyped-def]
         await http.aclose()
 
 
+async def test_mint_step_token_returns_loom_step_jwt(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    """A11.1: worker mints step tokens via the new endpoint."""
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        # Seed a team + trial the worker can mint a token for.
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="running",
+            ))
+        engine.dispose()
+
+        token = await cp.mint_step_token(
+            team_id=team_id, trial_id=trial_id,
+            step_id="main", ttl_sec=60,
+        )
+        assert token.startswith("loom_step_")
+    finally:
+        await http.aclose()
+
+
+async def test_get_trial_llm_calls_returns_items(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    """A11.1: worker reads llm_calls rows at finalize."""
+    from decimal import Decimal
+
+    from loom.db.schema import LlmCall
+
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="running",
+            ))
+            conn.execute(insert(LlmCall).values(
+                team_id=team_id, trial_id=trial_id, step_id="main",
+                dialect="anthropic", model="claude-opus-4-7",
+                input_tokens=100, output_tokens=50,
+                provider_extras={},
+                cost_usd=Decimal("0.001"), rate_card_hash="abc",
+            ))
+        engine.dispose()
+
+        items = await cp.get_trial_llm_calls(trial_id)
+        assert len(items) == 1
+        assert items[0]["input_tokens"] == 100
+        assert items[0]["dialect"] == "anthropic"
+    finally:
+        await http.aclose()
+
+
 async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[no-untyped-def]
     cp_setup, postgres_url,
 ):
