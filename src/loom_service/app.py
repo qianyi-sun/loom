@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_service.config import LoomServiceSettings
-from loom_service.routes import atif, health, tokens, trajectory, trials
+from loom_service.routes import atif, health, tasks, tokens, trajectory, trials
 
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
@@ -58,4 +58,5 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(trials.router, prefix="/api/v1")
     app.include_router(trajectory.router, prefix="/api/v1")
     app.include_router(atif.router, prefix="/api/v1")
+    app.include_router(tasks.router, prefix="/api/v1")
     return app
