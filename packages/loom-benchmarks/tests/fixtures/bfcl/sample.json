@@ -1,0 +1,21 @@
+[
+  {
+    "id": "simple_0",
+    "question": [[{"role": "user", "content": "What's the weather in Paris in celsius?"}]],
+    "function": [
+      {
+        "name": "get_current_weather",
+        "description": "Get the current weather in a location.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string"},
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+          },
+          "required": ["location"]
+        }
+      }
+    ],
+    "ground_truth": [{"get_current_weather": {"location": ["Paris"], "unit": ["celsius"]}}]
+  }
+]

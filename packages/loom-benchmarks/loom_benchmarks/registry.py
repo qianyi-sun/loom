@@ -3,6 +3,7 @@ remaining 11 ship Plan 15)."""
 
 from __future__ import annotations
 
+from loom_benchmarks.adapters.bfcl import BFCLAdapter
 from loom_benchmarks.adapters.humaneval import HumanEvalAdapter
 from loom_benchmarks.adapters.mbpp import MBPPAdapter
 from loom_benchmarks.adapters.osworld import OSWorldAdapter
@@ -20,4 +21,5 @@ REGISTRY: dict[str, BenchmarkAdapter] = {
     "osworld": OSWorldAdapter(),
     "webarena": WebArenaAdapter(),
     "mbpp": MBPPAdapter(),
+    "bfcl": BFCLAdapter(),
 }
