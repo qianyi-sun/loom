@@ -5,6 +5,14 @@ Used by adapters whose agent runs a local server inside the sandbox
 the container's loopback directly from the worker, so we exec `curl`
 inside the sandbox and parse the output. Slower than streaming stdout
 but the right shape for server-style agents.
+
+**Sandbox requirement.** The sandbox image MUST have `curl` installed
+on PATH. Plan 12's openhands adapter Dockerfile pins this; any adapter
+using this capture mechanism MUST document the dependency in its
+Dockerfile + adapter docstring. If curl is missing, `exec_oneshot`
+returns rc=127 and the polling loop emits zero events (logged at
+DEBUG, not an exception — silent failure is better than crashing the
+trial for what is fundamentally an image-build issue).
 """
 
 from __future__ import annotations
@@ -43,7 +51,12 @@ async def poll_local_http(
 
     async def _drain_once() -> AsyncIterator[TrajectoryEventLike]:
         nonlocal seen
-        url = f"http://localhost:{port}{path}?since={seen}"
+        # Audit fix: if the caller's path already contains a query string
+        # (e.g., path="/events?format=json"), append `since=N` with `&`
+        # not `?`. Otherwise we'd produce `...?format=json?since=0` which
+        # most servers misparse.
+        sep = "&" if "?" in path else "?"
+        url = f"http://localhost:{port}{path}{sep}since={seen}"
         rc, stdout = await handle.sandbox.exec_oneshot(  # type: ignore[union-attr]
             ["curl", "-fsS", url], timeout_sec=5.0,
         )

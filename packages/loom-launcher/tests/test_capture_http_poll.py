@@ -116,6 +116,24 @@ async def test_non_json_response_logged_and_skipped() -> None:
     assert any(e["id"] == 99 for e in events)
 
 
+async def test_appends_since_with_ampersand_when_path_has_query() -> None:
+    """Audit fix regression: a `path` already containing `?` must use `&`
+    to append `since=N`. Otherwise `...?format=json?since=0` is malformed."""
+    sandbox = _ScriptedHttpSandbox([
+        (0, [{"id": 1}]),
+    ])
+    handle = _handle_with(sandbox, runtime_sec=0.2)
+    _ = [
+        e async for e in poll_local_http(
+            handle, port=9000, path="/events?format=json",
+            poll_interval_sec=0.05,
+        )
+    ]
+    joined = " ".join(" ".join(c) for c in sandbox.calls)
+    assert "/events?format=json&since=0" in joined
+    assert "?format=json?since=" not in joined
+
+
 async def test_requires_sandbox(make_handle) -> None:
     handle = make_handle(stdout_chunks=[])
     import pytest
