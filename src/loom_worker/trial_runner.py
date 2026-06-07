@@ -60,6 +60,10 @@ class LocalTrialRunner:
 
     local_trajectory_root: Path
     state_patch_callback: StatePatchCallback
+    # Plan 9/11 amendment A11.1: optional fetcher the worker plumbs
+    # through to Trial via TrialContext.llm_calls_fetcher. None means
+    # no llm_calls injection at finalize (legacy v0.7 behavior).
+    llm_calls_fetcher: Callable[[UUID], Awaitable[list[dict[str, object]]]] | None = None
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
@@ -84,6 +88,7 @@ class LocalTrialRunner:
             local_trajectory_path=(
                 self.local_trajectory_root / f"{self.trial_id}.jsonl"
             ),
+            llm_calls_fetcher=self.llm_calls_fetcher,
         )
 
         async def _patch(state: str, fr: str | None) -> None:

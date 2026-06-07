@@ -50,15 +50,24 @@ def _bridge_driver(driver: Driver, *, cwd: PurePosixPath) -> SandboxAccess:
 
     class _Bridge:
         async def read_text(self, path: PurePosixPath) -> str:
+            # Use `test -e && cat` so we can distinguish "file doesn't
+            # exist yet" (FileNotFoundError, which polling adapters
+            # interpret as "keep waiting") from a real I/O failure
+            # (OSError, which we surface so the trial fails fast rather
+            # than looping forever on a misconfigured volume).
+            path_q = shlex.quote(str(path))
             result = await driver.exec(
-                f"cat {shlex.quote(str(path))}",
+                f"if [ -e {path_q} ]; then cat {path_q}; else exit 66; fi",
                 cwd=cwd, timeout_sec=10.0,
             )
-            if result.return_code != 0:
-                # Match the launcher contract: FileNotFoundError when the
-                # path doesn't exist (typical when the agent hasn't
-                # written its log yet during the first few polls).
+            if result.return_code == 66:
                 raise FileNotFoundError(str(path))
+            if result.return_code != 0:
+                stderr = result.stderr.decode("utf-8", errors="replace")[:200]
+                raise OSError(
+                    f"sandbox read_text({path}) failed rc={result.return_code}"
+                    f": {stderr}",
+                )
             return result.stdout.decode("utf-8", errors="replace")
 
         async def exec_oneshot(

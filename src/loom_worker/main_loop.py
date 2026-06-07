@@ -33,6 +33,7 @@ from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
 from loom.driver.docker import DockerDriver
+from loom.errors import AgentError
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
@@ -223,6 +224,10 @@ async def _spawn_trial(
         gateway_client=gateway_client,
         local_trajectory_root=settings.trajectory_cache_dir,
         state_patch_callback=_state_patch,
+        # A11.1: query CP for the trial's llm_calls rows at finalize,
+        # project each into an LLMCallEvent. No-op for trials that
+        # don't route through the Gateway (oracle, in-box runtimes).
+        llm_calls_fetcher=cp_client.get_trial_llm_calls,
     )
 
     async def _run_and_cleanup() -> None:
@@ -268,7 +273,7 @@ def _default_agent_factory(
             agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
         elif agent_name == "litellm":
             if model is None:
-                raise ValueError(
+                raise AgentError(
                     "litellm agent requires task.agent.model to be set",
                 )
             # mypy: LiteLLMAgent.model is ModelSpec while the AgentRuntime
@@ -287,12 +292,15 @@ def _default_agent_factory(
             from loom.agent.subprocess import SubprocessAgent
             adapter = get_adapter(agent_name)
             if adapter is None:
-                raise ValueError(
-                    f"unknown agent.name {agent_name!r} — not a v0.7 runtime "
-                    f"and not registered in loom-launcher",
+                # Surface as AgentError so Trial.run() classifies it as
+                # AGENT_ERROR and the trial fails cleanly instead of
+                # crashing the worker.
+                raise AgentError(
+                    f"unknown agent.name {agent_name!r} — not a v0.7 "
+                    f"runtime and not registered in loom-launcher",
                 )
             if model is None:
-                raise ValueError(
+                raise AgentError(
                     f"{agent_name} requires task.agent.model to be set",
                 )
             # Same Protocol-variance situation as LiteLLMAgent above:

@@ -39,6 +39,9 @@ class _FakeCPClient:
     async def get_task_bundle(self, _task_id: str) -> dict:
         return self.bundle
 
+    async def get_trial_llm_calls(self, _trial_id) -> list:  # type: ignore[no-untyped-def]
+        return []
+
 
 class _FakeSettings:
     trajectory_cache_dir = Path("/tmp/loom-test-cleanup-cache")

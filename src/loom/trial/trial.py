@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from loom.agent.base import AgentRuntime, InBoxAgentRuntime
@@ -61,6 +62,12 @@ class TrialContext:
     local_trajectory_path: Path
     trajectory_bucket: str = "trajectories"
     artifacts_bucket: str = "artifacts"
+    # Plan 9/11 amendment A11.1: optional callback the worker uses to
+    # fetch llm_calls rows from the Control Plane at finalize time and
+    # project each into an LLMCallEvent before ATIF runs. If None, no
+    # rows are injected (legacy v0.7 behavior — agents that bypassed
+    # the Gateway have no llm_calls).
+    llm_calls_fetcher: Callable[[UUID], Awaitable[list[dict[str, Any]]]] | None = None
 
     @property
     def task_id(self) -> str:
@@ -212,6 +219,21 @@ class Trial:
                     ))
                 except Exception:
                     logger.exception("failed to append TrialEndEvent")
+
+                # Plan 9/11 amendment A11.1: BEFORE the writer closes,
+                # query CP for llm_calls rows and append each as an
+                # LLMCallEvent-shaped dict so finalize_trajectory's ATIF
+                # projection sees them. The writer is still open here
+                # (inside `async with writer:`); skip silently if the
+                # context didn't supply a fetcher (v0.7 behavior).
+                if self.ctx.llm_calls_fetcher is not None:
+                    try:
+                        await self._append_llm_call_events(writer)
+                    except Exception:
+                        logger.exception(
+                            "failed to fetch llm_calls; trajectory will be "
+                            "finalized without LLMCallEvents",
+                        )
         finally:
             try:
                 atif_uri = await asyncio.wait_for(
@@ -263,6 +285,75 @@ class Trial:
                 raise asyncio.CancelledError
 
         return result
+
+    async def _append_llm_call_events(self, writer: TrajectoryWriter) -> None:
+        """Plan 9/11 A11.1: query CP for llm_calls rows + project each
+        into a valid LLMCallEvent on the local JSONL.
+
+        Cost-attribution facts (tokens, model, rate_card_hash) come
+        straight from the row. Conversation content (system_prompt,
+        messages, response, finish_reason) is set to placeholders
+        because the Gateway doesn't persist message bodies — the
+        adapter's `capture_events()` is the source of truth for
+        message-level semantics, this projection is the source of
+        truth for billing.
+        """
+        from loom.models.trajectory import ChatMessage, LLMCallEvent
+        from loom.models.types import ModelSpec
+
+        assert self.ctx.llm_calls_fetcher is not None
+        rows = await self.ctx.llm_calls_fetcher(self.ctx.trial_id)
+        _provider_by_dialect = {
+            "openai_chat": "openai",
+            "openai_responses": "openai",
+            "anthropic": "anthropic",
+            "gemini": "google",
+        }
+        for row in rows:
+            captured_at_raw = row.get("captured_at")
+            emitted_at = datetime.fromisoformat(
+                str(captured_at_raw).replace("Z", "+00:00"),
+            ) if captured_at_raw else datetime.now(UTC)
+            extras = row.get("provider_extras") or {}
+            event = LLMCallEvent(
+                emitted_at=emitted_at,
+                trial_id=self.ctx.trial_id,
+                step_id=str(row.get("step_id") or "__trial__"),
+                seq=0,        # appended out-of-band; ATIF sorts by emitted_at
+                model=ModelSpec(
+                    provider=_provider_by_dialect.get(
+                        str(row.get("dialect") or ""), "unknown",
+                    ),
+                    name=str(row.get("model") or "unknown"),
+                ),
+                rate_card_hash=str(row.get("rate_card_hash") or ""),
+                system_prompt=None,
+                messages=[],
+                response=ChatMessage(role="assistant", content=""),
+                finish_reason="synthetic",
+                input_tokens=int(row.get("input_tokens") or 0),
+                cached_input_tokens=int(
+                    extras.get("cache_read_input_tokens", 0)
+                    + extras.get("cachedContentTokenCount", 0),
+                ),
+                cache_write_tokens=int(
+                    extras.get("cache_creation_input_tokens", 0),
+                ),
+                output_tokens=int(row.get("output_tokens") or 0),
+                thinking_tokens=int(
+                    extras.get("reasoning_tokens", 0)
+                    + extras.get("thoughtsTokenCount", 0),
+                ),
+                provider_extras={
+                    k: int(v) for k, v in extras.items() if isinstance(v, int | float)
+                },
+                cost_usd_snapshot=float(row.get("cost_usd") or 0.0),
+                duration_sec=0.0,
+                streamed=False,
+                time_to_first_token_sec=None,
+                gateway_request_id=str(row.get("id") or ""),
+            )
+            await writer.append(event)
 
 
 def _aggregate(ctx: TrialContext, result: TrialResult) -> dict[str, float] | None:
