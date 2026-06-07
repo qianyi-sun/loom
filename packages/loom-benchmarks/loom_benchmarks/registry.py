@@ -3,6 +3,7 @@ remaining 11 ship Plan 15)."""
 
 from __future__ import annotations
 
+from loom_benchmarks.adapters.aime import AIMEAdapter
 from loom_benchmarks.adapters.bfcl import BFCLAdapter
 from loom_benchmarks.adapters.gaia import GAIAAdapter
 from loom_benchmarks.adapters.humaneval import HumanEvalAdapter
@@ -26,4 +27,5 @@ REGISTRY: dict[str, BenchmarkAdapter] = {
     "bfcl": BFCLAdapter(),
     "gaia": GAIAAdapter(),
     "livecodebench": LiveCodeBenchAdapter(),
+    "aime": AIMEAdapter(),
 }

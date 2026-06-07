@@ -1,0 +1,9 @@
+[
+  {
+    "id": "2022-I-1",
+    "problem": "Find the number of ordered pairs of positive integers (a, b) such that 1/a + 1/b = 1/2022.",
+    "solution": "The equation rewrites as (a - 2022)(b - 2022) = 2022^2. Count divisors of 2022^2 to get 45 ordered pairs.",
+    "answer": "45",
+    "url": "https://artofproblemsolving.com/wiki/index.php/2022_AIME_I_Problems/Problem_1"
+  }
+]
