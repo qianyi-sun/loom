@@ -7,6 +7,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 7 — System E2E + Ops (2026-06-06, tag `loom-v0.7-runtime-core`).**
+  Closes the runtime core: workers can now resolve trial → task config
+  via a new bundle endpoint, the canonical task fixtures live on disk,
+  hypothesis-driven property tests guard the state machine + backoff +
+  DRF + ATIF projection, full-stack docker-compose tests exercise the
+  hello/multi-step/cancel/worker-crash paths, deploy YAML covers dev
+  compose + k8s, and operator-facing docs ship.
+  - **Control Plane:** new `GET /tasks/{id}/bundle` → `{id, checksum,
+    config, source}`. Worker uses this as the second round-trip after
+    a successful claim, removing Plan 6's NotImplementedError stub.
+  - **Worker:** `HttpControlPlaneClient.get_task_bundle` + `_spawn_trial`
+    now fetches the bundle, validates `TaskConfig`, and pulls the
+    checksum from the bundle. `task_dir` uses `tempfile.mkdtemp()`;
+    production ops mounts a shared volume or clones `bundle["source"]`
+    (documented in `docs/operator-runbook.md`).
+  - **Canonical fixtures** (`tests/fixtures/tasks/`): hello-world (CI
+    canary), multi-step-3 (per-step rewards + `min_reward` gate),
+    in-box-cli (claude-code placeholder), healthcheck-flaky (DockerDriver
+    retry exercise), large-artifact (boto3 multipart). pytest's
+    `norecursedirs` excludes them from host collection.
+  - **Property tests** (`tests/property/`, hypothesis):
+    - state machine: terminal states absorbing + no invalid transitions
+    - backoff: delay within jitter bounds + zero-jitter determinism
+    - DRF: per-pick min-ratio invariant + weighted-fairness within
+      `1/min(weight)` + empty queues return None
+    - ATIF: projection metadata + steps deterministic across re-runs
+  - **System tests** (`tests/system/`, opted-out by default via
+    `addopts = "--ignore=tests/system"`): full-stack hello, multi-step,
+    cancellation, worker-crash-then-retry. Session fixture brings up
+    `deploy/docker-compose.test.yml` (postgres + minio + gateway +
+    control-plane + worker) and tears it down at session end.
+    Skippable via `LOOM_SKIP_SYSTEM_TESTS=1`.
+  - **Deploy:** `deploy/docker-compose.{dev,test}.yml` +
+    `Dockerfile.{control-plane,gateway,worker}` + `deploy/k8s/` (postgres
+    + minio StatefulSets, control-plane/gateway/worker Deployments,
+    nginx Ingress).
+  - **scripts/seed_test_data.py:** bootstraps a team + chosen fixture
+    + tokens + rate card directly into Postgres. `--print {team|worker|both}`
+    chooses which token to emit.
+  - **Docs:** README rewritten for post-shipment state;
+    `docs/operator-runbook.md` covers initial deploy, upgrade, rollback,
+    rate-card + token rotation, alarm matrix, backup/restore, capacity
+    planning. `docs/task-authoring-guide.md` walks through writing a
+    new task fixture from scratch.
+  - 293 unit+contract+property + 121 integration tests; lint + mypy
+    strict clean across 93 source files. **Loom v0.7 runtime core is
+    runnable end-to-end.**
+
 - **Plan 6 — Worker (2026-06-06, tag `loom-worker-v0.6`).** Long-lived
   worker process that claims trials from the Control Plane and runs them
   in-process via `Trial.run()`. New top-level package `src/loom_worker`
