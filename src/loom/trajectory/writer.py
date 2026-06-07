@@ -98,6 +98,24 @@ class TrajectoryWriter:
         if self._closed:
             raise RuntimeError("append after close")
         line = event.model_dump_json().encode("utf-8") + b"\n"
+        await self._write_line(line)
+
+    async def write_raw_dict(self, data: dict[str, object]) -> None:
+        """Append a pre-shaped dict as one JSONL line WITHOUT pydantic
+        validation. Used by `SubprocessAgent` (Plan 11) to forward
+        adapter-emitted events whose shape is the adapter's contract,
+        not Loom's `TrajectoryEvent` discriminated union — adapters in
+        Plan 12 are responsible for emitting valid shapes.
+
+        Loom v1.5 will reintroduce validation here once the adapter
+        catalog stabilizes. For v1 we accept the trust boundary."""
+        if self._closed:
+            raise RuntimeError("append after close")
+        import json
+        line = (json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8")
+        await self._write_line(line)
+
+    async def _write_line(self, line: bytes) -> None:
         assert self._local_file is not None
         await self._local_file.write(line)
         await self._local_file.flush()

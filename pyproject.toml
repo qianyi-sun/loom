@@ -77,6 +77,16 @@ ignore_missing_imports = true
 module = ["jsonschema", "jsonschema.*"]
 ignore_missing_imports = true
 
+# loom-launcher is an in-repo PyPI-style sibling package at
+# packages/loom-launcher/. It's installed via `pip install -e
+# packages/loom-launcher` in dev; mypy can't resolve the sibling
+# path automatically, so we suppress the missing-import warning at
+# the boundary. The launcher itself ships strict-typed under its own
+# pyproject.
+[[tool.mypy.overrides]]
+module = ["loom_launcher", "loom_launcher.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
