@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Plan 8 — Driver Protocol streaming exec (2026-06-06, tag `loom-driver-streaming-v0.8`).**
+  Additive `exec_streaming(argv, env_vars, cwd, user) -> ExecHandle` on
+  the `Driver` Protocol. Existing buffered `exec()` is unchanged; only
+  agent runtimes that need to stream multi-megabyte agent output reach
+  for the streaming path. Both `FakeDriver` and `DockerDriver` ship
+  implementations. `ExecHandle.kill()` is documented best-effort
+  (docker exec across PID namespaces can't be reliably signaled —
+  callers wanting a hard deadline use `asyncio.wait_for` and bound
+  execution via timeouts inside the agent command). 313
+  unit+contract+property + 125 integration green; lint + mypy strict
+  clean across 93 source files.
+
 ### Fixed
 - **Plan 7 post-review hardening (2026-06-06).** 9 findings from the
   post-Plan-7 self-audit, plus regression tests for the schema-drift
