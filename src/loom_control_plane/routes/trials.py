@@ -34,6 +34,28 @@ async def submit_trial(
     task_id = payload.get("task_id")
     if not task_id:
         raise HTTPException(status_code=400, detail="task_id required")
+    idempotency_key = payload.get("idempotency_key")
+
+    # Plan 19: if `idempotency_key` was supplied and a trial with that
+    # key already exists, return its trial_id without minting a new
+    # row. The check + insert are not atomic against a true race; the
+    # follow-up INSERT below has `ON CONFLICT (idempotency_key) DO
+    # NOTHING` which closes the window — we still do the early read so
+    # the common "campaign runner re-submits an already-emitted trial"
+    # case skips the (heavier) license + quota work.
+    if idempotency_key is not None:
+        async with request.app.state.session_factory() as session:
+            existing = (await session.execute(
+                select(TrialRow).where(
+                    TrialRow.idempotency_key == idempotency_key,
+                ),
+            )).scalar_one_or_none()
+        if existing is not None:
+            return {
+                "trial_id": str(existing.id),
+                "state": existing.state,
+                "submitted_at": existing.submitted_at.isoformat(),
+            }
 
     async with request.app.state.session_factory() as session:
         task_row = (await session.execute(
@@ -80,16 +102,60 @@ async def submit_trial(
                         f"allowlist {sorted(quota.license_allowlist)}"
                     ),
                 )
-        result = await session.execute(
-            insert(TrialRow).values(
-                id=trial_id, team_id=ctx.team_id, task_id=task_id,
-                config=trial_config.model_dump(mode="json"),
-                requires_caps=requires_caps.model_dump(mode="json"),
-                state="queued",
-                submit_priority=trial_config.submit_priority,
-            ).returning(TrialRow.submitted_at),
-        )
-        submitted_at = result.scalar_one()
+        # Plan 19: campaign_id + idempotency_key are optional. When
+        # `idempotency_key` is set we use pg_insert + ON CONFLICT DO
+        # NOTHING so a concurrent race (two runner instances picking
+        # the same campaign row before the SELECT-skip-locked is held)
+        # doesn't produce duplicate trial rows.
+        campaign_id = payload.get("campaign_id")
+        insert_values: dict[str, Any] = {
+            "id": trial_id, "team_id": ctx.team_id, "task_id": task_id,
+            "config": trial_config.model_dump(mode="json"),
+            "requires_caps": requires_caps.model_dump(mode="json"),
+            "state": "queued",
+            "submit_priority": trial_config.submit_priority,
+            "campaign_id": campaign_id,
+            "idempotency_key": idempotency_key,
+        }
+        if idempotency_key is not None:
+            # The partial unique index is `WHERE idempotency_key IS NOT
+            # NULL`; the ON CONFLICT predicate must match it for
+            # Postgres to use the index as a conflict target.
+            stmt = (
+                pg_insert(TrialRow)
+                .values(**insert_values)
+                .on_conflict_do_nothing(
+                    index_elements=["idempotency_key"],
+                    index_where=text(
+                        "idempotency_key IS NOT NULL",
+                    ),
+                )
+                .returning(TrialRow.id, TrialRow.submitted_at)
+            )
+            result = await session.execute(stmt)
+            row = result.one_or_none()
+            if row is None:
+                # ON CONFLICT fired — another caller won the race.
+                # Re-read the canonical row.
+                existing = (await session.execute(
+                    select(TrialRow).where(
+                        TrialRow.idempotency_key == idempotency_key,
+                    ),
+                )).scalar_one()
+                await session.commit()
+                return {
+                    "trial_id": str(existing.id),
+                    "state": existing.state,
+                    "submitted_at": existing.submitted_at.isoformat(),
+                }
+            trial_id = row.id
+            submitted_at = row.submitted_at
+        else:
+            result = await session.execute(
+                insert(TrialRow).values(**insert_values)
+                .returning(TrialRow.submitted_at),
+            )
+            submitted_at = result.scalar_one()
         await session.commit()
 
     return {
