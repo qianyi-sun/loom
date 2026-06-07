@@ -73,7 +73,7 @@ async def test_docker_exec_streaming_no_10mb_cap() -> None:
     try:
         handle = await driver.exec_streaming(
             # `dd` produces exactly `target_bytes` of zeros at high speed.
-            ["sh", "-c", f"dd if=/dev/zero bs=1M count=20 2>/dev/null"],
+            ["sh", "-c", "dd if=/dev/zero bs=1M count=20 2>/dev/null"],
             env_vars={},
             cwd=PurePosixPath("/workspace"),
         )

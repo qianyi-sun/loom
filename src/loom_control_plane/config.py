@@ -31,3 +31,9 @@ class ControlPlaneSettings(BaseSettings):
 
     # Signed-URL TTL for artifact uploads.
     signed_url_expiry_sec: int = 3600
+
+    # HS256 secret shared with the LLM Gateway. Used to sign step-scoped
+    # JWTs (loom_step_...) that agents present as their bearer token.
+    # The Gateway verifies with this same key; rotating it requires a
+    # coordinated restart of both services.
+    step_jwt_signing_key: SecretStr

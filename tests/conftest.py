@@ -13,6 +13,20 @@ from pathlib import Path
 import pytest
 from testcontainers.postgres import PostgresContainer
 
+_TEST_STEP_JWT_SIGNING_KEY = "test-step-jwt-signing-key-do-not-use-in-prod"
+
+
+@pytest.fixture(autouse=True)
+def _default_step_jwt_signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ControlPlaneSettings + GatewaySettings now require this env var.
+    Existing tests don't know about it; this autouse fixture supplies a
+    fixed-but-distinct key so they continue to construct settings without
+    each fixture needing the explicit setenv call. Production deploys
+    must override via loom-secrets/step-jwt-signing-key.
+    """
+    monkeypatch.setenv("LOOM_CP_STEP_JWT_SIGNING_KEY", _TEST_STEP_JWT_SIGNING_KEY)
+    monkeypatch.setenv("LOOM_GW_STEP_JWT_SIGNING_KEY", _TEST_STEP_JWT_SIGNING_KEY)
+
 
 @pytest.fixture(scope="session")
 def postgres_url() -> Iterator[str]:
