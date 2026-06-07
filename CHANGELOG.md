@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 13 — Bundle store + license tracking (2026-06-07, tag `loom-bundle-store-v0.13`).**
+  Foundation for Plan 14's benchmark integrations. Schema migration
+  0004 adds: `benchmarks` table (id = human-readable PK for `ON
+  CONFLICT DO UPDATE` upserts per amendment A13.2), `tasks.license` +
+  `tasks.benchmark_id`, `team_quotas.license_allowlist text[]` with
+  expanded default `[MIT, Apache-2.0, BSD-3-Clause, CC-BY-4.0]`
+  (amendment A13.1 — CC-BY-4.0 added so the v1 benchmark slate's
+  MBPP/GAIA pass without operator action), and `tokens.last_seen_at`
+  (amendment A13.3 — service-layer hook). `ObjectStore.download_prefix`
+  ships on both FakeObjectStore and MinioObjectStore (S3 paginator
+  + `download_file`). Worker's new `_materialize_task_dir` replaces
+  the bare `tempfile.mkdtemp()`: `s3://bucket/prefix/` sources pull
+  fixture content via download_prefix; `fixture://` / `git+` / None
+  leave the dir empty (operator-runbook flow). License enforcement at
+  POST /trials: a task with a license not in the team's allowlist 403s
+  with the allowlist surfaced in the detail. 332 unit+contract+
+  property + 152 integration green; 100 source files clean.
 - **Plan 12 — 11 concrete agent adapters (2026-06-07, tag `loom-agent-adapters-v0.12`).**
   Ships every adapter from spec §8.1: codex, opencode, aider, openhands,
   openhands-sdk, swe-agent, mini-swe-agent, claude-code, gemini-cli,

@@ -52,12 +52,31 @@ async def submit_trial(
         # §2.6 DRF claim query's JOIN team_quotas would silently exclude
         # every trial we insert, and the trial would languish in queued
         # forever. Upsert a default quota row idempotently before the
-        # trial INSERT so submission and scheduling stay aligned.
+        # trial INSERT so submission and scheduling stay aligned. The
+        # DB-level default on team_quotas.license_allowlist (Plan 13
+        # A13.1) means the new row carries the v1 allowlist automatically.
         await session.execute(
             pg_insert(TeamQuota)
             .values(team_id=ctx.team_id)
             .on_conflict_do_nothing(index_elements=["team_id"]),
         )
+        # Plan 13 Task 4: license-allowlist enforcement. Re-read the
+        # quota row (which may have just been upserted with defaults) to
+        # check the task's license against the team's allowlist. A NULL
+        # task license is treated as "allowed" — only benchmark-imported
+        # tasks have license tags; hand-authored tasks pass through.
+        if task_row.license:
+            quota = (await session.execute(
+                select(TeamQuota).where(TeamQuota.team_id == ctx.team_id),
+            )).scalar_one()
+            if task_row.license not in quota.license_allowlist:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"task license {task_row.license!r} not in team's "
+                        f"allowlist {sorted(quota.license_allowlist)}"
+                    ),
+                )
         result = await session.execute(
             insert(TrialRow).values(
                 id=trial_id, team_id=ctx.team_id, task_id=task_id,
