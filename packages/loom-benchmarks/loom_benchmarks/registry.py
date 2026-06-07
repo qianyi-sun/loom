@@ -6,6 +6,7 @@ from __future__ import annotations
 from loom_benchmarks.adapters.bfcl import BFCLAdapter
 from loom_benchmarks.adapters.gaia import GAIAAdapter
 from loom_benchmarks.adapters.humaneval import HumanEvalAdapter
+from loom_benchmarks.adapters.livecodebench import LiveCodeBenchAdapter
 from loom_benchmarks.adapters.mbpp import MBPPAdapter
 from loom_benchmarks.adapters.osworld import OSWorldAdapter
 from loom_benchmarks.adapters.swe_bench import SWEBenchAdapter
@@ -24,4 +25,5 @@ REGISTRY: dict[str, BenchmarkAdapter] = {
     "mbpp": MBPPAdapter(),
     "bfcl": BFCLAdapter(),
     "gaia": GAIAAdapter(),
+    "livecodebench": LiveCodeBenchAdapter(),
 }

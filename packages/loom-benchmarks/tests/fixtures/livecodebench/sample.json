@@ -1,0 +1,17 @@
+[
+  {
+    "question_id": "lcb-9001",
+    "question_content": "Read an integer n from stdin and print the n-th Fibonacci number.",
+    "starter_code": "",
+    "code": "n = int(input())\na, b = 0, 1\nfor _ in range(n):\n    a, b = b, a + b\nprint(a)\n",
+    "public_test_cases": [
+      {"input": "0\n", "output": "0\n", "testtype": "stdin"},
+      {"input": "1\n", "output": "1\n", "testtype": "stdin"}
+    ],
+    "private_test_cases": [
+      {"input": "10\n", "output": "55\n", "testtype": "stdin"}
+    ],
+    "platform": "leetcode",
+    "difficulty": "easy"
+  }
+]
