@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 9 — Gateway multi-dialect + step JWT (2026-06-07, tag `loom-gateway-multidialect-v0.9`).**
+  Three new Gateway dialect endpoints (`POST /v1/messages` Anthropic,
+  `POST /v1/responses` OpenAI Responses, `POST /v1beta/models/{model_path}`
+  Gemini) — all native httpx-passthrough per amendment A9.1, no LiteLLM
+  round-trip, so `cache_control`, `tool_use` content blocks, OpenAI
+  reasoning details, and Gemini `thoughtsTokenCount` survive intact.
+  `loom.auth.verify_bearer_token` gains a JWT branch (`loom_step_<jwt>`,
+  HS256) that fires only when a `signing_key` is supplied — preserves
+  the v0.7 `AuthContext` field names per amendment A9.0. Control Plane
+  gains `POST /admin/step-tokens` (worker mints per-step tokens for
+  agents) and `GET /trials/{trial_id}/llm-calls` (amendment A9.2 —
+  worker reads at finalize). New `llm_calls` table is the canonical
+  per-call cost/usage row store; the `DialectAdapter` extracts tokens
+  from each dialect's native response into the same `TokenUsage` shape.
+  324 unit+contract+property + 140 integration green; lint + mypy strict
+  clean across 99 source files.
 - **Plan 8 — Driver Protocol streaming exec (2026-06-06, tag `loom-driver-streaming-v0.8`).**
   Additive `exec_streaming(argv, env_vars, cwd, user) -> ExecHandle` on
   the `Driver` Protocol. Existing buffered `exec()` is unchanged; only

@@ -10,8 +10,8 @@ from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from loom.auth import verify_bearer_token
+from loom.db.schema import LlmCall, TeamQuota
 from loom.db.schema import Task as TaskRow
-from loom.db.schema import TeamQuota
 from loom.db.schema import Trial as TrialRow
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -143,4 +143,56 @@ async def get_trial(
         "attempt_count": row.attempt_count,
         "result": row.result,
         "trajectory_index": row.trajectory_index,
+    }
+
+
+@router.get("/trials/{trial_id}/llm-calls")
+async def get_trial_llm_calls(
+    trial_id: UUID,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """List every llm_calls row for this trial, ordered by capture time.
+    Read by the worker at finalize to project LLMCallEvents into the
+    trajectory before ATIF projection runs (Plan 9 amendment A9.2)."""
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="not authorized")
+
+    # Worker scope OR same-team team-token can read.
+    async with request.app.state.session_factory() as session:
+        trial_row = (await session.execute(
+            select(TrialRow.team_id).where(TrialRow.id == trial_id),
+        )).scalar_one_or_none()
+    if trial_row is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    if ctx.team_id is not None and trial_row != ctx.team_id:
+        raise HTTPException(
+            status_code=403, detail="trial belongs to another team",
+        )
+
+    async with request.app.state.session_factory() as session:
+        rows = (await session.execute(
+            select(LlmCall)
+            .where(LlmCall.trial_id == trial_id)
+            .order_by(LlmCall.captured_at),
+        )).scalars().all()
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "trial_id": str(r.trial_id),
+                "step_id": r.step_id,
+                "dialect": r.dialect,
+                "model": r.model,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "provider_extras": r.provider_extras,
+                "cost_usd": float(r.cost_usd),
+                "rate_card_hash": r.rate_card_hash,
+                "captured_at": r.captured_at.isoformat(),
+            }
+            for r in rows
+        ],
     }
