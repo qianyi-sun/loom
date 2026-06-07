@@ -78,3 +78,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# tests/fixtures/tasks/*/tests/test_*.py are sandbox test bodies meant to
+# run inside the verifier container with /workspace mounted — collecting
+# them from the host fails on the hardcoded /workspace path. Exclude.
+norecursedirs = ["tests/fixtures"]

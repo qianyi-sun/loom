@@ -1,0 +1,21 @@
+schema_version = "1"
+
+[task]
+id = "in-box-cli"
+name = "In-box CLI agent canary"
+description = "Exercises the ClaudeCodeAgent in-box runtime contract. Stub solution shipped as a placeholder until a real in-box agent runs the trial body."
+
+[environment]
+os = "linux"
+docker_image = "python:3.11-alpine"
+
+[agent]
+name = "claude-code"
+mode = "in-box"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+artifacts = ["out.txt"]

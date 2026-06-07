@@ -1,0 +1,29 @@
+schema_version = "1"
+
+[task]
+id = "multi-step-3"
+name = "Three-step task with min_reward gate"
+
+[environment]
+os = "linux"
+docker_image = "python:3.11-alpine"
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "phase-1"
+artifacts = ["step1.txt"]
+min_reward = 0.5
+
+[[steps]]
+name = "phase-2"
+artifacts = ["step2.txt"]
+min_reward = 0.5
+
+[[steps]]
+name = "phase-3"
+artifacts = ["step3.txt"]

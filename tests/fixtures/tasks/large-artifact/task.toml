@@ -1,0 +1,20 @@
+schema_version = "1"
+
+[task]
+id = "large-artifact"
+name = "Large artifact upload exercise"
+description = "Produces a 100 MB file (1 GB if LOOM_TEST_LARGE_ARTIFACT_GB=1). Exercises boto3 multipart upload."
+
+[environment]
+os = "linux"
+docker_image = "python:3.11-alpine"
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+artifacts = ["payload.bin"]

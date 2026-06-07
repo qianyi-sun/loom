@@ -1,0 +1,25 @@
+schema_version = "1"
+
+[task]
+id = "healthcheck-flaky"
+name = "Healthcheck retry exercise"
+description = "Healthcheck command fails twice then succeeds, exercising DockerDriver.run_healthcheck's retry loop."
+
+[environment]
+os = "linux"
+docker_image = "python:3.11-alpine"
+
+[environment.healthcheck]
+command = "sh -c 'test -f /workspace/.ready'"
+retries = 5
+interval_sec = 1.0
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+artifacts = ["ok.txt"]

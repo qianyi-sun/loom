@@ -1,0 +1,22 @@
+schema_version = "1"
+
+[task]
+id = "hello-world"
+name = "Print hello to a file"
+description = "Smallest possible Loom task. Used as canary in CI."
+
+[environment]
+os = "linux"
+# Custom image so the agent env has pytest pre-installed (v1 verifier
+# env mode is shared; separate-env support is v1.5).
+dockerfile = "environment/Dockerfile"
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+artifacts = ["result.txt"]
