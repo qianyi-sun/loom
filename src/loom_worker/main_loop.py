@@ -196,9 +196,13 @@ async def _spawn_trial(
     task_checksum = str(bundle["checksum"])
     trial_config = TrialConfig.model_validate(payload.get("config") or {})
 
-    # Empty mkdtemp per-trial. Production ops mounts a shared volume or
-    # clones `bundle["source"]`; v1 documents this in the operator runbook.
-    task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
+    # Plan 13 Task 3: materialize the fixture content from bundle["source"]
+    # when it's an s3:// URL (benchmark-imported tasks). Hand-authored
+    # tasks with source=None or git+... still get an empty tempdir; the
+    # operator runbook documents the volume-mount / git-clone alternatives.
+    task_dir = await _materialize_task_dir(
+        bundle=bundle, object_store=object_store, trial_id=trial_id,
+    )
 
     async def _state_patch(state: str, fr: str | None) -> bool:
         return await cp_client.patch_state(
@@ -241,6 +245,48 @@ async def _spawn_trial(
             shutil.rmtree(task_dir, ignore_errors=True)
 
     await pool.spawn(_run_and_cleanup())
+
+
+async def _materialize_task_dir(
+    *,
+    bundle: dict[str, Any],
+    object_store: MinioObjectStore,
+    trial_id: UUID,
+) -> Path:
+    """Plan 13 Task 3: create a fresh tempdir and populate it from
+    `bundle["source"]`.
+
+    - `s3://bucket/prefix/` — pull every object via download_prefix.
+      Benchmark-imported tasks follow this shape.
+    - None / `git+...` / `fixture://...` — leave the dir empty. The
+      operator runbook documents the volume-mount alternative; hand-
+      authored tasks rely on it.
+    """
+    task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
+    source = bundle.get("source")
+    if isinstance(source, str) and source.startswith("s3://"):
+        # Parse `s3://bucket/key/prefix/`.
+        without_scheme = source[len("s3://"):]
+        if "/" not in without_scheme:
+            logger.warning(
+                "bundle source %s has no key prefix; skipping materialize",
+                source,
+            )
+            return task_dir
+        bucket, prefix = without_scheme.split("/", 1)
+        count = await object_store.download_prefix(
+            bucket=bucket, prefix=prefix, out_dir=task_dir,
+        )
+        logger.info(
+            "materialized_task_dir trial=%s objects=%d source=%s",
+            trial_id, count, source,
+        )
+    else:
+        logger.info(
+            "materialize_task_dir trial=%s left dir empty (source=%r)",
+            trial_id, source,
+        )
+    return task_dir
 
 
 def _default_agent_factory(
