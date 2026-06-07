@@ -1,0 +1,119 @@
+"""loom_service auth guards (Plan 17 Task 3)."""
+
+from __future__ import annotations
+
+from uuid import UUID, uuid4
+
+import pytest
+from fastapi import HTTPException
+
+from loom.auth import AuthContext
+from loom_service.auth_guards import (
+    is_admin,
+    require_human_or_admin,
+    require_scope,
+    require_team_or_admin,
+)
+
+
+def _ctx(
+    *, type_: str, scopes: list[str], team_id: UUID | None = None,
+) -> AuthContext:
+    return AuthContext(
+        token_hash=b"\x00" * 32,
+        type=type_,
+        scopes=scopes,
+        team_id=team_id,
+        expires_at=None,
+    )
+
+
+def test_rejects_anonymous() -> None:
+    with pytest.raises(HTTPException) as ei:
+        require_human_or_admin(None)
+    assert ei.value.status_code == 401
+
+
+def test_rejects_worker() -> None:
+    ctx = _ctx(type_="worker", scopes=["worker:claim"])
+    with pytest.raises(HTTPException) as ei:
+        require_human_or_admin(ctx)
+    assert ei.value.status_code == 403
+    assert "worker" in ei.value.detail
+
+
+def test_rejects_step_session() -> None:
+    ctx = _ctx(type_="step_session", scopes=["llm:invoke"])
+    with pytest.raises(HTTPException) as ei:
+        require_human_or_admin(ctx)
+    assert ei.value.status_code == 403
+    assert "step session" in ei.value.detail
+
+
+def test_rejects_unsupported_type() -> None:
+    ctx = _ctx(type_="bogus", scopes=[])
+    with pytest.raises(HTTPException) as ei:
+        require_human_or_admin(ctx)
+    assert ei.value.status_code == 403
+
+
+def test_allows_team() -> None:
+    ctx = _ctx(type_="team", scopes=["read:own"], team_id=uuid4())
+    assert require_human_or_admin(ctx) is ctx
+
+
+def test_allows_admin() -> None:
+    ctx = _ctx(type_="admin", scopes=["admin:tokens"])
+    assert require_human_or_admin(ctx) is ctx
+
+
+def test_is_admin_by_type() -> None:
+    assert is_admin(_ctx(type_="admin", scopes=[]))
+
+
+def test_is_admin_by_scope() -> None:
+    assert is_admin(_ctx(type_="team", scopes=["admin:tokens"]))
+
+
+def test_is_admin_false_for_plain_team() -> None:
+    assert not is_admin(_ctx(type_="team", scopes=["read:own", "submit"]))
+
+
+def test_require_scope_missing() -> None:
+    ctx = _ctx(type_="team", scopes=["read:own"], team_id=uuid4())
+    with pytest.raises(HTTPException) as ei:
+        require_scope(ctx, "submit")
+    assert ei.value.status_code == 403
+
+
+def test_require_scope_satisfied() -> None:
+    ctx = _ctx(type_="team", scopes=["read:own", "submit"], team_id=uuid4())
+    require_scope(ctx, "submit")
+
+
+def test_require_scope_admin_wildcard() -> None:
+    """Admin tokens satisfy ANY scope check."""
+    ctx = _ctx(type_="admin", scopes=["admin:tokens"])
+    require_scope(ctx, "submit")
+    require_scope(ctx, "anything")
+
+
+def test_team_or_admin_other_team_forbidden() -> None:
+    team_a, team_b = uuid4(), uuid4()
+    ctx = _ctx(type_="team", scopes=["read:own"], team_id=team_a)
+    with pytest.raises(HTTPException) as ei:
+        require_team_or_admin(ctx, team_b)
+    assert ei.value.status_code == 403
+
+
+def test_team_or_admin_same_team_ok() -> None:
+    team = uuid4()
+    ctx = _ctx(type_="team", scopes=["read:own"], team_id=team)
+    require_team_or_admin(ctx, team)
+
+
+def test_team_or_admin_admin_wildcard() -> None:
+    """Admin bypasses team-id matching."""
+    team_a, team_b = uuid4(), uuid4()
+    ctx = _ctx(type_="admin", scopes=["admin:tokens"], team_id=team_a)
+    require_team_or_admin(ctx, team_b)
