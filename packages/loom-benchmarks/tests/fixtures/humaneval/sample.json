@@ -1,0 +1,16 @@
+[
+  {
+    "task_id": "HumanEval/0",
+    "prompt": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\"Return True if any two numbers in the list are within `threshold` of each other.\"\"\"\n",
+    "canonical_solution": "    for i in range(len(numbers)):\n        for j in range(i + 1, len(numbers)):\n            if abs(numbers[i] - numbers[j]) < threshold:\n                return True\n    return False\n",
+    "test": "def check(candidate):\n    assert candidate([1.0, 2.0, 3.0], 0.5) == False\n    assert candidate([1.0, 1.2, 3.0], 0.3) == True\n",
+    "entry_point": "has_close_elements"
+  },
+  {
+    "task_id": "HumanEval/1",
+    "prompt": "def add(a: int, b: int) -> int:\n    \"\"\"Return the sum of two integers.\"\"\"\n",
+    "canonical_solution": "    return a + b\n",
+    "test": "def check(candidate):\n    assert candidate(1, 2) == 3\n    assert candidate(-1, 1) == 0\n",
+    "entry_point": "add"
+  }
+]
