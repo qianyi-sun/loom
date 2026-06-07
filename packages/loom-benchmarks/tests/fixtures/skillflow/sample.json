@@ -1,0 +1,13 @@
+[
+  {
+    "instance_id": "skillflow/python-list-comprehension/01",
+    "files": {
+      "task.toml": "schema_version = \"1\"\n[task]\nid = \"skillflow/python-list-comprehension/01\"\nname = \"List comprehension\"\n[environment]\nos = \"linux\"\ndocker_image = \"python:3.11-alpine\"\n[agent]\nname = \"oracle\"\n[verifier]\nname = \"pytest\"\n[[steps]]\nname = \"main\"\nartifacts = [\"solution/main.py\"]\n",
+      "instruction.md": "Convert the for-loop to a list comprehension.\n",
+      "solution/__init__.py": "from solution.main import x  # noqa: F401\n",
+      "solution/main.py": "x = [i*2 for i in range(10)]\n",
+      "tests/__init__.py": "",
+      "tests/test_main.py": "from solution.main import x\n\ndef test_x():\n    assert x == [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]\n"
+    }
+  }
+]

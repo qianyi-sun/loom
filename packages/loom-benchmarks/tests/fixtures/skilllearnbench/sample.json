@@ -1,0 +1,13 @@
+[
+  {
+    "instance_id": "skilllearnbench/python-iterators/01",
+    "files": {
+      "task.toml": "schema_version = \"1\"\n[task]\nid = \"skilllearnbench/python-iterators/01\"\nname = \"Iterator chain\"\n[environment]\nos = \"linux\"\ndocker_image = \"python:3.11-alpine\"\n[agent]\nname = \"oracle\"\n[verifier]\nname = \"pytest\"\n[[steps]]\nname = \"main\"\nartifacts = [\"solution/main.py\"]\n",
+      "instruction.md": "Chain itertools.chain over the two lists.\n",
+      "solution/__init__.py": "from solution.main import result  # noqa: F401\n",
+      "solution/main.py": "from itertools import chain\nresult = list(chain([1, 2], [3, 4]))\n",
+      "tests/__init__.py": "",
+      "tests/test_main.py": "from solution.main import result\n\ndef test_result():\n    assert result == [1, 2, 3, 4]\n"
+    }
+  }
+]

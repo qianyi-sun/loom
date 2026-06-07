@@ -10,6 +10,8 @@ from loom_benchmarks.adapters.humaneval import HumanEvalAdapter
 from loom_benchmarks.adapters.livecodebench import LiveCodeBenchAdapter
 from loom_benchmarks.adapters.mbpp import MBPPAdapter
 from loom_benchmarks.adapters.osworld import OSWorldAdapter
+from loom_benchmarks.adapters.skillflow import SkillFlowAdapter
+from loom_benchmarks.adapters.skilllearnbench import SkillLearnBenchAdapter
 from loom_benchmarks.adapters.swe_bench import SWEBenchAdapter
 from loom_benchmarks.adapters.swe_bench_multimodal import SWEBenchMultimodalAdapter
 from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
@@ -28,4 +30,6 @@ REGISTRY: dict[str, BenchmarkAdapter] = {
     "gaia": GAIAAdapter(),
     "livecodebench": LiveCodeBenchAdapter(),
     "aime": AIMEAdapter(),
+    "skillflow": SkillFlowAdapter(),
+    "skilllearnbench": SkillLearnBenchAdapter(),
 }
