@@ -251,6 +251,90 @@ async def test_no_read_own_scope_forbidden(
     assert r.status_code == 403
 
 
+async def test_trial_detail_returns_presigned_urls(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] == str(trial_ids[0])
+    # boto3 presigned URLs include X-Amz-Signature in the query string.
+    assert "X-Amz-Signature" in body["atif_url"]
+    assert "X-Amz-Signature" in body["trajectory_url"]
+    # URL anchors on the actual key shape (`{team_id}/{trial_id}/...`).
+    assert f"/{trial_ids[0]}/atif.json" in body["atif_url"]
+    assert f"/{trial_ids[0]}/events.jsonl" in body["trajectory_url"]
+    assert body["artifacts"] == []
+
+
+async def test_trial_detail_not_found(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    app, raw, _team_id, _t = trials_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{uuid4()}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 404
+
+
+async def test_trial_detail_cross_team_forbidden(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    """A team-A caller can't read team-B's trial detail."""
+    app, _raw_a, _team_a, trial_ids_a = trials_setup
+    other_team = uuid4()
+    other_raw = f"loom_team_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Team).values(id=other_team, name=f"o-{other_team}"))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(other_raw.encode()).digest(),
+            type="team", scopes=["read:own"], team_id=other_team,
+            issued_at=datetime.now(UTC),
+        ))
+        s.commit()
+    sync_engine.dispose()
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://svc",
+        ) as ac:
+            r = await ac.get(
+                f"/api/v1/trials/{trial_ids_a[0]}",
+                headers={"Authorization": f"Bearer {other_raw}"},
+            )
+        assert r.status_code == 403
+    finally:
+        sync_engine = create_engine(postgres_url)
+        sl = sessionmaker(sync_engine)
+        with sl() as s:
+            from loom.db.schema import Token as TokenModel
+            s.execute(delete(TokenModel).where(
+                TokenModel.team_id == other_team,
+            ))
+            s.execute(delete(TeamQuota).where(
+                TeamQuota.team_id == other_team,
+            ))
+            s.execute(delete(Team).where(Team.id == other_team))
+            s.commit()
+        sync_engine.dispose()
+
+
 async def test_filter_by_task_id(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:

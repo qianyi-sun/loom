@@ -151,3 +151,56 @@ async def list_trials(
         "items": [_trial_row(r) for r in rows],
         "next_cursor": next_c,
     }
+
+
+def _presign_get(
+    client: Any, bucket: str, key: str, expires_sec: int,
+) -> str:
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires_sec,
+    )
+
+
+@router.get("/trials/{trial_id}")
+async def get_trial(
+    request: Request,
+    trial_id: UUID,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    settings = request.app.state.settings
+    async with request.app.state.session_factory() as s:
+        ctx = await verify_bearer_token(s, authorization)
+        ctx = require_human_or_admin(ctx)
+        require_scope(ctx, "read:own")
+        trial = (await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )).scalar_one_or_none()
+        if trial is None:
+            raise HTTPException(status_code=404, detail="trial not found")
+        require_team_or_admin(ctx, trial.team_id)
+
+    base = _trial_row(trial)
+    # The worker's TrajectoryWriter writes events.jsonl under
+    # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;
+    # finalize.py writes ATIF to the same bucket at `atif.json`.
+    # Both URLs are presigned-GET on the trajectories bucket.
+    base["atif_url"] = _presign_get(
+        request.app.state.minio_client,
+        settings.trajectories_bucket,
+        f"{trial.team_id}/{trial.id}/atif.json",
+        settings.signed_url_expiry_sec,
+    )
+    base["trajectory_url"] = _presign_get(
+        request.app.state.minio_client,
+        settings.trajectories_bucket,
+        f"{trial.team_id}/{trial.id}/events.jsonl",
+        settings.signed_url_expiry_sec,
+    )
+    # Per-artifact listing comes from Plan 7's `tasks/{id}/bundle` or
+    # the in-flight artifacts table; v0.7 doesn't yet have an
+    # `artifacts` table, so the array stays empty here. Plan 21+ can
+    # add it without changing the response shape.
+    base["artifacts"] = []
+    return base
