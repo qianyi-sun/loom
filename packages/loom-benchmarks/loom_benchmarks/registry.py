@@ -8,6 +8,7 @@ from loom_benchmarks.adapters.osworld import OSWorldAdapter
 from loom_benchmarks.adapters.swe_bench import SWEBenchAdapter
 from loom_benchmarks.adapters.swe_bench_multimodal import SWEBenchMultimodalAdapter
 from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
+from loom_benchmarks.adapters.webarena import WebArenaAdapter
 from loom_benchmarks.base import BenchmarkAdapter
 
 REGISTRY: dict[str, BenchmarkAdapter] = {
@@ -16,4 +17,5 @@ REGISTRY: dict[str, BenchmarkAdapter] = {
     "swe-bench": SWEBenchAdapter(),
     "swe-bench-multimodal": SWEBenchMultimodalAdapter(),
     "osworld": OSWorldAdapter(),
+    "webarena": WebArenaAdapter(),
 }

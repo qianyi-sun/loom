@@ -1,0 +1,25 @@
+[
+  {
+    "task_id": 42,
+    "sites": ["shopping"],
+    "intent_template": "Find the {item_type} priced under ${max_price}.",
+    "intent": "Find the running shoes priced under $50.",
+    "require_login": true,
+    "storage_state": "shopping.json",
+    "start_url": "http://shopping.example/",
+    "geolocation": null,
+    "eval": {
+      "eval_types": ["url_match", "program_html"],
+      "reference_url": "http://shopping.example/search?q=running+shoes&max_price=50",
+      "url_note": "GOLD in PRED",
+      "reference_answers": null,
+      "program_html": [
+        {
+          "url": "last",
+          "locator": ".price",
+          "required_contents": {"must_include": ["$49", "$48"]}
+        }
+      ]
+    }
+  }
+]
