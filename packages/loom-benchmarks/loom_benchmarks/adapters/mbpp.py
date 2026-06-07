@@ -75,6 +75,16 @@ class MBPPAdapter:
         tests_dir = out_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
         (tests_dir / "__init__.py").write_text("")
+        # Explicit conftest so `from solution import ...` resolves
+        # regardless of pytest invocation cwd / --rootdir. Without
+        # this, discovery is implicit on the runtime's auto-rootdir
+        # behavior — fragile when the verifier shells out from
+        # elsewhere.
+        (tests_dir / "conftest.py").write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).parent.parent))\n",
+        )
         pytest_from_test_strings(
             list(r["test_list"]), out_dir=tests_dir, prefix="mbpp",
         )

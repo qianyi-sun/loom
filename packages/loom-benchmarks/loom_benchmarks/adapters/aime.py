@@ -38,8 +38,12 @@ _AIME_CHECK_PY = textwrap.dedent("""
         os.environ["LOOM_TASK_DIR"] + "/expected_answer.txt"
     ).read_text().strip()
     last_line = ans.splitlines()[-1] if ans else ""
-    match = re.search(r"-?\\d+", last_line)
-    got = match.group(0) if match else ""
+    # Use the LAST integer on the line, not the first. Phrasings like
+    # "answer: 45 (out of 1000)" should extract 45 only if it's the
+    # final integer mentioned, so this matches AIME's "return final
+    # integer on last line" convention.
+    matches = re.findall(r"-?\\d+", last_line)
+    got = matches[-1] if matches else ""
     result = {"pass": got == exp, "got": got, "expected": exp}
     pathlib.Path(os.environ["LOOM_VERIFIER_OUTPUT"]).write_text(
         json.dumps(result),
@@ -55,8 +59,13 @@ class AIMEAdapter:
         locator="AI-MO/aimo-validation-aime",
         revision=None,
     )
-    license_spdx = "Apache-2.0"
-    license_url = "https://huggingface.co/datasets/AI-MO/aimo-validation-aime"
+    # Spec §7: AIME problem text is owned by the Mathematical
+    # Association of America. License is `proprietary-MAA`, NOT in
+    # any default allowlist. Plan 16 ships an `--accept-maa-terms`
+    # gate on `loom_benchmark_tool import`; this adapter just stamps
+    # the license tag so submit-time enforcement does the rest.
+    license_spdx = "proprietary-MAA"
+    license_url = "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"
     splits = ("train",)
 
     def list_instances(

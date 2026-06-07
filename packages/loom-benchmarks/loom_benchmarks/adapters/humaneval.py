@@ -91,6 +91,13 @@ class HumanEvalAdapter:
         tests_dir = out_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
         (tests_dir / "__init__.py").write_text("")
+        # Explicit conftest so `from solution import ...` resolves
+        # regardless of pytest invocation cwd / --rootdir.
+        (tests_dir / "conftest.py").write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).parent.parent))\n",
+        )
         (tests_dir / "test_humaneval.py").write_text(
             f"from solution import {entry_point} as candidate\n\n"
             + test_src

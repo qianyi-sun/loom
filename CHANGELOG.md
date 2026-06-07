@@ -29,6 +29,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   task dir to prove the bundles are end-to-end runnable. 60
   unit+contract tests in the package (+29 new); 156 integration green.
   Registry exposes 13 adapters via `python -m loom_benchmark_tool list`.
+  **Audit follow-ups (same-day):** LiveCodeBench license tag was MIT
+  in the plan; corrected to `CC-BY-NC-4.0` per spec §7 (the non-default
+  allowlist tag is what defeats the Plan-13 submit-time guardrail until
+  an operator opts in for non-commercial use). AIME was Apache-2.0;
+  corrected to `proprietary-MAA` per spec §7 (MAA owns the problem
+  text; Plan 16 ships the `--accept-maa-terms` import gate). GAIA
+  rubric switched from `str.format` to `<<MARKER>>` substitution so
+  set-notation reference answers like `{Honolulu, Quincy}` AND the
+  literal `{"score": ...}` JSON in the rubric both survive
+  convert→verify two-pass. GAIA attachment file_name sanitized to
+  basename (rejects `../poison` / absolute paths). AIME verifier
+  `check.py` extracts the LAST integer on the final line so
+  `"45 is partial; final: 100"` correctly grades 100 not 45. MBPP +
+  HumanEval tests/ dirs gain an explicit conftest that puts the task
+  dir on sys.path so `from solution import ...` resolves regardless
+  of pytest invocation cwd. 65 unit+contract tests in the package
+  (+5 new); ruff + mypy strict clean.
 - **Plan 14 — `loom-benchmarks` core package + HumanEval reference adapter
   (2026-06-07, tag `loom-benchmarks-core-v0.14`).** New sibling package
   at `packages/loom-benchmarks/` (PyPI-publishable, depends on

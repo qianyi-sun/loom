@@ -73,24 +73,36 @@ class GAIAAdapter:
         if r.get("file_name"):
             attach = out_dir / "attachments"
             attach.mkdir(parents=True, exist_ok=True)
-            src_str = r.get("file_path") or ""
-            src = Path(src_str) if src_str else Path("")
-            try:
-                if src and src.exists():
-                    (attach / str(r["file_name"])).write_bytes(src.read_bytes())
-                else:
-                    warnings.append(f"attachment missing: {r['file_name']}")
-            except OSError as exc:
-                warnings.append(f"attachment copy failed: {exc}")
+            # Sanitize file_name: only keep the basename so an upstream
+            # row with `file_name="../poison"` or `/etc/passwd` can't
+            # escape `attachments/` once we join (`Path.name` strips
+            # every directory component).
+            safe_name = Path(str(r["file_name"])).name
+            if not safe_name or safe_name in (".", ".."):
+                warnings.append(
+                    f"attachment file_name {r['file_name']!r} sanitized "
+                    f"to empty; skipping",
+                )
+            else:
+                src_str = r.get("file_path") or ""
+                src = Path(src_str) if src_str else Path("")
+                try:
+                    if src and src.exists():
+                        (attach / safe_name).write_bytes(src.read_bytes())
+                    else:
+                        warnings.append(f"attachment missing: {safe_name}")
+                except OSError as exc:
+                    warnings.append(f"attachment copy failed: {exc}")
 
         verifier_dir = out_dir / "verifier"
         verifier_dir.mkdir(parents=True, exist_ok=True)
-        (verifier_dir / "rubric.md").write_text(
-            GAIA_RUBRIC_TEMPLATE.format(
-                reference_answer=r["Final answer"],
-                candidate_answer="{candidate_answer}",
-            ),
+        # Direct marker substitution — no `.format()` so the rubric's
+        # literal `{"score": ...}` JSON and any `{...}` set notation
+        # in the reference answer pass through unchanged.
+        rubric = GAIA_RUBRIC_TEMPLATE.replace(
+            "<<REFERENCE_ANSWER>>", str(r["Final answer"]),
         )
+        (verifier_dir / "rubric.md").write_text(rubric)
 
         toml_id = toml_string(task_id)
         toml_name = toml_string(f"{self.display_name} — {instance.instance_id}")

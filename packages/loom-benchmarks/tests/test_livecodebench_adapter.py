@@ -32,6 +32,19 @@ def test_livecodebench_emits_io_pytest(tmp_path: Path) -> None:
     assert "55" in (tmp_path / "tests" / "test_lcb_2.py").read_text()
 
 
+def test_livecodebench_license_is_cc_by_nc(tmp_path: Path) -> None:
+    """Spec §7: LiveCodeBench tasks must carry `CC-BY-NC-4.0` so the
+    Plan 13 license-allowlist keeps them out of the default allowlist
+    until an operator opts in for non-commercial use (audit license-bypass)."""
+    rec = json.loads(FIXTURE.read_text())[0]
+    inst = BenchmarkInstance(
+        instance_id=rec["question_id"], split="test", raw=rec,
+    )
+    converted = LiveCodeBenchAdapter().convert_instance(inst, out_dir=tmp_path)
+    assert converted.license_spdx == "CC-BY-NC-4.0"
+    assert LiveCodeBenchAdapter.license_spdx == "CC-BY-NC-4.0"
+
+
 def test_livecodebench_solution_passes_subprocess_run(tmp_path: Path) -> None:
     """End-to-end: the canonical Fibonacci solution passes its own
     stdin tests when run via pytest in a subprocess."""

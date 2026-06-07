@@ -49,7 +49,10 @@ class LiveCodeBenchAdapter:
         locator="livecodebench/code_generation_lite",
         revision=None,
     )
-    license_spdx = "MIT"
+    # Spec §7: upstream license clause is CC-BY-NC; LiveCodeBench tasks
+    # must NOT be in the default allowlist — operators add `CC-BY-NC-4.0`
+    # to a team's allowlist explicitly to opt in (non-commercial use).
+    license_spdx = "CC-BY-NC-4.0"
     license_url = "https://github.com/LiveCodeBench/LiveCodeBench/blob/main/LICENSE"
     splits = ("test",)
 
