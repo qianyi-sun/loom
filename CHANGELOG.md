@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Plan 7 post-review hardening (2026-06-06).** 9 findings from the
+  post-Plan-7 self-audit, plus regression tests for the schema-drift
+  and resource-leak classes.
+  - **Bug 1 (HIGH):** `tests/fixtures/tasks/in-box-cli/task.toml` had a
+    bogus `mode = "in-box"` under `[agent]`; `AgentDefaults` is
+    `extra="forbid"`. Dropped — runtime class fixes the mode.
+  - **Bug 2 (HIGH):** `tests/system/test_full_stack_worker_crash.py`
+    used `retry_on = ["crash"]`; the enum value is `"worker_crash"`.
+  - **Bug 3 (HIGH):** `docker-compose.test.yml` baked a placeholder
+    worker token at compose-up; the worker container failed
+    registration before any test ran. Rewrote
+    `tests/system/docker_compose.py` to do two-stage compose-up: deps
+    → seed (mints real worker token) → worker (with token in env). The
+    worker service is now gated by `profiles: ["worker"]`.
+  - **Bug 4 (MEDIUM):** `src/loom_worker/main_loop.py:_spawn_trial`
+    was leaking a `tempfile.mkdtemp()` per trial. Added
+    `shutil.rmtree` in a `try/finally` so cleanup fires on success,
+    agent error, and cancellation.
+  - **Bug 5 (MEDIUM):** `docs/task-authoring-guide.md` showed a
+    `POST /admin/tasks` example as if usable in v0.7. Rewrote the
+    Submitting section to point at `scripts/seed_test_data.py`.
+  - **Bug 6 (MEDIUM):** `deploy/Dockerfile.worker` was installing
+    `docker.io` (daemon + CLI). Worker uses the Docker SDK for Python
+    (already a dep) to talk to the bind-mounted socket — no CLI
+    binary needed. Image is now noticeably smaller.
+  - **Bug 7 (LOW):** Documented the open-to-any-authenticated-token
+    scope policy in `src/loom_control_plane/routes/tasks.py`.
+  - **Bug 8 (LOW):** Documented the Pod Security Admission "restricted"
+    profile incompatibility on the docker-sock hostPath in
+    `deploy/k8s/worker.yaml`.
+  - **Bug 9 (LOW):** Comment explaining the `1e-9` float tolerance in
+    `tests/property/test_drf_fairness_property.py`.
+  - **3 new regression tests (14 cases):** fixture TaskConfig parses,
+    every RetryReason round-trips + the literal `"crash"` is rejected,
+    `_spawn_trial`'s mkdtemp cleanup fires on success/exception/cancel.
+  - `scripts/seed_test_data.py` is now idempotent for the shared rate
+    card + already-seeded tasks so multi-stage system-test seeding
+    doesn't crash on duplicate keys.
+  - 307 unit+contract+property + 121 integration tests green; lint +
+    mypy strict clean across 93 source files. Tag
+    `loom-v0.7-runtime-core` force-moved to the fix commit.
+
 ### Added
 - **Plan 7 — System E2E + Ops (2026-06-06, tag `loom-v0.7-runtime-core`).**
   Closes the runtime core: workers can now resolve trial → task config
