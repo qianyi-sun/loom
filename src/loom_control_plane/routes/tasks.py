@@ -4,6 +4,14 @@ Closes the v1 limitation flagged in Plan 6's `_fetch_task_config`: workers
 need the task body to construct a TrialContext, but the claim payload
 only carries trial-level fields. The bundle endpoint is the second
 round-trip — workers fetch by `task_id` after claim succeeds.
+
+**Scope policy.** Any authenticated bearer token may fetch any task
+bundle — there is no per-team scoping. Task config + checksum + source
+are not secrets in v1 (tasks are openly shared across teams as
+benchmark fixtures). Teams that need to gate task visibility should
+publish under a separate namespace. If a future deployment needs team-
+scoped tasks, add a `team_id` column to `tasks` and check
+`ctx.team_id`; nothing about this route's shape blocks that.
 """
 
 from __future__ import annotations

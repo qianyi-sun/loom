@@ -74,13 +74,17 @@ services:
     environment:
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
       LOOM_WORKER_GATEWAY_URL: http://llm-gateway:9100
-      # Injected by tests/system/docker_compose.py after the seed script
-      # mints a worker token; defaults to a placeholder so compose-up
-      # validation doesn't fail at parse time.
-      LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:-placeholder}"
+      # MUST be set in the caller's environment before docker compose up.
+      # tests/system/docker_compose.py runs the seed script first to mint
+      # a real worker token, exports LOOM_WORKER_TOKEN, then brings this
+      # service up. Compose substitutes the env var at parse time — if
+      # it isn't set, the worker container is intentionally NOT started
+      # (profile=needs_token gates the service).
+      LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:?LOOM_WORKER_TOKEN must be set before compose-up}"
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
       LOOM_WORKER_MINIO_ACCESS_KEY: loomtest
       LOOM_WORKER_MINIO_SECRET_KEY: loomtest
+    profiles: ["worker"]
     depends_on:
       control-plane:
         condition: service_started

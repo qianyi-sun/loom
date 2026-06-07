@@ -31,8 +31,17 @@ spec:
               mountPath: /var/lib/loom/trajectories
             - name: docker-sock
               # NOTE: bind-mounting the host docker socket has obvious
-              # blast-radius implications. Production should swap this for
-              # a rootless / sysbox / kata-containers runtime.
+              # blast-radius implications. Production should swap this
+              # for a rootless / sysbox / kata-containers runtime.
+              #
+              # On clusters running the Pod Security Admission
+              # "restricted" profile (k8s 1.25+ default for new
+              # namespaces), this hostPath mount is rejected outright.
+              # You must either:
+              #   (a) label the namespace
+              #       pod-security.kubernetes.io/enforce=privileged,
+              #   (b) move workers to a dedicated cluster, or
+              #   (c) switch to a non-Docker driver (sysbox / kata).
               mountPath: /var/run/docker.sock
           resources:
             requests: { cpu: 500m, memory: 1Gi }

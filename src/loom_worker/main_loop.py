@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -219,7 +220,18 @@ async def _spawn_trial(
         local_trajectory_root=settings.trajectory_cache_dir,
         state_patch_callback=_state_patch,
     )
-    await pool.spawn(runner.run())
+
+    async def _run_and_cleanup() -> None:
+        # Bug 4 fix: drop the per-trial mkdtemp once the trial body is
+        # done. Without this, every claim leaks a directory under /tmp
+        # until the host or PV runs out of inodes. Cleanup runs in a
+        # try/finally so it fires on cancellation + agent error too.
+        try:
+            await runner.run()
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+    await pool.spawn(_run_and_cleanup())
 
 
 def _default_agent_factory(

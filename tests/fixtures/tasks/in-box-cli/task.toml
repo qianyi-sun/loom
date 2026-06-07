@@ -10,8 +10,9 @@ os = "linux"
 docker_image = "python:3.11-alpine"
 
 [agent]
+# `claude-code` is the in-box ClaudeCodeAgent runtime; mode is fixed by
+# the runtime class and not configurable per-task in v1.
 name = "claude-code"
-mode = "in-box"
 
 [verifier]
 name = "pytest"

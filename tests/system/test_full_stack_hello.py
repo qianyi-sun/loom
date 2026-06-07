@@ -7,12 +7,10 @@ import time
 
 import httpx
 
-from tests.system.docker_compose import run_seed
-
 
 def test_hello_world_succeeds(compose_stack: dict[str, str]) -> None:
     cp = compose_stack["control_plane"]
-    raw_token = run_seed(task_id="hello-world", which="team")
+    raw_token = compose_stack["team_token"]
 
     r = httpx.post(
         f"{cp}/trials",

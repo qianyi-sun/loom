@@ -62,6 +62,8 @@ def test_drf_keeps_teams_proportionally_fair(
     # [0.5, 4.0], that's at most 2.0.
     ratios = sorted(t["in_flight"] / t["weight"] for t in teams.values())
     bound = 1.0 / min(weights)
+    # 1e-9 absorbs float rounding when bound itself is the result of
+    # 1/weight on hypothesis-generated floats.
     assert ratios[-1] - ratios[0] <= bound + 1e-9
 
 

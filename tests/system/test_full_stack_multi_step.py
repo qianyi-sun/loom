@@ -12,6 +12,9 @@ from tests.system.docker_compose import run_seed
 
 def test_multi_step_aggregates_mean(compose_stack: dict[str, str]) -> None:
     cp = compose_stack["control_plane"]
+    # Seed an additional fixture (the session stack is already running and
+    # already seeded hello-world by stack_up). multi-step-3 needs its own
+    # task row + team token.
     raw_token = run_seed(task_id="multi-step-3", which="team")
 
     r = httpx.post(

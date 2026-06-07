@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, insert, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import RateCard, Task, Team, TeamQuota, Token
@@ -73,11 +74,19 @@ def main() -> None:
             team_id=None,
             issued_at=now, expires_at=None,
         ))
-        s.execute(insert(Task).values(
-            id=args.task_id, checksum=checksum,
-            config=config, source=f"fixture://{args.task_id}",
-        ))
-        s.execute(insert(RateCard).values(
+        # Task may already exist if called twice for the same fixture
+        # (e.g., stack_up + a second test re-seeding). Skip in that case
+        # so repeated calls don't crash the test session.
+        task_exists = s.execute(
+            select(Task.id).where(Task.id == args.task_id),
+        ).scalar_one_or_none()
+        if not task_exists:
+            s.execute(insert(Task).values(
+                id=args.task_id, checksum=checksum,
+                config=config, source=f"fixture://{args.task_id}",
+            ))
+        # Rate card has a fixed id across calls — upsert.
+        s.execute(pg_insert(RateCard).values(
             id="card-e2e", captured_at=now,
             table={
                 "id": "card-e2e",
@@ -88,7 +97,7 @@ def main() -> None:
                     "cache_read_per_mtok": 0, "cache_write_per_mtok": 0,
                 }],
             },
-        ))
+        ).on_conflict_do_nothing(index_elements=["id"]))
         s.commit()
     engine.dispose()
 

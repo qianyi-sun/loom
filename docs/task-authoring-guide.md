@@ -140,20 +140,34 @@ sg docker -c "pytest tests/integration/test_trial_e2e_docker.py -v"
 
 ## Submitting
 
-```bash
-# First-time: register the task with the Control Plane.
-curl -X POST https://loom.example.com/admin/tasks \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -F "bundle=@my-task.tar.gz"
-# (The /admin/tasks ingestion endpoint is v1.5; for v1, an operator
-#  seeds the `tasks` table directly — see scripts/seed_test_data.py
-#  for the pattern.)
+**v0.7 does not ship a task-ingestion endpoint.** Operators register
+new tasks by seeding the `tasks` table directly. Use
+`scripts/seed_test_data.py` as a template:
 
-# Then submit a trial:
+```bash
+python scripts/seed_test_data.py \
+    --db-url postgresql+psycopg://loom:PWD@HOST:5432/loom \
+    --task-id my-task \
+    --print team
+```
+
+The script reads `tests/fixtures/tasks/my-task/task.toml`, computes a
+SHA-256 checksum of the TOML, and inserts the row. To register a task
+that lives somewhere else than `tests/fixtures/tasks/`, fork the
+script — the SQL is short and the schema is at
+`src/loom/db/schema.py:Task`.
+
+Once registered, submit a trial:
+
+```bash
 curl -X POST https://loom.example.com/trials \
   -H "Authorization: Bearer $TEAM_TOKEN" \
   -d '{"task_id": "my-task", "config": {}}'
 ```
+
+`POST /admin/tasks` is planned for v1.5 — it'll accept a tarball of the
+fixture dir, validate the TaskConfig, and stash the source for the
+worker to pull via `bundle["source"]`.
 
 ## Gotchas
 

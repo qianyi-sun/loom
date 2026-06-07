@@ -7,14 +7,15 @@ import time
 
 import httpx
 
-from tests.system.docker_compose import kill_service, run_seed, start_service
+from tests.system.docker_compose import kill_service, start_service
 
 
 def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
     cp = compose_stack["control_plane"]
     # Submit a config with at least 2 max_attempts so the crash detector's
     # requeue translates into a real retry rather than terminal failure.
-    raw_token = run_seed(task_id="hello-world", which="team")
+    raw_token = compose_stack["team_token"]
+    worker_token = compose_stack["worker_token"]
 
     r = httpx.post(
         f"{cp}/trials",
@@ -24,7 +25,7 @@ def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
             "config": {
                 "retry": {
                     "max_attempts": 3,
-                    "retry_on": ["crash"],
+                    "retry_on": ["worker_crash"],
                 },
             },
         },
@@ -44,7 +45,10 @@ def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
         time.sleep(0.5)
     kill_service("worker")
     time.sleep(2.0)
-    start_service("worker")
+    # Worker restart needs LOOM_WORKER_TOKEN in the compose env (the
+    # docker-compose.yml uses the required-substitution form), so we
+    # thread the token captured at session-up through.
+    start_service("worker", worker_token=worker_token)
 
     final_state: str | None = None
     for _ in range(600):
