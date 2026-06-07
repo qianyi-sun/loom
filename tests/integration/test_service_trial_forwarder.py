@@ -217,6 +217,48 @@ async def test_cancel_unknown_trial_404(
     assert r.status_code == 404
 
 
+async def test_forwarder_propagates_retry_after(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+) -> None:
+    """Audit H3: upstream 429 with Retry-After must reach the client
+    so backoff works. Plan 19's rate-limited campaign submits depend
+    on this."""
+    app, raw, _team_id, _captured = fwd_setup
+    # Re-wire the mock to return 429 with a Retry-After header.
+    await app.state.http_client.aclose()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={"detail": "rate limited"},
+            headers={
+                "Retry-After": "30",
+                "X-RateLimit-Remaining": "0",
+                "X-Internal-Trace": "leak-me",  # NOT in allowlist
+            },
+        )
+
+    app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://cp",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_id": "local/t", "config": {}},
+        )
+    assert r.status_code == 429
+    assert r.headers.get("retry-after") == "30"
+    assert r.headers.get("x-ratelimit-remaining") == "0"
+    # Internal trace header NOT propagated.
+    assert "x-internal-trace" not in r.headers
+
+
 async def test_cancel_cross_team_403(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,

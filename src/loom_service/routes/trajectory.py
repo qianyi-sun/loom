@@ -70,22 +70,35 @@ async def list_events(
         raise HTTPException(
             status_code=404, detail="trajectory not found",
         ) from exc
-    body = obj["Body"].read().decode()
-    lines = [ln for ln in body.split("\n") if ln.strip()]
-
+    # Stream-decode the JSONL line by line instead of materializing
+    # the whole object into memory — a 100k-event trial would otherwise
+    # cost ~200 MB raw + ~400 MB after split. `iter_lines()` lets us
+    # skip lines up to `cursor`, decode `limit` events, and exit
+    # early; remaining bytes stay on the wire (the response.close()
+    # triggers a connection-close).
+    body = obj["Body"]
     events: list[dict[str, Any]] = []
     next_cursor: int | None = None
-    end = min(cursor + limit, len(lines))
-    for i in range(cursor, end):
-        try:
-            events.append(json.loads(lines[i]))
-        except json.JSONDecodeError:
-            # Skip malformed lines; the writer is supposed to emit
-            # one well-formed JSON object per line, but tolerate
-            # truncation tails.
-            continue
-    if end < len(lines):
-        next_cursor = end
+    line_index = 0  # 1-based count of non-blank lines seen
+    try:
+        for raw in body.iter_lines():
+            text = raw.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            line_index += 1
+            if line_index <= cursor:
+                continue
+            if len(events) >= limit:
+                next_cursor = cursor + limit
+                break
+            try:
+                events.append(json.loads(text))
+            except json.JSONDecodeError:
+                # Tolerate truncation tails — finalize crashes can
+                # leave a partial last line.
+                continue
+    finally:
+        body.close()
     return {"events": events, "next_cursor": next_cursor}
 
 

@@ -335,6 +335,28 @@ async def test_trial_detail_cross_team_forbidden(
         sync_engine.dispose()
 
 
+async def test_trial_detail_carries_ready_flags(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    """Audit M1: ready flags so the SPA can skip rendering a download
+    link that would 404. trajectory_ready iff started_at is not null;
+    atif_ready iff state terminal + finished_at not null."""
+    app, raw, _team_id, trial_ids = trials_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    body = r.json()
+    # Seeded trial: succeeded state, but no started_at/finished_at
+    # were set on insert — so both flags should be False.
+    assert body["atif_ready"] is False
+    assert body["trajectory_ready"] is False
+
+
 async def test_filter_by_task_id(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:

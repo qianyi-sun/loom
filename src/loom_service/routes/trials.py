@@ -21,6 +21,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
@@ -42,23 +43,35 @@ def _extract_reward(result: dict[str, Any] | None) -> float | None:
     """Pull aggregate reward out of the worker-written result JSONB.
     The worker stores the multi-step combined reward as
     `result["aggregate_reward"]` (Plan 3 contract); fall through to
-    `result["reward"]` for single-step trials that predate that key."""
+    `result["reward"]` for single-step trials that predate that key.
+
+    Defensive cast — `result` is JSONB whose shape is enforced by the
+    worker; a malformed value should not crash the read API."""
     if not result:
         return None
     val = result.get("aggregate_reward")
     if val is None:
         val = result.get("reward")
-    return float(val) if val is not None else None
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_cost(result: dict[str, Any] | None) -> float:
-    """Total cost in USD across all LLM calls; 0.0 if absent."""
+    """Total cost in USD across all LLM calls; 0.0 if absent or
+    malformed."""
     if not result:
         return 0.0
     val = result.get("cost_usd", 0)
     if isinstance(val, Decimal):
         return float(val)
-    return float(val or 0)
+    try:
+        return float(val or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _trial_row(t: Trial) -> dict[str, Any]:
@@ -202,6 +215,12 @@ async def get_trial(
         f"{trial.team_id}/{trial.id}/events.jsonl",
         settings.signed_url_expiry_sec,
     )
+    # `*_ready` flags so the SPA can avoid rendering a download link
+    # that's going to 404. The trajectory exists as soon as the worker
+    # starts the trial (first event flushed); ATIF only after finalize.
+    is_terminal = trial.state in {"succeeded", "failed", "cancelled"}
+    base["atif_ready"] = is_terminal and trial.finished_at is not None
+    base["trajectory_ready"] = trial.started_at is not None
     # Per-artifact listing comes from Plan 7's `tasks/{id}/bundle` or
     # the in-flight artifacts table; v0.7 doesn't yet have an
     # `artifacts` table, so the array stays empty here. Plan 21+ can
@@ -220,7 +239,7 @@ async def submit_trial(
     request: Request,
     payload: _SubmitReq,
     authorization: Annotated[str | None, Header()] = None,
-) -> Any:
+) -> JSONResponse:
     """Authenticate locally, check `submit` scope, then proxy to
     Control Plane's POST /trials. The CP runs the canonical license-
     allowlist + team-quota checks; this route just keeps unauthorized
@@ -243,7 +262,7 @@ async def cancel_trial(
     request: Request,
     trial_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
-) -> Any:
+) -> JSONResponse:
     """Same-team check happens BEFORE the forward so we don't burn
     a CP round-trip when the caller is unauthorized."""
     async with request.app.state.session_factory() as s:

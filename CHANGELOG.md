@@ -42,7 +42,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Adapted aggressively to the actual v0.7 schema (no
   `aggregate_reward`/`cost_usd`/`campaign_id` columns, str PKs on
   Task + Benchmark, no `Artifact` model — extracted from `Trial.result`
-  JSONB instead).
+  JSONB instead). **Audit follow-ups (same-day):** trajectory route
+  stream-decodes events.jsonl via `iter_lines()` instead of
+  materializing the whole object — a 100k-event trial would otherwise
+  cost ~600 MB resident before slicing (audit H1). New migration 0006
+  creates `idx_trials_submitted_at_id_desc` so the keyset-pagination
+  query has a supporting btree (audit H2). `propagate()` returns a
+  `JSONResponse` with an allowlist of upstream headers (Retry-After,
+  Location, X-RateLimit-*, X-Idempotency-Key) — Plan 19's rate-limited
+  campaign submits depend on Retry-After (audit H3). Trial detail now
+  carries `atif_ready` + `trajectory_ready` flags so the SPA can
+  avoid rendering download links that would 404 on pre-finalize
+  trials (audit M1). `_extract_reward` / `_extract_cost` defensive-cast
+  so a malformed `Trial.result` JSONB falls through to `None`/`0.0`
+  rather than crashing the route (audit M2). 2 audit-regression
+  integration tests added.
 - **Plan 17 — `loom_service` skeleton + tokens routes + `admin:rate_cards`
   scope (2026-06-07, tag `loom-service-skeleton-v0.17`).** First of a
   6-plan service-layer arc (17-22) that exposes a thin REST API +
