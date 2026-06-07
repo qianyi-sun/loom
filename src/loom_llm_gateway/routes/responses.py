@@ -53,6 +53,12 @@ async def responses(
     model_name = payload.get("model")
     if not isinstance(model_name, str) or not model_name:
         raise HTTPException(status_code=400, detail="`model` is required")
+    if payload.get("stream"):
+        raise HTTPException(
+            status_code=400,
+            detail="stream=true not supported on the Gateway in v1 "
+                   "(cost attribution requires the final usage block)",
+        )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
     upstream_response = await upstream.post(
@@ -74,6 +80,12 @@ async def responses(
     body: dict[str, Any] = upstream_response.json()
 
     usage = DIALECTS["openai_responses"].extract_tokens(body)
+    if usage.input_tokens == 0 and usage.output_tokens == 0:
+        raise HTTPException(
+            status_code=502,
+            detail="openai responses 200 missing usage block; "
+                   "cost cannot be attributed",
+        )
     table = await request.app.state.rate_card_cache.get()
     entry = lookup_entry(table, ModelSpec(provider="openai", name=model_name))
     cost = compute_cost_usd(

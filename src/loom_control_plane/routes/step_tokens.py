@@ -12,8 +12,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from loom.auth import mint_step_jwt, verify_bearer_token
+from loom.db.schema import Trial as TrialRow
 
 router = APIRouter(prefix="/admin")
 
@@ -41,6 +43,26 @@ async def issue_step_token(
     if ctx is None or "worker:report" not in ctx.scopes:
         raise HTTPException(
             status_code=403, detail="missing scope worker:report",
+        )
+
+    # Plan 9 audit fix: verify the trial exists and matches the team
+    # the worker claims to be acting on behalf of. Without this, a
+    # buggy/compromised worker could mint step tokens for fictional
+    # trial_ids and the Gateway would silently attribute orphan
+    # llm_calls rows.
+    async with request.app.state.session_factory() as session:
+        trial_team = (await session.execute(
+            select(TrialRow.team_id).where(TrialRow.id == payload.trial_id),
+        )).scalar_one_or_none()
+    if trial_team is None:
+        raise HTTPException(
+            status_code=404, detail=f"trial {payload.trial_id} not found",
+        )
+    if trial_team != payload.team_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"team_id {payload.team_id} does not own trial "
+                   f"{payload.trial_id}",
         )
 
     token = mint_step_jwt(

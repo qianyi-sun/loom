@@ -66,7 +66,15 @@ async def gemini_generate_content(
             status_code=400,
             detail="path must be <model>:<action>, e.g. gemini-2.0-flash:generateContent",
         )
-    model_name, _action = model_path.split(":", 1)
+    model_name, action = model_path.split(":", 1)
+    # Plan 9 audit fix: streaming variant loses the final usage block on
+    # mid-stream connection close; refuse in v1.
+    if action.startswith("stream"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"action {action!r} not supported on the Gateway in v1 "
+                   "(cost attribution requires the final usage block)",
+        )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
     upstream_response = await upstream.post(
@@ -86,10 +94,18 @@ async def gemini_generate_content(
     body: dict[str, Any] = upstream_response.json()
 
     usage = DIALECTS["gemini"].extract_tokens(body)
-    # If usageMetadata is absent (e.g. countTokens-only responses don't
-    # carry it), skip cost recording.
+    # `countTokens` legitimately has no usageMetadata block — return
+    # the response without inserting a cost row. `generateContent` MUST
+    # carry it; a missing block on that action signals an upstream
+    # contract violation.
     if usage.input_tokens == 0 and usage.output_tokens == 0:
-        return body
+        if action == "countTokens":
+            return body
+        raise HTTPException(
+            status_code=502,
+            detail=f"gemini 200 response missing usageMetadata for action "
+                   f"{action!r}; cost cannot be attributed",
+        )
 
     table = await request.app.state.rate_card_cache.get()
     entry = lookup_entry(

@@ -59,6 +59,17 @@ async def messages(
     if not isinstance(model_name, str) or not model_name:
         raise HTTPException(status_code=400, detail="`model` is required")
 
+    # Plan 9 audit fix: streaming responses lose the final usage block on
+    # mid-stream connection close + can't be cost-attributed atomically.
+    # v1 refuses stream=true; clients that want SSE must wait for v1.5.
+    if payload.get("stream"):
+        raise HTTPException(
+            status_code=400,
+            detail="stream=true not supported on the Gateway in v1 "
+                   "(cost attribution requires the final usage block; "
+                   "v1.5 will add SSE passthrough)",
+        )
+
     # 1. Forward to Anthropic native endpoint.
     upstream: httpx.AsyncClient = request.app.state.upstream_client
     upstream_response = await upstream.post(
@@ -79,8 +90,17 @@ async def messages(
         )
     body: dict[str, Any] = upstream_response.json()
 
-    # 2. Extract usage + record cost.
+    # 2. Extract usage + record cost. Anthropic 200 responses always
+    # include a usage block; if it's missing we treat this as a
+    # surprising upstream contract violation and 502 — better than
+    # silently inserting a zero-cost row.
     usage = DIALECTS["anthropic"].extract_tokens(body)
+    if usage.input_tokens == 0 and usage.output_tokens == 0:
+        raise HTTPException(
+            status_code=502,
+            detail="anthropic 200 response missing usage block; "
+                   "cost cannot be attributed",
+        )
     table = await request.app.state.rate_card_cache.get()
     entry = lookup_entry(table, ModelSpec(provider="anthropic", name=model_name))
     cost = compute_cost_usd(
