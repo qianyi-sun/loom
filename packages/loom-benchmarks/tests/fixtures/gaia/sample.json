@@ -1,0 +1,11 @@
+[
+  {
+    "task_id": "c61d22de-5f6c-4958-a7f6-5e9707bd3466",
+    "Question": "Of the cities within the United States where U.S. presidents were born, which two are the farthest apart from the westernmost to the easternmost?",
+    "Level": "2",
+    "Final answer": "Honolulu, Quincy",
+    "file_name": "",
+    "file_path": "",
+    "Annotator Metadata": {"Steps": "Look up presidential birthplaces, compare longitudes."}
+  }
+]
