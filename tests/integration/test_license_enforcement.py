@@ -73,6 +73,20 @@ def seed(postgres_url: str) -> Iterator[dict]:
             },
             license=None,
         ))
+        # Empty-string license — a misconfigured importer might write
+        # this. It must NOT bypass enforcement (audit M3).
+        s.execute(insert(Task).values(
+            id="empty-license-task", checksum="0" * 64,
+            config={
+                "schema_version": "1",
+                "task": {"id": "empty-license-task", "name": "empty"},
+                "environment": {"os": "linux", "docker_image": "alpine"},
+                "agent": {"name": "oracle"},
+                "verifier": {"name": "pytest"},
+                "steps": [{"name": "main"}],
+            },
+            license="",
+        ))
         s.commit()
     try:
         yield {"team_id": team_id, "token": raw}
@@ -132,6 +146,19 @@ def test_no_license_task_accepted(app, seed):  # type: ignore[no-untyped-def]
             json={"task_id": "no-license-task", "config": {}},
         )
         assert r.status_code == 201, r.text
+
+
+def test_empty_string_license_rejected(app, seed):  # type: ignore[no-untyped-def]
+    """A task with license='' (empty string from a buggy importer)
+    must 403, not bypass — empty-string is NOT None and shouldn't be
+    in any sane allowlist (audit M3)."""
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {seed['token']}"},
+            json={"task_id": "empty-license-task", "config": {}},
+        )
+        assert r.status_code == 403
 
 
 def test_tightened_allowlist_rejects_mit(app, seed, postgres_url):  # type: ignore[no-untyped-def]

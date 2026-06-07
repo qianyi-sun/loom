@@ -65,7 +65,10 @@ async def submit_trial(
         # check the task's license against the team's allowlist. A NULL
         # task license is treated as "allowed" — only benchmark-imported
         # tasks have license tags; hand-authored tasks pass through.
-        if task_row.license:
+        # NOTE: explicit `is not None` — an empty-string license (which a
+        # buggy benchmark importer could produce) must NOT bypass; it
+        # should fall through to the allowlist check and 403.
+        if task_row.license is not None:
             quota = (await session.execute(
                 select(TeamQuota).where(TeamQuota.team_id == ctx.team_id),
             )).scalar_one()

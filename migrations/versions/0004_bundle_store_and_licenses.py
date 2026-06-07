@@ -73,6 +73,13 @@ def upgrade() -> None:
         "tasks_benchmark_id_fkey",
         "tasks", "benchmarks",
         ["benchmark_id"], ["id"],
+        ondelete="SET NULL",
+    )
+    # Index on the child column so deleting a benchmark (which fires the
+    # SET NULL cascade) and any "tasks belonging to benchmark X" lookup
+    # don't seq-scan. Postgres does NOT auto-index FK child columns.
+    op.create_index(
+        "tasks_benchmark_id_idx", "tasks", ["benchmark_id"],
     )
 
     # 3. team_quotas.license_allowlist. Default per A13.1 — added
@@ -105,6 +112,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column("tokens", "last_seen_at")
     op.drop_column("team_quotas", "license_allowlist")
+    op.drop_index("tasks_benchmark_id_idx", table_name="tasks")
     op.drop_constraint("tasks_benchmark_id_fkey", "tasks", type_="foreignkey")
     op.drop_column("tasks", "benchmark_id")
     op.drop_column("tasks", "license")

@@ -22,8 +22,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fixture content via download_prefix; `fixture://` / `git+` / None
   leave the dir empty (operator-runbook flow). License enforcement at
   POST /trials: a task with a license not in the team's allowlist 403s
-  with the allowlist surfaced in the detail. 332 unit+contract+
-  property + 152 integration green; 100 source files clean.
+  with the allowlist surfaced in the detail. **Audit follow-ups
+  (same-day):** migration 0004 now creates `tasks_benchmark_id_idx`
+  and the FK uses `ON DELETE SET NULL` (orphaned tasks survive a
+  benchmark deletion instead of cascading-fail or seq-scanning);
+  `download_prefix` refuses empty prefix with `ValueError` and skips
+  keys whose suffix contains `..` (path traversal); `_materialize_task_dir`
+  is typed against the `ObjectStore` Protocol (not concrete
+  `MinioObjectStore`), rejects `s3://bucket/` with empty prefix, and
+  removes its tempdir if `download_prefix` raises so failed claims
+  don't leak `/tmp` inodes; license enforcement uses `is not None` so
+  an empty-string license from a buggy importer no longer bypasses.
+  336 unit+contract+property + 153 integration green; 83 source files
+  mypy-strict clean.
 - **Plan 12 — 11 concrete agent adapters (2026-06-07, tag `loom-agent-adapters-v0.12`).**
   Ships every adapter from spec §8.1: codex, opencode, aider, openhands,
   openhands-sdk, swe-agent, mini-swe-agent, claude-code, gemini-cli,

@@ -37,7 +37,7 @@ from loom.errors import AgentError
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
-from loom.trajectory.storage import MinioObjectStore
+from loom.trajectory.storage import MinioObjectStore, ObjectStore
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
@@ -185,7 +185,7 @@ async def _spawn_trial(
     settings: WorkerSettings,
     cp_client: HttpControlPlaneClient,
     gateway_client: HttpLLMGatewayClient,
-    object_store: MinioObjectStore,
+    object_store: ObjectStore,
     worker_id: UUID,
     payload: dict[str, Any],
 ) -> None:
@@ -250,7 +250,7 @@ async def _spawn_trial(
 async def _materialize_task_dir(
     *,
     bundle: dict[str, Any],
-    object_store: MinioObjectStore,
+    object_store: ObjectStore,
     trial_id: UUID,
 ) -> Path:
     """Plan 13 Task 3: create a fresh tempdir and populate it from
@@ -261,11 +261,16 @@ async def _materialize_task_dir(
     - None / `git+...` / `fixture://...` — leave the dir empty. The
       operator runbook documents the volume-mount alternative; hand-
       authored tasks rely on it.
+    - `s3://bucket` or `s3://bucket/` with no prefix is REJECTED with
+      an empty dir + warning — without a prefix, download_prefix would
+      drain the entire bucket into one trial's workspace.
+
+    If download_prefix raises, the tempdir is removed before the
+    exception propagates so failed claims don't leak `/tmp` inodes.
     """
     task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
     source = bundle.get("source")
     if isinstance(source, str) and source.startswith("s3://"):
-        # Parse `s3://bucket/key/prefix/`.
         without_scheme = source[len("s3://"):]
         if "/" not in without_scheme:
             logger.warning(
@@ -274,9 +279,20 @@ async def _materialize_task_dir(
             )
             return task_dir
         bucket, prefix = without_scheme.split("/", 1)
-        count = await object_store.download_prefix(
-            bucket=bucket, prefix=prefix, out_dir=task_dir,
-        )
+        if not prefix:
+            logger.warning(
+                "bundle source %s has empty key prefix; refusing to "
+                "drain entire bucket — leaving task_dir empty",
+                source,
+            )
+            return task_dir
+        try:
+            count = await object_store.download_prefix(
+                bucket=bucket, prefix=prefix, out_dir=task_dir,
+            )
+        except BaseException:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            raise
         logger.info(
             "materialized_task_dir trial=%s objects=%d source=%s",
             trial_id, count, source,

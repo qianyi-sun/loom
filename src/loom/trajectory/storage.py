@@ -15,6 +15,18 @@ import boto3
 from botocore.config import Config
 
 
+def _has_traversal(rel: str) -> bool:
+    """True if a relative key contains a `..` segment, an absolute root,
+    or a drive-letter prefix. Used by download_prefix to reject keys that
+    would escape `out_dir` once joined."""
+    parts = Path(rel).parts
+    if not parts:
+        return False
+    if parts[0] in ("/", "\\") or (len(parts[0]) == 2 and parts[0][1] == ":"):
+        return True
+    return ".." in parts
+
+
 @dataclass
 class MultipartUpload:
     bucket: str
@@ -57,6 +69,13 @@ class ObjectStore(Protocol):
         """List every object under `prefix` in `bucket` and stream each to
         `out_dir` preserving the relative path. Returns the count of
         objects downloaded.
+
+        `prefix` must be non-empty — an empty string would match every
+        key in the bucket, which would let a misconfigured bundle source
+        (`s3://bucket/` or `s3://bucket`) drain the entire bucket into
+        one trial workspace. Implementations MUST raise ValueError on
+        empty prefix. Keys containing `..` segments after the prefix is
+        stripped are skipped to prevent path traversal out of `out_dir`.
 
         Used by the worker's `_materialize_task_dir` to pull a benchmark-
         imported task's fixture content (task.toml + instruction.md +
@@ -115,13 +134,18 @@ class FakeObjectStore:
         """Stream every (bucket, key) where key startswith `prefix` into
         `out_dir`, preserving the suffix path. Used by the worker's
         materialize_task_dir test path."""
+        if not prefix:
+            raise ValueError(
+                "download_prefix requires a non-empty prefix; refusing "
+                "to drain entire bucket",
+            )
         count = 0
         out_dir.mkdir(parents=True, exist_ok=True)
         for (b, k), body in self.objects.items():
             if b != bucket or not k.startswith(prefix):
                 continue
             rel = k[len(prefix):].lstrip("/")
-            if not rel:
+            if not rel or _has_traversal(rel):
                 continue
             dest = out_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -230,6 +254,11 @@ class MinioObjectStore:
         because large benchmarks (SWE-Bench Verified is ~500 instances)
         may have thousands of objects per task; the default list_objects
         returns 1000-key pages."""
+        if not prefix:
+            raise ValueError(
+                "download_prefix requires a non-empty prefix; refusing "
+                "to drain entire bucket",
+            )
         def _do() -> int:
             paginator = self._client.get_paginator("list_objects_v2")
             count = 0
@@ -238,7 +267,7 @@ class MinioObjectStore:
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     rel = key[len(prefix):].lstrip("/")
-                    if not rel:
+                    if not rel or _has_traversal(rel):
                         continue
                     dest = out_dir / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)

@@ -61,4 +61,29 @@ async def test_prefix_only_key_skipped(tmp_path: Path) -> None:
     assert (tmp_path / "file.txt").read_bytes() == b"hi"
 
 
+async def test_empty_prefix_rejected(tmp_path: Path) -> None:
+    """An empty prefix would match every key in the bucket. Refuse with
+    ValueError so a malformed `s3://bucket/` source can't drain the
+    bucket into one trial workspace (audit H4)."""
+    store = FakeObjectStore()
+    store.objects[("bench", "x/file.txt")] = b"hi"
+    with pytest.raises(ValueError, match="non-empty prefix"):
+        await store.download_prefix(bucket="bench", prefix="", out_dir=tmp_path)
+
+
+async def test_path_traversal_key_skipped(tmp_path: Path) -> None:
+    """A bucket key with `..` segments after the prefix is stripped
+    would join out of out_dir. Skip it rather than escaping (audit M4)."""
+    store = FakeObjectStore()
+    store.objects[("bench", "x/../../etc/passwd")] = b"sensitive"
+    store.objects[("bench", "x/legit.txt")] = b"ok"
+    count = await store.download_prefix(
+        bucket="bench", prefix="x/", out_dir=tmp_path,
+    )
+    assert count == 1
+    assert (tmp_path / "legit.txt").read_bytes() == b"ok"
+    # The traversal key wrote nothing outside tmp_path
+    assert not (tmp_path.parent.parent / "etc" / "passwd").exists()
+
+
 _ = pytest
