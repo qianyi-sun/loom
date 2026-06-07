@@ -1,19 +1,27 @@
 """Worker main loop — wires settings → register → heartbeat thread →
 claim loop → runner pool → drain.
 
-v1 limitation: the Control Plane's POST /trials/claim returns the trial's
-`config` (TrialConfig) but not the full `TaskConfig` body. Plan 7 expands
-the claim response to embed the task bundle (or adds a follow-up
-`GET /tasks/{id}/bundle` endpoint). Until then, `_fetch_task_config`
-raises NotImplementedError — the main loop will register + heartbeat +
-sit on the claim poll, and only fail when a real trial is dequeued.
+The claim payload carries the trial's id + team + task_id + trial config
++ requires_caps; the full TaskConfig body lives behind a second
+round-trip to `GET /tasks/{task_id}/bundle` (Plan 7 Task 1).
+
+Remaining v1 limitation: the worker uses a tempfile mkdtemp() for the
+task directory. The solution/ + tests/ + environment/ subtrees that live
+under a real fixture directory must be fetched out-of-band — production
+deploys mount a shared volume or run a git clone against
+`bundle["source"]`. v1 documents this as an ops requirement and leaves
+the dir empty; agents that depend on disk content (OracleAgent,
+PytestVerifier with local tests) will error out until the ops
+integration ships.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -177,12 +185,18 @@ async def _spawn_trial(
     gateway_client: HttpLLMGatewayClient,
     object_store: MinioObjectStore,
     worker_id: UUID,
-    payload: dict[str, object],
+    payload: dict[str, Any],
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
-    task_config = _fetch_task_config(cp_client, payload)
+    bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+    task_config = TaskConfig.model_validate(bundle["config"])
+    task_checksum = str(bundle["checksum"])
     trial_config = TrialConfig.model_validate(payload.get("config") or {})
+
+    # Empty mkdtemp per-trial. Production ops mounts a shared volume or
+    # clones `bundle["source"]`; v1 documents this in the operator runbook.
+    task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
 
     async def _state_patch(state: str, fr: str | None) -> bool:
         return await cp_client.patch_state(
@@ -192,9 +206,8 @@ async def _spawn_trial(
 
     runner = LocalTrialRunner(
         trial_id=trial_id, team_id=team_id,
-        task_config=task_config, task_checksum="<unknown>",
-        # See Plan 7: task body fetching is not implemented yet.
-        task_dir=Path("/tmp/task-not-implemented"),
+        task_config=task_config, task_checksum=task_checksum,
+        task_dir=task_dir,
         trial_config=trial_config,
         driver_factory=lambda: DockerDriver(
             image=task_config.environment.docker_image or "alpine",
@@ -231,15 +244,3 @@ def _default_agent_factory(
     return make
 
 
-def _fetch_task_config(
-    _cp_client: HttpControlPlaneClient, _payload: dict[str, object],
-) -> TaskConfig:
-    """v1 limitation: the claim endpoint returns trial config but not the
-    full task body. Plan 7 expands the claim payload to embed the task or
-    adds a follow-up GET /tasks/{id}/bundle endpoint. Until then, calling
-    `_spawn_trial` against a real claimed trial raises NotImplementedError
-    and the run() above is effectively a register + heartbeat skeleton."""
-    raise NotImplementedError(
-        "v1 worker requires Control Plane to embed full task config in "
-        "claim response. See Plan 7 for the endpoint expansion.",
-    )

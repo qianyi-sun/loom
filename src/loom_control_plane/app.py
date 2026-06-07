@@ -18,6 +18,7 @@ from loom_control_plane.routes import (
     artifacts,
     health,
     state,
+    tasks,
     trajectory,
     trials,
     workers,
@@ -69,5 +70,6 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)
+    app.include_router(tasks.router)
     app.include_router(admin.router)
     return app

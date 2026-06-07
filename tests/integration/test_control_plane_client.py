@@ -198,6 +198,37 @@ async def test_patch_state_returns_false_when_fenced(  # type: ignore[no-untyped
         await http.aclose()
 
 
+async def test_get_task_bundle_returns_config(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Task).values(
+                id="t-bundle", checksum="ab" * 32,
+                config={
+                    "schema_version": "1",
+                    "task": {"id": "t-bundle", "name": "t-bundle"},
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+                source="fixture://t-bundle",
+            ))
+        engine.dispose()
+
+        bundle = await cp.get_task_bundle("t-bundle")
+        assert bundle["id"] == "t-bundle"
+        assert bundle["checksum"] == "ab" * 32
+        assert bundle["config"]["task"]["name"] == "t-bundle"
+        assert bundle["source"] == "fixture://t-bundle"
+    finally:
+        await http.aclose()
+
+
 async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[no-untyped-def]
     cp_setup, postgres_url,
 ):

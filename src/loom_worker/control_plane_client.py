@@ -124,6 +124,19 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
+    async def get_task_bundle(self, task_id: str) -> dict[str, Any]:
+        """Fetch full TaskConfig + checksum + source by `task_id`."""
+        client, owned = self._http()
+        try:
+            r = await client.get(
+                f"/tasks/{task_id}/bundle", headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
     async def patch_trajectory_index(
         self,
         *,
