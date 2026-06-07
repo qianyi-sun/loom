@@ -63,7 +63,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker"]
+files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package
@@ -85,6 +85,19 @@ ignore_missing_imports = true
 # pyproject.
 [[tool.mypy.overrides]]
 module = ["loom_launcher", "loom_launcher.*"]
+ignore_missing_imports = true
+
+# loom-benchmarks is a sibling package at packages/loom-benchmarks/,
+# installed editable into the venv. mypy can't auto-resolve the sibling
+# path; suppress missing-import at the boundary. The package ships its
+# own pyproject + tests under packages/loom-benchmarks/tests.
+[[tool.mypy.overrides]]
+module = ["loom_benchmarks", "loom_benchmarks.*"]
+ignore_missing_imports = true
+
+# datasets (HuggingFace) has no stubs; treat as untyped.
+[[tool.mypy.overrides]]
+module = ["datasets", "datasets.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

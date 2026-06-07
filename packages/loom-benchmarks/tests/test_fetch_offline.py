@@ -9,7 +9,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-
 from loom_benchmarks.base import UpstreamSource
 from loom_benchmarks.fetch import cache_key, fetch_upstream
 
@@ -118,5 +117,5 @@ def test_unknown_kind_rejected(tmp_path: Path) -> None:
         kind="ftp",  # type: ignore[arg-type]
         locator="ftp://nope",
     )
-    with pytest.raises(ValueError, match="unknown UpstreamSource.kind"):
+    with pytest.raises(ValueError, match=r"unknown UpstreamSource\.kind"):
         fetch_upstream(src, cache_root=tmp_path)

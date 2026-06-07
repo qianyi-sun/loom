@@ -7,7 +7,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-
 from loom_benchmarks.util import (
     download_files_from_record,
     embed_base64_image,

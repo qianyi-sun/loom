@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy import create_engine, delete, text
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark, Task as TaskRow
+from loom.db.schema import Benchmark
+from loom.db.schema import Task as TaskRow
 from loom.trajectory.storage import FakeObjectStore
 from loom_benchmark_tool.import_cmd import run_import
 

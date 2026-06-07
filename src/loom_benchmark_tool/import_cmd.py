@@ -24,13 +24,14 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from loom_benchmarks.fetch import fetch_upstream
+from loom_benchmarks.registry import REGISTRY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Benchmark, Task as TaskRow
+from loom.db.schema import Benchmark
+from loom.db.schema import Task as TaskRow
 from loom.trajectory.storage import ObjectStore
-from loom_benchmarks.fetch import fetch_upstream
-from loom_benchmarks.registry import REGISTRY
 from loom_benchmark_tool.upload import upload_task_dir
 
 

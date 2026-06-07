@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 14 — `loom-benchmarks` core package + HumanEval reference adapter
+  (2026-06-07, tag `loom-benchmarks-core-v0.14`).** New sibling package
+  at `packages/loom-benchmarks/` (PyPI-publishable, depends on
+  `datasets`, `httpx`, `pydantic`): `BenchmarkAdapter` Protocol + value
+  types (`UpstreamSource`, `BenchmarkInstance`, `ConvertedTask`) +
+  conversion utilities (`pytest_from_test_strings`,
+  `pytest_from_unittest`, `structured_verifier_script`,
+  `embed_base64_image`, `download_files_from_record`, `sha256_of_dir`) +
+  kind-dispatched `fetch_upstream` (HuggingFace / git / https-tarball
+  with content-hash cache + `.fetch_complete` sentinel) +
+  `HumanEvalAdapter` (writes a runnable `solution/` + `tests/` bundle
+  whose canonical solution passes the upstream `check` under
+  `pytest`). Tarball extraction uses `filter="data"` to refuse unsafe
+  upstream archives. New `src/loom_benchmark_tool/` CLI (`python -m
+  loom_benchmark_tool {list,import,verify}`): `import` fetches → for
+  each instance converts → uploads bundle to MinIO under
+  `s3://{bucket}/{benchmark}/{instance_id}/` → upserts `benchmarks` +
+  `tasks` rows (idempotent ON CONFLICT). `import_cmd` is typed against
+  `ObjectStore` Protocol so the end-to-end integration test injects a
+  `FakeObjectStore`. `verify` is a documented Plan-16 placeholder.
+  336 unit+contract+property + 155 integration (+2 from new e2e + 1
+  from Plan 13 audit follow-ups); ruff + mypy strict clean across 106
+  source files (+23 from new tool + package).
 - **Plan 13 — Bundle store + license tracking (2026-06-07, tag `loom-bundle-store-v0.13`).**
   Foundation for Plan 14's benchmark integrations. Schema migration
   0004 adds: `benchmarks` table (id = human-readable PK for `ON

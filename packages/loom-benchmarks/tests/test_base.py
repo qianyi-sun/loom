@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError, is_dataclass
 
 import pytest
-
 from loom_benchmarks.base import (
     BenchmarkAdapter,
     BenchmarkInstance,
