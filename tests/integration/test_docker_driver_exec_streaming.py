@@ -63,6 +63,32 @@ async def test_docker_exec_streaming_non_zero_exit() -> None:
         await driver.stop()
 
 
+async def test_docker_exec_streaming_no_10mb_cap() -> None:
+    """exec_streaming's whole reason for existing is bypassing the 10 MB
+    buffered exec() cap. Produce ~20 MiB of stdout and assert all of it
+    flows through."""
+    target_bytes = 20 * 1024 * 1024
+    driver = DockerDriver(image="alpine:3.20")
+    await driver.start()
+    try:
+        handle = await driver.exec_streaming(
+            # `dd` produces exactly `target_bytes` of zeros at high speed.
+            ["sh", "-c", f"dd if=/dev/zero bs=1M count=20 2>/dev/null"],
+            env_vars={},
+            cwd=PurePosixPath("/workspace"),
+        )
+        total = 0
+        async for chunk in handle.stdout:
+            total += len(chunk)
+        rc = await handle.wait()
+        assert rc == 0
+        assert total == target_bytes, (
+            f"expected {target_bytes} bytes through stream, got {total}"
+        )
+    finally:
+        await driver.stop()
+
+
 async def test_docker_exec_streaming_kill_is_callable() -> None:
     """kill() is best-effort across docker's PID namespaces (see ExecHandle
     docstring). We verify the public contract: kill() doesn't raise, and

@@ -15,6 +15,7 @@ import contextlib
 import io
 import logging
 import tarfile
+import threading
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -272,10 +273,16 @@ class DockerDriver:
         stdout_q: asyncio.Queue[bytes | None] = asyncio.Queue()
         stderr_q: asyncio.Queue[bytes | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        # Signaled by the asyncio side (_wait race winner = poll path) to
+        # tell the blocking drainer it can quit early; we still process
+        # any chunks currently in flight before exiting.
+        stop_reader = threading.Event()
 
         def _drain_blocking() -> None:
             try:
                 for chunk in raw_stream:
+                    if stop_reader.is_set():
+                        break
                     out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
                     if out_chunk:
                         loop.call_soon_threadsafe(stdout_q.put_nowait, out_chunk)
@@ -316,6 +323,10 @@ class DockerDriver:
             )
             for t in pending:
                 t.cancel()
+            # If the poll path won, signal the blocking drainer so it
+            # doesn't outlive its useful life as an orphan thread holding
+            # docker's iterator.
+            stop_reader.set()
             if poll_task in done:
                 return poll_task.result()
             # Normal path: reader finished; fetch the exit code.
