@@ -9,7 +9,7 @@ Constants:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
@@ -29,6 +29,28 @@ class StartOptions:
 
     force_build: bool = False
     pull: bool = True
+
+
+@dataclass
+class ExecHandle:
+    """Long-running process handle returned by Driver.exec_streaming.
+
+    Caller iterates stdout/stderr (async; chunks of any size), then
+    `await handle.wait()` for the exit code. Driver implementations
+    buffer nothing — chunks flow through. No 10 MB cap.
+    """
+
+    pid: int
+    stdout: AsyncIterator[bytes]
+    stderr: AsyncIterator[bytes]
+    _wait: Callable[[], Awaitable[int]]
+    _kill: Callable[[], Awaitable[None]]
+
+    async def wait(self) -> int:
+        return await self._wait()
+
+    async def kill(self) -> None:
+        await self._kill()
 
 
 @runtime_checkable
