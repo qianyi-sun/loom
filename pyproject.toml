@@ -33,6 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "hypothesis>=6.100,<7.0",
   "mypy>=1.10,<2.0",
   "pytest>=8.0,<9.0",
   "pytest-asyncio>=0.23,<1.0",
@@ -81,4 +82,8 @@ testpaths = ["tests"]
 # tests/fixtures/tasks/*/tests/test_*.py are sandbox test bodies meant to
 # run inside the verifier container with /workspace mounted — collecting
 # them from the host fails on the hardcoded /workspace path. Exclude.
-norecursedirs = ["tests/fixtures"]
+# (Plus the pytest defaults — they must be re-listed when overriding.)
+norecursedirs = [
+  "tests/fixtures",
+  ".*", "build", "dist", "CVS", "_darcs", "{arch}", "*.egg", "venv",
+]
