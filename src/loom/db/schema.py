@@ -22,6 +22,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import (
@@ -49,6 +50,15 @@ class TeamQuota(Base):
     fair_share_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     in_flight_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Per-team SPDX allowlist (Plan 13 A13.1). DB default ships
+    # MIT / Apache-2.0 / BSD-3-Clause / CC-BY-4.0 so the v1 benchmark
+    # slate passes without operator action.
+    license_allowlist: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False,
+        server_default=text(
+            "ARRAY['MIT', 'Apache-2.0', 'BSD-3-Clause', 'CC-BY-4.0']::text[]",
+        ),
+    )
 
 
 class Task(Base):
@@ -57,9 +67,33 @@ class Task(Base):
     checksum: Mapped[str] = mapped_column(String, nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Per-task SPDX license tag (Plan 13). NULL on hand-authored tasks;
+    # benchmark-imported tasks always carry it.
+    license: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Parent benchmark, NULL for hand-authored tasks.
+    benchmark_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("benchmarks.id"), nullable=True,
+    )
     registered_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
+
+
+class Benchmark(Base):
+    """One row per registered benchmark suite (Plan 13)."""
+    __tablename__ = "benchmarks"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    upstream_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    upstream_locator: Mapped[str] = mapped_column(Text, nullable=False)
+    upstream_revision: Mapped[str] = mapped_column(Text, nullable=False)
+    license_spdx: Mapped[str] = mapped_column(Text, nullable=False)
+    license_url: Mapped[str] = mapped_column(Text, nullable=False)
+    splits: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    imported_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Agent(Base):
@@ -120,6 +154,10 @@ class Token(Base):
     expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    # Plan 13 A13.3: service layer + auth helpers debounce-update this
+    # on each successful verify_bearer_token, so /teams/{id}/members can
+    # surface last-active without each route writing per-request.
+    last_seen_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
 class RateCard(Base):
