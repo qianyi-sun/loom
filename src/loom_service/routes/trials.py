@@ -21,6 +21,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
 from loom.auth import verify_bearer_token
@@ -31,6 +32,7 @@ from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
 )
+from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 
 router = APIRouter()
@@ -204,3 +206,58 @@ async def get_trial(
     # add it without changing the response shape.
     base["artifacts"] = []
     return base
+
+
+class _SubmitReq(BaseModel):
+    task_id: str
+    config: dict[str, Any]
+
+
+@router.post("/trials", status_code=201)
+async def submit_trial(
+    request: Request,
+    payload: _SubmitReq,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Any:
+    """Authenticate locally, check `submit` scope, then proxy to
+    Control Plane's POST /trials. The CP runs the canonical license-
+    allowlist + team-quota checks; this route just keeps unauthorized
+    requests from touching the upstream at all."""
+    async with request.app.state.session_factory() as s:
+        ctx = await verify_bearer_token(s, authorization)
+        ctx = require_human_or_admin(ctx)
+        require_scope(ctx, "submit")
+    resp = await forward(
+        request.app.state.http_client,
+        method="POST", path="/trials",
+        authorization=authorization,
+        json_body=payload.model_dump(mode="json"),
+    )
+    return propagate(resp)
+
+
+@router.post("/trials/{trial_id}/cancel")
+async def cancel_trial(
+    request: Request,
+    trial_id: UUID,
+    authorization: Annotated[str | None, Header()] = None,
+) -> Any:
+    """Same-team check happens BEFORE the forward so we don't burn
+    a CP round-trip when the caller is unauthorized."""
+    async with request.app.state.session_factory() as s:
+        ctx = await verify_bearer_token(s, authorization)
+        ctx = require_human_or_admin(ctx)
+        require_scope(ctx, "submit")
+        trial = (await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )).scalar_one_or_none()
+        if trial is None:
+            raise HTTPException(status_code=404, detail="trial not found")
+        require_team_or_admin(ctx, trial.team_id)
+    resp = await forward(
+        request.app.state.http_client,
+        method="POST",
+        path=f"/trials/{trial_id}/cancel",
+        authorization=authorization,
+    )
+    return propagate(resp)
