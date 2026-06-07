@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: loom-worker }
+  template:
+    metadata:
+      labels: { app: loom-worker }
+    spec:
+      containers:
+        - name: worker
+          image: loom-worker:0.7
+          env:
+            - name: LOOM_WORKER_CONTROL_PLANE_URL
+              value: http://loom-control-plane:8080
+            - name: LOOM_WORKER_GATEWAY_URL
+              value: http://loom-llm-gateway:9100
+            - name: LOOM_WORKER_TOKEN
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: worker-token } }
+            - name: LOOM_WORKER_MINIO_ENDPOINT
+              value: http://loom-minio:9000
+            - name: LOOM_WORKER_MINIO_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
+            - name: LOOM_WORKER_MINIO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+          volumeMounts:
+            - name: trajectories
+              mountPath: /var/lib/loom/trajectories
+            - name: docker-sock
+              # NOTE: bind-mounting the host docker socket has obvious
+              # blast-radius implications. Production should swap this for
+              # a rootless / sysbox / kata-containers runtime.
+              mountPath: /var/run/docker.sock
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: 4, memory: 8Gi }
+      volumes:
+        - name: trajectories
+          persistentVolumeClaim:
+            claimName: loom-worker-trajectories
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loom-worker-trajectories
+spec:
+  accessModes: [ ReadWriteOnce ]
+  resources: { requests: { storage: 100Gi } }
