@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 12 — 11 concrete agent adapters (2026-06-07, tag `loom-agent-adapters-v0.12`).**
+  Ships every adapter from spec §8.1: codex, opencode, aider, openhands,
+  openhands-sdk, swe-agent, mini-swe-agent, claude-code, gemini-cli,
+  qwen-cli, kimi-cli. Each is a frozen dataclass satisfying the
+  `AgentAdapter` Protocol, self-registers at import time, and picks a
+  capture mechanism per the spec table: 5 stream_stdout_jsonl, 2
+  tail_log_file (aider's chat history, swe-agent's trajectory.jsonl), 1
+  poll_local_http (openhands server mode), 3 tail_pty (codex, qwen-cli,
+  kimi-cli — degraded TUI fidelity). Amendment A12.1 applied: claude-code
+  uses `sh -c "cd workdir && claude --print ..."` (NOT
+  `--instruction`/`--workdir`/`--no-update-check`) with telemetry +
+  auto-update disabled via env vars. 11 per-adapter contract tests + a
+  parametrized registry round-trip sweep + 27 pre-existing capture/
+  registry/hello tests = 61 tests in the launcher; lint + mypy strict
+  clean across 21 launcher source files. Main repo's 324 unit+contract+
+  property tests unchanged. **Argv flags for openhands / swe-agent /
+  opencode / gemini-cli / openhands-sdk / mini-swe-agent are best-guess
+  against each project's published CLI** and will be re-tuned alongside
+  the per-adapter sandbox Dockerfiles when those land.
 - **Plan 11 — SubprocessAgent + worker integration (2026-06-07, tag `loom-subprocess-agent-v0.11`).**
   `loom.agent.subprocess.SubprocessAgent` wraps any
   `loom_launcher.AgentAdapter` as an `AgentRuntime` satisfying
