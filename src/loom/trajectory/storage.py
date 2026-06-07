@@ -83,6 +83,17 @@ class ObjectStore(Protocol):
         runs. Plan 13 Task 2 / agent integrations spec §6.3."""
         ...
 
+    async def list_task_prefixes(
+        self, *, bucket: str, benchmark: str,
+    ) -> list[str]:
+        """List per-task prefixes under `<bucket>/<benchmark>/`. Returns
+        sorted strings ending in `/`, e.g. `["humaneval/HumanEval/0/",
+        "humaneval/HumanEval/1/", ...]`.
+
+        Used by `loom_benchmark_tool verify` to enumerate imported tasks
+        and sample a subset for Oracle baseline runs. Plan 16."""
+        ...
+
 
 @dataclass
 class FakeObjectStore:
@@ -127,6 +138,23 @@ class FakeObjectStore:
         self, *, bucket: str, key: str, expires_sec: int,
     ) -> str:
         return f"https://fake/{bucket}/{key}?expires_sec={expires_sec}"
+
+    async def list_task_prefixes(
+        self, *, bucket: str, benchmark: str,
+    ) -> list[str]:
+        """Find every `<benchmark>/.../task.toml` key and return its
+        parent prefix. One prefix per converted task. Matches the
+        MinioObjectStore impl: anchored on `task.toml` so multi-segment
+        instance_ids (HumanEval is `HumanEval/0`) round-trip correctly."""
+        base = f"{benchmark}/"
+        seen: set[str] = set()
+        for (b, k) in self.objects:
+            if b != bucket or not k.startswith(base):
+                continue
+            if not k.endswith("/task.toml"):
+                continue
+            seen.add(k[: -len("task.toml")])
+        return sorted(seen)
 
     async def download_prefix(
         self, *, bucket: str, prefix: str, out_dir: Path,
@@ -245,6 +273,27 @@ class MinioObjectStore:
                 Params={"Bucket": bucket, "Key": key},
                 ExpiresIn=expires_sec,
             ))
+        return await asyncio.to_thread(_do)
+
+    async def list_task_prefixes(
+        self, *, bucket: str, benchmark: str,
+    ) -> list[str]:
+        """Walk `<benchmark>/` keys and infer per-task prefixes — each
+        prefix maps to one converted task bundle. We can't use S3's
+        Delimiter listing because some benchmarks have multi-segment
+        instance_ids (HumanEval is `HumanEval/0`); we walk all keys
+        and group by `task.toml`'s parent prefix."""
+        def _do() -> list[str]:
+            paginator = self._client.get_paginator("list_objects_v2")
+            base = f"{benchmark}/"
+            seen: set[str] = set()
+            for page in paginator.paginate(Bucket=bucket, Prefix=base):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if not key.endswith("/task.toml"):
+                        continue
+                    seen.add(key[: -len("task.toml")])
+            return sorted(seen)
         return await asyncio.to_thread(_do)
 
     async def download_prefix(
