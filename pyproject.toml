@@ -114,3 +114,6 @@ norecursedirs = [
 # tests/system require docker-compose + built service images and take
 # minutes to run; opt in explicitly with `pytest tests/system`.
 addopts = "--ignore=tests/system"
+markers = [
+  "swe_bench_smoke: SWE-Bench Verified end-to-end smoke; pulls ~5GB per-instance images. Opt-in via LOOM_RUN_SWE_BENCH_SMOKE=1.",
+]
