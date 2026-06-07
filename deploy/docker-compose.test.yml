@@ -1,0 +1,88 @@
+# Compose stack for full-stack system tests (tests/system/*).
+# Brought up by tests/system/docker_compose.py at session start; torn
+# down at session end. NOT for development — use docker-compose.dev.yml
+# for that.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: loom
+      POSTGRES_PASSWORD: loom
+      POSTGRES_DB: loom
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "loom"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: loomtest
+      MINIO_ROOT_PASSWORD: loomtest
+    ports:
+      - "59000:9000"
+      - "59001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  llm-gateway:
+    image: loom-llm-gateway:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    environment:
+      LOOM_GW_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
+      LOOM_GW_ANTHROPIC_API_KEY: stub-key
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "59100:9100"
+
+  control-plane:
+    image: loom-control-plane:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
+    environment:
+      LOOM_CP_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
+      LOOM_CP_MINIO_ENDPOINT: http://minio:9000
+      LOOM_CP_MINIO_ACCESS_KEY: loomtest
+      LOOM_CP_MINIO_SECRET_KEY: loomtest
+      LOOM_CP_LLM_GATEWAY_URL: http://llm-gateway:9100
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "58080:8080"
+
+  worker:
+    image: loom-worker:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    environment:
+      LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
+      LOOM_WORKER_GATEWAY_URL: http://llm-gateway:9100
+      # Injected by tests/system/docker_compose.py after the seed script
+      # mints a worker token; defaults to a placeholder so compose-up
+      # validation doesn't fail at parse time.
+      LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:-placeholder}"
+      LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
+      LOOM_WORKER_MINIO_ACCESS_KEY: loomtest
+      LOOM_WORKER_MINIO_SECRET_KEY: loomtest
+    depends_on:
+      control-plane:
+        condition: service_started
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,61 @@
+"""Full-stack: kill the worker mid-trial, restart it, assert the trial is
+re-queued by the crash detector and eventually succeeds on retry."""
+
+from __future__ import annotations
+
+import time
+
+import httpx
+
+from tests.system.docker_compose import kill_service, run_seed, start_service
+
+
+def test_worker_crash_then_retry(compose_stack: dict[str, str]) -> None:
+    cp = compose_stack["control_plane"]
+    # Submit a config with at least 2 max_attempts so the crash detector's
+    # requeue translates into a real retry rather than terminal failure.
+    raw_token = run_seed(task_id="hello-world", which="team")
+
+    r = httpx.post(
+        f"{cp}/trials",
+        headers={"Authorization": f"Bearer {raw_token}"},
+        json={
+            "task_id": "hello-world",
+            "config": {
+                "retry": {
+                    "max_attempts": 3,
+                    "retry_on": ["crash"],
+                },
+            },
+        },
+        timeout=10,
+    )
+    assert r.status_code == 201, r.text
+    trial_id = r.json()["trial_id"]
+
+    # Wait until claimed/running, then kill the worker.
+    for _ in range(60):
+        r = httpx.get(
+            f"{cp}/trials/{trial_id}",
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+        if r.json()["state"] in ("claimed", "running", "succeeded"):
+            break
+        time.sleep(0.5)
+    kill_service("worker")
+    time.sleep(2.0)
+    start_service("worker")
+
+    final_state: str | None = None
+    for _ in range(600):
+        r = httpx.get(
+            f"{cp}/trials/{trial_id}",
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+        final_state = r.json()["state"]
+        if final_state in ("succeeded", "failed", "cancelled"):
+            break
+        time.sleep(1.0)
+    assert final_state == "succeeded", (
+        f"trial ended in state={final_state!r}; full body: {r.text}"
+    )

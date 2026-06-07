@@ -87,3 +87,6 @@ norecursedirs = [
   "tests/fixtures",
   ".*", "build", "dist", "CVS", "_darcs", "{arch}", "*.egg", "venv",
 ]
+# tests/system require docker-compose + built service images and take
+# minutes to run; opt in explicitly with `pytest tests/system`.
+addopts = "--ignore=tests/system"
