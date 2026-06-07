@@ -1,0 +1,18 @@
+[
+  {
+    "id": "8849e9da-d935-46bb-9bef-d3204c1f1e3c",
+    "snapshot": "chrome_v123",
+    "instruction": "Open Firefox, navigate to wikipedia.org, and bookmark the page.",
+    "source": "human-authored",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["firefox"]}}
+    ],
+    "trajectory": "trajectory_1.json",
+    "related_apps": ["firefox"],
+    "evaluator": {
+      "func": "check_bookmark_exists",
+      "result": {"type": "file", "path": "~/.mozilla/firefox/places.sqlite"},
+      "expected": {"url": "https://wikipedia.org"}
+    }
+  }
+]
