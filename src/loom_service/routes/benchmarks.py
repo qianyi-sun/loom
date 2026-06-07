@@ -40,8 +40,8 @@ def _bench_row(b: Benchmark) -> dict[str, Any]:
 @router.get("/benchmarks")
 async def list_benchmarks(
     request: Request,
-    cursor: str | None = Query(default=None),
-    limit: int = Query(default=50, gt=0, le=200),
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=200)] = 50,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:

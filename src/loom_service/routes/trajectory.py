@@ -12,7 +12,7 @@ to byte-range reads + sidecar index.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import UUID
 
 from botocore.exceptions import ClientError
@@ -42,15 +42,15 @@ async def _load_trial(session: Any, trial_id: UUID, ctx: Any) -> Trial:
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
-    return trial
+    return cast(Trial, trial)
 
 
 @router.get("/trials/{trial_id}/trajectory")
 async def list_events(
     request: Request,
     trial_id: UUID,
-    cursor: int = Query(default=0, ge=0),
-    limit: int = Query(default=200, gt=0, le=1000),
+    cursor: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(gt=0, le=1000)] = 200,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     settings = request.app.state.settings

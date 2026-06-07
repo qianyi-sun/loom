@@ -7,6 +7,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 18 — `loom_service` read routes + Control Plane forwarders
+  (2026-06-07, tag `loom-service-read-v0.18`).** Adds the read-side of
+  the service API + the two write proxies (POST /trials, /cancel) that
+  let the SPA (Plan 21+) cover the trial lifecycle without bypassing
+  the service layer. New `pagination.py` ships an unsealed
+  base64(json) cursor that round-trips `(submitted_at, id)` —
+  deliberately debuggable (not a JWT) since it carries only public
+  sort keys. `LoomServiceSettings` now exposes `trajectories_bucket`
+  + `artifacts_bucket` (defaults `trajectories` / `artifacts` — the
+  buckets the worker's TrajectoryWriter + finalize.py actually write
+  to). New routes:
+  - `GET /api/v1/trials` (filter by team/task/state; cursor paginated;
+    reward + cost extracted from `Trial.result` JSONB)
+  - `GET /api/v1/trials/{id}` (detail + presigned ATIF + trajectory
+    URLs anchored on the real `<team>/<trial>/{atif.json,events.jsonl}`
+    key shape)
+  - `GET /api/v1/trials/{id}/trajectory` (paginated event read via
+    boto3 get_object; line-index cursor)
+  - `GET /api/v1/trials/{id}/trajectory/download` (302 to presigned)
+  - `GET /api/v1/trials/{id}/atif` (302 to presigned)
+  - `GET /api/v1/tasks` + `GET /api/v1/tasks/{id:path}` (Task PK is a
+    string like `humaneval/HumanEval/0`, so detail uses `{path}`)
+  - `GET /api/v1/benchmarks` + `GET /api/v1/benchmarks/{id}`
+  - `POST /api/v1/trials` → forwarded to CP with the caller's bearer
+    intact; local `submit` scope check short-circuits unauthorized
+  - `POST /api/v1/trials/{id}/cancel` → same shape + same-team check
+  Shared `tests/integration/conftest.py` brings up a module-scoped
+  MinIO container + seeds events.jsonl + atif.json so trajectory +
+  ATIF tests don't pay per-test container start-up. 367
+  unit+contract+property (+6 pagination); 198 integration (+34 new:
+  11 trials + 4 trajectory + 2 atif + 7 tasks + 5 benchmarks + 5
+  forwarder); ruff + mypy strict clean across 122 source files.
+  Adapted aggressively to the actual v0.7 schema (no
+  `aggregate_reward`/`cost_usd`/`campaign_id` columns, str PKs on
+  Task + Benchmark, no `Artifact` model — extracted from `Trial.result`
+  JSONB instead).
 - **Plan 17 — `loom_service` skeleton + tokens routes + `admin:rate_cards`
   scope (2026-06-07, tag `loom-service-skeleton-v0.17`).** First of a
   6-plan service-layer arc (17-22) that exposes a thin REST API +

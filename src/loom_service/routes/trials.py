@@ -85,13 +85,14 @@ def _trial_row(t: Trial) -> dict[str, Any]:
 @router.get("/trials")
 async def list_trials(
     request: Request,
-    team_id: UUID | None = Query(default=None),
-    task_id: str | None = Query(default=None),
-    state: str | None = Query(
-        default=None, description="comma-separated state filter",
-    ),
-    cursor: str | None = Query(default=None),
-    limit: int = Query(default=50, gt=0, le=200),
+    team_id: Annotated[UUID | None, Query()] = None,
+    task_id: Annotated[str | None, Query()] = None,
+    state: Annotated[
+        str | None,
+        Query(description="comma-separated state filter"),
+    ] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=200)] = 50,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:
@@ -158,11 +159,12 @@ async def list_trials(
 def _presign_get(
     client: Any, bucket: str, key: str, expires_sec: int,
 ) -> str:
-    return client.generate_presigned_url(
+    url: str = client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key},
         ExpiresIn=expires_sec,
     )
+    return url
 
 
 @router.get("/trials/{trial_id}")

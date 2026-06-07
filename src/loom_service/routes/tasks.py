@@ -34,18 +34,21 @@ def _task_row(t: Task) -> dict[str, Any]:
 @router.get("/tasks")
 async def list_tasks(
     request: Request,
-    benchmark_id: str | None = Query(default=None),
-    license: str | None = Query(default=None),  # noqa: A002
-    cursor: str | None = Query(default=None),
-    limit: int = Query(default=50, gt=0, le=200),
+    benchmark_id: Annotated[str | None, Query()] = None,
+    license_spdx: Annotated[
+        str | None,
+        Query(alias="license"),
+    ] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=200)] = 50,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:
         ctx = await verify_bearer_token(s, authorization)
         require_human_or_admin(ctx)
         stmt = select(Task).order_by(Task.id)
-        if license:
-            stmt = stmt.where(Task.license == license)
+        if license_spdx:
+            stmt = stmt.where(Task.license == license_spdx)
         if benchmark_id is not None:
             stmt = stmt.where(Task.benchmark_id == benchmark_id)
         if cursor:
