@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 15 — Twelve more benchmark adapters (2026-06-07, tag
+  `loom-benchmark-adapters-v0.15`).** Brings the v1 slate from 1 to 13
+  adapters (HumanEval shipped Plan 14): SWE-Bench Verified, SWE-Bench
+  (full), SWE-Bench Multimodal (with base64-embedded screenshots in
+  `instruction.md`), OSWorld + WebArena + BFCL (structured-verifier
+  shells via descriptor JSON), MBPP + LiveCodeBench (pytest verifier;
+  LCB emits one stdin-driven pytest file per public + private test
+  case), GAIA (llm-judge verifier; rubric template at
+  `verifier/rubric.md` with `{candidate_answer}` left as a verify-time
+  placeholder), AIME (script verifier — extracts the last integer from
+  the agent's final line via standalone `verifier/check.py` so we
+  don't have to thread shell escapes), SkillFlow + SkillLearnBench
+  (passthrough — upstream bundle is already in Loom layout; we
+  re-stamp the namespaced task_id). New `loom_benchmarks/judges/`
+  sub-package holds llm-judge rubric templates. Every adapter pipes
+  `task_id` + `name` through `toml_string` to apply the Plan 14 audit
+  lesson preemptively — no upstream-controlled value reaches `task.toml`
+  unescaped. MBPP + LiveCodeBench + SkillFlow + SkillLearnBench
+  contract tests run subprocess `pytest` against the converted
+  task dir to prove the bundles are end-to-end runnable. 60
+  unit+contract tests in the package (+29 new); 156 integration green.
+  Registry exposes 13 adapters via `python -m loom_benchmark_tool list`.
 - **Plan 14 — `loom-benchmarks` core package + HumanEval reference adapter
   (2026-06-07, tag `loom-benchmarks-core-v0.14`).** New sibling package
   at `packages/loom-benchmarks/` (PyPI-publishable, depends on

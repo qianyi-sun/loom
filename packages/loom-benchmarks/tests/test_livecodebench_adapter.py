@@ -8,9 +8,10 @@ import sys
 import tomllib
 from pathlib import Path
 
-from loom.models.task import TaskConfig
 from loom_benchmarks.adapters.livecodebench import LiveCodeBenchAdapter
 from loom_benchmarks.base import BenchmarkInstance
+
+from loom.models.task import TaskConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "livecodebench" / "sample.json"
 

@@ -12,11 +12,11 @@ import tomllib
 from pathlib import Path
 
 import pytest
-
-from loom.models.task import TaskConfig
 from loom_benchmarks.adapters.skillflow import SkillFlowAdapter
 from loom_benchmarks.adapters.skilllearnbench import SkillLearnBenchAdapter
 from loom_benchmarks.base import BenchmarkInstance
+
+from loom.models.task import TaskConfig
 
 
 @pytest.mark.parametrize(

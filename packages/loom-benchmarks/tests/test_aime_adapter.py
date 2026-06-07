@@ -9,9 +9,10 @@ import sys
 import tomllib
 from pathlib import Path
 
-from loom.models.task import TaskConfig
 from loom_benchmarks.adapters.aime import AIMEAdapter
 from loom_benchmarks.base import BenchmarkInstance
+
+from loom.models.task import TaskConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aime" / "sample.json"
 
