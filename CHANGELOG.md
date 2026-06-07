@@ -27,7 +27,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   routes can require it cleanly without a manual grant. 376
   unit+contract+property pass (+15 auth guard + 3 config); 174
   integration pass (+10 tokens + 3 migration + 1 health); ruff + mypy
-  strict clean across 115 source files.
+  strict clean across 115 source files. **Audit follow-ups (same-day):**
+  DELETE /tokens filters by `team_id` BEFORE the prefix scan so a
+  team caller can't probe (or revoke via prefix collision) another
+  team's token; cross-team lookups return 404 instead of 403 leaking
+  existence (audit H1+M1). Hex prefix validation is strict
+  (`[0-9a-f]{8}`). Multi-match prefix collisions return 409 instead of
+  silently picking the first non-deterministic row. POST /tokens
+  rejects `type=admin` with a populated `team_id` (admin tokens are
+  global; silent-drop was a confused-deputy hazard, audit H2) and
+  rejects unrecognized scopes with 400 against a known-scope allowlist
+  (audit M2). Migration 0005 skips tokens with `revoked_at IS NOT
+  NULL` (audit M4). 3 audit-regression integration tests added.
 - **Plan 16 — `verify` CLI + system smoke tests + license-allowlist
   closure (2026-06-07, tag `loom-benchmarks-v0.16`).** Closes the
   benchmark-integrations arc. New `src/loom_benchmark_tool/oracle_runner.py`

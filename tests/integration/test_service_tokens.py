@@ -231,3 +231,99 @@ async def test_revoke_unknown_prefix_404(
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 404
+
+
+async def test_revoke_rejects_non_hex_prefix(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, _t = svc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        # 8 chars but contains non-hex.
+        r = await ac.delete(
+            "/api/v1/tokens/xyzzyabc",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 400
+
+
+async def test_post_rejects_unknown_scope(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """Audit M2: an unrecognized scope is rejected at request time
+    rather than silently stored."""
+    app, raw, _t = svc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tokens",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "type": "team",
+                "scopes": ["bogus:typo"],
+                "expires_in_days": 1,
+            },
+        )
+    assert r.status_code == 400
+    assert "unrecognized scopes" in r.json()["detail"]
+
+
+async def test_revoke_other_team_token_returns_404(
+    svc_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """Audit H1+M1: a team caller cannot revoke (or even probe) a
+    token belonging to another team. The lookup is filtered by
+    team_id BEFORE the prefix scan, so a colliding prefix gets 404
+    (not 403, not silent success)."""
+    app, raw, _team_id = svc_setup
+
+    # Seed a token in a different team.
+    from datetime import UTC, datetime
+    other_team = uuid4()
+    other_raw = f"loom_team_{uuid4().hex}"
+    other_hash = hashlib.sha256(other_raw.encode()).digest()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Team).values(
+            id=other_team, name=f"other-{other_team}",
+        ))
+        s.execute(insert(Token).values(
+            token_hash=other_hash, type="team",
+            scopes=["read:own"], team_id=other_team,
+            issued_at=datetime.now(UTC), expires_at=None,
+        ))
+        s.commit()
+    try:
+        other_prefix = other_hash.hex()[:8]
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://svc",
+        ) as ac:
+            r = await ac.delete(
+                f"/api/v1/tokens/{other_prefix}",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        # The other team's token is invisible to this caller; 404
+        # rather than 403 (which would have leaked existence).
+        assert r.status_code == 404
+        # And the other team's token is still unrevoked.
+        with sl() as s:
+            from sqlalchemy import select as sa_select
+            still = s.execute(
+                sa_select(Token).where(Token.token_hash == other_hash),
+            ).scalar_one()
+        assert still.revoked_at is None
+    finally:
+        with sl() as s:
+            s.execute(delete(Token).where(Token.token_hash == other_hash))
+            from loom.db.schema import TeamQuota
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id == other_team))
+            s.execute(delete(Team).where(Team.id == other_team))
+            s.commit()
+        sync_engine.dispose()

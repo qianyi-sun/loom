@@ -24,12 +24,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Skip revoked tokens — granting a scope to a token that can never
+    # authenticate again is wasted disk + audit noise.
     op.execute(
         """
         UPDATE tokens
            SET scopes = array_append(scopes, 'admin:rate_cards')
          WHERE 'admin:tokens' = ANY(scopes)
            AND NOT ('admin:rate_cards' = ANY(scopes))
+           AND revoked_at IS NULL
         """,
     )
 
