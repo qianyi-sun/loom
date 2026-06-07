@@ -8,6 +8,7 @@ that writes the row (which already validates against the Pydantic models).
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,7 +18,9 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     LargeBinary,
+    Numeric,
     String,
+    Text,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
@@ -124,3 +127,27 @@ class RateCard(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     captured_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     table: Mapped[dict[str, Any]] = mapped_column("table", JSONB, nullable=False)
+
+
+class LlmCall(Base):
+    """One row per LLM call routed through the Gateway. Written by every
+    dialect endpoint after the upstream provider returns. Read by the
+    worker at trial finalize to project LLMCallEvents into the trial's
+    trajectory JSONL before ATIF projection runs."""
+    __tablename__ = "llm_calls"
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    trial_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    step_id: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    dialect: Mapped[str] = mapped_column(Text, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_extras: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict,
+    )
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    rate_card_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
