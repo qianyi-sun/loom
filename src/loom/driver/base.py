@@ -84,6 +84,24 @@ class Driver(Protocol):
         timeout_sec: float | None = None,
     ) -> ExecResult: ...
 
+    async def exec_streaming(
+        self,
+        argv: list[str],
+        *,
+        env_vars: dict[str, str],
+        cwd: PurePosixPath,
+        user: str | int | None = None,
+    ) -> ExecHandle:
+        """Start a process and return immediately. Caller iterates stdout/
+        stderr (each yield is whatever chunk size the underlying driver
+        produces), then `await handle.wait()` for the exit code. Driver
+        buffers nothing — no 10 MB cap. Used for long-running agent
+        subprocesses; existing `exec()` stays for short commands.
+
+        `env_vars` are MERGED with whatever the container already has.
+        """
+        ...
+
     async def upload(self, src: Path, dst: PurePosixPath) -> None: ...
 
     async def download(self, src: PurePosixPath, dst: Path) -> None: ...
