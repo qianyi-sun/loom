@@ -62,8 +62,11 @@ async def run_oracle_for_task(
     alongside other tasks.
     """
     def _do() -> OracleResult:
+        # `--` locks the positional boundary so an `image` value
+        # starting with `-` (or `--privileged` etc.) is treated as the
+        # image name, not as a docker-run flag.
         container_id = subprocess.check_output(
-            ["docker", "run", "-d", "--rm", image, "sleep", "300"],
+            ["docker", "run", "-d", "--rm", "--", image, "sleep", "300"],
         ).decode().strip()
         try:
             _copy_into_container(
@@ -72,15 +75,20 @@ async def run_oracle_for_task(
 
             # SWE-Bench-style bundles include solution/solve.sh.
             if (task_dir / "solution" / "solve.sh").exists():
-                rc = subprocess.call(
+                solve = subprocess.run(
                     ["docker", "exec", container_id, "sh",
                      f"/workspace/{task_dir.name}/solution/solve.sh"],
+                    capture_output=True, text=True,
                 )
-                if rc != 0:
+                if solve.returncode != 0:
                     return OracleResult(
-                        task_id=task_id, passed=False, return_code=rc,
-                        stdout_tail="",
-                        stderr_tail=f"solve.sh exited {rc}",
+                        task_id=task_id, passed=False,
+                        return_code=solve.returncode,
+                        stdout_tail=(solve.stdout or "")[-500:],
+                        stderr_tail=(
+                            f"solve.sh exited {solve.returncode}\n"
+                            + (solve.stderr or "")
+                        )[-500:],
                     )
 
             tests_dir = task_dir / "tests"

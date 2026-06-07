@@ -116,6 +116,111 @@ async def test_verify_empty_benchmark_returns_zero(
     assert report == {"total": 0, "passed": 0, "failed": 0, "results": []}
 
 
+async def test_verify_one_bad_task_does_not_abort_sample(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Audit C1: a broken bundle (e.g. invalid task.toml) must not
+    prevent the remaining sampled tasks from being verified. The bad
+    one is captured as `passed=False` with the error in stderr_tail."""
+    store = FakeObjectStore()
+    # Seed two task bundles directly: one valid, one with a broken toml.
+    good_toml = b"""schema_version = "1"
+[task]
+id = "humaneval/good"
+name = "good"
+[environment]
+os = "linux"
+docker_image = "python:3.11-slim"
+[agent]
+name = "oracle"
+[verifier]
+name = "pytest"
+[[steps]]
+name = "main"
+"""
+    store.objects[("loom-benchmarks", "humaneval/good/task.toml")] = good_toml
+    store.objects[
+        ("loom-benchmarks", "humaneval/bad/task.toml")
+    ] = b"not valid toml ===="
+
+    async def _fake_oracle(
+        *, task_id: str, task_dir: Path, image: str,
+    ) -> OracleResult:
+        return OracleResult(
+            task_id=task_id, passed=True, return_code=0,
+            stdout_tail="ok", stderr_tail="",
+        )
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.verify_cmd.run_oracle_for_task",
+        _fake_oracle,
+    )
+
+    report = await run_verify(
+        benchmark="humaneval", object_store=store,
+        bucket="loom-benchmarks", limit=10,
+    )
+    assert report["total"] == 2
+    assert report["passed"] == 1
+    assert report["failed"] == 1
+    bad = next(r for r in report["results"] if not r["passed"])
+    assert "verify pipeline error" in bad["stderr_tail"]
+
+
+async def test_verify_rejects_unsafe_prefix_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit H1: a prefix segment with shell metacharacters must NOT
+    flow into the docker-exec interpolation. The task is captured as
+    `passed=False` with the rejection in stderr_tail; other tasks
+    continue."""
+    store = FakeObjectStore()
+    good_toml = b"""schema_version = "1"
+[task]
+id = "humaneval/good"
+name = "good"
+[environment]
+os = "linux"
+docker_image = "python:3.11-slim"
+[agent]
+name = "oracle"
+[verifier]
+name = "pytest"
+[[steps]]
+name = "main"
+"""
+    store.objects[("loom-benchmarks", "humaneval/good/task.toml")] = good_toml
+    # Inject a poisoned bundle whose prefix slug contains shell-special
+    # characters. The walker treats every `task.toml` as a task; this
+    # forces an unsafe last-segment.
+    store.objects[
+        ("loom-benchmarks", "humaneval/bad; rm -rf/task.toml")
+    ] = good_toml
+
+    async def _fake_oracle(
+        *, task_id: str, task_dir: Path, image: str,
+    ) -> OracleResult:
+        return OracleResult(
+            task_id=task_id, passed=True, return_code=0,
+            stdout_tail="ok", stderr_tail="",
+        )
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.verify_cmd.run_oracle_for_task",
+        _fake_oracle,
+    )
+
+    report = await run_verify(
+        benchmark="humaneval", object_store=store,
+        bucket="loom-benchmarks", limit=10,
+    )
+    assert report["total"] == 2
+    assert report["passed"] == 1
+    assert report["failed"] == 1
+    rejected = next(r for r in report["results"] if not r["passed"])
+    assert "unsafe prefix slug" in rejected["stderr_tail"]
+
+
 async def test_verify_samples_when_limit_below_total(
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,

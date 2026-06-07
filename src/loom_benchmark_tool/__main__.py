@@ -128,6 +128,15 @@ def main() -> None:
         for r in report["results"]:
             if not r["passed"]:
                 print(f"  FAIL {r['task_id']}: {r['stderr_tail']}")
+        if report["total"] == 0:
+            # An operator running `verify` against the wrong benchmark
+            # name (or before any import) should not see a silent
+            # green. Exit non-zero so CI / runbooks catch the typo.
+            print(
+                f"  WARNING: no tasks found for benchmark "
+                f"{args.benchmark!r} under bucket {args.bucket!r}",
+            )
+            raise SystemExit(2)
         if report["failed"] > 0:
             raise SystemExit(1)
         return

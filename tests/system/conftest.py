@@ -30,7 +30,10 @@ def compose_stack() -> Iterator[dict[str, str]]:
             "worker_token": worker_token,
             # Plan 16 smoke tests drive `run_import` directly, which
             # needs DB + MinIO creds. The compose file fixes these to
-            # static test values (`loom/loom/loom`, `loomtest/loomtest`).
+            # static test values — see deploy/docker-compose.test.yml
+            # for `POSTGRES_USER/PASSWORD/DB`, the `55432:5432` mapping,
+            # and `MINIO_ROOT_USER/PASSWORD`. Keep this block in sync
+            # if the compose file's test creds ever change.
             "db_url": "postgresql+psycopg://loom:loom@localhost:55432/loom",
             "minio_access_key": "loomtest",
             "minio_secret_key": "loomtest",

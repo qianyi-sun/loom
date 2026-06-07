@@ -35,6 +35,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   audit) 403s — the latter is the regression guard for any future
   attempt to re-tag LCB as MIT. 408 unit+contract+property pass (+5
   new); ruff + mypy strict clean across 107 source files.
+  **Audit follow-ups (same-day):** verify pipeline is now fail-soft
+  per task — a broken `task.toml` or a `download_prefix` exception
+  captures `passed=False` with the error in `stderr_tail` instead of
+  aborting the whole sample. The per-task tempdir slug must match
+  `[A-Za-z0-9._+-]+` before any docker-exec interpolation
+  (defense-in-depth even though list-form subprocess calls block
+  direct shell injection). `docker run`/`exec` get a `--` separator so
+  an image value starting with `-` can't be parsed as a flag.
+  `solve.sh` stdout+stderr now captured into the `OracleResult` tail
+  so SWE-Bench failures surface the real reason. Verify exits
+  `SystemExit(2)` when `total=0` so an operator pointing at the wrong
+  benchmark name catches the typo instead of seeing a silent green.
+  Two new audit-regression tests pin C1 (fail-soft) and H1 (slug
+  validation).
 - **Plan 15 — Twelve more benchmark adapters (2026-06-07, tag
   `loom-benchmark-adapters-v0.15`).** Brings the v1 slate from 1 to 13
   adapters (HumanEval shipped Plan 14): SWE-Bench Verified, SWE-Bench

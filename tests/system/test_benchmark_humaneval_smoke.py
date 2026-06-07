@@ -89,7 +89,7 @@ async def test_humaneval_end_to_end(
         assert r.status_code == 201, r.text
         submitted.append(r.json()["trial_id"])
 
-    deadline = time.time() + 600  # 10 min per trial across the batch
+    deadline = time.time() + 600  # 10 min TOTAL across the batch
     pending = set(submitted)
     final: dict[str, str] = {}
     while pending and time.time() < deadline:
