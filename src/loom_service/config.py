@@ -34,6 +34,16 @@ class LoomServiceSettings(BaseSettings):
     # Trajectory / ATIF presigned URLs (Plan 18).
     signed_url_expiry_sec: int = 3600
 
+    # Bucket names — match what the worker + finalize.py actually use.
+    # Worker's TrajectoryWriter writes to bucket `trajectories` at key
+    # `{team_id}/{trial_id}/events.jsonl`. `finalize.py` writes ATIF to
+    # the same bucket at key `{team_id}/{trial_id}/atif.json`.
+    # `loom_control_plane/routes/artifacts.py` presigns the `artifacts`
+    # bucket. Promoting to settings so deploys can override without
+    # patching Python.
+    trajectories_bucket: str = "trajectories"
+    artifacts_bucket: str = "artifacts"
+
     # Campaign runner (Plan 19); plumbed early to keep settings stable.
     campaign_runner_batch_size: int = 50
     campaign_runner_submit_rate_per_sec: int = 100
