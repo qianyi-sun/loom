@@ -28,6 +28,12 @@ def compose_stack() -> Iterator[dict[str, str]]:
             "minio": "http://localhost:59000",
             "team_token": team_token,
             "worker_token": worker_token,
+            # Plan 16 smoke tests drive `run_import` directly, which
+            # needs DB + MinIO creds. The compose file fixes these to
+            # static test values (`loom/loom/loom`, `loomtest/loomtest`).
+            "db_url": "postgresql+psycopg://loom:loom@localhost:55432/loom",
+            "minio_access_key": "loomtest",
+            "minio_secret_key": "loomtest",
         }
     finally:
         stack_down()
