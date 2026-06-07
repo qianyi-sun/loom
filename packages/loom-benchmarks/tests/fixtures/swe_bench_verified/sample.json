@@ -1,0 +1,15 @@
+[
+  {
+    "instance_id": "django__django-12345",
+    "repo": "django/django",
+    "base_commit": "abc123def4567890",
+    "problem_statement": "Querysets with `.filter(foo__in=[])` should short-circuit to .none() instead of issuing SQL with an empty IN clause.",
+    "hints_text": "",
+    "patch": "diff --git a/django/db/models/query.py b/django/db/models/query.py\n--- a/django/db/models/query.py\n+++ b/django/db/models/query.py\n@@ -100,3 +100,5 @@ class QuerySet:\n     def filter(self, *args, **kwargs):\n+        if any(v == [] for v in kwargs.values()):\n+            return self.none()\n         return self._filter_or_exclude(False, args, kwargs)\n",
+    "test_patch": "",
+    "FAIL_TO_PASS": "[\"tests/queries.py::test_empty_in_short_circuits\"]",
+    "PASS_TO_PASS": "[\"tests/queries.py::test_basic_filter\", \"tests/queries.py::test_chained_filter\"]",
+    "version": "4.2",
+    "environment_setup_commit": "fff999"
+  }
+]
