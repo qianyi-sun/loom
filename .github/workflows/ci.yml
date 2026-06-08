@@ -16,6 +16,8 @@ concurrency:
 
 permissions:
   contents: read
+  # `pull-requests: write` is needed for the coverage-comment step on PRs.
+  pull-requests: write
 
 jobs:
   # Job name must stay `repository-checks` — the dev branch protection
@@ -45,6 +47,7 @@ jobs:
           uv pip install -e ".[dev]"
           uv pip install -e packages/loom-launcher
           uv pip install -e packages/loom-benchmarks
+          uv pip install -e packages/loom-benchmark-terminal-bench-2
 
       - name: Ruff
         run: uv run ruff check src tests
@@ -52,14 +55,52 @@ jobs:
       - name: Mypy (strict)
         run: uv run mypy
 
-      - name: Pytest — unit + contract + property
-        run: uv run pytest tests/unit tests/contract tests/property
+      - name: Pytest — unit + contract + property + loom_cli
+        run: |
+          uv run pytest \
+            tests/unit tests/contract tests/property tests/loom_cli \
+            --cov=src --cov=packages \
+            --cov-report=term --cov-report=xml
 
       - name: Pytest — sibling packages
         run: |
           uv run pytest \
             packages/loom-launcher/tests \
-            packages/loom-benchmarks/tests
+            packages/loom-benchmarks/tests \
+            packages/loom-benchmark-terminal-bench-2/tests \
+            --cov=src --cov=packages --cov-append \
+            --cov-report=term --cov-report=xml
+
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+      # Phase 1 of #260: measurement only. No --cov-fail-under gate yet;
+      # collecting baseline numbers across a few PRs first.
+      - name: Coverage comment on PR
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pct=$(uv run coverage report --format=total)
+          summary=$(uv run coverage report | tail -1)
+          {
+            echo "## Coverage report"
+            echo ""
+            echo "**Total: ${pct}%** (fast tier only — integration tests not included)."
+            echo ""
+            echo '```'
+            echo "$summary"
+            echo '```'
+            echo ""
+            echo "Phase 1 of [#260](https://github.com/carinrc/loom/issues/260) — measurement only, no fail-under gate. Full per-file report attached as the \`coverage-xml\` workflow artifact."
+          } > /tmp/cov-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/cov-comment.md
 
   # Integration suite needs Docker (testcontainers spins up Postgres +
   # MinIO). Runs on every push to dev/main; on PRs it's opt-in via the

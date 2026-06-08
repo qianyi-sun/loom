@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **CI coverage Phase 1: measurement-only (2026-06-08, closes #260).**
+  `repository-checks` now runs `pytest --cov=src --cov=packages` and
+  uploads `coverage.xml` as a workflow artifact; a PR-comment step
+  posts the total coverage % + TOTAL line summary. No
+  `--cov-fail-under` gate yet — collecting baseline data across a few
+  PRs first; Phase 2 sets the floor. Also fills two pre-existing CI
+  gaps: `tests/loom_cli` (Plan 23) and
+  `packages/loom-benchmark-terminal-bench-2/tests` (Plan 25) are now
+  gated. Workflow installs the TB-2 sibling alongside the others.
+  Baseline at this commit: 71% (8864 statements, 2581 missed). Big
+  zeros are loom_service routes + several loom_worker entry points
+  (those need integration tests, not unit tests).
 - **Plan 25 — Terminal-Bench-2.0 canonical adapter (2026-06-08,
   closes #251).** New sibling package
   `packages/loom-benchmark-terminal-bench-2/` (Apache-2.0) pinned
