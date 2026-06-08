@@ -10,13 +10,19 @@ under pilot group.
 
 ## Status
 
-All seven implementation plans shipped (2026-06-05/06). The runtime
-core is runnable; v0.7 is the first tagged release.
+Plans 0–22 shipped (2026-06-05/08), spanning the runtime core, the
+multi-dialect LLM Gateway, the benchmark-integration arc (loom-benchmarks
+core + 13 adapters + `verify` CLI), the agent-integrations arc
+(loom-launcher + SubprocessAgent + 11 concrete adapters), and the
+service-layer arc (REST API + 11-page SPA). The harbor-parity arc
+(Plans 23–27) is specified and ready to execute — see
+`docs/specs/2026-06-08-loom-harbor-parity-arc-design.md`.
 
-- **Tag:** `loom-v0.7-runtime-core`
-- **Plan tags:** `loom-foundation-v0.1` (Plan 1), `loom-driver-trajectory-v0.2` (Plan 2), `loom-agent-verifier-trial-v0.3` (Plan 3), `loom-llm-gateway-v0.4` (Plan 4), `loom-control-plane-v0.5` (Plan 5), `loom-worker-v0.6` (Plan 6).
+- **Latest tag:** `loom-service-v0.22` (service layer + SPA complete)
+- **Milestone tag:** `loom-v0.7-runtime-core` (runtime core runnable end-to-end)
+- **Plan tags:** `loom-foundation-v0.1` (Plan 1), `loom-driver-trajectory-v0.2` (Plan 2), `loom-agent-verifier-trial-v0.3` (Plan 3), `loom-llm-gateway-v0.4` (Plan 4), `loom-control-plane-v0.5` (Plan 5), `loom-worker-v0.6` (Plan 6), `loom-shared-auth-v0.8` (Plan 8), `loom-gateway-multidialect-v0.9` (Plan 9), `loom-launcher-v0.10` (Plan 10), `loom-subprocess-agent-v0.11` (Plan 11), `loom-agent-adapters-v0.12` (Plan 12), `loom-bundle-store-v0.13` (Plan 13), `loom-benchmarks-core-v0.14` (Plan 14), `loom-benchmark-adapters-v0.15` (Plan 15), `loom-benchmarks-v0.16` (Plan 16), `loom-service-skeleton-v0.17` (Plan 17), `loom-service-read-v0.18` (Plan 18), `loom-campaigns-v0.19` (Plan 19), `loom-service-admin-v0.20` (Plan 20), `loom-spa-read-v0.21` (Plan 21), `loom-service-v0.22` (Plan 22).
 - **CHANGELOG:** `CHANGELOG.md`
-- **Design spec:** `docs/specs/2026-06-05-loom-runtime-core-design.md`
+- **Design specs:** `docs/specs/`
 - **Implementation plans:** `docs/plans/`
 - **Pre-Loom repo content** (read-only reference): `legacy/`
 
