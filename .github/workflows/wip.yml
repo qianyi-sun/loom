@@ -17,5 +17,5 @@ jobs:
     steps:
       - name: Notice
         run: |
-          echo "Loom is being rebuilt. See docs/superpowers/plans/ for the roadmap."
+          echo "Loom is being rebuilt. See docs/plans/ for the roadmap."
           echo "Real CI lands with Plan 7 Task 15."

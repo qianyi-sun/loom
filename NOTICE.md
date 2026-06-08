@@ -5,7 +5,7 @@ and training-data generation runtime — replacing the previous
 `agentic-data-platform` content that integrated `harbor==0.9.0`.
 
 The full design and seven implementation plans for Loom live under
-`docs/superpowers/specs/` and `docs/superpowers/plans/`.
+`docs/specs/` and `docs/plans/`.
 
 All pre-Loom code, tests, docs, and configuration artifacts have been
 moved to `legacy/` and are no longer wired into the build. They are

@@ -16,8 +16,8 @@ core is runnable; v0.7 is the first tagged release.
 - **Tag:** `loom-v0.7-runtime-core`
 - **Plan tags:** `loom-foundation-v0.1` (Plan 1), `loom-driver-trajectory-v0.2` (Plan 2), `loom-agent-verifier-trial-v0.3` (Plan 3), `loom-llm-gateway-v0.4` (Plan 4), `loom-control-plane-v0.5` (Plan 5), `loom-worker-v0.6` (Plan 6).
 - **CHANGELOG:** `CHANGELOG.md`
-- **Design spec:** `docs/superpowers/specs/2026-06-05-loom-runtime-core-design.md`
-- **Implementation plans:** `docs/superpowers/plans/`
+- **Design spec:** `docs/specs/2026-06-05-loom-runtime-core-design.md`
+- **Implementation plans:** `docs/plans/`
 - **Pre-Loom repo content** (read-only reference): `legacy/`
 
 ## What Loom does
@@ -86,7 +86,7 @@ src/loom_llm_gateway/              # OpenAI-compatible LLM Gateway service
 src/loom_worker/                   # Worker process
 migrations/                        # Alembic
 tests/{unit,contract,integration,system,property,fixtures}/
-docs/superpowers/{specs,plans}/    # design + roadmap
+docs/{specs,plans}/    # design + roadmap
 deploy/                            # docker-compose + k8s manifests
 scripts/                           # operator + test helpers
 legacy/                            # everything from before Loom — read-only
@@ -94,7 +94,7 @@ legacy/                            # everything from before Loom — read-only
 
 ## How to read this repo
 
-1. `docs/superpowers/specs/2026-06-05-loom-runtime-core-design.md` — the design
+1. `docs/specs/2026-06-05-loom-runtime-core-design.md` — the design
 2. `CHANGELOG.md` — what shipped and when
 3. `docs/operator-runbook.md` — production deploy + ops
 4. `docs/task-authoring-guide.md` — how to write a new task
