@@ -60,6 +60,18 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         # Plan 19: campaign runner background task. Picks up
         # submitted/running campaigns on each poll, fans out trial
         # submissions to Control Plane via the shared http_client.
+        # The runner's CP token is read from settings — without it
+        # every CP submit 401s, so the loop short-circuits with a
+        # warning per tick and waits for the operator to provision
+        # the secret.
+        runner_token = (
+            settings.campaign_runner_cp_token.get_secret_value()
+            if settings.campaign_runner_cp_token is not None
+            else None
+        )
+        runner_authorization = (
+            f"Bearer {runner_token}" if runner_token else None
+        )
         runner_task = asyncio.create_task(
             run_loop(
                 session_factory=session_factory,
@@ -71,6 +83,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 poll_interval_sec=(
                     settings.campaign_runner_poll_interval_sec
                 ),
+                cp_authorization=runner_authorization,
             ),
             name="loom-svc-campaign-runner",
         )

@@ -150,6 +150,86 @@ def test_no_idempotency_key_creates_distinct_trials(
     assert r1.json()["trial_id"] != r2.json()["trial_id"]
 
 
+def test_unknown_campaign_id_returns_400(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+) -> None:
+    """Audit C2: payload campaign_id that doesn't exist returns 400,
+    not 500 from a downstream FK IntegrityError."""
+    _, raw = seed_team
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {},
+                "campaign_id": str(uuid4()),
+            },
+        )
+    assert r.status_code == 400
+    assert "unknown campaign" in r.json()["detail"]
+
+
+def test_cross_team_idempotency_key_does_not_leak(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    """Audit H1: team A submits with idempotency_key X. Team B then
+    submits the same key — must NOT receive team A's trial_id."""
+    _, raw_a = seed_team
+
+    team_b = uuid4()
+    raw_b = f"loom_team_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Team).values(id=team_b, name=f"b-{team_b}"))
+        s.execute(insert(TeamQuota).values(team_id=team_b))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw_b.encode()).digest(),
+            type="team", scopes=["submit"], team_id=team_b,
+            issued_at=datetime.now(UTC),
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+    try:
+        with TestClient(app) as client:
+            r_a = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw_a}"},
+                json={
+                    "task_id": "hello", "config": {},
+                    "idempotency_key": "shared-key",
+                },
+            )
+            r_b = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw_b}"},
+                json={
+                    "task_id": "hello", "config": {},
+                    "idempotency_key": "shared-key",
+                },
+            )
+        assert r_a.status_code == 201, r_a.text
+        # Team B's ON CONFLICT fires; the recovery path sees the
+        # canonical row belongs to team A and 409s.
+        assert r_b.status_code == 409
+        assert "collision" in r_b.json()["detail"]
+    finally:
+        sync_engine = create_engine(postgres_url)
+        sl = sessionmaker(sync_engine)
+        with sl() as s:
+            s.execute(delete(Trial))
+            s.execute(delete(Token).where(Token.team_id == team_b))
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_b))
+            s.execute(delete(Team).where(Team.id == team_b))
+            s.commit()
+        sync_engine.dispose()
+
+
 def test_campaign_id_stored_on_trial(
     app,  # type: ignore[no-untyped-def]
     seed_team: tuple[UUID, str],

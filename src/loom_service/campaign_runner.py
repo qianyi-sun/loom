@@ -248,17 +248,31 @@ async def run_loop(
     poll_interval_sec: int,
     cp_authorization: str | None = None,
 ) -> None:
-    """Forever-loop entrypoint for the service lifespan. Logs +
-    swallows per-iteration exceptions so the runner never dies."""
+    """Forever-loop entrypoint for the service lifespan.
+
+    If `cp_authorization` is None the loop logs ONE warning and then
+    skips submitting (still ticks the poll). Without a token every
+    CP submit would 401 — better to surface the misconfig once than
+    to spam the CP with failed POSTs."""
+    warned_missing_token = False
     while True:
         try:
-            await run_once(
-                session_factory=session_factory,
-                http_client=http_client,
-                batch_size=batch_size,
-                submit_rate_per_sec=submit_rate_per_sec,
-                cp_authorization=cp_authorization,
-            )
+            if cp_authorization is None:
+                if not warned_missing_token:
+                    logger.warning(
+                        "campaign_runner has no CP token "
+                        "(LOOM_SVC_CAMPAIGN_RUNNER_CP_TOKEN unset); "
+                        "campaigns will queue but not fan out",
+                    )
+                    warned_missing_token = True
+            else:
+                await run_once(
+                    session_factory=session_factory,
+                    http_client=http_client,
+                    batch_size=batch_size,
+                    submit_rate_per_sec=submit_rate_per_sec,
+                    cp_authorization=cp_authorization,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -122,6 +122,19 @@ async def create_campaign(
             )
 
         task_ids = await _resolve_task_filter(s, payload.task_filter)
+        # Audit M2: a filter materializing to zero tasks (empty
+        # `task_ids`, or a license/benchmark that matches no row)
+        # creates a campaign stuck in `submitted` forever —
+        # `next_campaign_state` only transitions on `expected > 0`.
+        # Reject up front so the operator gets immediate feedback.
+        if not task_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"task_filter {payload.task_filter} matched zero "
+                    f"tasks; refusing to create empty campaign"
+                ),
+            )
         token_prefix = (
             ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
         )

@@ -37,17 +37,19 @@ async def submit_trial(
     idempotency_key = payload.get("idempotency_key")
 
     # Plan 19: if `idempotency_key` was supplied and a trial with that
-    # key already exists, return its trial_id without minting a new
-    # row. The check + insert are not atomic against a true race; the
-    # follow-up INSERT below has `ON CONFLICT (idempotency_key) DO
-    # NOTHING` which closes the window — we still do the early read so
-    # the common "campaign runner re-submits an already-emitted trial"
-    # case skips the (heavier) license + quota work.
+    # key already exists FOR THIS TEAM, return its trial_id without
+    # minting a new row. The team-scoping is important — without it,
+    # a cross-team idempotency_key collision would leak the existence
+    # of the other team's trial (audit H1). The follow-up INSERT below
+    # has `ON CONFLICT DO NOTHING` which closes the race window; the
+    # early read just skips the (heavier) license + quota work on the
+    # common "runner re-submits an already-emitted trial" path.
     if idempotency_key is not None:
         async with request.app.state.session_factory() as session:
             existing = (await session.execute(
                 select(TrialRow).where(
                     TrialRow.idempotency_key == idempotency_key,
+                    TrialRow.team_id == ctx.team_id,
                 ),
             )).scalar_one_or_none()
         if existing is not None:
@@ -63,6 +65,22 @@ async def submit_trial(
         )).scalar_one_or_none()
     if task_row is None:
         raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
+
+    # Plan 19: validate campaign_id FK at request time. The schema FK
+    # would raise IntegrityError → 500; surface as a clean 400 so the
+    # campaign runner sees the misconfig in the response (audit C2).
+    campaign_id = payload.get("campaign_id")
+    if campaign_id is not None:
+        from loom.db.schema import Campaign
+        async with request.app.state.session_factory() as session:
+            exists = (await session.execute(
+                select(Campaign.id).where(Campaign.id == campaign_id),
+            )).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown campaign {campaign_id}",
+            )
 
     task_config = normalize_steps(TaskConfig.model_validate(task_row.config))
     trial_config = TrialConfig.model_validate(payload.get("config") or {})
@@ -106,8 +124,8 @@ async def submit_trial(
         # `idempotency_key` is set we use pg_insert + ON CONFLICT DO
         # NOTHING so a concurrent race (two runner instances picking
         # the same campaign row before the SELECT-skip-locked is held)
-        # doesn't produce duplicate trial rows.
-        campaign_id = payload.get("campaign_id")
+        # doesn't produce duplicate trial rows. `campaign_id` was
+        # already FK-validated upstream.
         insert_values: dict[str, Any] = {
             "id": trial_id, "team_id": ctx.team_id, "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
@@ -136,13 +154,26 @@ async def submit_trial(
             row = result.one_or_none()
             if row is None:
                 # ON CONFLICT fired — another caller won the race.
-                # Re-read the canonical row.
+                # Re-read the canonical row scoped to this team (a
+                # cross-team idempotency-key collision should never
+                # reach here because the partial unique index is
+                # global, but we never expose another team's trial:
+                # if the canonical row belongs to a different team
+                # we 409 the caller).
                 existing = (await session.execute(
                     select(TrialRow).where(
                         TrialRow.idempotency_key == idempotency_key,
                     ),
                 )).scalar_one()
                 await session.commit()
+                if existing.team_id != ctx.team_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "idempotency_key collision with another "
+                            "team's trial"
+                        ),
+                    )
                 return {
                     "trial_id": str(existing.id),
                     "state": existing.state,

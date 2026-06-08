@@ -41,6 +41,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `loom-svc-campaign-runner`. 375 unit+contract+property (+8 state
   machine); 220 integration (+7 CRUD + 4 idempotency + 2 migration +
   3 runner e2e); ruff + mypy strict clean across 124 source files.
+  **Audit follow-ups (same-day):** runner now reads a CP-side bearer
+  token from `LOOM_SVC_CAMPAIGN_RUNNER_CP_TOKEN` and forwards it on
+  every submit — without the token the loop logs a single warning
+  and skips ticks instead of spamming the CP with 401s (audit C1).
+  CP /trials pre-validates `campaign_id` and returns 400 on
+  unknown UUID instead of letting the FK violation surface as a 500
+  (audit C2). Idempotency-key lookup is scoped to the caller's
+  team_id; a cross-team key collision returns 409 with a generic
+  "collision with another team's trial" detail instead of leaking
+  the other team's trial_id (audit H1). Campaign create rejects a
+  task_filter that materializes to zero tasks (`task_ids=[]`, no
+  matching license, etc.) with 400 — otherwise the campaign would
+  sit in `submitted` forever (audit M2). 3 audit-regression tests
+  pin the behavior.
 - **Plan 18 — `loom_service` read routes + Control Plane forwarders
   (2026-06-07, tag `loom-service-read-v0.18`).** Adds the read-side of
   the service API + the two write proxies (POST /trials, /cancel) that

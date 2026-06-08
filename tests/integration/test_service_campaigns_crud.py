@@ -140,6 +140,30 @@ async def test_post_rejects_unknown_filter_key(
     assert "liscense" in r.json()["detail"]
 
 
+async def test_post_rejects_empty_filter_match(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """Audit M2: a filter that materializes to zero tasks would
+    create a campaign stuck in `submitted` forever
+    (next_campaign_state needs `expected > 0`). Reject up front."""
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/campaigns",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "empty",
+                "task_filter": {"license": "no-such-license"},
+                "trial_config": {},
+            },
+        )
+    assert r.status_code == 400
+    assert "zero tasks" in r.json()["detail"]
+
+
 async def test_post_requires_submit_scope(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
