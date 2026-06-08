@@ -91,23 +91,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   SkillLearnBench specifically).
 
 ### Fixed
-- **Plan 22.5 — Real CI on push/PR (2026-06-08, closes #247).** Replaced
-  the `.github/workflows/wip.yml` placeholder with `ci.yml`. The
-  `repository-checks` job (name preserved to satisfy the existing
-  `dev` branch-protection rule) gates ruff + mypy --strict + the
-  fast pytest tier (unit/contract/property) + sibling-package tests.
-  A separate `integration` job runs testcontainers-backed tests on
-  push to `dev`/`main` and on PRs labeled `ci:integration` (opt-in
-  for slow PRs). System tests stay opt-in via local invocation only.
-  Uses `uv` for install (lock-aware caching via `setup-uv@v3`).
-  `CONTRIBUTING.md` Known Gaps drops the "No real CI" bullet.
-- **Pre-existing test cleanup uncovered by local CI validation
-  (2026-06-08).** Ruff I001 import-sort in
-  `tests/contract/test_driver_contract.py`; `runtime_sec` in
-  `test_capture_via_http_poll` bumped 0.5→1.5s so all three scripted
-  polls drain before the agent's wait task completes (the test was
-  under-budgeted on wall-clock relative to the 0.5s default
-  `poll_interval_sec`).
+- **SPA dev-deps security bump (2026-06-08, closes #255).** Cleared
+  5 Dependabot advisories (2 critical happy-dom RCE/VM-escape, 1
+  high happy-dom fetch-credentials, 1 moderate vite path-traversal,
+  1 moderate esbuild dev-server CSRF). Bumped `vite` 5→8,
+  `happy-dom` 14→20, `vitest` 1→4, `@vitejs/plugin-react` 4→6 in
+  `web/package.json`. All dev-only — no production artifact ships
+  these. Build still ~71 KB gzipped; 18 vitest tests still pass.
 - **`migrations/env.py` preserves existing loggers across alembic
   invocations (2026-06-08).** Python's `logging.config.fileConfig`
   defaults to `disable_existing_loggers=True`, which silently
