@@ -13,7 +13,10 @@ from loom.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False prevents fileConfig from disabling
+    # loggers configured before alembic runs — notably pytest's caplog
+    # attachment to project loggers like `loom_worker.trial_runner`.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 db_url = os.environ.get("LOOM_DB_URL")
 if not db_url:
