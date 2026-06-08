@@ -39,7 +39,10 @@ class HumanEvalAdapter:
     display_name = "HumanEval"
     upstream_source = UpstreamSource(
         kind="huggingface",
-        locator="openai_humaneval",
+        # HuggingFace Hub >=1.x requires namespace/name; the legacy
+        # unnamespaced "openai_humaneval" alias raises HfUriError on
+        # current datasets/hub releases.
+        locator="openai/openai_humaneval",
         revision=None,
         subset=None,
     )

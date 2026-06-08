@@ -19,7 +19,10 @@ dependencies = [
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
 
 [project.entry-points."loom.benchmarks"]
-terminal-bench-2 = "loom_benchmark_terminal_bench_2:adapter"
+# Point at the CLASS, not the module-level instance — the Plan 24
+# loader instantiates via `ep.load()()` and a pre-created instance
+# isn't callable.
+terminal-bench-2 = "loom_benchmark_terminal_bench_2.adapter:TerminalBench2Adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["loom_benchmark_terminal_bench_2"]

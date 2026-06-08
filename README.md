@@ -2,64 +2,74 @@
 
 Agent evaluation and training-data generation runtime.
 
-Loom replaces the `harbor==0.9.0` integration this repo previously
-shipped with a tailored, distributed runtime designed for shared use
-across our research subteams. Loom is **benchmark-agnostic**:
-scalability and compatibility with arbitrary benchmarks via
-per-benchmark adapters are the product, not optimization for any
-single workflow. 13 benchmark adapters ship today (HumanEval,
-SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench, BFCL, GAIA,
-AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench), with
-Terminal-Bench-2.0 and Daytona/Modal cloud backends queued for the
-harbor-parity arc.
+Loom is **benchmark-agnostic**: scalability and compatibility with
+arbitrary benchmarks via per-benchmark adapters are the product, not
+optimization for any single workflow. 14 benchmark adapters ship today
+(HumanEval, SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench,
+BFCL, GAIA, AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench,
+Terminal-Bench-2.0).
 
-## Status
+There are two ways to use Loom:
 
-Plans 0–22 shipped (2026-06-05/08), spanning the runtime core, the
-multi-dialect LLM Gateway, the benchmark-integration arc (loom-benchmarks
-core + 13 adapters + `verify` CLI), the agent-integrations arc
-(loom-launcher + SubprocessAgent + 11 concrete adapters), and the
-service-layer arc (REST API + 11-page SPA). The harbor-parity arc
-(Plans 23–27) is specified and ready to execute — see
-`docs/specs/2026-06-08-loom-harbor-parity-arc-design.md`.
+- **`loom` CLI (local laptop)** — `pip install` and run benchmarks
+  against agents on your machine, no server stack required. The fastest
+  way to get a single trial's trajectory + ATIF JSON out the door.
+- **Service mode (cluster)** — Control Plane + Workers + LLM Gateway +
+  Postgres + MinIO. Multi-team, DRF-scheduled, with the SPA at
+  `web/` for browsing trials and managing tokens.
 
-- **Latest tag:** `loom-service-v0.22` (service layer + SPA complete)
-- **Milestone tag:** `loom-v0.7-runtime-core` (runtime core runnable end-to-end)
-- **Plan tags:** `loom-foundation-v0.1` (Plan 1), `loom-driver-trajectory-v0.2` (Plan 2), `loom-agent-verifier-trial-v0.3` (Plan 3), `loom-llm-gateway-v0.4` (Plan 4), `loom-control-plane-v0.5` (Plan 5), `loom-worker-v0.6` (Plan 6), `loom-shared-auth-v0.8` (Plan 8), `loom-gateway-multidialect-v0.9` (Plan 9), `loom-launcher-v0.10` (Plan 10), `loom-subprocess-agent-v0.11` (Plan 11), `loom-agent-adapters-v0.12` (Plan 12), `loom-bundle-store-v0.13` (Plan 13), `loom-benchmarks-core-v0.14` (Plan 14), `loom-benchmark-adapters-v0.15` (Plan 15), `loom-benchmarks-v0.16` (Plan 16), `loom-service-skeleton-v0.17` (Plan 17), `loom-service-read-v0.18` (Plan 18), `loom-campaigns-v0.19` (Plan 19), `loom-service-admin-v0.20` (Plan 20), `loom-spa-read-v0.21` (Plan 21), `loom-service-v0.22` (Plan 22).
-- **CHANGELOG:** `CHANGELOG.md`
-- **Design specs:** `docs/specs/`
-- **Implementation plans:** `docs/plans/`
-- **Pre-Loom repo content** (read-only reference): `legacy/`
+## Quick start — `loom run` (laptop)
 
-## What Loom does
+```bash
+pip install -e . -e packages/loom-launcher -e packages/loom-benchmarks
 
-- Runs benchmark tasks against arbitrary agents (Claude Code, custom, Oracle baseline).
-- Captures full agent trajectories as event-sourced JSONL on MinIO.
-- Projects to **ATIF v1.7** at finalize for downstream tooling.
-- Schedules across teams with **DRF** (Dominant Resource Fairness).
-- Tracks costs against versioned rate cards via the LLM Gateway.
+# Discover what's available.
+loom datasets list
 
-## Architecture (one paragraph)
+# Set an upstream API key (or `export ANTHROPIC_API_KEY=...`).
+loom config set token.anthropic sk-ant-xxx
 
-A FastAPI **Control Plane** owns the trial state machine, DRF
-scheduling, and the trajectory index. **Workers** poll for trials,
-run them in-process against a **Driver** (Docker in v1), emit
-append-only JSONL trajectories to MinIO, and report state via fenced
-HTTP PATCH endpoints. An **LLM Gateway** (LiteLLM-backed) proxies
-model calls so every trajectory carries faithful token usage and
-cost. Postgres + MinIO are the only stateful services; the LLM
-Gateway and Control Plane are stateless.
+# Run a benchmark against any agent + backend.
+loom run \
+  --dataset swe-bench-verified \
+  --agent claude-code \
+  --model anthropic/claude-opus-4-7 \
+  --backend docker \
+  --concurrency 4 \
+  --output-dir ./runs
+```
 
-## Components
+Per-trial outputs land at `./runs/<trial-id>/events.jsonl` (full event
+trajectory) + `./runs/<trial-id>/atif.json` (ATIF v1.7 projection).
+`loom run --json` switches the per-trial line to a JSON object for
+piping to `jq`.
 
-| Component | Lives in | Talks to |
-|---|---|---|
-| Foundation library | `src/loom/` | (used by all) |
-| Control Plane | `src/loom_control_plane/` | Postgres, MinIO |
-| LLM Gateway | `src/loom_llm_gateway/` | Anthropic / OpenAI / Together, Postgres |
-| Worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
+### Cloud backends (optional)
 
-## Quick start (local dev)
+```bash
+# Daytona cloud sandboxes — no local Docker required.
+export DAYTONA_API_KEY=...
+loom run --backend daytona --dataset bfcl --agent oracle ...
+```
+
+`--backend daytona` shells trials to Daytona cloud sandboxes;
+compute-seconds + cost land in the `cloud_compute_records` table when
+the run is connected to a Loom service (`--server-url`).
+
+### `loom datasets`
+
+```
+loom datasets list                  # all sources (installed + available)
+loom datasets list --installed      # only adapters in this venv
+loom datasets show humaneval        # adapter detail + entry-point
+loom datasets install <slug>        # pip-install a registry entry
+```
+
+Discovery unions three sources: entry-points (`loom.benchmarks` group),
+an in-tree default registry JSON, and an optional Loom service's
+`/api/v1/benchmarks` (set `LOOM_SERVER_URL`).
+
+## Quick start — service mode (cluster)
 
 ```bash
 pip install -e ".[dev]"
@@ -67,7 +77,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d
 alembic -c migrations/alembic.ini upgrade head
 TEAM_TOKEN=$(python scripts/seed_test_data.py)
 
-curl -X POST http://localhost:8080/trials \
+curl -X POST http://localhost:8080/api/v1/trials \
   -H "Authorization: Bearer $TEAM_TOKEN" \
   -d '{"task_id":"hello-world","config":{}}'
 ```
@@ -76,41 +86,138 @@ See `docs/operator-runbook.md` for production deployment + token
 rotation + alarm response, and `docs/task-authoring-guide.md` for
 writing new tasks.
 
+## Architecture (one paragraph)
+
+A FastAPI **Control Plane** owns the trial state machine, DRF
+(Dominant Resource Fairness) scheduling, and the trajectory index.
+**Workers** poll for trials, run them in-process against a **Driver**
+(Docker, Daytona; Modal pending), emit append-only JSONL trajectories
+to MinIO, and report state via fenced HTTP PATCH endpoints. An **LLM
+Gateway** (LiteLLM-backed) proxies model calls so every trajectory
+carries faithful token usage and cost. Postgres + MinIO are the only
+stateful services; Gateway, Control Plane, and `loom_service` (REST +
+SPA) are stateless.
+
+For laptop use, the **`loom` CLI** reuses `Trial.run()` against a
+`LocalDiskObjectStore` + `UpstreamDirectGatewayClient` (provider SDKs
+directly), so trajectories + ATIF files are bit-identical to a
+service-mode run.
+
+## Status
+
+Plans 0–26 + #260 Phase 1 shipped. Latest plan tag:
+`loom-service-v0.22`. Newer ships are on `dev` tip:
+
+| Plan | What | Closed |
+|---|---|---|
+| 22.5 | Real CI on push/PR (ruff + mypy --strict + pytest) | #247 |
+| 23 | `loom` CLI scaffold (`run` / `config` / `datasets`) | #249 |
+| 24 | Dataset discovery via entry-points + registry JSON | #250 |
+| 25 | Terminal-Bench-2.0 canonical adapter | #251 |
+| 26 | Daytona cloud driver + `cloud_compute_records` rollup | #252 |
+| #255 | SPA dev-deps security bump (vite/vitest/happy-dom) | #255 |
+| #260 | pytest-cov measurement in CI (Phase 1: no gate) | #260 |
+
+Plan 27 (Modal cloud driver) is queued but deferred —
+`cloud_compute_records` schema is already generic via the
+`cloud_provider` column, so Plan 27 ships zero schema work when picked
+up.
+
+- **CHANGELOG:** `CHANGELOG.md`
+- **Design specs:** `docs/specs/`
+- **Implementation plans:** `docs/plans/`
+- **Pre-Loom repo content** (read-only reference): `legacy/`
+
+## What Loom does
+
+- Runs benchmark tasks against arbitrary agents (Claude Code, custom,
+  Oracle baseline, 11 concrete CLI adapters in `loom-launcher`).
+- Captures full agent trajectories as event-sourced JSONL on MinIO
+  (or local disk in CLI mode).
+- Projects to **ATIF v1.7** at finalize for downstream tooling.
+- Schedules across teams with **DRF** (Dominant Resource Fairness) in
+  service mode.
+- Tracks LLM-call cost against versioned rate cards via the LLM
+  Gateway; tracks cloud-driver compute-seconds + cost in
+  `cloud_compute_records`.
+- Surfaces both via `/api/v1/usage` (service) or per-trial JSON
+  (`loom run --json`).
+
+## Components
+
+| Component | Lives in | Talks to |
+|---|---|---|
+| Foundation library | `src/loom/` | (used by all) |
+| `loom` CLI | `src/loom_cli/` | adapters, local disk, provider SDKs |
+| Cloud drivers | `src/loom_drivers/` | Daytona (`packages/loom-benchmark-terminal-bench-2/` not relevant here — sibling pkg) |
+| Control Plane | `src/loom_control_plane/` | Postgres, MinIO |
+| LLM Gateway | `src/loom_llm_gateway/` | Anthropic / OpenAI / Google, Postgres |
+| Worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
+| Service (REST + SPA) | `src/loom_service/` + `web/` | CP, Gateway, Postgres |
+| Benchmark adapters | `packages/loom-benchmarks/` + `packages/loom-benchmark-terminal-bench-2/` | (discovered via entry-points) |
+| Agent adapters | `packages/loom-launcher/` | (discovered via `loom_launcher.get_adapter`) |
+| Operator CLI | `src/loom_benchmark_tool/` | Postgres, MinIO |
+
 ## Tests
 
+CI gates the fast tier on every push + PR:
+
 ```bash
-pytest tests/unit tests/contract           # fast: ~3s, no external deps
-pytest tests/property                       # hypothesis-based
-sg docker -c "pytest tests/integration"     # docker-gated; ~4 min
-pytest tests/system -v                      # full-stack (compose up + down)
+pytest tests/unit tests/contract tests/property tests/loom_cli \
+       packages/loom-launcher/tests packages/loom-benchmarks/tests \
+       packages/loom-benchmark-terminal-bench-2/tests
+       # ~10s, 649+ tests, no external deps
 ```
 
-`tests/system` is excluded from the default `pytest tests/` collection
-(see `pyproject.toml`); opt in explicitly.
+Heavier suites are opt-in:
+
+```bash
+pytest tests/integration -v         # Docker + Postgres + MinIO via testcontainers
+pytest tests/system -v              # full docker-compose stack
+LOOM_RUN_DAYTONA_INTEGRATION=1 \
+DAYTONA_API_KEY=... \
+pytest tests/integration/test_daytona_driver.py -v   # live Daytona, costs ~$0.01
+```
+
+Coverage is measured + posted to PRs (no `--cov-fail-under` gate yet —
+Phase 1 of #260; baseline 72% at latest dev tip). `coverage.xml` ships
+as a workflow artifact.
 
 ## Repo layout
 
 ```
-src/loom/                          # foundation library
+src/loom/                          # foundation library (types, errors, models)
+src/loom_cli/                      # `loom` CLI entry point
+src/loom_drivers/                  # cloud Driver implementations (daytona/)
 src/loom_control_plane/            # FastAPI Control Plane service
 src/loom_llm_gateway/              # OpenAI-compatible LLM Gateway service
 src/loom_worker/                   # Worker process
+src/loom_service/                  # REST surface for SPA / external clients
+src/loom_benchmark_tool/           # `loom-benchmark` operator CLI
+packages/loom-launcher/            # PyPI-style agent-adapter framework
+packages/loom-benchmarks/          # PyPI-style benchmark-adapter framework + 13 adapters
+packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter (Plan 25)
 migrations/                        # Alembic
-tests/{unit,contract,integration,system,property,fixtures}/
-docs/{specs,plans}/    # design + roadmap
+tests/{unit,contract,integration,system,property,loom_cli,fixtures}/
+web/                               # React SPA (Plans 21-22)
 deploy/                            # docker-compose + k8s manifests
+docs/{specs,plans,notes}/          # design + roadmap + probe outputs
 scripts/                           # operator + test helpers
-legacy/                            # everything from before Loom — read-only
+legacy/                            # pre-Loom code, read-only reference
 ```
 
 ## How to read this repo
 
-1. `docs/specs/2026-06-05-loom-runtime-core-design.md` — the design
-2. `CHANGELOG.md` — what shipped and when
-3. `docs/operator-runbook.md` — production deploy + ops
-4. `docs/task-authoring-guide.md` — how to write a new task
+1. **Try it**: `pip install -e . && loom datasets list` then `loom --help`
+2. `docs/specs/2026-06-08-loom-harbor-parity-arc-design.md` — current arc
+3. `docs/specs/2026-06-05-loom-runtime-core-design.md` — original runtime design
+4. `CHANGELOG.md` — what shipped and when
+5. `docs/operator-runbook.md` — production deploy + ops
+6. `docs/task-authoring-guide.md` — how to write a new task
 
 ## Contributing
 
-`CONTRIBUTING.md` — generic process, still applicable.
+`CONTRIBUTING.md` — single-owner direct-to-dev workflow (with the
+GitHub-flow target state for future contributors documented at the
+bottom).
 `SECURITY.md` — generic policy, still applicable.

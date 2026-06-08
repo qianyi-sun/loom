@@ -32,7 +32,8 @@ class MBPPAdapter:
     display_name = "MBPP"
     upstream_source = UpstreamSource(
         kind="huggingface",
-        locator="mbpp",
+        # Namespaced form required by HuggingFace Hub >=1.x.
+        locator="google-research-datasets/mbpp",
         revision=None,
         subset="sanitized",
     )
