@@ -4,9 +4,14 @@ Agent evaluation and training-data generation runtime.
 
 Loom replaces the `harbor==0.9.0` integration this repo previously
 shipped with a tailored, distributed runtime designed for shared use
-across our research subteams. The first product workflow targeting
-Loom is SkillFlow + SkillLearnBench (terminal-agent skill learning)
-under pilot group.
+across our research subteams. Loom is **benchmark-agnostic**:
+scalability and compatibility with arbitrary benchmarks via
+per-benchmark adapters are the product, not optimization for any
+single workflow. 13 benchmark adapters ship today (HumanEval,
+SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench, BFCL, GAIA,
+AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench), with
+Terminal-Bench-2.0 and Daytona/Modal cloud backends queued for the
+harbor-parity arc.
 
 ## Status
 
