@@ -59,6 +59,17 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         # routes proxy to /admin/rate-cards on the Gateway; we keep
         # CP + Gateway clients independent so a slow CP doesn't
         # starve the rate-card surface.
+        # Path-prefix sanity check: a base_url with a non-root path
+        # (e.g. `https://gw/loom/`) silently strips the prefix when
+        # the forwarder uses absolute paths like `/admin/rate-cards`.
+        # Fail at startup rather than route to the wrong URL.
+        gw_path = settings.gateway_url.path or "/"
+        if gw_path not in ("", "/"):
+            raise RuntimeError(
+                f"LOOM_SVC_GATEWAY_URL must not include a path prefix "
+                f"(got {settings.gateway_url!s}). Forwarders use "
+                f"absolute paths; a prefix would be silently dropped."
+            )
         gateway_client = httpx.AsyncClient(
             base_url=str(settings.gateway_url), timeout=10.0,
         )

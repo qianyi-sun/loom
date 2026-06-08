@@ -137,6 +137,10 @@ async def test_usage_groups_by_day(
 
     day1 = buckets[0]
     assert day1["trial_count"] == 2
+    # Canonical field names introduced after the Plan 20 audit (H1).
+    assert day1["trials_currently_succeeded"] == 1
+    assert day1["trials_currently_failed"] == 1
+    # Legacy aliases remain for the SPA's first-pass migration.
     assert day1["succeeded_count"] == 1
     assert day1["failed_count"] == 1
     assert day1["llm_input_tokens"] == 200
@@ -145,8 +149,8 @@ async def test_usage_groups_by_day(
 
     day2 = buckets[1]
     assert day2["trial_count"] == 1
-    assert day2["succeeded_count"] == 1
-    assert day2["failed_count"] == 0
+    assert day2["trials_currently_succeeded"] == 1
+    assert day2["trials_currently_failed"] == 0
 
 
 async def test_usage_groups_by_week(

@@ -33,7 +33,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Team; no Trial.aggregate_reward / Task.name columns; llm_calls is
   canonical). 375 unit+contract+property; 247 integration (+5 rate
   cards + 5 teams + 7 usage); ruff + mypy strict clean across 127
-  source files.
+  source files. **Audit follow-ups (same-day):** usage rollup field
+  names renamed to `trials_currently_succeeded` /
+  `trials_currently_failed` to make point-in-time semantics
+  explicit (the count is `Trial.state` at query time, NOT the state
+  at `captured_at`); legacy `succeeded_count`/`failed_count` aliases
+  kept for the SPA's first-pass migration. Lifespan now refuses to
+  start if `LOOM_SVC_GATEWAY_URL` has a non-root path prefix —
+  httpx silently strips any prefix when forwarder paths are
+  absolute, which would route writes to the wrong URL.
 - **Plan 19 — Campaigns: table, routes, runner (2026-06-07, tag
   `loom-campaigns-v0.19`).** First-class campaign concept. Migration
   `0007` adds the `campaigns` table + `trials.campaign_id` FK

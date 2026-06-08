@@ -3,11 +3,22 @@
 GET /api/v1/usage?team_id=...&start=YYYY-MM-DD&end=YYYY-MM-DD&group_by=day|week|month
 
 Aggregates `llm_calls JOIN trials` by `date_trunc(group_by,
-captured_at)`. Returns per-bucket counts (trial count, succeeded,
-failed) + token totals + cost. The `llm_calls` table is part of the
-canonical Plan 9 schema, so the `degraded` flag is defensive
-defense-in-depth — if some future maintenance dropped the table the
-route still 200s with empty buckets instead of 500'ing the SPA.
+captured_at)`. Returns per-bucket counts (trial count + each
+trial's CURRENT state — succeeded/failed/etc — at query time, NOT
+at the time of the llm_call) + token totals + cost.
+
+Note: the per-state counts are point-in-time (they reflect
+`Trial.state` as of the SQL execution). A trial that had llm_calls
+inside the bucket but was later retried and re-finalized will be
+counted under its current state. Field names reflect this:
+`trials_currently_succeeded`, etc. — not "trials succeeded during
+the bucket".
+
+The `llm_calls` table is part of the canonical Plan 9 schema and
+v0.7 has no retention/delete path on it, so the INNER JOIN below
+doesn't undercount in practice. The `degraded` flag is
+defense-in-depth — if some future maintenance dropped the table
+the route still 200s with empty buckets instead of 500'ing the SPA.
 """
 
 from __future__ import annotations
@@ -91,12 +102,13 @@ async def get_usage(
             SELECT
                 date_trunc('{group_by}', l.captured_at) AS bucket_start,
                 COUNT(DISTINCT t.id) AS trial_count,
+                -- Point-in-time state counts (see module docstring)
                 COUNT(DISTINCT t.id)
                     FILTER (WHERE t.state = 'succeeded')
-                    AS succeeded_count,
+                    AS trials_currently_succeeded,
                 COUNT(DISTINCT t.id)
                     FILTER (WHERE t.state = 'failed')
-                    AS failed_count,
+                    AS trials_currently_failed,
                 COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
                 COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
                 COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens
@@ -120,8 +132,12 @@ async def get_usage(
             # arithmetic; the SPA already knows the group_by.
             "end_at": None,
             "trial_count": int(r.trial_count),
-            "succeeded_count": int(r.succeeded_count),
-            "failed_count": int(r.failed_count),
+            "trials_currently_succeeded": int(r.trials_currently_succeeded),
+            "trials_currently_failed": int(r.trials_currently_failed),
+            # Aliases preserved for the SPA's first-pass implementation —
+            # remove once the client migrates to the canonical names.
+            "succeeded_count": int(r.trials_currently_succeeded),
+            "failed_count": int(r.trials_currently_failed),
             "total_cost_usd": float(r.total_cost_usd),
             "llm_input_tokens": int(r.llm_input_tokens),
             "llm_output_tokens": int(r.llm_output_tokens),
