@@ -26,6 +26,7 @@ from loom_service.routes import (
     benchmarks,
     campaigns,
     health,
+    rate_cards,
     tasks,
     tokens,
     trajectory,
@@ -119,4 +120,5 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(benchmarks.router, prefix="/api/v1")
     app.include_router(campaigns.router, prefix="/api/v1")
+    app.include_router(rate_cards.router, prefix="/api/v1")
     return app
