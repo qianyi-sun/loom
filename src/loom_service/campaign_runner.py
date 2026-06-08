@@ -165,18 +165,38 @@ async def run_once(
 ) -> None:
     """Process all non-terminal campaigns once. Safe to call from a loop.
 
+    The locking strategy splits each tick into three short transactions:
+
+    1. SELECT … FOR UPDATE SKIP LOCKED the campaign rows to claim them
+       for this runner instance, materialize the pending task list,
+       COMMIT (release the lock).
+    2. HTTP fanout to Control Plane. No DB locks held — trial INSERTs
+       on the CP side need a key-share lock on the parent campaign row,
+       which would deadlock against a held FOR UPDATE.
+    3. Re-open a transaction, advance each campaign's state from the
+       current trial counts.
+
+    Concurrent runner safety: the idempotency_key
+    `{campaign_id}::{task_id}` is the cross-process dedupe key —
+    a second runner that picks up the same campaign mid-tick (after we
+    released our SKIP-LOCKED claim) submits the same payloads, and
+    the CP's ON CONFLICT DO NOTHING on the partial unique index
+    collapses the duplicates.
+
     `cp_authorization` is the bearer token the runner sends upstream to
     Control Plane — in production this is a service-owned token with
-    `submit` scope and the campaign's team_id.
+    `submit` scope.
     """
     delay = 1.0 / max(submit_rate_per_sec, 1)
+
+    # Phase 1: pick + materialize work, then release the lock.
+    work: list[tuple[UUID, dict[str, Any], list[str]]] = []
     async with session_factory() as s:
         campaigns_to_process = (await s.execute(
             select(Campaign)
             .where(Campaign.state.in_(["submitted", "running"]))
             .with_for_update(skip_locked=True),
         )).scalars().all()
-
         for c in campaigns_to_process:
             task_ids = await _resolve_task_filter(s, c.task_filter)
             already_submitted = {
@@ -190,21 +210,31 @@ async def run_once(
             pending = [
                 t for t in task_ids if t not in already_submitted
             ]
-            for chunk_start in range(0, len(pending), batch_size):
-                chunk = pending[chunk_start:chunk_start + batch_size]
-                for tid in chunk:
-                    await _submit_one(
-                        http_client,
-                        authorization=cp_authorization,
-                        campaign_id=c.id,
-                        task_id=tid,
-                        trial_config=c.trial_config,
-                    )
-                    await asyncio.sleep(delay)
-            # Refresh the campaign row (the CP inserts may have just
-            # created Trial rows that change the state machine input)
-            # then advance.
-            await s.refresh(c)
+            work.append((c.id, dict(c.trial_config), pending))
+        await s.commit()
+
+    # Phase 2: HTTP fanout. No DB locks.
+    for campaign_id, trial_config, pending in work:
+        for chunk_start in range(0, len(pending), batch_size):
+            chunk = pending[chunk_start:chunk_start + batch_size]
+            for tid in chunk:
+                await _submit_one(
+                    http_client,
+                    authorization=cp_authorization,
+                    campaign_id=campaign_id,
+                    task_id=tid,
+                    trial_config=trial_config,
+                )
+                await asyncio.sleep(delay)
+
+    # Phase 3: advance state for the campaigns we processed.
+    async with session_factory() as s:
+        for campaign_id, _, _ in work:
+            c = (await s.execute(
+                select(Campaign).where(Campaign.id == campaign_id),
+            )).scalar_one_or_none()
+            if c is None:
+                continue
             await _advance_campaign_state(s, c)
         await s.commit()
 

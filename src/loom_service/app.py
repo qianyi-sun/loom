@@ -8,6 +8,7 @@ Routes pull these off `request.app.state`.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom_service.campaign_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
     atif,
@@ -54,9 +56,32 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.minio_client = minio_client
         app.state.http_client = http_client
+
+        # Plan 19: campaign runner background task. Picks up
+        # submitted/running campaigns on each poll, fans out trial
+        # submissions to Control Plane via the shared http_client.
+        runner_task = asyncio.create_task(
+            run_loop(
+                session_factory=session_factory,
+                http_client=http_client,
+                batch_size=settings.campaign_runner_batch_size,
+                submit_rate_per_sec=(
+                    settings.campaign_runner_submit_rate_per_sec
+                ),
+                poll_interval_sec=(
+                    settings.campaign_runner_poll_interval_sec
+                ),
+            ),
+            name="loom-svc-campaign-runner",
+        )
+        app.state.campaign_runner_task = runner_task
+
         try:
             yield
         finally:
+            runner_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await runner_task
             with contextlib.suppress(Exception):
                 await http_client.aclose()
             await engine.dispose()
