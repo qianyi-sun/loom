@@ -68,8 +68,9 @@ loom-service-v0.22              (Plan 22)
 ```
 
 Tags are pushed to dev only; we do not use SemVer `vX.Y.Z` tags on `main`
-yet. `VERSION` is unused for now (still `0.0.0`) and will become active
-when we cut a real release.
+yet. When SemVer releases start, the version source of truth will be
+`pyproject.toml [project] version` (root package + any published
+sibling packages under `packages/`), bumped manually per release.
 
 ## Commit Style
 
@@ -139,10 +140,9 @@ Highlights as of 2026-06-08:
   `.github/workflows/wip.yml` is a placeholder that just echoes a
   notice; the archived `legacy/github/workflows/ci.yml` is written
   against pre-Loom layout and would need porting before it could run.
-- **GitHub-flow surface dormant** — `VERSION` at `0.0.0`,
-  PR/issue templates decorative, CODEOWNERS unused, no `vX.Y.Z`
-  tags on `main`. Catch-all: issue #254 — to activate when
-  external contributors join.
+- **GitHub-flow surface dormant** — PR/issue templates decorative,
+  CODEOWNERS unused, no `vX.Y.Z` tags on `main`. Catch-all: issue
+  #254 — to activate when external contributors join.
 
 Per-arc tracking lives in the arc-tagged epic
 ([`loom:arc`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22))
@@ -179,8 +179,9 @@ release promotion PRs from `dev`.
 ### Release Flow
 
 1. After dev validation passes for a planned release, open a release issue
-2. Update `VERSION` and `CHANGELOG.md` (move `[Unreleased]` items into a
-   dated section)
+2. Bump `pyproject.toml [project] version` (root + any published
+   `packages/<name>/pyproject.toml`) and update `CHANGELOG.md` (move
+   `[Unreleased]` items into a dated section)
 3. Open a PR from `dev` to `main`
 4. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub release
 5. Plan-level tags (`loom-*-v0.X`) continue to mark intermediate dev tips

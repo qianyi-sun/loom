@@ -39,7 +39,7 @@ body:
       options:
         - label: "Release PR targets `main` and uses `dev` as the source branch."
           required: true
-        - label: "`VERSION` and `CHANGELOG.md` are updated."
+        - label: "`pyproject.toml` version bumped (root + any published packages) and `CHANGELOG.md` updated."
           required: true
         - label: "Documentation is current for all included code changes."
           required: true

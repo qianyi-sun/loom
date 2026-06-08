@@ -46,13 +46,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A27.1 dropped Plan 27's defensive create-if-not-exists branch
   since Plan 26 now guarantees the table.
 
+### Removed
+- **`VERSION` file (2026-06-08).** No source code read it (only
+  `legacy/` artifacts and `.github/ISSUE_TEMPLATE/release.yml`
+  referenced it). Across 22 plans and 237 commits it sat at
+  `0.0.0` despite the codebase being at `loom-service-v0.22` —
+  it was actively lying about the project version. Future SemVer
+  releases will use `pyproject.toml [project] version` as the
+  single source of truth (root + any published `packages/`
+  siblings). Updated `.github/ISSUE_TEMPLATE/release.yml`,
+  `CONTRIBUTING.md` (Release Flow + Known Gaps), and issue #254
+  to drop `VERSION` references.
+
 ### Changed
 - **CONTRIBUTING.md rewritten + issue tracker cleaned up
   (2026-06-08).** The previous CONTRIBUTING.md described a
   textbook GitHub-flow workflow that didn't match the actual
   single-owner direct-to-dev practice (0 merge commits in 232
-  commits ahead of origin; placeholder CI; no `vX.Y.Z` tags;
-  `VERSION` dormant at `0.0.0`). Rewrote to document the active
+  commits ahead of origin; placeholder CI; no `vX.Y.Z` tags).
+  Rewrote to document the active
   workflow (per-plan TDD commits + per-plan tags + plan-shipping
   trio), kept the GitHub-flow content as a clearly-marked
   "Future Contributor Workflow" section. Companion GitHub issue
