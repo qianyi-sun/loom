@@ -1,0 +1,96 @@
+"""Stateless wrapper around `Trial.run()` for the CLI.
+
+Constructs a TrialContext against:
+  - LocalDiskObjectStore (trajectory + ATIF land on local disk)
+  - UpstreamDirectGatewayClient (no Gateway service required)
+  - CLI agent factory (oracle / litellm / launcher subprocess)
+  - PytestVerifier (the same verifier the worker uses)
+  - A no-op state_patch_callback (no Control Plane)
+
+After Trial.run() finishes, the trajectory + ATIF docs are already in
+the object store; we also copy events.jsonl + atif.json to
+`<output_dir>/<trial_id>/` for friendly user-facing paths.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import UUID
+
+from loom.driver.base import Driver
+from loom.models.result import TrialResult
+from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
+from loom.trajectory.storage import ObjectStore
+from loom.trial.trial import Trial, TrialContext
+from loom.verifier.pytest_verifier import PytestVerifier
+from loom_cli.agent_factory import build_agent_factory
+from loom_cli.upstream_gateway import UpstreamDirectGatewayClient
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class LocalRunner:
+    trial_id: UUID
+    team_id: UUID
+    task_config: TaskConfig
+    task_checksum: str
+    task_dir: Path
+
+    driver_factory: Callable[[], Driver]
+    output_dir: Path
+    object_store: ObjectStore
+
+    upstream_gateway_tokens: dict[str, str]
+    anthropic_client: object
+    openai_client: object
+    google_client: object
+
+    trial_config: TrialConfig | None = None
+
+    async def run(self) -> TrialResult:
+        cfg = self.trial_config or TrialConfig()
+        gateway = UpstreamDirectGatewayClient(
+            anthropic_client=self.anthropic_client,
+            openai_client=self.openai_client,
+            google_client=self.google_client,
+            tokens=self.upstream_gateway_tokens,
+        )
+        agent_factory = build_agent_factory(
+            team_id=self.team_id, trial_id=self.trial_id,
+        )
+        agent = agent_factory(
+            self.task_dir, gateway,
+            self.task_config.agent.model,
+            self.task_config.agent.name,
+        )
+        verifier = PytestVerifier()
+        driver = self.driver_factory()
+
+        trial_dir = self.output_dir / str(self.trial_id)
+        trial_dir.mkdir(parents=True, exist_ok=True)
+
+        ctx = TrialContext(
+            trial_id=self.trial_id, team_id=self.team_id,
+            task_config=self.task_config, task_checksum=self.task_checksum,
+            task_dir=self.task_dir, trial_config=cfg,
+            driver=driver, agent=agent, verifier=verifier,
+            object_store=self.object_store,
+            local_trajectory_path=trial_dir / "events.jsonl",
+            llm_calls_fetcher=None,
+        )
+        trial = Trial(ctx=ctx, state_patch=None)
+        result = await trial.run()
+        try:
+            atif_bytes = await self.object_store.get_object(
+                bucket="trajectories",
+                key=f"{self.team_id}/{self.trial_id}/atif.json",
+            )
+            (trial_dir / "atif.json").write_bytes(atif_bytes)
+        except Exception:
+            logger.warning("could not copy atif.json out of object store")
+        return result

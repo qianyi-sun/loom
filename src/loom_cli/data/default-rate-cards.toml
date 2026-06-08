@@ -1,0 +1,51 @@
+# Default rate cards seeded into ~/.config/loom/rate-cards.toml on first run.
+# Prices in USD per 1,000,000 tokens; pulled from public pricing pages 2026-06.
+# Users can edit ~/.config/loom/rate-cards.toml to override any entry.
+
+[[entries]]
+provider = "anthropic"
+model = "claude-opus-4-7"
+input_per_mtok = 15.0
+output_per_mtok = 75.0
+cache_read_per_mtok = 1.5
+cache_write_per_mtok = 18.75
+
+[[entries]]
+provider = "anthropic"
+model = "claude-sonnet-4-7"
+input_per_mtok = 3.0
+output_per_mtok = 15.0
+cache_read_per_mtok = 0.3
+cache_write_per_mtok = 3.75
+
+[[entries]]
+provider = "openai"
+model = "gpt-4o"
+input_per_mtok = 2.5
+output_per_mtok = 10.0
+cache_read_per_mtok = 1.25
+cache_write_per_mtok = 2.5
+
+[[entries]]
+provider = "openai"
+model = "gpt-4o-mini"
+input_per_mtok = 0.15
+output_per_mtok = 0.6
+cache_read_per_mtok = 0.075
+cache_write_per_mtok = 0.15
+
+[[entries]]
+provider = "google"
+model = "gemini-1.5-pro"
+input_per_mtok = 1.25
+output_per_mtok = 5.0
+cache_read_per_mtok = 0.3125
+cache_write_per_mtok = 1.25
+
+[[entries]]
+provider = "google"
+model = "gemini-1.5-flash"
+input_per_mtok = 0.075
+output_per_mtok = 0.3
+cache_read_per_mtok = 0.01875
+cache_write_per_mtok = 0.075

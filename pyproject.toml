@@ -14,12 +14,16 @@ authors = [
 dependencies = [
   "aiofiles>=23.2,<25.0",
   "alembic>=1.13,<2.0",
+  "anthropic>=0.40,<1.0",
   "boto3>=1.34,<2.0",
   "dirhash>=0.5,<1.0",
   "docker>=7.0,<8.0",
   "fastapi>=0.110,<1.0",
+  "google-generativeai>=0.8,<1.0",
+  "httpx>=0.27,<1.0",
   "jsonschema>=4.21,<5.0",
   "litellm>=1.70,<2.0",
+  "openai>=1.55,<2.0",
   "prometheus-client>=0.19,<1.0",
   "psycopg[binary]>=3.2,<4.0",
   "pyjwt>=2.8,<3.0",
@@ -28,6 +32,7 @@ dependencies = [
   "sqlalchemy>=2.0,<3.0",
   "structlog>=24.1,<25.0",
   "tenacity>=9.0,<10.0",
+  "tomli-w>=1.0,<2.0",
   "types-aiofiles>=23.2,<25.0",
   "uvicorn[standard]>=0.32,<1.0",
 ]
@@ -43,9 +48,15 @@ dev = [
   "types-docker>=7.0,<8.0",
 ]
 
+[project.scripts]
+loom = "loom_cli.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["loom*"]
+
+[tool.setuptools.package-data]
+"loom_cli.data" = ["*.toml"]
 
 [tool.ruff]
 line-length = 100
@@ -63,7 +74,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service"]
+files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package
