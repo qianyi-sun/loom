@@ -7,6 +7,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Harbor-parity arc spec + 5 detailed plans (2026-06-08).** Closes
+  every capability gap between Loom and Harbor
+  (`harbor-framework/harbor`) so Loom can act as a strict superset.
+  Arc spec at `docs/specs/2026-06-08-loom-harbor-parity-arc-design.md`;
+  five priority-ordered implementation plans under `docs/plans/`:
+  - **Plan 23** — Ad-hoc `loom run` CLI: stateless `Trial.run()`
+    reuse with a new `UpstreamDirectGatewayClient` against the
+    openai/anthropic/google SDKs, local rate-card file, XDG config.
+    15 TDD tasks; researchers `pip install loom && loom run` on a
+    laptop without standing up Postgres/MinIO/CP/Gateway/Worker.
+  - **Plan 24** — Dataset discovery: `loom datasets list/show/install`
+    over three union'd sources (entry-points-based built-in
+    registry, in-tree default registry JSON, optional CP service).
+    13 tasks; migrates all 13 existing `loom_benchmarks` adapters
+    to declare themselves via `[project.entry-points."loom.benchmarks"]`
+    while keeping Plan 14's `loom_benchmark_tool` working.
+  - **Plan 25** — Terminal-Bench-2.0 canonical adapter: new sibling
+    package `packages/loom-benchmark-terminal-bench-2/` pinned to
+    upstream commit `91e10457` (terminal-bench-core v0.1.1,
+    Apache-2.0). `loom run --tb2-report` emits scores in TB-2's
+    canonical JSON shape alongside Loom's native ATIF. 15 tasks;
+    the upstream probe concluded the existing `BenchmarkAdapter`
+    Protocol needs no extension.
+  - **Plan 26** — Daytona cloud driver: `src/loom_drivers/daytona/`
+    implements the Driver Protocol against `daytona>=0.184` (async
+    SDK). NetworkPolicy → security-group mapping, atexit/SIGINT
+    orphan cleanup with a 30s cancel budget, cost telemetry in a
+    new generic `cloud_compute_records` table (migration `0008`).
+    20 tasks.
+  - **Plan 27** — Modal cloud driver: `src/loom_drivers/modal/`
+    bridges Modal's sync SDK via `asyncio.to_thread`. Additive
+    `Capabilities.gpu_types` field, `--gpu` CLI flag, cross-driver
+    byte-equivalence test (docker / daytona / modal). 16 tasks.
+  Cross-plan review amendments: A26.1 unified Plan 26's
+  `loom_daytona_usage` schema into the generic `cloud_compute_records`
+  table Plan 27 expected (with a `cloud_provider` column);
+  A27.1 dropped Plan 27's defensive create-if-not-exists branch
+  since Plan 26 now guarantees the table.
+
+### Changed
+- **Docs reorganization (2026-06-08).** Moved
+  `docs/superpowers/{specs,plans}/` → `docs/{specs,plans}/`.
+  The `superpowers` umbrella exposed the Claude Code plugin name
+  in the docs tree without adding semantic value (no third
+  sibling, no signal to outside contributors). Rewrote all 79
+  cross-references across 39 files via `git mv` (renames
+  preserved at 100% similarity).
+
+### Fixed
+- **`migrations/env.py` preserves existing loggers across alembic
+  invocations (2026-06-08).** Python's `logging.config.fileConfig`
+  defaults to `disable_existing_loggers=True`, which silently
+  disables every logger configured before alembic runs. In the
+  full integration suite, migration fixtures running before
+  `test_trial_runner.py::test_runner_logs_fenced_response` were
+  disabling the `loom_worker.trial_runner` logger and making
+  caplog miss the warning the test asserts on. Pass
+  `disable_existing_loggers=False` explicitly. Suite now 251
+  passed (was 250 + 1 flake).
+
+### Added
 - **Plans 21+22 — SPA scaffold + read pages + write/admin (2026-06-08,
   tags `loom-spa-read-v0.21` and `loom-service-v0.22`).** New top-level
   `web/` directory: React 18 + Vite + TypeScript + TanStack Query +
