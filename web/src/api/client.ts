@@ -75,6 +75,16 @@ type TrajectoryPage =
 type TaskList = paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
 type BenchmarkList =
   paths["/api/v1/benchmarks"]["get"]["responses"][200]["content"]["application/json"];
+type CampaignList =
+  paths["/api/v1/campaigns"]["get"]["responses"][200]["content"]["application/json"];
+type CampaignDetail =
+  paths["/api/v1/campaigns/{id}"]["get"]["responses"][200]["content"]["application/json"];
+type CampaignCreate =
+  paths["/api/v1/campaigns"]["post"]["responses"][201]["content"]["application/json"];
+type Usage =
+  paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
+type Team =
+  paths["/api/v1/teams/{team_id}"]["get"]["responses"][200]["content"]["application/json"];
 type TokenList = paths["/api/v1/tokens"]["get"]["responses"][200]["content"]["application/json"];
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -112,4 +122,38 @@ export const api = {
     ),
   revokeToken: (prefix: string) =>
     apiFetch<void>(`/api/v1/tokens/${prefix}`, { method: "DELETE" }),
+  listCampaigns: (q: Record<string, string | undefined> = {}) =>
+    apiFetch<CampaignList>(`/api/v1/campaigns${qs(q)}`),
+  getCampaign: (id: string) =>
+    apiFetch<CampaignDetail>(`/api/v1/campaigns/${id}`),
+  createCampaign: (body: {
+    name: string;
+    description?: string;
+    task_filter: Record<string, unknown>;
+    trial_config: Record<string, unknown>;
+  }) =>
+    apiFetch<CampaignCreate>("/api/v1/campaigns", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  cancelCampaign: (id: string) =>
+    apiFetch<{ campaign_id: string; state: string }>(
+      `/api/v1/campaigns/${id}/cancel`,
+      { method: "POST" },
+    ),
+  listRateCards: () =>
+    apiFetch<{ items: unknown[] }>("/api/v1/rate-cards"),
+  createRateCard: (body: Record<string, unknown>) =>
+    apiFetch<unknown>("/api/v1/rate-cards", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getUsage: (q: {
+    team_id?: string;
+    start: string;
+    end: string;
+    group_by?: string;
+  }) => apiFetch<Usage>(`/api/v1/usage${qs(q)}`),
+  getTeam: (teamId: string) =>
+    apiFetch<Team>(`/api/v1/teams/${teamId}`),
 };

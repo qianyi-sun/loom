@@ -7,6 +7,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plans 21+22 — SPA scaffold + read pages + write/admin (2026-06-08,
+  tags `loom-spa-read-v0.21` and `loom-service-v0.22`).** New top-level
+  `web/` directory: React 18 + Vite + TypeScript + TanStack Query +
+  React Router. Token-paste auth stored in `localStorage`; the API
+  client surfaces 401s through a callback that auto-clears the token.
+  Hand-stubbed types in `src/api/schema.d.ts` match the actual Plan
+  17-20 service surface (re-generate via `npm run gen-api` once
+  `loom_service` is reachable). 11 pages: TrialsList (state-filtered
+  cursor list), TrialDetail (header + paginated trajectory viewer +
+  ATIF/trajectory download gated on `*_ready` flags), Tasks (license
+  + benchmark filter), Benchmarks, Settings (token paste + active
+  tokens list with revoke), CampaignsList, NewCampaign (JSON
+  validation before POST), CampaignDetail (5s polling while
+  submitted/running, stops on terminal, cancel button),
+  RateCardsAdmin (admin-only proxy to Gateway's `/admin/rate-cards`),
+  UsageDashboard (date-range + group_by + inline SVG bar chart),
+  NotFound. Components: Layout (redirects unauthenticated to
+  Settings), NavBar, EventTimeline (per-kind summary +
+  click-to-expand JSON for the v0.7 trajectory event catalog),
+  Pagination, JsonViewer, LoadingState, ErrorState, EmptyState. Tests
+  (vitest + happy-dom + @testing-library/react): 18 across api client
+  (header attachment, 401 callback, 403 detail extraction, 204),
+  AuthContext (localStorage round-trip), Pagination helpers,
+  EventTimeline rendering, and NewCampaign JSON validation +
+  POST-body shape. `npm run build` produces a ~74 KB gzipped bundle.
+  Skipped from the plan-doc: `Dockerfile.service`, `Dockerfile.web`,
+  k8s manifests, system smoke test — those belong in a
+  deploy-focused follow-up since they need real infrastructure to
+  exercise meaningfully.
 - **Plan 20 — Rate cards + teams + usage endpoints (2026-06-08, tag
   `loom-service-admin-v0.20`).** Closes the remaining admin/team
   surfaces on the service layer. `lifespan` now provisions a second

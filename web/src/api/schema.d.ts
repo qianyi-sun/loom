@@ -123,6 +123,111 @@ export interface paths {
       responses: { 204: { content: never } };
     };
   };
+  "/api/v1/campaigns": {
+    get: {
+      parameters: {
+        query?: {
+          team_id?: string;
+          state?: string;
+          cursor?: string;
+          limit?: number;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["CampaignList"];
+          };
+        };
+      };
+    };
+    post: {
+      requestBody: {
+        content: {
+          "application/json": {
+            name: string;
+            description?: string;
+            task_filter: Record<string, unknown>;
+            trial_config: Record<string, unknown>;
+          };
+        };
+      };
+      responses: {
+        201: {
+          content: {
+            "application/json": {
+              campaign_id: string;
+              expected_trial_count: number;
+              state: string;
+              created_at: string;
+            };
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/campaigns/{id}": {
+    get: {
+      parameters: { path: { id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["CampaignDetail"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/campaigns/{id}/cancel": {
+    post: {
+      parameters: { path: { id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": { campaign_id: string; state: string };
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/rate-cards": {
+    get: {
+      responses: {
+        200: { content: { "application/json": { items: unknown[] } } };
+      };
+    };
+    post: {
+      requestBody: {
+        content: { "application/json": Record<string, unknown> };
+      };
+      responses: { 201: { content: { "application/json": unknown } } };
+    };
+  };
+  "/api/v1/usage": {
+    get: {
+      parameters: {
+        query: {
+          team_id?: string;
+          start: string;
+          end: string;
+          group_by?: string;
+        };
+      };
+      responses: {
+        200: {
+          content: { "application/json": components["schemas"]["Usage"] };
+        };
+      };
+    };
+  };
+  "/api/v1/teams/{team_id}": {
+    get: {
+      parameters: { path: { team_id: string } };
+      responses: {
+        200: { content: { "application/json": components["schemas"]["Team"] } };
+      };
+    };
+  };
 }
 
 export interface components {
@@ -203,5 +308,65 @@ export interface components {
       revoked_at: string | null;
     };
     TokenList: { items: components["schemas"]["Token"][] };
+    Campaign: {
+      id: string;
+      team_id: string;
+      name: string;
+      description: string | null;
+      task_filter: Record<string, unknown>;
+      trial_config: Record<string, unknown>;
+      state: string;
+      created_at: string;
+      finished_at: string | null;
+      created_by_token_prefix: string;
+      expected_trial_count: number;
+    };
+    CampaignList: {
+      items: components["schemas"]["Campaign"][];
+      next_cursor: string | null;
+    };
+    CampaignDetail: components["schemas"]["Campaign"] & {
+      trial_summary: Record<string, number>;
+      aggregate_reward: number | null;
+      total_cost_usd: number;
+    };
+    UsageBucket: {
+      start_at: string;
+      end_at: string | null;
+      trial_count: number;
+      trials_currently_succeeded: number;
+      trials_currently_failed: number;
+      succeeded_count: number;
+      failed_count: number;
+      total_cost_usd: number;
+      llm_input_tokens: number;
+      llm_output_tokens: number;
+    };
+    Usage: {
+      buckets: components["schemas"]["UsageBucket"][];
+      degraded: boolean;
+    };
+    TeamMember: {
+      token_hash_prefix: string;
+      type: string;
+      scopes: string[];
+      issued_at: string;
+      expires_at: string | null;
+      revoked_at: string | null;
+      last_seen_at: string | null;
+    };
+    TeamQuota: {
+      fair_share_weight: number;
+      max_attempts: number;
+      in_flight_count: number;
+      license_allowlist: string[];
+    };
+    Team: {
+      id: string;
+      name: string;
+      created_at: string;
+      quota: components["schemas"]["TeamQuota"] | null;
+      members: components["schemas"]["TeamMember"][];
+    };
   };
 }
