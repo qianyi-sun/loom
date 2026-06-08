@@ -40,3 +40,4 @@ logs/
 .vscode/
 .claude/settings.local.json
 .venv/
+NEW_SESSION_BRIEFING.md
