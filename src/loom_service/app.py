@@ -52,10 +52,19 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             base_url=str(settings.control_plane_url), timeout=10.0,
         )
 
+        # Plan 20: separate httpx client for the Gateway. Rate-card
+        # routes proxy to /admin/rate-cards on the Gateway; we keep
+        # CP + Gateway clients independent so a slow CP doesn't
+        # starve the rate-card surface.
+        gateway_client = httpx.AsyncClient(
+            base_url=str(settings.gateway_url), timeout=10.0,
+        )
+
         app.state.settings = settings
         app.state.session_factory = session_factory
         app.state.minio_client = minio_client
         app.state.http_client = http_client
+        app.state.gateway_client = gateway_client
 
         # Plan 19: campaign runner background task. Picks up
         # submitted/running campaigns on each poll, fans out trial
@@ -95,6 +104,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             runner_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner_task
+            with contextlib.suppress(Exception):
+                await gateway_client.aclose()
             with contextlib.suppress(Exception):
                 await http_client.aclose()
             await engine.dispose()
