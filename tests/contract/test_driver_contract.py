@@ -38,6 +38,7 @@ def _register_driver_impls() -> list[tuple[str, DriverFactory]]:
     docker_available = False
     try:
         import docker
+
         from loom.driver.docker import DockerDriver
         try:
             docker.from_env().ping()

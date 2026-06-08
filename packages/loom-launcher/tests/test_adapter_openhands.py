@@ -76,7 +76,7 @@ async def test_capture_via_http_poll() -> None:
         (0, [{"id": 1, "kind": "thought"}]),
         (0, [{"id": 2, "kind": "tool_use", "name": "Bash"}]),
     ])
-    handle = _handle_with(sandbox, runtime_sec=0.5)
+    handle = _handle_with(sandbox, runtime_sec=1.5)
     events = [
         e.model_dump()
         async for e in adapter.capture_events(

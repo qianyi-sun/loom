@@ -2,10 +2,14 @@
 
 > **Current state (2026-06-08):** Loom is single-owner local-development. All
 > work happens directly on `dev`; the branch is hundreds of commits ahead of
-> `origin/dev` and is not pushed. There are no live PRs, no live CI, and no
-> issue tracker in use. The "Future contributor workflow" section at the
-> bottom describes the GitHub-flow process we'll switch to when external
-> contributors join — it is not yet in force.
+> `origin/dev` and is pushed when batches are ready. CI runs on every push
+> and PR (`.github/workflows/ci.yml`: ruff + mypy --strict + unit/contract/
+> property + sibling-package tests gate `dev`; integration suite opt-in via
+> the `ci:integration` PR label). There are no live PRs yet and no
+> issue-tracker workflow with external contributors. The "Future
+> contributor workflow" section at the bottom describes the GitHub-flow
+> process we'll switch to when external contributors join — it is not yet
+> in force.
 
 ## Active Workflow (Single-Owner Mode)
 
@@ -136,10 +140,6 @@ Tracked as GitHub issues with `label:gap`:
 [gap issues](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3Agap).
 Highlights as of 2026-06-08:
 
-- **No real CI** — tracked as Plan 22.5 (issue #247).
-  `.github/workflows/wip.yml` is a placeholder that just echoes a
-  notice; the archived `legacy/github/workflows/ci.yml` is written
-  against pre-Loom layout and would need porting before it could run.
 - **GitHub-flow surface dormant** — PR/issue templates decorative,
   CODEOWNERS unused, no `vX.Y.Z` tags on `main`. Catch-all: issue
   #254 — to activate when external contributors join.
