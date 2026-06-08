@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 20 — Rate cards + teams + usage endpoints (2026-06-08, tag
+  `loom-service-admin-v0.20`).** Closes the remaining admin/team
+  surfaces on the service layer. `lifespan` now provisions a second
+  `httpx.AsyncClient` as `app.state.gateway_client` (independent of
+  the CP client) so a slow CP doesn't starve the rate-card proxy.
+  New routes:
+  - `GET/POST /api/v1/rate-cards` + `GET /api/v1/rate-cards/{id}` —
+    thin proxies to Gateway's `/admin/rate-cards` (shipped Plan 4).
+    Gated on the `admin:rate_cards` scope Plan 17 introduced; reuses
+    Plan 18's `forward()`/`propagate()` so Retry-After +
+    X-RateLimit-* carry through.
+  - `GET /api/v1/teams/{team_id}` — team row + TeamQuota
+    (fair_share_weight, max_attempts, in_flight_count,
+    license_allowlist) + member tokens (8-char hash prefix only,
+    raw secret never recoverable). Cross-team check fires BEFORE
+    the not-found probe so a team caller can't enumerate which
+    team UUIDs exist (403, not 404, on unknown).
+  - `GET /api/v1/usage` — date_trunc rollup over
+    `llm_calls JOIN trials` with `group_by ∈ {day, week, month}`,
+    cross-team enforcement, defense-in-depth `degraded` flag if the
+    table is ever absent. Per bucket: trial_count, succeeded_count,
+    failed_count, llm_input_tokens, llm_output_tokens, total_cost_usd.
+  Adapted to actual v0.7 schema (quota fields live on TeamQuota, not
+  Team; no Trial.aggregate_reward / Task.name columns; llm_calls is
+  canonical). 375 unit+contract+property; 247 integration (+5 rate
+  cards + 5 teams + 7 usage); ruff + mypy strict clean across 127
+  source files.
 - **Plan 19 — Campaigns: table, routes, runner (2026-06-07, tag
   `loom-campaigns-v0.19`).** First-class campaign concept. Migration
   `0007` adds the `campaigns` table + `trials.campaign_id` FK
