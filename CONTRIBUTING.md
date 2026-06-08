@@ -133,7 +133,7 @@ but never end up in git.
 ## Known Gaps (Open Backlog)
 
 Tracked as GitHub issues with `label:gap`:
-[gap issues](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3Agap).
+[gap issues](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3Agap).
 Highlights as of 2026-06-08:
 
 - **No real CI** — tracked as Plan 22.5 (issue #247).
@@ -145,11 +145,11 @@ Highlights as of 2026-06-08:
   #254 — to activate when external contributors join.
 
 Per-arc tracking lives in the arc-tagged epic
-([`loom:arc`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22))
+([`loom:arc`](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22))
 with one sub-issue per plan
-([`loom:plan`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22loom%3Aplan%22)).
+([`loom:plan`](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3A%22loom%3Aplan%22)).
 Deferred long-horizon items use
-[`deferred:v1.5`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
+[`deferred:v1.5`](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
 
 ## Future Contributor Workflow
 
