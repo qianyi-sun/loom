@@ -47,6 +47,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   since Plan 26 now guarantees the table.
 
 ### Changed
+- **CONTRIBUTING.md rewritten + issue tracker cleaned up
+  (2026-06-08).** The previous CONTRIBUTING.md described a
+  textbook GitHub-flow workflow that didn't match the actual
+  single-owner direct-to-dev practice (0 merge commits in 232
+  commits ahead of origin; placeholder CI; no `vX.Y.Z` tags;
+  `VERSION` dormant at `0.0.0`). Rewrote to document the active
+  workflow (per-plan TDD commits + per-plan tags + plan-shipping
+  trio), kept the GitHub-flow content as a clearly-marked
+  "Future Contributor Workflow" section. Companion GitHub issue
+  cleanup: closed 26 stale pre-Loom issues with per-issue
+  superseded-by replacement pointers; created 8 Loom-current
+  issues (harbor-parity arc epic #248, Plans 23–27 sub-issues
+  #249–#253, Plan 22.5 real-CI #247, GitHub-flow standup #254);
+  added labels `loom:arc`, `loom:plan`, `gap`, `deferred:v1.5`,
+  `superseded`. The CONTRIBUTING.md "Known Gaps" section now
+  points at `label:gap` issue filters instead of an inline punch
+  list.
 - **Docs reorganization (2026-06-08).** Moved
   `docs/superpowers/{specs,plans}/` → `docs/{specs,plans}/`.
   The `superpowers` umbrella exposed the Claude Code plugin name
@@ -54,6 +71,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sibling, no signal to outside contributors). Rewrote all 79
   cross-references across 39 files via `git mv` (renames
   preserved at 100% similarity).
+- **README.md + NOTICE.md no longer claim "seven plans" / v0.7
+  as latest (2026-06-08).** Status block was frozen at 2026-06-05/06;
+  updated to reflect Plans 0–22 shipped + harbor-parity arc ready.
+  Latest tag is `loom-service-v0.22`; v0.7 demoted to milestone tag.
+  Reframed as benchmark-agnostic (not targeting SkillFlow +
+  SkillLearnBench specifically).
 
 ### Fixed
 - **`migrations/env.py` preserves existing loggers across alembic

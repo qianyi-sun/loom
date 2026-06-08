@@ -131,23 +131,25 @@ but never end up in git.
 
 ## Known Gaps (Open Backlog)
 
-These are documented inaccuracies between this CONTRIBUTING.md and the
-codebase, kept here as a punch list:
+Tracked as GitHub issues with `label:gap`:
+[gap issues](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3Agap).
+Highlights as of 2026-06-08:
 
-- **No real CI.** `.github/workflows/wip.yml` is a placeholder that just
-  echoes a notice. The archived `legacy/github/workflows/ci.yml` is
-  written against pre-Loom layout (`Dockerfile.dev`,
-  `docker-compose.dev.yml`, old doc paths) and would not run against
-  current Loom code. A small targeted plan to land real CI
-  (`pytest tests/{unit,contract}` + `ruff` + `mypy strict` on push to
-  `dev`) is a reasonable Plan 22.5 candidate.
-- **`VERSION` = `0.0.0`** and unused. Will activate when we cut a real
-  SemVer release.
-- **Issue templates exist (`.github/ISSUE_TEMPLATE/*.yml`)** but no
-  issues are filed. They're kept for the future-contributor workflow.
-- **`.github/PULL_REQUEST_TEMPLATE.md` exists** but no PRs are opened.
-  Same as above.
-- **`.github/CODEOWNERS`** exists for future use.
+- **No real CI** — tracked as Plan 22.5 (issue #247).
+  `.github/workflows/wip.yml` is a placeholder that just echoes a
+  notice; the archived `legacy/github/workflows/ci.yml` is written
+  against pre-Loom layout and would need porting before it could run.
+- **GitHub-flow surface dormant** — `VERSION` at `0.0.0`,
+  PR/issue templates decorative, CODEOWNERS unused, no `vX.Y.Z`
+  tags on `main`. Catch-all: issue #254 — to activate when
+  external contributors join.
+
+Per-arc tracking lives in the arc-tagged epic
+([`loom:arc`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22))
+with one sub-issue per plan
+([`loom:plan`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22loom%3Aplan%22)).
+Deferred long-horizon items use
+[`deferred:v1.5`](https://github.com/carinrc/agentic-data-platform/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
 
 ## Future Contributor Workflow
 
