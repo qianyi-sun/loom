@@ -1,0 +1,115 @@
+/**
+ * `apiFetch` is the single point of entry for all `loom_service`
+ * calls. It pulls the bearer token from `localStorage`, attaches
+ * `Content-Type: application/json` + `Authorization`, and surfaces
+ * non-2xx responses as a typed `ApiError`. A 401 from the service
+ * fires the registered `setUnauthorizedHandler` callback (used by
+ * `AuthContext` to clear the stored token and redirect to /settings).
+ */
+
+import type { paths } from "./schema";
+
+export type ApiError = { status: number; detail: string };
+
+let _onUnauthorized: () => void = () => {};
+export function setUnauthorizedHandler(cb: () => void): void {
+  _onUnauthorized = cb;
+}
+
+function getToken(): string | null {
+  try {
+    return window.localStorage.getItem("loom_token");
+  } catch {
+    return null;
+  }
+}
+
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init.headers as Record<string, string> | undefined),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const env = (
+    import.meta as unknown as { env: { VITE_API_BASE?: string } }
+  ).env;
+  const base = env.VITE_API_BASE ?? "";
+  const resp = await fetch(`${base}${path}`, { ...init, headers });
+
+  if (resp.status === 401) {
+    _onUnauthorized();
+    throw { status: 401, detail: "unauthorized" } satisfies ApiError;
+  }
+  if (!resp.ok) {
+    let detail = await resp.text();
+    try {
+      const parsed: unknown = JSON.parse(detail);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "detail" in parsed
+      ) {
+        const d = (parsed as { detail: unknown }).detail;
+        if (typeof d === "string") detail = d;
+        else detail = JSON.stringify(d);
+      }
+    } catch {
+      /* keep raw text */
+    }
+    throw { status: resp.status, detail } satisfies ApiError;
+  }
+  if (resp.status === 204) return undefined as T;
+  return (await resp.json()) as T;
+}
+
+type TrialList = paths["/api/v1/trials"]["get"]["responses"][200]["content"]["application/json"];
+type TrialDetail =
+  paths["/api/v1/trials/{trial_id}"]["get"]["responses"][200]["content"]["application/json"];
+type TrajectoryPage =
+  paths["/api/v1/trials/{trial_id}/trajectory"]["get"]["responses"][200]["content"]["application/json"];
+type TaskList = paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
+type BenchmarkList =
+  paths["/api/v1/benchmarks"]["get"]["responses"][200]["content"]["application/json"];
+type TokenList = paths["/api/v1/tokens"]["get"]["responses"][200]["content"]["application/json"];
+
+function qs(params: Record<string, string | number | undefined>): string {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "") out[k] = String(v);
+  }
+  const s = new URLSearchParams(out).toString();
+  return s ? `?${s}` : "";
+}
+
+export const api = {
+  listTrials: (q: Record<string, string | undefined> = {}) =>
+    apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
+  getTrial: (id: string) =>
+    apiFetch<TrialDetail>(`/api/v1/trials/${id}`),
+  getTrajectoryPage: (id: string, cursor?: number, limit = 200) =>
+    apiFetch<TrajectoryPage>(
+      `/api/v1/trials/${id}/trajectory${qs({ cursor, limit })}`,
+    ),
+  listTasks: (q: Record<string, string | undefined> = {}) =>
+    apiFetch<TaskList>(`/api/v1/tasks${qs(q)}`),
+  listBenchmarks: (q: Record<string, string | undefined> = {}) =>
+    apiFetch<BenchmarkList>(`/api/v1/benchmarks${qs(q)}`),
+  listTokens: () => apiFetch<TokenList>("/api/v1/tokens"),
+  createToken: (body: {
+    type: string;
+    scopes: string[];
+    expires_in_days: number;
+    team_id?: string;
+  }) =>
+    apiFetch<{ token: string; token_hash_prefix: string; expires_at: string }>(
+      "/api/v1/tokens",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  revokeToken: (prefix: string) =>
+    apiFetch<void>(`/api/v1/tokens/${prefix}`, { method: "DELETE" }),
+};
