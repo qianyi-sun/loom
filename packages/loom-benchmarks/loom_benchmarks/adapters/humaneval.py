@@ -54,7 +54,7 @@ class HumanEvalAdapter:
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
         ds = datasets.load_dataset(
-            "openai_humaneval", cache_dir=str(source_dir),
+            self.upstream_source.locator, cache_dir=str(source_dir),
         )[split]
         for record in ds:
             rec = cast(dict[str, Any], dict(record))
