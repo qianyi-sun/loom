@@ -57,6 +57,7 @@ include = ["loom*"]
 
 [tool.setuptools.package-data]
 "loom_cli.data" = ["*.toml"]
+"loom_cli.registry_data" = ["*.json"]
 
 [tool.ruff]
 line-length = 100

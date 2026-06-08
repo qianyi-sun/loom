@@ -49,11 +49,16 @@ def _build_parser() -> argparse.ArgumentParser:
     config_sub.add_parser("show")
     p_config.set_defaults(handler=_config_handler)
 
-    p_datasets = sub.add_parser("datasets", help="Discover datasets")
-    datasets_sub = p_datasets.add_subparsers(dest="datasets_cmd", required=True)
-    datasets_sub.add_parser("list")
-    p_datasets.set_defaults(handler=_datasets_handler)
-
+    # `datasets` is registered as a help-only stub here so it appears in
+    # `loom --help`. The real subcommand surface (list/show/install/
+    # refresh-registry plus filters) is owned by loom_cli.datasets_cmd.dispatch
+    # which receives raw argv from main() via a pre-route before argparse sees
+    # the subcommand.
+    sub.add_parser(
+        "datasets",
+        help="Discover datasets (list/show/install/refresh-registry)",
+        add_help=False,
+    )
     return p
 
 
@@ -69,15 +74,13 @@ def _config_handler(args: argparse.Namespace) -> int:
     return dispatch(args)
 
 
-def _datasets_handler(args: argparse.Namespace) -> int:
-    from loom_cli.datasets_cmd import dispatch
-
-    return dispatch(args)
-
-
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "datasets":
+        from loom_cli.datasets_cmd import dispatch as datasets_dispatch
+        return datasets_dispatch(raw[1:])
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     return cast(int, args.handler(args))
 
 

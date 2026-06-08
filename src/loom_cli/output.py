@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
 from loom.models.result import TrialResult
+from loom_cli.discovery import DatasetEntry
 
 
 def _duration_sec(result: TrialResult) -> float:
@@ -63,3 +65,32 @@ def format_json_line(result: TrialResult) -> str:
         ),
     }
     return json.dumps(payload, sort_keys=True)
+
+
+def render_datasets_table(entries: list[DatasetEntry]) -> str:
+    # Dynamic column widths so adapter slugs longer than 24 chars don't
+    # misalign the table (Plan 24 ships with longest slug `swe-bench-
+    # multimodal`=20 chars; future adapters may go wider).
+    slug_w = max(24, max((len(e.slug) for e in entries), default=0))
+    license_w = max(14, max((len(e.license_spdx) for e in entries), default=0))
+    header = (
+        f"{'SLUG':<{slug_w}} {'SOURCE':<10} {'LICENSE':<{license_w}} "
+        f"{'TASKS':<6} STATUS"
+    )
+    if not entries:
+        return header
+    rows = [header]
+    for e in entries:
+        tasks = "-" if e.task_count is None else str(e.task_count)
+        rows.append(
+            f"{e.slug:<{slug_w}} {e.source:<10} {e.license_spdx:<{license_w}} "
+            f"{tasks:<6} {e.status}",
+        )
+    return "\n".join(rows)
+
+
+def render_datasets_json(entries: list[DatasetEntry]) -> str:
+    return json.dumps(
+        {"count": len(entries), "items": [asdict(e) for e in entries]},
+        indent=2, sort_keys=True,
+    )

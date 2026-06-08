@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 24 — Dataset discovery (2026-06-08, closes #250).** New
+  `loom datasets list/show/install/refresh-registry` subcommands
+  union three sources: built-in entry-points (every adapter in
+  `packages/loom-benchmarks` now declares itself via
+  `[project.entry-points."loom.benchmarks"]`), an in-tree default
+  JSON registry at `src/loom_cli/registry_data/default-registry.json`
+  (14 entries: 13 built-ins + `terminal-bench-2` advertised for
+  Plan 25), and an optional CP-service `/api/v1/benchmarks` query
+  when `LOOM_SERVER_URL` is set. Override registry URL via
+  `--registry-url` or `LOOM_REGISTRY_URL`; HTTP responses cached
+  24h under `${LOOM_CACHE_DIR:-~/.cache}/loom/registry/`.
+  `loom datasets install <slug>` shells out to
+  `[sys.executable, "-m", "pip", "install", spec]` after rejecting
+  shell metacharacters. ~40 new tests covering each source +
+  dispatch + union precedence (builtin > remote > registry).
 - **Harbor-parity arc spec + 5 detailed plans (2026-06-08).** Closes
   every capability gap between Loom and Harbor
   (`harbor-framework/harbor`) so Loom can act as a strict superset.
@@ -45,6 +60,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   table Plan 27 expected (with a `cloud_provider` column);
   A27.1 dropped Plan 27's defensive create-if-not-exists branch
   since Plan 26 now guarantees the table.
+
+### Changed
+- **`loom_benchmarks.registry.REGISTRY` is now lazy entry-points-backed
+  (2026-06-08, part of Plan 24).** Replaced the hard-coded
+  `dict[str, BenchmarkAdapter]` with an `_EntryPointRegistry`
+  MutableMapping that loads adapters from `loom.benchmarks`
+  entry-points on first access. `loom_benchmark_tool list/import` and
+  any third-party importer of `REGISTRY` keep working unchanged.
+  MutableMapping (not just Mapping) so tests can
+  `monkeypatch.setitem(REGISTRY, ...)` to inject stub adapters.
 
 ### Removed
 - **`VERSION` file (2026-06-08).** No source code read it (only

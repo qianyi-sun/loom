@@ -18,5 +18,20 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
 
+[project.entry-points."loom.benchmarks"]
+aime = "loom_benchmarks.adapters.aime:AIMEAdapter"
+bfcl = "loom_benchmarks.adapters.bfcl:BFCLAdapter"
+gaia = "loom_benchmarks.adapters.gaia:GAIAAdapter"
+humaneval = "loom_benchmarks.adapters.humaneval:HumanEvalAdapter"
+livecodebench = "loom_benchmarks.adapters.livecodebench:LiveCodeBenchAdapter"
+mbpp = "loom_benchmarks.adapters.mbpp:MBPPAdapter"
+osworld = "loom_benchmarks.adapters.osworld:OSWorldAdapter"
+skillflow = "loom_benchmarks.adapters.skillflow:SkillFlowAdapter"
+skilllearnbench = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchAdapter"
+swe-bench = "loom_benchmarks.adapters.swe_bench:SWEBenchAdapter"
+swe-bench-multimodal = "loom_benchmarks.adapters.swe_bench_multimodal:SWEBenchMultimodalAdapter"
+swe-bench-verified = "loom_benchmarks.adapters.swe_bench_verified:SWEBenchVerifiedAdapter"
+webarena = "loom_benchmarks.adapters.webarena:WebArenaAdapter"
+
 [tool.hatch.build.targets.wheel]
 packages = ["loom_benchmarks"]

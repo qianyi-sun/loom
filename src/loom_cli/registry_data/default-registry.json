@@ -1,0 +1,8 @@
+{
+  "registry_version": 1,
+  "generated_at": "2026-06-08T00:00:00Z",
+  "_note": "Registry holds datasets that are NOT shipped as builtin entry-points — i.e. you would pip install to get them. Adapters already in packages/loom-benchmarks are discovered via the loom.benchmarks entry-point group; listing them here would be silently masked by union_entries(builtin > registry) and is therefore omitted.",
+  "entries": [
+    {"slug": "terminal-bench-2", "display_name": "Terminal-Bench 2.0", "license_spdx": "Apache-2.0", "license_url": "", "task_count": null, "available": "loom-benchmark-terminal-bench-2"}
+  ]
+}
