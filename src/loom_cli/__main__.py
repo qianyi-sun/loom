@@ -24,7 +24,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Run a benchmark or single task")
     g = p_run.add_mutually_exclusive_group(required=True)
     g.add_argument("--dataset", help="Benchmark slug (e.g. humaneval)")
-    g.add_argument("--task", help="Single task id (e.g. humaneval/HumanEval-42)")
+    g.add_argument(
+        "--task",
+        help=(
+            "Single task id in `<dataset-slug>/<instance-id>` form. The "
+            "instance-id portion may itself contain slashes — e.g. "
+            "`humaneval/HumanEval/0`, `swe-bench-verified/django__django-12345`."
+        ),
+    )
     p_run.add_argument("--split", default="test")
     p_run.add_argument("--agent", required=True,
                        help="Agent name (oracle / litellm / claude-code / ...)")

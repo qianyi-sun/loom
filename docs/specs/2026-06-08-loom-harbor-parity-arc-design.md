@@ -68,7 +68,7 @@ src/loom_cli/                       (NEW package)
 ```bash
 loom run \
   --dataset humaneval               # dataset slug from registry (Plan 24)
-  --task humaneval/HumanEval-42     # OR a single task id
+  --task humaneval/HumanEval/0      # OR single task; instance id may contain '/'
   --agent claude-code               # one of Loom's 11 adapters
   --model claude-opus-4-7           # passed to LLM Gateway
   --backend docker                  # docker | daytona | modal

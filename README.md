@@ -44,6 +44,27 @@ trajectory) + `./runs/<trial-id>/atif.json` (ATIF v1.7 projection).
 `loom run --json` switches the per-trial line to a JSON object for
 piping to `jq`.
 
+### Targeting a single task
+
+`--task` is `<dataset-slug>/<instance-id>` — the instance-id portion
+may itself contain slashes (HumanEval upstream literally uses
+`HumanEval/0`, SWE-Bench uses `django__django-12345`, etc.):
+
+```bash
+# One HumanEval task, oracle baseline, no real agent run.
+loom run --task humaneval/HumanEval/0 --agent oracle --backend fake \
+         --output-dir /tmp/loom-smoke --json
+```
+
+### Backend choice
+
+- `--backend fake` — wiring smoke; the trial runs end-to-end and
+  events.jsonl + atif.json land on disk, but no real solver runs
+  inside a sandbox. Use this to verify your install is healthy.
+- `--backend docker` — real per-task sandbox via the local Docker
+  daemon. Required for actual evaluation runs.
+- `--backend daytona` — cloud sandboxes via Daytona (see below).
+
 ### Cloud backends (optional)
 
 ```bash
