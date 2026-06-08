@@ -39,6 +39,13 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Emit JSON one-result-per-line instead of text")
     p_run.add_argument("--server-url", default=None,
                        help="If set, also POST results to this Control Plane")
+    p_run.add_argument("--tb2-report", dest="tb2_report", type=Path, default=None,
+                       help=(
+                           "Path to write a Terminal-Bench-2.0 canonical "
+                           "BenchmarkResults JSON file. Emitted alongside "
+                           "Loom's native ATIF. Meaningful primarily for "
+                           "--dataset terminal-bench-2."
+                       ))
     p_run.set_defaults(handler=_run_handler)
 
     p_config = sub.add_parser("config", help="Manage CLI config")

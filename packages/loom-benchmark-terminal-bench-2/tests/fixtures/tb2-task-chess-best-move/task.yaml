@@ -1,0 +1,10 @@
+instruction: |-
+  You are given a chess position in FEN notation in /app/position.fen. Find the best move and write it in UCI notation to /app/best_move.txt. Use stockfish.
+parser_name: pytest
+max_agent_timeout_sec: 600.0
+max_test_timeout_sec: 60.0
+test_scripts:
+  - run-tests.sh
+tags:
+  - chess
+  - search

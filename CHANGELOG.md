@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 25 — Terminal-Bench-2.0 canonical adapter (2026-06-08,
+  closes #251).** New sibling package
+  `packages/loom-benchmark-terminal-bench-2/` (Apache-2.0) pinned
+  to upstream commit `91e10457b5410f16c44364da1a34cb6de8c488a5`
+  (terminal-bench-core v0.1.1). Adapter implements
+  `BenchmarkAdapter` (no Protocol extension — TB-2 fits the existing
+  surface): walks `tasks/<slug>/` via `list_instances`, emits Loom's
+  canonical task layout (`task.toml` + `instruction.md` + bundled
+  `tests/` + verifier shim that translates pytest exit code 0/non-0
+  into the ScriptVerifier JSON contract). Multi-service
+  docker-compose fallback warns + uses client image only. New
+  `to_tb2_report()` produces canonical `BenchmarkResults` JSON.
+  `loom run --tb2-report PATH` writes that JSON alongside ATIF.
+  Discoverable as `terminal-bench-2` via the `loom.benchmarks`
+  entry-point — `loom datasets list` surfaces it automatically.
+  29 tests + Harbor-reference snapshot guard.
 - **Plan 24 — Dataset discovery (2026-06-08, closes #250).** New
   `loom datasets list/show/install/refresh-registry` subcommands
   union three sources: built-in entry-points (every adapter in

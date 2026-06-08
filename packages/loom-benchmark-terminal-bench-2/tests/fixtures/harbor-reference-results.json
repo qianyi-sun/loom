@@ -1,0 +1,46 @@
+{
+  "results": [
+    {
+      "trial_name": "blind-maze-explorer-5x5.1",
+      "task_id": "blind-maze-explorer-5x5",
+      "task_description": "",
+      "is_resolved": true,
+      "failure_mode": "none",
+      "parser_results": {"tb2_run_tests": "passed"},
+      "total_input_tokens": 0,
+      "total_output_tokens": 0,
+      "uuid": "00000000-0000-0000-0000-000000000003",
+      "recording_path": null
+    },
+    {
+      "trial_name": "chess-best-move.1",
+      "task_id": "chess-best-move",
+      "task_description": "",
+      "is_resolved": false,
+      "failure_mode": "agent_timeout",
+      "parser_results": {"tb2_run_tests": "failed"},
+      "total_input_tokens": 0,
+      "total_output_tokens": 0,
+      "uuid": "00000000-0000-0000-0000-000000000002",
+      "recording_path": null
+    },
+    {
+      "trial_name": "hello-world.1",
+      "task_id": "hello-world",
+      "task_description": "",
+      "is_resolved": true,
+      "failure_mode": "none",
+      "parser_results": {"tb2_run_tests": "passed"},
+      "total_input_tokens": 0,
+      "total_output_tokens": 0,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "recording_path": null
+    }
+  ],
+  "accuracy": 0.6666666666666666,
+  "n_resolved": 2,
+  "n_unresolved": 1,
+  "resolved_ids": ["blind-maze-explorer-5x5", "hello-world"],
+  "unresolved_ids": ["chess-best-move"],
+  "pass_at_k": {"1": 0.6666666666666666}
+}

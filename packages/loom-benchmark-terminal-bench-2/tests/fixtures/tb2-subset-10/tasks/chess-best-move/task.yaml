@@ -1,0 +1,6 @@
+instruction: |-
+  Synthetic fixture for chess-best-move — not the real upstream instruction.
+parser_name: pytest
+max_agent_timeout_sec: 360.0
+max_test_timeout_sec: 60.0
+test_scripts: []

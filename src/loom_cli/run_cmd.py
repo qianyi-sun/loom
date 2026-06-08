@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -88,6 +89,7 @@ async def _run_async(args: argparse.Namespace) -> int:
     a_client, o_client, g_client = _build_sdk_clients(tokens)
 
     sem = asyncio.Semaphore(max(1, int(args.concurrency)))
+    completed: list[TrialResult] = []
 
     async def _one(loaded: LoadedTask) -> int:
         async with sem:
@@ -119,12 +121,38 @@ async def _run_async(args: argparse.Namespace) -> int:
                 format_json_line(result) if args.json_output
                 else format_text_line(result)
             )
+            completed.append(result)
             print(line, flush=True)
             await _maybe_post_result(args.server_url, result)
             return 0 if result.state == TrialState.SUCCEEDED else 1
 
     exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
+    _maybe_write_tb2_report(args, completed)
     return 0 if all(c == 0 for c in exit_codes) else 1
+
+
+def _maybe_write_tb2_report(
+    args: argparse.Namespace, trials: list[TrialResult],
+) -> None:
+    """Emit a TB-2 canonical BenchmarkResults JSON when --tb2-report is set.
+
+    Imported lazily so the loom-benchmark-terminal-bench-2 package isn't
+    a hard dependency unless the flag is actually used.
+    """
+    target: Path | None = getattr(args, "tb2_report", None)
+    if target is None:
+        return
+    try:
+        from loom_benchmark_terminal_bench_2.report import to_tb2_report
+    except ImportError as exc:
+        print(
+            f"warning: --tb2-report set but loom-benchmark-terminal-bench-2 "
+            f"is not installed: {exc}",
+            file=sys.stderr,
+        )
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(to_tb2_report(trials), indent=2, sort_keys=True))
 
 
 def _parse_model(spec: str) -> ModelSpec:

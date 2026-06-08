@@ -1,0 +1,10 @@
+services:
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: "sleep infinity"
+  server:
+    image: linuxserver/openssh-server:latest
+    environment:
+      - PUID=1000

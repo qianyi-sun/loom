@@ -1,0 +1,64 @@
+"""--tb2-report flag invokes to_tb2_report and writes JSON to disk.
+
+Plan 25 Task 12. The flag is wired in __main__.py's argparse + a
+_maybe_write_tb2_report hook in run_cmd._run_async. Tests adapted
+from the plan's hypothetical run_cmd.parse_args / main entry points
+to Plan 23's actual __main__.main argparse-subparser surface.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from loom_cli.__main__ import _build_parser, main
+
+
+def test_parse_args_accepts_tb2_report_flag() -> None:
+    parser = _build_parser()
+    parsed = parser.parse_args([
+        "run", "--dataset", "terminal-bench-2", "--agent", "claude-code",
+        "--tb2-report", "/tmp/out.json",
+    ])
+    assert parsed.tb2_report == Path("/tmp/out.json")
+
+
+def test_tb2_report_omitted_defaults_to_none() -> None:
+    parser = _build_parser()
+    parsed = parser.parse_args([
+        "run", "--dataset", "humaneval", "--agent", "claude-code",
+    ])
+    assert parsed.tb2_report is None
+
+
+def test_tb2_report_written_after_trials_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: stub the registry + LocalRunner so `loom run` returns
+    a TrialResult per stub task, then verify the JSON file is written
+    with to_tb2_report output."""
+    from loom_benchmarks import registry
+
+    from tests.loom_cli.test_task_loader import _StubAdapter
+
+    monkeypatch.setitem(registry.REGISTRY, "tb2-stub", _StubAdapter(name="tb2-stub"))
+
+    out_path = tmp_path / "tb2.json"
+    rc = main([
+        "run",
+        "--dataset", "tb2-stub",
+        "--agent", "oracle",
+        "--backend", "fake",
+        "--output-dir", str(tmp_path / "runs"),
+        "--tb2-report", str(out_path),
+    ])
+    assert rc in {0, 1}
+    assert out_path.exists()
+    parsed = json.loads(out_path.read_text())
+    # Two stub instances + to_tb2_report contract.
+    assert "accuracy" in parsed
+    assert "results" in parsed
+    assert "pass_at_k" in parsed
+    assert isinstance(parsed["results"], list)

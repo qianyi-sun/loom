@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loom-benchmark-terminal-bench-2"
+version = "0.1.0"
+description = "Terminal-Bench-2.0 canonical adapter for the Loom evaluation runtime."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "loom-benchmarks>=0.1.0,<0.3",
+    "loom>=0.0.0",
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
+
+[project.entry-points."loom.benchmarks"]
+terminal-bench-2 = "loom_benchmark_terminal_bench_2:adapter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["loom_benchmark_terminal_bench_2"]

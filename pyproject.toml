@@ -107,6 +107,12 @@ ignore_missing_imports = true
 module = ["loom_benchmarks", "loom_benchmarks.*"]
 ignore_missing_imports = true
 
+# loom-benchmark-terminal-bench-2 is a sibling under packages/, same
+# story as loom-benchmarks — suppress missing-import at the boundary.
+[[tool.mypy.overrides]]
+module = ["loom_benchmark_terminal_bench_2", "loom_benchmark_terminal_bench_2.*"]
+ignore_missing_imports = true
+
 # datasets (HuggingFace) has no stubs; treat as untyped.
 [[tool.mypy.overrides]]
 module = ["datasets", "datasets.*"]
