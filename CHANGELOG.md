@@ -7,6 +7,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 26 — Daytona cloud driver (2026-06-08, closes #252).** New
+  top-level `src/loom_drivers/daytona/` package implements the Loom
+  `Driver` Protocol against the `daytona>=0.184,<0.200` async SDK
+  (no Protocol extension required — probe Task 1 confirmed the
+  surface fits). `loom run --backend daytona` dispatches to
+  DaytonaDriver via _driver_factory. Compute-seconds + cost surface
+  through `/api/v1/usage` via two new bucket fields
+  (`daytona_compute_seconds`, `daytona_cost_usd`) backed by the new
+  generic `cloud_compute_records` table (migration `0008`, per
+  amendment A26.1 unified with Plan 27's Modal driver via a
+  `cloud_provider` column). Cancel/SIGINT teardown is bounded to 30s
+  by the in-process `LiveSandboxRegistry` + atexit handler. Domain
+  allowlists resolve via in-sandbox `getent ahosts` before being
+  promoted to /32 CIDRs (Daytona's network API is CIDR-only).
+  Session-based streaming exec bridges `get_session_command_logs_async`
+  callbacks to ExecHandle's stdout/stderr AsyncIterators.
+  45 new tests cover config / client / network mapping / images
+  (warm pool) / registry / exec-stream / driver lifecycle / usage
+  schema / CLI dispatch / cancel-path budget. Live integration test
+  opt-in via `LOOM_RUN_DAYTONA_INTEGRATION=1 + DAYTONA_API_KEY`
+  (default skipped, costs ~\$0.01/run). httpx MockTransport contract
+  test deferred — Daytona SDK's `_api_client` is OpenAPI-generated
+  and not easily transport-swappable; driver-protocol conformance
+  covered via AsyncMock seam.
 - **CI coverage Phase 1: measurement-only (2026-06-08, closes #260).**
   `repository-checks` now runs `pytest --cov=src --cov=packages` and
   uploads `coverage.xml` as a workflow artifact; a PR-comment step

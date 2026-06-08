@@ -183,6 +183,11 @@ def _driver_factory(backend: str, cfg: TaskConfig) -> Callable[[], Driver]:
         return FakeDriver
     if backend == "docker":
         return lambda: DockerDriver(image=image)
+    if backend == "daytona":
+        from loom_drivers.daytona.config import DaytonaConfig
+        from loom_drivers.daytona.driver import DaytonaDriver
+        daytona_cfg = DaytonaConfig.from_env()
+        return lambda: DaytonaDriver(image=image, config=daytona_cfg)
     raise SystemExit(f"unknown backend: {backend!r}")
 
 

@@ -31,8 +31,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--model", default=None,
                        help="Model id in provider/name form, e.g. anthropic/claude-opus-4-7")
     p_run.add_argument("--backend", default="docker",
-                       choices=("docker", "fake"),
-                       help="Driver backend (daytona/modal land in Plans 26/27)")
+                       choices=("docker", "fake", "daytona"),
+                       help="Driver backend (modal lands in Plan 27)")
     p_run.add_argument("--concurrency", type=int, default=1)
     p_run.add_argument("--output-dir", type=Path, default=Path("./runs"))
     p_run.add_argument("--json", dest="json_output", action="store_true",

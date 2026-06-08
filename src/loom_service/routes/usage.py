@@ -50,6 +50,13 @@ async def _llm_calls_exists(session: AsyncSession) -> bool:
     return bool(res.scalar())
 
 
+async def _cloud_compute_records_exists(session: AsyncSession) -> bool:
+    res = await session.execute(
+        text("SELECT to_regclass('cloud_compute_records') IS NOT NULL"),
+    )
+    return bool(res.scalar())
+
+
 @router.get("/usage")
 async def get_usage(
     request: Request,
@@ -82,64 +89,117 @@ async def get_usage(
         if not await _llm_calls_exists(s):
             return {"buckets": [], "degraded": True}
 
+        has_cloud = await _cloud_compute_records_exists(s)
+
         start_ts = datetime.combine(start, time.min, tzinfo=UTC)
-        # `end` is inclusive — use the start of the day AFTER `end` as
-        # the upper bound and BETWEEN ... < end_ts. To keep the query
-        # simple, use `time.max` (microsecond precision) so the
-        # comparison is `<=`.
         end_ts = datetime.combine(end, time.max, tzinfo=UTC)
 
         params: dict[str, Any] = {"start": start_ts, "end": end_ts}
         team_clause = ""
+        cloud_team_clause = ""
         if target_team is not None:
             team_clause = "AND t.team_id = :team_id"
+            cloud_team_clause = "AND d.team_id = :team_id"
             params["team_id"] = str(target_team)
 
         # `date_trunc` argument is a literal interpolated into the SQL
         # text — only the 3 strings in `_TRUNC_UNITS` can reach it, so
         # the substitution is safe even though it isn't parameterized.
-        sql = f"""
-            SELECT
-                date_trunc('{group_by}', l.captured_at) AS bucket_start,
-                COUNT(DISTINCT t.id) AS trial_count,
-                -- Point-in-time state counts (see module docstring)
-                COUNT(DISTINCT t.id)
-                    FILTER (WHERE t.state = 'succeeded')
-                    AS trials_currently_succeeded,
-                COUNT(DISTINCT t.id)
-                    FILTER (WHERE t.state = 'failed')
-                    AS trials_currently_failed,
-                COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
-                COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
-                COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens
-              FROM llm_calls l
-              JOIN trials t ON t.id = l.trial_id
-             WHERE l.captured_at BETWEEN :start AND :end
-               {team_clause}
-          GROUP BY bucket_start
-          ORDER BY bucket_start
-        """
+        # When the cloud_compute_records table exists (post-Plan-26
+        # migration 0008), we LEFT JOIN it for the daytona_* fields;
+        # otherwise we run the original LLM-only query.
+        if has_cloud:
+            sql = f"""
+                WITH llm_buckets AS (
+                    SELECT
+                        date_trunc('{group_by}', l.captured_at) AS bucket_start,
+                        COUNT(DISTINCT t.id) AS trial_count,
+                        COUNT(DISTINCT t.id)
+                            FILTER (WHERE t.state = 'succeeded')
+                            AS trials_currently_succeeded,
+                        COUNT(DISTINCT t.id)
+                            FILTER (WHERE t.state = 'failed')
+                            AS trials_currently_failed,
+                        COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
+                        COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
+                        COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens
+                      FROM llm_calls l
+                      JOIN trials t ON t.id = l.trial_id
+                     WHERE l.captured_at BETWEEN :start AND :end
+                       {team_clause}
+                  GROUP BY bucket_start
+                ),
+                daytona_buckets AS (
+                    SELECT
+                        date_trunc('{group_by}', d.stopped_at) AS bucket_start,
+                        COALESCE(SUM(d.compute_seconds), 0) AS daytona_compute_seconds,
+                        COALESCE(SUM(d.cost_usd), 0)        AS daytona_cost_usd
+                      FROM cloud_compute_records d
+                     WHERE d.cloud_provider = 'daytona'
+                       AND d.stopped_at BETWEEN :start AND :end
+                       {cloud_team_clause}
+                  GROUP BY bucket_start
+                )
+                SELECT
+                    COALESCE(l.bucket_start, d.bucket_start) AS bucket_start,
+                    COALESCE(l.trial_count, 0) AS trial_count,
+                    COALESCE(l.trials_currently_succeeded, 0)
+                        AS trials_currently_succeeded,
+                    COALESCE(l.trials_currently_failed, 0)
+                        AS trials_currently_failed,
+                    COALESCE(l.total_cost_usd, 0) AS total_cost_usd,
+                    COALESCE(l.llm_input_tokens, 0) AS llm_input_tokens,
+                    COALESCE(l.llm_output_tokens, 0) AS llm_output_tokens,
+                    COALESCE(d.daytona_compute_seconds, 0)
+                        AS daytona_compute_seconds,
+                    COALESCE(d.daytona_cost_usd, 0) AS daytona_cost_usd
+                  FROM llm_buckets l
+                  FULL OUTER JOIN daytona_buckets d USING (bucket_start)
+              ORDER BY bucket_start
+            """
+        else:
+            sql = f"""
+                SELECT
+                    date_trunc('{group_by}', l.captured_at) AS bucket_start,
+                    COUNT(DISTINCT t.id) AS trial_count,
+                    COUNT(DISTINCT t.id)
+                        FILTER (WHERE t.state = 'succeeded')
+                        AS trials_currently_succeeded,
+                    COUNT(DISTINCT t.id)
+                        FILTER (WHERE t.state = 'failed')
+                        AS trials_currently_failed,
+                    COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
+                    COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
+                    COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens
+                  FROM llm_calls l
+                  JOIN trials t ON t.id = l.trial_id
+                 WHERE l.captured_at BETWEEN :start AND :end
+                   {team_clause}
+              GROUP BY bucket_start
+              ORDER BY bucket_start
+            """
         rows = (await s.execute(text(sql), params)).all()
 
     buckets: list[dict[str, Any]] = []
     for r in rows:
         bs = r.bucket_start
-        buckets.append({
+        bucket = {
             "start_at": bs.isoformat(),
-            # The bucket close is `start_at + 1 {group_by}` — computed
-            # client-side because Postgres `date_trunc` only returns
-            # the start. Keeping it here would require interval
-            # arithmetic; the SPA already knows the group_by.
             "end_at": None,
             "trial_count": int(r.trial_count),
             "trials_currently_succeeded": int(r.trials_currently_succeeded),
             "trials_currently_failed": int(r.trials_currently_failed),
-            # Aliases preserved for the SPA's first-pass implementation —
-            # remove once the client migrates to the canonical names.
             "succeeded_count": int(r.trials_currently_succeeded),
             "failed_count": int(r.trials_currently_failed),
             "total_cost_usd": float(r.total_cost_usd),
             "llm_input_tokens": int(r.llm_input_tokens),
             "llm_output_tokens": int(r.llm_output_tokens),
-        })
+            "daytona_compute_seconds": (
+                float(r.daytona_compute_seconds) if has_cloud else 0.0
+            ),
+            "daytona_cost_usd": (
+                float(r.daytona_cost_usd) if has_cloud else 0.0
+            ),
+        }
+        buckets.append(bucket)
     return {"buckets": buckets, "degraded": False}
