@@ -230,12 +230,12 @@ async def run_once(
     # Phase 3: advance state for the campaigns we processed.
     async with session_factory() as s:
         for campaign_id, _, _ in work:
-            c = (await s.execute(
+            row = (await s.execute(
                 select(Campaign).where(Campaign.id == campaign_id),
             )).scalar_one_or_none()
-            if c is None:
+            if row is None:
                 continue
-            await _advance_campaign_state(s, c)
+            await _advance_campaign_state(s, row)
         await s.commit()
 
 

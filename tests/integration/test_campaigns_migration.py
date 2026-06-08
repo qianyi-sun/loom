@@ -18,8 +18,19 @@ def _cfg(url: str) -> Config:
 
 
 @pytest.fixture
-def at_revision_0006(postgres_url: str) -> Iterator[None]:
-    """Roll back to pre-Plan-19, yield, then bring back to head."""
+def at_revision_0006(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Roll back to pre-Plan-19, yield, then bring back to head.
+
+    `migrations/env.py` reads LOOM_DB_URL from os.environ and
+    OVERWRITES whatever sqlalchemy.url we set on the Config. Earlier
+    modules in the suite (test_alembic_migrations.py) may have left a
+    stale URL in os.environ pointing at a since-shut-down container.
+    Force the env var to our live container's URL so env.py reads the
+    right one.
+    """
+    monkeypatch.setenv("LOOM_DB_URL", postgres_url)
     cfg = _cfg(postgres_url)
     command.downgrade(cfg, "0006")
     try:

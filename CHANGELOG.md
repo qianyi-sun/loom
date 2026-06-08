@@ -7,6 +7,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Plan 19 — Campaigns: table, routes, runner (2026-06-07, tag
+  `loom-campaigns-v0.19`).** First-class campaign concept. Migration
+  `0007` adds the `campaigns` table + `trials.campaign_id` FK
+  (ON DELETE SET NULL) + `trials.idempotency_key` (partial unique
+  index `WHERE NOT NULL`). New `Campaign` SQLAlchemy model.
+  `Trial.campaign_id` + `Trial.idempotency_key` columns added.
+  Control Plane `POST /trials` now accepts `idempotency_key` +
+  `campaign_id` payload fields; if `idempotency_key` matches an
+  existing row, returns the canonical trial_id. The INSERT path uses
+  `pg_insert + ON CONFLICT DO NOTHING` with `index_where` matching
+  the partial unique index. New service-layer routes under
+  `/api/v1/campaigns`: POST (creates + materializes
+  `expected_trial_count` from `task_filter`), GET list (cursor
+  paginated, team-scoped, state-filtered), GET detail (with per-state
+  trial summary + reward/cost rollup from `Trial.result` JSONB
+  since v0.7 trials has no top-level aggregate_reward/cost_usd
+  columns), POST cancel (cancels campaign + cascades to still-active
+  trials). Task filter is allowlisted to `{license, task_ids,
+  benchmark_id}` — a typo like `liscense` returns 400 instead of
+  silently matching zero tasks. New `campaign_runner.py` exposes
+  `next_campaign_state` (pure state machine; unit-tested across 8
+  cases), `run_once`, and `run_loop`. The runner uses a
+  release-lock-before-HTTP pattern: SELECT … FOR UPDATE SKIP LOCKED
+  the campaigns, materialize pending tasks, COMMIT (release the
+  lock), submit trials over HTTP, then re-open a transaction to
+  advance state. Without the split, holding FOR UPDATE deadlocks
+  against the CP-side trial INSERT's FK key-share lock on the same
+  campaign row. Concurrent-runner correctness is preserved by the
+  deterministic idempotency key `{campaign_id}::{task_id}` —
+  duplicate submissions collapse via ON CONFLICT DO NOTHING. The
+  runner is spawned from `loom_service`'s lifespan as
+  `loom-svc-campaign-runner`. 375 unit+contract+property (+8 state
+  machine); 220 integration (+7 CRUD + 4 idempotency + 2 migration +
+  3 runner e2e); ruff + mypy strict clean across 124 source files.
 - **Plan 18 — `loom_service` read routes + Control Plane forwarders
   (2026-06-07, tag `loom-service-read-v0.18`).** Adds the read-side of
   the service API + the two write proxies (POST /trials, /cancel) that
