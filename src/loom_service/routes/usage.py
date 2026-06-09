@@ -106,8 +106,10 @@ async def get_usage(
         # text — only the 3 strings in `_TRUNC_UNITS` can reach it, so
         # the substitution is safe even though it isn't parameterized.
         # When the cloud_compute_records table exists (post-Plan-26
-        # migration 0008), we LEFT JOIN it for the daytona_* fields;
-        # otherwise we run the original LLM-only query.
+        # migration 0008), we LEFT JOIN it for the per-provider compute
+        # fields; otherwise we run the original LLM-only query.
+        # The cloud CTE uses FILTER aggregates so each provider gets its
+        # own column without needing a separate CTE per provider.
         if has_cloud:
             sql = f"""
                 WITH llm_buckets AS (
@@ -129,14 +131,34 @@ async def get_usage(
                        {team_clause}
                   GROUP BY bucket_start
                 ),
-                daytona_buckets AS (
+                cloud_buckets AS (
                     SELECT
                         date_trunc('{group_by}', d.stopped_at) AS bucket_start,
-                        COALESCE(SUM(d.compute_seconds), 0) AS daytona_compute_seconds,
-                        COALESCE(SUM(d.cost_usd), 0)        AS daytona_cost_usd
+                        COALESCE(
+                            SUM(d.compute_seconds)
+                                FILTER (WHERE d.cloud_provider = 'daytona'),
+                            0
+                        ) AS daytona_compute_seconds,
+                        COALESCE(
+                            SUM(d.cost_usd)
+                                FILTER (WHERE d.cloud_provider = 'daytona'),
+                            0
+                        ) AS daytona_cost_usd,
+                        COALESCE(
+                            SUM(d.compute_seconds)
+                                FILTER (WHERE d.cloud_provider = 'modal'),
+                            0
+                        ) AS modal_compute_seconds,
+                        COALESCE(
+                            SUM(d.cost_usd)
+                                FILTER (WHERE d.cloud_provider = 'modal'),
+                            0
+                        ) AS modal_cost_usd,
+                        COALESCE(SUM(d.compute_seconds), 0)
+                            AS cloud_compute_seconds,
+                        COALESCE(SUM(d.cost_usd), 0) AS cloud_cost_usd
                       FROM cloud_compute_records d
-                     WHERE d.cloud_provider = 'daytona'
-                       AND d.stopped_at BETWEEN :start AND :end
+                     WHERE d.stopped_at BETWEEN :start AND :end
                        {cloud_team_clause}
                   GROUP BY bucket_start
                 )
@@ -152,9 +174,15 @@ async def get_usage(
                     COALESCE(l.llm_output_tokens, 0) AS llm_output_tokens,
                     COALESCE(d.daytona_compute_seconds, 0)
                         AS daytona_compute_seconds,
-                    COALESCE(d.daytona_cost_usd, 0) AS daytona_cost_usd
+                    COALESCE(d.daytona_cost_usd, 0) AS daytona_cost_usd,
+                    COALESCE(d.modal_compute_seconds, 0)
+                        AS modal_compute_seconds,
+                    COALESCE(d.modal_cost_usd, 0) AS modal_cost_usd,
+                    COALESCE(d.cloud_compute_seconds, 0)
+                        AS cloud_compute_seconds,
+                    COALESCE(d.cloud_cost_usd, 0) AS cloud_cost_usd
                   FROM llm_buckets l
-                  FULL OUTER JOIN daytona_buckets d USING (bucket_start)
+                  FULL OUTER JOIN cloud_buckets d USING (bucket_start)
               ORDER BY bucket_start
             """
         else:
@@ -199,6 +227,18 @@ async def get_usage(
             ),
             "daytona_cost_usd": (
                 float(r.daytona_cost_usd) if has_cloud else 0.0
+            ),
+            "modal_compute_seconds": (
+                float(r.modal_compute_seconds) if has_cloud else 0.0
+            ),
+            "modal_cost_usd": (
+                float(r.modal_cost_usd) if has_cloud else 0.0
+            ),
+            "cloud_compute_seconds": (
+                float(r.cloud_compute_seconds) if has_cloud else 0.0
+            ),
+            "cloud_cost_usd": (
+                float(r.cloud_cost_usd) if has_cloud else 0.0
             ),
         }
         buckets.append(bucket)

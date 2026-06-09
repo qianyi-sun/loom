@@ -68,3 +68,29 @@ def test_required_caps_frozen():
     )
     with pytest.raises(ValidationError):
         req.os = "windows"  # type: ignore[misc]
+
+
+def test_capabilities_default_gpu_types_empty():
+    """gpu_types defaults to an empty frozenset (no GPU passthrough)."""
+    c = Capabilities(
+        os="linux", gpu_vendor="none",
+        network_policies=frozenset(["public"]),
+        dynamic_network_policy=True, mounted_fs=True,
+        resource_modes=frozenset(["auto"]),
+    )
+    assert c.gpu_types == frozenset()
+
+
+def test_capabilities_gpu_types_roundtrip():
+    """gpu_types accepts a non-empty frozenset and is immutable like the rest."""
+    c = Capabilities(
+        os="linux", gpu_vendor="nvidia",
+        network_policies=frozenset(["public"]),
+        dynamic_network_policy=False, mounted_fs=True,
+        resource_modes=frozenset(["auto"]),
+        gpu_types=frozenset({"A10", "H100"}),
+    )
+    assert "A10" in c.gpu_types
+    assert "H100" in c.gpu_types
+    with pytest.raises(ValidationError):
+        c.gpu_types = frozenset()  # type: ignore[misc]

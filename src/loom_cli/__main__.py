@@ -38,8 +38,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--model", default=None,
                        help="Model id in provider/name form, e.g. anthropic/claude-opus-4-7")
     p_run.add_argument("--backend", default="docker",
-                       choices=("docker", "fake", "daytona"),
-                       help="Driver backend (modal lands in Plan 27)")
+                       choices=("docker", "fake", "daytona", "modal"),
+                       help="Driver backend")
+    p_run.add_argument("--gpu", type=str, default=None,
+                       help=(
+                           "GPU spec (Modal only). Example: --gpu A10, "
+                           "--gpu H100:2. Rejected for other backends."
+                       ))
     p_run.add_argument("--concurrency", type=int, default=1)
     p_run.add_argument("--output-dir", type=Path, default=Path("./runs"))
     p_run.add_argument("--json", dest="json_output", action="store_true",

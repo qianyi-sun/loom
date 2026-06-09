@@ -79,7 +79,8 @@ Production deployment: [`docs/operator-runbook.md`](docs/operator-runbook.md).
 A FastAPI **Control Plane** owns the trial state machine, DRF
 (Dominant Resource Fairness) scheduling, and the trajectory index.
 **Workers** poll for trials, run them in-process against a **Driver**
-(Docker, Daytona; Modal pending), emit append-only JSONL trajectories
+(Docker, Daytona, Modal — Modal supports GPU passthrough via
+`--gpu <TYPE>`), emit append-only JSONL trajectories
 to MinIO, and report state via fenced HTTP PATCH endpoints. An **LLM
 Gateway** (LiteLLM-backed) proxies model calls so every trajectory
 carries faithful token usage and cost. Postgres + MinIO are the only

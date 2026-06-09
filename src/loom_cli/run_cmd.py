@@ -100,7 +100,9 @@ async def _run_async(args: argparse.Namespace) -> int:
                 task_config=patched,
                 task_checksum=loaded.checksum,
                 task_dir=loaded.task_dir,
-                driver_factory=_driver_factory(args.backend, patched),
+                driver_factory=_driver_factory(
+                    args.backend, patched, gpu=getattr(args, "gpu", None),
+                ),
                 output_dir=output_dir,
                 object_store=store,
                 upstream_gateway_tokens=tokens,
@@ -177,18 +179,96 @@ def _patch_agent(
     return cfg.model_copy(update={"agent": new_agent})
 
 
-def _driver_factory(backend: str, cfg: TaskConfig) -> Callable[[], Driver]:
-    image = cfg.environment.docker_image or "alpine"
+class UnsupportedFlagError(ValueError):
+    """Raised when a CLI flag is incompatible with the chosen backend."""
+
+
+_VALID_BACKENDS = {"docker", "fake", "daytona", "modal"}
+
+
+def build_driver(*, backend: str, image: str, gpu: str | None = None) -> Driver:
+    """Construct a Driver for ``backend``.
+
+    Raises:
+        UnsupportedFlagError: when ``--gpu`` is set with a backend that does
+            not support GPU passthrough (docker / fake / daytona today).
+        ValueError: for an unknown backend value.
+        ModalConfigError: when ``--backend modal`` is chosen but Modal
+            credentials env vars are not set.
+    """
+    if backend not in _VALID_BACKENDS:
+        raise ValueError(
+            f"Unknown --backend {backend!r}. "
+            f"Valid: {sorted(_VALID_BACKENDS)}",
+        )
     if backend == "fake":
-        return FakeDriver
+        if gpu is not None:
+            raise UnsupportedFlagError(
+                "--gpu is not supported by --backend fake. "
+                "Use --backend modal for GPU trials.",
+            )
+        return FakeDriver()
     if backend == "docker":
+        if gpu is not None:
+            raise UnsupportedFlagError(
+                "--gpu is not supported by --backend docker. "
+                "Use --backend modal for GPU trials.",
+            )
+        return DockerDriver(image=image)
+    if backend == "daytona":
+        if gpu is not None:
+            raise UnsupportedFlagError(
+                "--gpu is not supported by --backend daytona. "
+                "Use --backend modal for GPU trials.",
+            )
+        from loom_drivers.daytona.config import DaytonaConfig
+        from loom_drivers.daytona.driver import DaytonaDriver
+        return DaytonaDriver(image=image, config=DaytonaConfig.from_env())
+    # backend == "modal"
+    from loom_drivers.modal.config import ModalConfig
+    from loom_drivers.modal.driver import ModalDriver
+    return ModalDriver(image=image, gpu=gpu, config=ModalConfig.from_env())
+
+
+def _driver_factory(
+    backend: str,
+    cfg: TaskConfig,
+    *,
+    gpu: str | None = None,
+) -> Callable[[], Driver]:
+    """Return a zero-arg factory for the chosen backend.
+
+    Each call to the returned factory constructs a fresh Driver instance.
+    Heavy SDK config (e.g. ``DaytonaConfig`` / ``ModalConfig``) is captured
+    in the closure so env vars are read once per ``loom run`` invocation.
+    """
+    image = cfg.environment.docker_image or "alpine"
+    if backend not in _VALID_BACKENDS:
+        raise SystemExit(f"unknown backend: {backend!r}")
+    if backend in {"docker", "fake"}:
+        if gpu is not None:
+            raise UnsupportedFlagError(
+                f"--gpu is not supported by --backend {backend}. "
+                "Use --backend modal for GPU trials.",
+            )
+        if backend == "fake":
+            return FakeDriver
         return lambda: DockerDriver(image=image)
     if backend == "daytona":
+        if gpu is not None:
+            raise UnsupportedFlagError(
+                "--gpu is not supported by --backend daytona. "
+                "Use --backend modal for GPU trials.",
+            )
         from loom_drivers.daytona.config import DaytonaConfig
         from loom_drivers.daytona.driver import DaytonaDriver
         daytona_cfg = DaytonaConfig.from_env()
         return lambda: DaytonaDriver(image=image, config=daytona_cfg)
-    raise SystemExit(f"unknown backend: {backend!r}")
+    # backend == "modal"
+    from loom_drivers.modal.config import ModalConfig
+    from loom_drivers.modal.driver import ModalDriver
+    modal_cfg = ModalConfig.from_env()
+    return lambda: ModalDriver(image=image, gpu=gpu, config=modal_cfg)
 
 
 def _build_sdk_clients(

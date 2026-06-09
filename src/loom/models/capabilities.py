@@ -20,6 +20,11 @@ class Capabilities(BaseModel):
     dynamic_network_policy: bool
     mounted_fs: bool
     resource_modes: frozenset[ResourceMode]
+    # GPU types this backend can attach to a single sandbox. Empty set ⇒
+    # backend cannot attach a GPU even if gpu_vendor != "none". For Docker
+    # and Daytona this is always empty (no GPU passthrough). For Modal it
+    # lists the modal-supported GPU strings.
+    gpu_types: frozenset[str] = frozenset()
 
 
 class RequiredCapabilities(BaseModel):
