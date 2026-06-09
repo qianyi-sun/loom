@@ -8,7 +8,7 @@ task; `multi-step-3/` shows per-step rewards + `min_reward` gates.
 
 ```
 my-task/
-├── task.toml                # required: task config (spec §4.1)
+├── task.toml                # required: task config (see src/loom/models/task.py:TaskConfig)
 ├── instruction.md           # required: top-level agent instruction
 ├── solution/
 │   └── solve.sh             # optional: Oracle baseline (chmod +x)

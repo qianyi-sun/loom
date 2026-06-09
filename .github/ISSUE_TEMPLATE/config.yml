@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Loom design spec
-    url: https://github.com/carinrc/loom/blob/dev/docs/specs/2026-06-05-loom-runtime-core-design.md
-    about: Read the Loom runtime core design before opening broad scope or architecture issues.
-  - name: Loom implementation plans
-    url: https://github.com/carinrc/loom/tree/dev/docs/plans
-    about: The seven implementation plans + cross-plan review.
+  - name: Loom architecture docs
+    url: https://github.com/carinrc/loom/blob/dev/docs/architecture/overview.md
+    about: Read the architecture overview before opening broad-scope or architecture issues.
+  - name: Loom CHANGELOG
+    url: https://github.com/carinrc/loom/blob/dev/CHANGELOG.md
+    about: What shipped and when — check before reporting "missing" features.

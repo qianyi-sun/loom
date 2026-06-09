@@ -1,6 +1,6 @@
-"""Ad-hoc `loom` CLI — stateless one-shot mode (Plan 23).
+"""Ad-hoc `loom` CLI — stateless one-shot mode.
 
-See `docs/specs/2026-06-08-loom-harbor-parity-arc-design.md` §3.
+See `docs/architecture/cli-mode.md` for the wiring.
 """
 
 from __future__ import annotations

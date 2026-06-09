@@ -1,8 +1,5 @@
-"""Pin guard — UPSTREAM_REVISION matches the SHA recorded in
-docs/notes/2026-06-08-tb2-upstream-probe.md.
-
-If upstream TB-2 ships a new dataset version, a follow-up plan bumps both
-the notes file and this constant. Silent drift fails this test.
+"""Pin guard — UPSTREAM_REVISION must match the SHA pinned literally
+in this test. Silent drift in upstream.py fails the assertion below.
 """
 
 from __future__ import annotations

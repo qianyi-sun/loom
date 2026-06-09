@@ -232,7 +232,7 @@ Use this section as we make hard calls during implementation.
 | 2026-06-05 | Skills (D1), multi-backend (D2), adapters (D3), leaderboard (D4) deferred from v1 | Scope discipline; not on critical path |
 | 2026-06-05 | v1 scope: H1 + H2 + H3 (Docker only) + H4-lite + H5; ~1.5k LOC target | Smallest version that captures the essence and validates our improvements |
 | 2026-06-05 | Round-3 audit completed (concrete agents, verifier zoo, TrialResult schema, network policy plumbing); 4 new warts logged in addendum below | Final contract-validation pass before spec writing |
-| 2026-06-05 | All 7 Loom implementation plans written + committed; runtime-core spec is implementation-ready | See `docs/plans/2026-06-05-loom-cross-plan-review.md` |
+| 2026-06-05 | All 7 Loom implementation plans written + committed; runtime-core spec is implementation-ready | Plan docs have since been deleted; see git log around 2026-06-05 / 2026-06-08 |
 
 ---
 

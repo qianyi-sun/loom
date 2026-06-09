@@ -1,0 +1,207 @@
+# Driver Protocol
+
+The `Driver` Protocol is the sandbox-lifecycle contract every backend
+implements. Lives at `src/loom/driver/base.py`.
+
+## Contract
+
+```python
+from typing import Protocol, runtime_checkable, Literal
+from pathlib import Path, PurePosixPath
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass
+
+from loom.models.capabilities import Capabilities
+from loom.models.exec import ExecResult
+from loom.models.healthcheck import HealthcheckSpec
+from loom.models.networking import NetworkPolicy
+
+MAX_EXEC_STREAM_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
+@dataclass
+class StartOptions:
+    force_build: bool = False
+    pull: bool = True
+
+@dataclass
+class ExecHandle:
+    pid: int
+    stdout: AsyncIterator[bytes]
+    stderr: AsyncIterator[bytes]
+    _wait: Callable[[], Awaitable[int]]
+    _kill: Callable[[], Awaitable[None]]
+    async def wait(self) -> int: ...
+    async def kill(self) -> None: ...
+
+@runtime_checkable
+class Driver(Protocol):
+    image: str
+    workspace: PurePosixPath
+    capabilities: Capabilities
+    os: Literal["linux", "windows"]
+    network_policy_baseline: NetworkPolicy
+
+    async def start(self, *, options: StartOptions | None = None) -> None: ...
+    async def stop(self, *, delete: bool = True) -> None: ...
+
+    async def exec(
+        self, cmd: str, *,
+        user: str | int | None = None,
+        cwd: PurePosixPath | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_sec: float | None = None,
+    ) -> ExecResult: ...
+
+    async def exec_streaming(
+        self, argv: list[str], *,
+        env_vars: dict[str, str],
+        cwd: PurePosixPath,
+        user: str | int | None = None,
+    ) -> ExecHandle: ...
+
+    async def upload(self, src: Path, dst: PurePosixPath) -> None: ...
+    async def download(self, src: PurePosixPath, dst: Path) -> None: ...
+
+    async def set_network_policy(self, policy: NetworkPolicy) -> None: ...
+    async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None: ...
+```
+
+## Lifecycle invariants
+
+- `start()` once per instance. Second call raises
+  `DriverAlreadyStartedError`.
+- `stop()` is idempotent. Calling `stop()` before `start()` is a
+  no-op, not an error.
+- `exec` / `upload` / `download` / `set_network_policy` /
+  `run_healthcheck` require `state == "running"`. Otherwise raise
+  `DriverNotStartedError`.
+- `stop(delete=False)` is for archive flows (Docker doesn't fully
+  support it; cloud backends may). Default is `delete=True`.
+
+State machine: `constructed → running → stopped`. No re-start.
+
+## Output buffering
+
+- `exec()` is buffered and capped at `MAX_EXEC_STREAM_BYTES = 10 MB`.
+  Larger outputs truncate; `ExecResult.truncated == True`.
+- `exec_streaming()` is unbounded — chunks flow through async
+  iterators with no cap. Callers drain `stdout` + `stderr` in
+  parallel. Closing the iterators is implicit when `wait()` resolves.
+
+## NetworkPolicy
+
+`loom.models.networking` exports three kinds:
+
+```python
+Public()                                                          # no restriction
+NoNetwork()                                                       # block all egress
+Allowlist(domains=("api.example.com",), cidrs=("10.0.0.0/8",))   # allow these only
+```
+
+Domain resolution is backend-specific:
+- **DockerDriver** resolves via `getent ahosts` (IPv4-only), pins
+  IPs into `/etc/hosts`, sets iptables default DROP with explicit
+  ACCEPT rules per IP/CIDR. Requires `cap_add=["NET_ADMIN"]`.
+- **DaytonaDriver** maps to Daytona's `update_network_settings`,
+  which is CIDR-only. Domains are resolved upstream via in-sandbox
+  `getent ahosts` and promoted to `/32` entries.
+- **FakeDriver** records the policy on `self.network_policy_baseline`;
+  no enforcement.
+
+Unresolvable domain → `DriverError` (no silent drop).
+
+## Shipped implementations
+
+### `loom.driver.docker.DockerDriver`
+
+Local Docker. The reference impl — most other drivers follow its
+shape.
+
+```python
+from loom.driver.docker import DockerDriver
+drv = DockerDriver(image="python:3.12-slim", workspace=PurePosixPath("/workspace"))
+await drv.start()
+r = await drv.exec("ls /workspace")
+await drv.stop()
+```
+
+Specifics:
+- Containers run with `cap_add=["NET_ADMIN"]` for iptables policy
+- `exec_streaming()` uses `docker exec` with TTY-less pipes
+- Healthcheck loop polls `cmd` with `start_period_sec` grace +
+  `retries` consecutive failures before raising
+
+### `loom.driver.fake.FakeDriver`
+
+Test harness — every `exec` returns success with empty bytes.
+Useful for wiring smoke (the trial completes successfully without
+spending compute), but no real solver work happens. The
+`--backend fake` CLI choice uses this.
+
+### `loom_drivers.daytona.driver.DaytonaDriver`
+
+Cloud Daytona sandboxes. See
+`src/loom_drivers/daytona/` for the full package. Adds:
+- `DaytonaConfig` env loader (`DAYTONA_API_KEY` / `JWT_TOKEN` /
+  `API_URL` / `TARGET`)
+- `DaytonaClient` lifecycle wrapper + tenacity retry on transient
+  `DaytonaError`
+- `LiveSandboxRegistry` + `atexit` + `SIGINT` handlers with 30s
+  teardown budget — Ctrl-C never leaves sandboxes running
+- Optional warm-pool (`LOOM_DAYTONA_WARM_POOL=N`)
+- Cost telemetry via `cloud_compute_records` table when constructed
+  with `trial_id` + `team_id` + `session_factory`
+
+### Modal (pending)
+
+Tracked at issue [#253](https://github.com/carinrc/loom/issues/253).
+`cloud_compute_records` schema is generic via the `cloud_provider`
+column, so a Modal driver ships with zero schema work — just a
+`src/loom_drivers/modal/` sibling.
+
+## Adding a new driver
+
+1. Pick a Driver as reference. For cloud sandbox APIs that are
+   async-native, copy `loom_drivers/daytona/`. For SDK-bridged
+   sync-style APIs that need a threadpool, see the (pending) Modal
+   plan.
+2. Implement every Protocol method. Run
+   `pytest tests/contract/test_driver_contract.py` — the parametrized
+   contract suite exercises Protocol conformance against every
+   registered Driver impl.
+3. If the cloud backend needs cost telemetry, reuse
+   `loom_drivers.daytona.usage.compute_record` with
+   `cloud_provider="<name>"`. The `cloud_compute_records` table is
+   shared across providers via the `cloud_provider` column.
+4. Wire into `src/loom_cli/run_cmd.py::_driver_factory` for
+   `--backend <name>` support. Add `<name>` to the `--backend`
+   `choices=` tuple in `src/loom_cli/__main__.py`.
+5. Add unit tests with an `AsyncMock` SDK seam; a live integration
+   test should be opt-in via an env var (e.g.
+   `LOOM_RUN_<NAME>_INTEGRATION=1`).
+
+## Common pitfalls
+
+- **`set_network_policy` order-of-operations**: if the backend
+  enforces "block all egress" by default at start time, your domain
+  resolution call inside the sandbox will fail. DaytonaDriver
+  resolves before applying the new policy; do the same in any
+  driver where the in-sandbox DNS uses the network being
+  reconfigured.
+- **`stop()` should not raise**. Even if the cloud delete fails, log
+  + continue. Use `asyncio.wait_for(delete, timeout=N+5)` so a stuck
+  delete doesn't hang `stop()`. See DaytonaDriver's `_teardown` —
+  keep the entry in the live-sandbox registry on delete failure so
+  the atexit/SIGINT path retries.
+- **GIL + signal handlers**: cloud drivers that install SIGINT
+  handlers should keep handler bodies minimal. `asyncio.run` inside
+  a signal handler is technically not async-signal-safe; it works
+  for the Ctrl-C exit path but multi-threaded workloads should
+  prefer the `atexit` path.
+
+## See also
+
+- [overview.md](overview.md)
+- `src/loom/driver/base.py` — the Protocol source
+- `tests/contract/test_driver_contract.py` — the parametrized
+  conformance suite every Driver should pass

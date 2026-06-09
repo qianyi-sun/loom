@@ -1,15 +1,11 @@
 """TerminalBench2Adapter — implements loom_benchmarks.BenchmarkAdapter
 for terminal-bench-core v0.1.1.
 
-Spec: docs/specs/2026-06-08-loom-harbor-parity-arc-design.md
-      §3 Plan 25 deliverable 1.
-Probe: docs/notes/2026-06-08-tb2-upstream-probe.md.
-
 `list_instances` walks the cloned upstream `tasks/<slug>/` tree and
 yields one BenchmarkInstance per task dir, with the parsed task.yaml in
 `.raw` plus a `__source_path` key pointing back to the on-disk dir so
 `convert_instance` can copy auxiliary files (Dockerfile, tests/...)
-without re-walking. `convert_instance` is implemented in Tasks 5-7.
+without re-walking.
 """
 
 from __future__ import annotations

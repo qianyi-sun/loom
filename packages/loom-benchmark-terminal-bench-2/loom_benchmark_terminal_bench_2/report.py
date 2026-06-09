@@ -3,7 +3,7 @@ canonical Terminal-Bench-2.0 BenchmarkResults JSON shape.
 
 The shape is verified against
 https://github.com/laude-institute/terminal-bench/blob/91e1045.../terminal_bench/harness_models.py
-(see docs/notes/2026-06-08-tb2-upstream-probe.md).
+(upstream SHA pinned in upstream.py).
 """
 
 from __future__ import annotations

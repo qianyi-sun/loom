@@ -104,7 +104,7 @@ curl -X POST http://localhost:8080/api/v1/trials \
 ```
 
 See `docs/operator-runbook.md` for production deployment + token
-rotation + alarm response, and `docs/task-authoring-guide.md` for
+rotation + alarm response, and `docs/authoring-a-task.md` for
 writing new tasks.
 
 ## Architecture (one paragraph)
@@ -145,8 +145,8 @@ Plan 27 (Modal cloud driver) is queued but deferred —
 up.
 
 - **CHANGELOG:** `CHANGELOG.md`
-- **Design specs:** `docs/specs/`
-- **Implementation plans:** `docs/plans/`
+- **Docs index:** `docs/index.md` (start here)
+- **Architecture & contracts:** `docs/architecture/overview.md`
 - **Pre-Loom repo content** (read-only reference): `legacy/`
 
 ## What Loom does
@@ -170,7 +170,7 @@ up.
 |---|---|---|
 | Foundation library | `src/loom/` | (used by all) |
 | `loom` CLI | `src/loom_cli/` | adapters, local disk, provider SDKs |
-| Cloud drivers | `src/loom_drivers/` | Daytona (`packages/loom-benchmark-terminal-bench-2/` not relevant here — sibling pkg) |
+| Cloud drivers | `src/loom_drivers/` | Daytona (Modal pending) |
 | Control Plane | `src/loom_control_plane/` | Postgres, MinIO |
 | LLM Gateway | `src/loom_llm_gateway/` | Anthropic / OpenAI / Google, Postgres |
 | Worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
@@ -217,24 +217,27 @@ src/loom_service/                  # REST surface for SPA / external clients
 src/loom_benchmark_tool/           # `loom-benchmark` operator CLI
 packages/loom-launcher/            # PyPI-style agent-adapter framework
 packages/loom-benchmarks/          # PyPI-style benchmark-adapter framework + 13 adapters
-packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter (Plan 25)
+packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter
 migrations/                        # Alembic
 tests/{unit,contract,integration,system,property,loom_cli,fixtures}/
-web/                               # React SPA (Plans 21-22)
+web/                               # React SPA
 deploy/                            # docker-compose + k8s manifests
-docs/{specs,plans,notes}/          # design + roadmap + probe outputs
+docs/                              # index.md → user-guide, architecture/, operator-runbook, authoring-a-task
 scripts/                           # operator + test helpers
 legacy/                            # pre-Loom code, read-only reference
 ```
 
-## How to read this repo
+## Docs
 
-1. **Try it**: `pip install -e . && loom datasets list` then `loom --help`
-2. `docs/specs/2026-06-08-loom-harbor-parity-arc-design.md` — current arc
-3. `docs/specs/2026-06-05-loom-runtime-core-design.md` — original runtime design
-4. `CHANGELOG.md` — what shipped and when
-5. `docs/operator-runbook.md` — production deploy + ops
-6. `docs/task-authoring-guide.md` — how to write a new task
+- `docs/index.md` — navigation entry point (start here)
+- `docs/user-guide.md` — `loom` CLI guide for researchers (install,
+  `run`, `datasets`, `config`, troubleshooting)
+- `docs/architecture/` — focused architecture docs (overview, driver
+  protocol, benchmark adapter, agent adapter, trajectory + ATIF,
+  CLI mode, service mode)
+- `docs/operator-runbook.md` — production deployment + ops
+- `docs/authoring-a-task.md` — writing a new benchmark task
+- `CHANGELOG.md` — what shipped and when
 
 ## Contributing
 

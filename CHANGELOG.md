@@ -78,7 +78,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   every capability gap between Loom and Harbor
   (`harbor-framework/harbor`) so Loom can act as a strict superset.
   Arc spec at `docs/specs/2026-06-08-loom-harbor-parity-arc-design.md`;
-  five priority-ordered implementation plans under `docs/plans/`:
+  five priority-ordered work items:
   - **Plan 23** — Ad-hoc `loom run` CLI: stateless `Trial.run()`
     reuse with a new `UpstreamDirectGatewayClient` against the
     openai/anthropic/google SDKs, local rate-card file, XDG config.

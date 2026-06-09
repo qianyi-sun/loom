@@ -2,11 +2,11 @@
 
 The SHA was probed against
 https://github.com/laude-institute/terminal-bench/blob/main/registry.json
-on 2026-06-08; see docs/notes/2026-06-08-tb2-upstream-probe.md.
+on 2026-06-08.
 
-Upgrades to a newer TB-2 dataset version are out of scope for Plan 25 and
-require a follow-up plan that updates this constant AND the probe notes.
-The pin-guard test in `tests/test_upstream_pin.py` enforces lockstep.
+Upgrading to a newer TB-2 dataset version requires updating this
+constant; the pin-guard test in `tests/test_upstream_pin.py` enforces
+lockstep with the SHA below.
 """
 
 from __future__ import annotations
