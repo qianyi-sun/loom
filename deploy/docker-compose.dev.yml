@@ -9,6 +9,13 @@
 #   alembic -c migrations/alembic.ini upgrade head
 #   python scripts/seed_test_data.py
 #   # The team token printed by seed_test_data.py is your bearer.
+#
+# Endpoint map (matches the k8s ingress in deploy/k8s/):
+#   localhost:8090   loom_service (user-facing REST at /api/v1/*)
+#   localhost:8080   control_plane (worker-facing, normally internal-only)
+#   localhost:9100   llm_gateway   (agent-facing)
+#   localhost:9000   minio S3 API
+#   localhost:9001   minio console
 
 services:
   postgres:
@@ -82,6 +89,32 @@ services:
         condition: service_healthy
     ports:
       - "8080:8080"
+
+  loom-service:
+    image: loom-service:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.service
+    environment:
+      LOOM_SVC_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
+      LOOM_SVC_MINIO_ENDPOINT: http://minio:9000
+      LOOM_SVC_MINIO_ACCESS_KEY: loomdev
+      LOOM_SVC_MINIO_SECRET_KEY: loomdev123
+      LOOM_SVC_CONTROL_PLANE_URL: http://control-plane:8080/
+      LOOM_SVC_GATEWAY_URL: http://llm-gateway:9100/
+      LOOM_SVC_LOG_LEVEL: debug
+      # LOOM_SVC_CAMPAIGN_RUNNER_CP_TOKEN unset → runner skips its tick
+      # with a warning. Set it after seeding a submit-scoped token if
+      # you want to exercise the campaign-runner locally.
+    volumes:
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control-plane:
+        condition: service_started
+    ports:
+      - "8090:8090"
 
   worker:
     image: loom-worker:dev

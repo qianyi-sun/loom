@@ -11,16 +11,16 @@ Postgres + MinIO are the only stateful services.
 
 | Service | Routes mounted at | Audience |
 |---|---|---|
-| `loom_service` | `/api/v1/*` | External (SPA, `curl`, customer scripts) — designed surface |
-| Control Plane | root (`/trials`, `/workers/...`, `/admin/worker-tokens`, etc.) | Workers + `loom_service` + (today) external operators |
+| `loom_service` | `/api/v1/*` | External (SPA, `curl`, customer scripts) |
+| Control Plane | root (`/trials`, `/workers/...`, `/admin/worker-tokens`, etc.) | Workers + `loom_service` (cluster-internal only) |
 | LLM Gateway | `/v1/*` (OpenAI dialect), `/v1beta/*` (Gemini dialect), `/admin/*` | Agents from inside sandboxes |
 
-The intended layering is SPA → `loom_service` → CP. As shipped today,
-`deploy/k8s/ingress.yaml` fronts the Control Plane directly at the
-external host (`loom.example.com`) and `loom_service` is not yet
-packaged into a Dockerfile / k8s manifest. The `operator-runbook.md`
-curl examples reflect the shipped reality (hitting CP routes
-directly).
+Layering: SPA / external curl → `loom_service` (`/api/v1/*`) → CP
+over cluster DNS. `deploy/k8s/ingress.yaml` exposes only
+`loom_service` (at `loom.example.com`) and the LLM Gateway (at
+`gateway.loom.example.com`); CP is reachable only inside the cluster.
+For operator-side admin curls, port-forward CP:
+`kubectl port-forward deploy/loom-control-plane 8080:8080`.
 
 ## Process model
 

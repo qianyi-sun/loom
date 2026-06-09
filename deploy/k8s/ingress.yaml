@@ -8,6 +8,10 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
 spec:
   rules:
+    # External REST surface. `loom_service` mounts everything under
+    # `/api/v1/*` and forwards trial CRUD to the Control Plane over
+    # cluster-internal DNS. Use this for SPA, curl, and customer
+    # scripts.
     - host: loom.example.com
       http:
         paths:
@@ -15,9 +19,12 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: loom-control-plane
+                name: loom-service
                 port:
-                  number: 8080
+                  number: 8090
+    # LLM Gateway is exposed at its own host because agents inside
+    # sandboxes need a stable URL to call from outside the cluster.
+    # Bearer auth is enforced at the route level.
     - host: gateway.loom.example.com
       http:
         paths:
@@ -28,3 +35,11 @@ spec:
                 name: loom-llm-gateway
                 port:
                   number: 9100
+  # NOTE: the Control Plane (`loom-control-plane:8080`) is intentionally
+  # NOT exposed via Ingress. It carries worker-only routes
+  # (`POST /trials/claim`, `PATCH /trials/{id}/state`) and admin
+  # endpoints (`POST /admin/worker-tokens`) that should only be
+  # reachable from inside the cluster. Workers + `loom_service`
+  # reach the CP through cluster DNS (`http://loom-control-plane:8080`).
+  # For operator-side admin curls, port-forward:
+  #   kubectl port-forward deploy/loom-control-plane 8080:8080

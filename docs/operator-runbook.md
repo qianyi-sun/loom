@@ -9,6 +9,7 @@ top-level README + `deploy/docker-compose.dev.yml`.
    ```bash
    docker build -f deploy/Dockerfile.control-plane -t loom-control-plane:0.7 .
    docker build -f deploy/Dockerfile.gateway       -t loom-llm-gateway:0.7   .
+   docker build -f deploy/Dockerfile.service       -t loom-service:0.7       .
    docker build -f deploy/Dockerfile.worker        -t loom-worker:0.7        .
    ```
    Push to your registry, then update `image:` refs in `deploy/k8s/*.yaml`.
@@ -36,6 +37,7 @@ top-level README + `deploy/docker-compose.dev.yml`.
    # wait for postgres + minio ready
    kubectl apply -f deploy/k8s/llm-gateway.yaml
    kubectl apply -f deploy/k8s/control-plane.yaml
+   kubectl apply -f deploy/k8s/loom-service.yaml
    kubectl apply -f deploy/k8s/worker.yaml
    kubectl apply -f deploy/k8s/ingress.yaml
    ```
@@ -53,14 +55,44 @@ top-level README + `deploy/docker-compose.dev.yml`.
    VALUES (decode(sha256_hex('admin_TOKEN_RAW_VALUE'), 'hex'),
            'admin', ARRAY['admin:tokens'], now());
    ```
-   Then use `POST /admin/worker-tokens` to issue worker tokens:
+   The Control Plane's `POST /admin/worker-tokens` route is
+   intentionally NOT exposed via Ingress (see
+   `deploy/k8s/ingress.yaml`). Reach it via port-forward:
    ```bash
-   curl -X POST https://loom.example.com/admin/worker-tokens \
+   kubectl port-forward deploy/loom-control-plane 8080:8080 &
+   curl -X POST http://localhost:8080/admin/worker-tokens \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
      -d '{"expires_in_days": 365}'
    ```
    Update the `worker-token` key in `loom-secrets` with the returned
    raw token, then `kubectl rollout restart deploy/loom-worker`.
+
+6. **(Optional) Provision the campaign-runner CP token.** The
+   `loom_service` campaign-runner needs a `submit`-scoped team token
+   to fan out trials from campaigns. Without it, the runner skips
+   its tick with a warning — campaigns will not advance.
+
+   CP's `POST /admin/worker-tokens` hardcodes `type=worker` /
+   `scopes=[worker:*]` so it cannot mint a submit-scoped token. Mint
+   instead via `loom_service`'s `POST /api/v1/tokens`, which DOES
+   accept `type` + `scopes` + `team_id`. Port-forward `loom-service`
+   (NOT CP), pick the team that will own the campaigns, then patch
+   the secret:
+   ```bash
+   kubectl port-forward deploy/loom-service 8090:8090 &
+   # SYSTEM_TEAM_UUID is the team_id you want campaigns to be
+   # attributed to — typically a dedicated "system" team you
+   # created via the SQL bootstrap (similar to step 5's admin
+   # token), or any existing team.
+   RAW=$(curl -sS -X POST http://localhost:8090/api/v1/tokens \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d "{\"type\": \"team\", \"team_id\": \"$SYSTEM_TEAM_UUID\",
+          \"scopes\": [\"submit\"], \"expires_in_days\": 365}" \
+     | jq -r .token)
+   kubectl patch secret loom-secrets \
+     -p "{\"stringData\":{\"svc-campaign-runner-cp-token\":\"$RAW\"}}"
+   kubectl rollout restart deploy/loom-service
+   ```
 
 ## Upgrade
 
@@ -71,16 +103,19 @@ docker build -t loom-control-plane:${NEW_TAG} -f deploy/Dockerfile.control-plane
 # ... push, then bump image refs:
 kubectl set image deploy/loom-control-plane control-plane=loom-control-plane:${NEW_TAG}
 kubectl set image deploy/loom-llm-gateway   gateway=loom-llm-gateway:${NEW_TAG}
+kubectl set image deploy/loom-service       loom-service=loom-service:${NEW_TAG}
 kubectl set image deploy/loom-worker        worker=loom-worker:${NEW_TAG}
 ```
 
 Workers drain on SIGTERM (default 600 s); k8s sends SIGTERM during rollout.
+`loom-service` and the Control Plane are stateless — restart-safe.
 
 ## Rollback
 
 ```bash
 kubectl rollout undo deploy/loom-control-plane
 kubectl rollout undo deploy/loom-llm-gateway
+kubectl rollout undo deploy/loom-service
 kubectl rollout undo deploy/loom-worker
 ```
 
@@ -103,18 +138,27 @@ requests use whatever card was active when they started.
 
 ## Token rotation
 
-Worker tokens:
-1. Mint a new token via `POST /admin/worker-tokens`.
+Worker tokens (admin route is CP-internal; reach via port-forward):
+1. Mint a new token via `POST /admin/worker-tokens` (port-forward CP
+   first: `kubectl port-forward deploy/loom-control-plane 8080:8080 &`).
 2. Update `loom-secrets` and `kubectl rollout restart deploy/loom-worker`.
 3. Revoke the old token by its hash prefix:
    ```bash
-   curl -X DELETE https://loom.example.com/admin/worker-tokens/$OLD_PREFIX \
+   curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
      -H "Authorization: Bearer $ADMIN_TOKEN"
    ```
    Prefix is the 4–64 hex chars from `token_hash_prefix` returned at issue.
 
-Team tokens: same flow against the `tokens` table, but the admin
-endpoint for team tokens is not yet shipped — insert directly via SQL.
+Team tokens: managed via `loom_service`'s public API:
+```bash
+curl -X POST https://loom.example.com/api/v1/tokens \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"type": "team", "team_id": "...",
+       "scopes": ["submit"], "expires_in_days": 90}'
+```
+`type` is required; allowed values are `team` and `admin`.
+Recognized `scopes`: `read:own`, `submit`, `admin:tokens`,
+`admin:rate_cards`. Unrecognized scopes 400 at the route.
 
 ## Alarm response (troubleshooting matrix)
 
