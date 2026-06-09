@@ -72,10 +72,24 @@ def load_rate_cards() -> RateCardTable:
 
 def lookup_entry(
     table: RateCardTable, *, provider: str, model: str,
+    default_zero: bool = False,
 ) -> RateCardEntry:
+    """Return the rate-card row for (provider, model).
+
+    `default_zero=True` returns an all-zero entry when no row exists
+    instead of raising. Use for providers where billing is naturally
+    optional (e.g. local LLM servers — `$0` until the user explicitly
+    adds a row to bill against their own GPU cost).
+    """
     for e in table.entries:
         if e.provider == provider and e.model == model:
             return e
+    if default_zero:
+        return RateCardEntry(
+            provider=provider, model=model,
+            input_per_mtok=0.0, output_per_mtok=0.0,
+            cache_read_per_mtok=0.0, cache_write_per_mtok=0.0,
+        )
     raise KeyError(
         f"no rate card entry for provider={provider!r} model={model!r}; "
         f"add one to {rate_cards_path()}",

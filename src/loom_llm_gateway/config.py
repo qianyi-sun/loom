@@ -2,10 +2,55 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
+
 from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from loom.models.types import LogLevel
+
+
+@dataclass(frozen=True)
+class LocalProviderConfig:
+    """One operator-registered locally-served OpenAI-compatible LLM
+    server. Surfaced through env vars `LOOM_GW_LOCAL_<NAME>_BASE_URL`
+    and optional `LOOM_GW_LOCAL_<NAME>_API_KEY`. Consumed by chat route
+    when `model="local/<name>/<model_id>"`. Gateway dispatch path is
+    follow-up work; the config surface is here so operators can stage
+    secrets ahead of the route-level support landing."""
+
+    base_url: str
+    api_key: str | None = None
+
+
+def _parse_local_providers_from_env() -> dict[str, LocalProviderConfig]:
+    """Scan os.environ for `LOOM_GW_LOCAL_<NAME>_BASE_URL` + optional
+    `LOOM_GW_LOCAL_<NAME>_API_KEY` pairs. Name is lowercased for
+    matching the same convention used by CLI config (TOML table keys
+    are lowercase identifiers)."""
+    base_prefix = "LOOM_GW_LOCAL_"
+    base_suffix = "_BASE_URL"
+    key_suffix = "_API_KEY"
+    names: dict[str, dict[str, str]] = {}
+    for env_key, env_val in os.environ.items():
+        if not env_key.startswith(base_prefix):
+            continue
+        if env_key.endswith(base_suffix):
+            name = env_key[len(base_prefix):-len(base_suffix)].lower()
+            names.setdefault(name, {})["base_url"] = env_val
+        elif env_key.endswith(key_suffix):
+            name = env_key[len(base_prefix):-len(key_suffix)].lower()
+            names.setdefault(name, {})["api_key"] = env_val
+    out: dict[str, LocalProviderConfig] = {}
+    for name, parts in names.items():
+        if "base_url" not in parts:
+            continue  # api_key without base_url is incomplete — ignore
+        out[name] = LocalProviderConfig(
+            base_url=parts["base_url"],
+            api_key=parts.get("api_key"),
+        )
+    return out
 
 
 class GatewaySettings(BaseSettings):
@@ -43,3 +88,11 @@ class GatewaySettings(BaseSettings):
 
     # Request timeout to providers
     upstream_timeout_sec: float = 120.0
+
+    @property
+    def local_providers(self) -> dict[str, LocalProviderConfig]:
+        """Operator-registered locally-served OpenAI-compatible LLM
+        servers, parsed from `LOOM_GW_LOCAL_<NAME>_BASE_URL` (+ optional
+        `_API_KEY`) env vars. Property (not field) so we recompute
+        whenever the env changes during a test session."""
+        return _parse_local_providers_from_env()

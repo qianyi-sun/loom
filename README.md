@@ -3,9 +3,12 @@
 A team platform for running LLMs on customizable tasks, tracking
 their performance, and saving results for download.
 
-LLMs are first-class — point at any provider (Anthropic, OpenAI,
-Google, or local). Tasks and agents are **pluggable infrastructure**,
-not assumptions:
+LLMs are first-class — point at any cloud provider (Anthropic,
+OpenAI, Google) or any **local** OpenAI-compatible server (vLLM,
+ollama, llama.cpp, lm-studio). See
+[`docs/user-guide.md#local-llms`](docs/user-guide.md) for the local
+workflow. Tasks and agents are **pluggable infrastructure**, not
+assumptions:
 
 - **Tasks** — 14 benchmark adapters ship out of the box (HumanEval,
   SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench, BFCL,

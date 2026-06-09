@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
@@ -28,6 +28,7 @@ from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom_cli.agent_factory import build_agent_factory
+from loom_cli.config import LocalProvider
 from loom_cli.upstream_gateway import UpstreamDirectGatewayClient
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class LocalRunner:
     anthropic_client: object
     openai_client: object
     google_client: object
+    local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
     trial_config: TrialConfig | None = None
 
@@ -59,6 +61,7 @@ class LocalRunner:
             openai_client=self.openai_client,
             google_client=self.google_client,
             tokens=self.upstream_gateway_tokens,
+            local_providers=self.local_providers,
         )
         agent_factory = build_agent_factory(
             team_id=self.team_id, trial_id=self.trial_id,

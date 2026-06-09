@@ -78,6 +78,68 @@ run is connected to a Loom service (`--server-url`). Standalone
 laptop runs skip persistence — the trajectories + ATIF still drop on
 local disk.
 
+## Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
+
+Loom supports locally-served LLMs via any OpenAI-compatible HTTP
+endpoint. Workflow:
+
+1. **Start your local server.** Examples:
+   ```bash
+   vllm serve meta-llama/Llama-3.1-8B-Instruct
+   # or
+   ollama serve  &&  ollama pull llama3.1
+   # or
+   ./llama-server -m model.gguf --port 8080
+   ```
+2. **Register it with Loom** (one-time per server):
+   ```bash
+   loom config set local.vllm.base_url http://localhost:8000/v1
+   # optional, only if your server requires auth (e.g. vLLM --api-key):
+   loom config set local.vllm.api_key sk-foo
+   ```
+   `vllm` is your chosen name; you can register several
+   (`local.ollama.base_url ...`, `local.lmstudio.base_url ...`)
+   and pick one per trial.
+3. **Sanity-check it's reachable** (recommended):
+   ```bash
+   loom models test local/vllm
+   # → ✓ vllm reachable at http://localhost:8000/v1
+   #     models advertised by /v1/models: 1
+   #       • meta-llama/Llama-3.1-8B-Instruct
+   ```
+4. **Run a trial against it.** Model spec is `local/<server>/<model_id>`
+   where `<model_id>` is what your server's `/v1/models` returns:
+   ```bash
+   loom run \
+     --task humaneval/HumanEval/0 \
+     --agent litellm \
+     --model local/vllm/meta-llama/Llama-3.1-8B-Instruct \
+     --backend docker
+   ```
+
+`loom models list` shows everything currently configured (remote
+providers + local servers, redacted keys).
+
+**Cost tracking:** local trials default to `$0` (no upstream API
+cost). If you want internal cost-accounting against your own GPU
+rates, add a row to `~/.config/loom/rate-cards.toml`:
+
+```toml
+[[entries]]
+provider = "local:vllm"          # "local:" prefix + your server name
+model = "meta-llama/Llama-3.1-8B-Instruct"
+input_per_mtok = 0.10            # your own $/Mtok numbers
+output_per_mtok = 0.30
+cache_read_per_mtok = 0.0
+cache_write_per_mtok = 0.0
+```
+
+Service-mode operators register local providers via env vars:
+`LOOM_GW_LOCAL_<NAME>_BASE_URL=http://...` (+ optional
+`LOOM_GW_LOCAL_<NAME>_API_KEY`). Route-level Gateway dispatch for
+`model=local/...` is the natural follow-up; today, service-mode
+clients reach local servers via `loom run` on the agent's host.
+
 ## `loom datasets` reference
 
 ```

@@ -1,9 +1,20 @@
 """XDG-aware config for the `loom` CLI.
 
-Lives at `$XDG_CONFIG_HOME/loom/config.toml` (default `~/.config/loom/config.toml`).
-Holds upstream LLM API tokens and optional `server_url` for additive
-result-posting. All fields are optional — a fresh install has no file
-and `load_config()` returns an empty `LoomConfig`.
+Lives at `$XDG_CONFIG_HOME/loom/config.toml` (default
+`~/.config/loom/config.toml`). Holds:
+
+- `tokens` — upstream LLM provider API keys (anthropic / openai /
+  google)
+- `server_url` — optional Control Plane URL for additive
+  result-posting from `loom run`
+- `local_providers` — registered locally-served OpenAI-compatible
+  LLM servers (vLLM, ollama, llama.cpp, lm-studio). Each server has
+  a name + base_url + optional api_key. The name disambiguates
+  between multiple local servers; the base_url is the
+  OpenAI-compatible endpoint (typically ends in `/v1`).
+
+All fields are optional — a fresh install has no file and
+`load_config()` returns an empty `LoomConfig`.
 """
 
 from __future__ import annotations
@@ -30,11 +41,20 @@ def config_path() -> Path:
 
 
 @dataclass
+class LocalProvider:
+    """One registered locally-served OpenAI-compatible LLM server."""
+
+    base_url: str
+    api_key: str | None = None
+
+
+@dataclass
 class LoomConfig:
     """Persisted CLI config. Mutable so callers can set fields then save."""
 
     tokens: dict[str, str] = field(default_factory=dict)
     server_url: str | None = None
+    local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
     def to_toml_dict(self) -> dict[str, object]:
         out: dict[str, object] = {}
@@ -42,6 +62,14 @@ class LoomConfig:
             out["tokens"] = dict(self.tokens)
         if self.server_url is not None:
             out["server_url"] = self.server_url
+        if self.local_providers:
+            local: dict[str, dict[str, str]] = {}
+            for name, p in self.local_providers.items():
+                entry: dict[str, str] = {"base_url": p.base_url}
+                if p.api_key is not None:
+                    entry["api_key"] = p.api_key
+                local[name] = entry
+            out["local_providers"] = local
         return out
 
 
@@ -57,7 +85,33 @@ def load_config() -> LoomConfig:
     server_url = raw.get("server_url")
     if server_url is not None and not isinstance(server_url, str):
         raise ValueError(f"{path}: server_url must be a string")
-    return LoomConfig(tokens=tokens, server_url=server_url)
+    local_raw = raw.get("local_providers", {})
+    if not isinstance(local_raw, dict):
+        raise ValueError(f"{path}: [local_providers] must be a table")
+    local_providers: dict[str, LocalProvider] = {}
+    for name, entry in local_raw.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{path}: [local_providers.{name}] must be a table "
+                f"with at minimum a base_url",
+            )
+        base_url = entry.get("base_url")
+        if not isinstance(base_url, str) or not base_url:
+            raise ValueError(
+                f"{path}: [local_providers.{name}].base_url is required "
+                f"(string, non-empty)",
+            )
+        api_key = entry.get("api_key")
+        if api_key is not None and not isinstance(api_key, str):
+            raise ValueError(
+                f"{path}: [local_providers.{name}].api_key must be a string",
+            )
+        local_providers[str(name)] = LocalProvider(
+            base_url=base_url, api_key=api_key,
+        )
+    return LoomConfig(
+        tokens=tokens, server_url=server_url, local_providers=local_providers,
+    )
 
 
 def save_config(cfg: LoomConfig) -> None:

@@ -109,6 +109,7 @@ async def _run_async(args: argparse.Namespace) -> int:
                 anthropic_client=a_client,
                 openai_client=o_client,
                 google_client=g_client,
+                local_providers=cfg.local_providers,
             )
             try:
                 result = await runner.run()
