@@ -39,6 +39,14 @@ logs/
 # IDE
 .idea/
 .vscode/
-.claude/settings.local.json
 .venv/
 NEW_SESSION_BRIEFING.md
+
+# Claude Code workspace — session state + worktrees. The worktrees
+# directory alone is ~hundreds of MB of repo clones, which floods
+# the IDE source-control panel with phantom "untracked" entries.
+.claude/
+
+# uv lockfile — opted out of tracking (env-specific resolution;
+# pyproject.toml is the version source of truth).
+uv.lock
