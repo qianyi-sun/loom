@@ -147,7 +147,6 @@ up.
 - **CHANGELOG:** `CHANGELOG.md`
 - **Docs index:** `docs/index.md` (start here)
 - **Architecture & contracts:** `docs/architecture/overview.md`
-- **Pre-Loom repo content** (read-only reference): `legacy/`
 
 ## What Loom does
 
@@ -224,7 +223,6 @@ web/                               # React SPA
 deploy/                            # docker-compose + k8s manifests
 docs/                              # index.md → user-guide, architecture/, operator-runbook, authoring-a-task
 scripts/                           # operator + test helpers
-legacy/                            # pre-Loom code, read-only reference
 ```
 
 ## Docs

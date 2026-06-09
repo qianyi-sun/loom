@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **`legacy/` archive deleted (2026-06-09).** Same "reflect current
+  state" principle that drove #268: 4 days since the pre-Loom code
+  was archived, zero salvage commits, 3.1 MB / 219 files of frozen
+  content clogging the working tree. Git history still has every file
+  — `git show f9e797d^:<path>` retrieves the pre-archive state,
+  `git show abe8843^:legacy/<path>` retrieves the archived state.
+  README + NOTICE updated; CHANGELOG `[Pre-Loom]` footer now points
+  at the git-show recipe instead of the deleted file.
+
 ### Changed
 - **Docs restructure (2026-06-09, #268).** `docs/` now reflects
   current code rather than development history. Deleted `docs/plans/`
@@ -960,4 +970,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Pre-Loom]
 
-For changes prior to the Loom rebuild, see `legacy/CHANGELOG-pre-loom.md`.
+For changes prior to the Loom rebuild, retrieve the original CHANGELOG
+via `git show f9e797d^:CHANGELOG.md` (commit before the legacy archive
+was created) or `git show abe8843^:legacy/CHANGELOG-pre-loom.md`
+(commit before legacy/ was removed).
