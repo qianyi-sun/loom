@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Docs restructure (2026-06-09, #268).** `docs/` now reflects
+  current code rather than development history. Deleted `docs/plans/`
+  (32 frozen execution scripts, ~50K lines), `docs/specs/` (5 dated
+  design docs, superseded), and `docs/notes/` (1 TB-2 probe, redundant
+  with the SHA pin + pin test). Added `docs/index.md` (navigation
+  entry point), `docs/user-guide.md` (researcher-facing `loom` CLI
+  guide), and `docs/architecture/{overview,driver-protocol,
+  benchmark-adapter,agent-adapter,trajectory-and-atif,cli-mode,
+  service-mode}.md` (focused architecture docs, ≤300 lines each).
+  Renamed `docs/task-authoring-guide.md` → `docs/authoring-a-task.md`.
+  Cross-refs rewired in README, NOTICE, CONTRIBUTING,
+  `src/loom_cli/__init__.py`, package READMEs, TB-2 docstrings,
+  `.github/ISSUE_TEMPLATE/config.yml`, `legacy/README.md`. Two
+  code-review passes during the PR caught + fixed invented APIs (state
+  machine, DRF SQL, Gateway routes, AgentAdapter Protocol shape,
+  verifier file paths), Protocol blocks missing `: ...` bodies, and
+  stale plan-number references.
+
 ### Added
 - **Plan 26 — Daytona cloud driver (2026-06-08, closes #252).** New
   top-level `src/loom_drivers/daytona/` package implements the Loom
