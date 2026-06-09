@@ -1,7 +1,8 @@
 # Overview
 
-Loom is a runtime for evaluating agents on benchmark tasks. Two
-execution modes share the same primitives:
+Loom runs LLMs against customizable tasks through pluggable agent
+harnesses, capturing the full execution trace + metrics for browsing
+and download. Two execution modes share the same primitives:
 
 - **CLI mode** — `loom run` on a laptop. No server stack. Trajectories
   and ATIF docs land on local disk. Provider SDKs called directly.

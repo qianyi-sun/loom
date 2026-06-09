@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "loom-benchmarks"
 version = "0.1.0"
-description = "Benchmark adapters for the Loom evaluation runtime."
+description = "Benchmark/task adapters for Loom."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

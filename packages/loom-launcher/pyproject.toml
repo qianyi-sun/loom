@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "loom-launcher"
 version = "0.1.0"
-description = "Loom — agent adapter registry and capture utilities."
+description = "Loom — pluggable agent harnesses + capture utilities."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

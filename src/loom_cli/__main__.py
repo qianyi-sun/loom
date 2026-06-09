@@ -14,8 +14,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="loom",
         description=(
-            "Loom CLI — ad-hoc agent evaluation. Run benchmarks against "
-            "agents from a laptop with no server required."
+            "Loom CLI — run LLMs on customizable tasks from a laptop. "
+            "Pluggable agents + benchmark adapters; trajectories + ATIF "
+            "results land on local disk. No server required."
         ),
     )
     p.add_argument("--version", action="version", version=__version__)

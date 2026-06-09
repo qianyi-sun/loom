@@ -1,21 +1,41 @@
 # Loom
 
-Agent evaluation and training-data generation runtime.
+A team platform for running LLMs on customizable tasks, tracking
+their performance, and saving results for download.
 
-**Benchmark-agnostic by design** — scalability and compatibility with
-arbitrary benchmarks via per-benchmark adapters are the product, not
-optimization for any single workflow. 14 benchmark adapters ship today
-(HumanEval, SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench,
-BFCL, GAIA, AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench,
-Terminal-Bench-2.0). 11 agent adapters (Claude Code, Codex,
-OpenHands, Aider, Gemini, Qwen, Kimi, …).
+LLMs are first-class — point at any provider (Anthropic, OpenAI,
+Google, or local). Tasks and agents are **pluggable infrastructure**,
+not assumptions:
 
-Two ways to use Loom:
+- **Tasks** — 14 benchmark adapters ship out of the box (HumanEval,
+  SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench, BFCL,
+  GAIA, AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench,
+  Terminal-Bench-2.0). Add your own by implementing a
+  `BenchmarkAdapter` Protocol — your task isn't locked to anyone
+  else's leaderboard.
+- **Agents** — 11 pick-up-and-use harnesses for popular CLI agents
+  (Claude Code, Codex, OpenHands, Aider, Gemini, Qwen, Kimi, ...)
+  plus an `oracle` baseline. Bring your own by implementing
+  `AgentAdapter` (a small `build_invocation` + `capture_events`
+  Protocol in the `loom-launcher` package).
+
+For every trial, Loom records the full agent execution as
+event-sourced JSONL (every LLM call, tool use, env exec, verifier
+check), projects an **ATIF v1.7** metric document (per-step rewards,
+token usage, cost attribution, verifier outcomes), and stores both
+for browsing in the SPA or downloading as artifacts. Multi-team fair
+scheduling (DRF), per-`(team, trial, step)` cost attribution, license
+allowlists, and a `/api/v1/usage` dashboard make it usable for a
+research org, not just one user.
+
+Two ways to consume:
 
 - **`loom` CLI** — `pip install` and run benchmarks against agents on
   your laptop. No server stack.
-- **Service mode** — clustered Control Plane + Workers + LLM Gateway
-  + Postgres + MinIO, with a React SPA at `web/` for browsing trials.
+- **Service mode** — Control Plane + Workers + LLM Gateway + Postgres
+  + MinIO, with a React SPA at `web/` for browsing trials, campaigns,
+  and per-team usage. `loom service up` brings the whole stack up in
+  one command.
 
 ---
 

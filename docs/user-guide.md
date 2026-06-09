@@ -1,7 +1,9 @@
 # User Guide — `loom` CLI
 
-Everything a researcher needs to run benchmark evaluations against
-arbitrary agents with one `pip install`.
+Everything a researcher needs to run LLMs against customizable tasks
+from a laptop. Pluggable agents (use one of the 11 shipped harnesses
+or write your own); pluggable task adapters (14 ship). One
+`pip install`, then `loom run`.
 
 ## Install
 
