@@ -4,7 +4,7 @@ Subcommands:
 - list [--installed | --available | --remote] [--json]
 - show <slug>
 - install <slug>
-- refresh-registry
+- refresh-catalog
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import argparse
 import sys
 
 from loom_cli import builtin as builtin_mod
+from loom_cli import catalog as catalog_mod
 from loom_cli import install as install_mod
-from loom_cli import registry as registry_mod
 from loom_cli import remote as remote_mod
 from loom_cli.discovery import DatasetEntry, union_entries
 from loom_cli.output import render_datasets_json, render_datasets_table
@@ -30,21 +30,21 @@ def _build_parser() -> argparse.ArgumentParser:
     filt.add_argument("--available", action="store_true")
     filt.add_argument("--remote", action="store_true")
     p_list.add_argument("--json", action="store_true", dest="as_json")
-    p_list.add_argument("--registry-url", default=None)
+    p_list.add_argument("--catalog-url", default=None)
     p_list.add_argument("--server-url", default=None)
     p_list.add_argument("--token", default=None)
 
     p_show = sub.add_parser("show")
     p_show.add_argument("slug")
-    p_show.add_argument("--registry-url", default=None)
+    p_show.add_argument("--catalog-url", default=None)
     p_show.add_argument("--server-url", default=None)
     p_show.add_argument("--token", default=None)
 
     p_install = sub.add_parser("install")
     p_install.add_argument("slug")
-    p_install.add_argument("--registry-url", default=None)
+    p_install.add_argument("--catalog-url", default=None)
 
-    sub.add_parser("refresh-registry")
+    sub.add_parser("refresh-catalog")
 
     return p
 
@@ -52,24 +52,24 @@ def _build_parser() -> argparse.ArgumentParser:
 def _gather(
     *,
     only: str | None,
-    registry_url: str | None,
+    catalog_url: str | None,
     server_url: str | None,
     token: str | None,
 ) -> list[DatasetEntry]:
     builtin = builtin_mod.load_builtin_entries() if only in (None, "installed") else []
     if only in (None, "available"):
         try:
-            registry = registry_mod.load_registry_entries(url=registry_url)
-        except registry_mod.RegistryFetchError as exc:
-            print(f"warning: registry fetch failed: {exc}", file=sys.stderr)
-            registry = []
+            catalog = catalog_mod.load_catalog_entries(url=catalog_url)
+        except catalog_mod.CatalogFetchError as exc:
+            print(f"warning: catalog fetch failed: {exc}", file=sys.stderr)
+            catalog = []
     else:
-        registry = []
+        catalog = []
     remote = (
         remote_mod.load_remote_entries(server_url=server_url, token=token)
         if only in (None, "remote") else []
     )
-    return union_entries(builtin=builtin, registry=registry, remote=remote)
+    return union_entries(builtin=builtin, catalog=catalog, remote=remote)
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
@@ -81,7 +81,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     elif args.remote:
         only = "remote"
     entries = _gather(
-        only=only, registry_url=args.registry_url,
+        only=only, catalog_url=args.catalog_url,
         server_url=args.server_url, token=args.token,
     )
     if args.as_json:
@@ -93,7 +93,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 def _cmd_show(args: argparse.Namespace) -> int:
     entries = _gather(
-        only=None, registry_url=args.registry_url,
+        only=None, catalog_url=args.catalog_url,
         server_url=args.server_url, token=args.token,
     )
     match = next((e for e in entries if e.slug == args.slug), None)
@@ -116,13 +116,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _cmd_install(args: argparse.Namespace) -> int:
     entries = _gather(
-        only=None, registry_url=args.registry_url,
+        only=None, catalog_url=args.catalog_url,
         server_url=None, token=None,
     )
     match = next((e for e in entries if e.slug == args.slug), None)
     if match is None or not match.available_pip_spec:
         print(
-            f"error: dataset {args.slug!r} not found in registry "
+            f"error: dataset {args.slug!r} not found in catalog "
             "(no pip spec available)",
             file=sys.stderr,
         )
@@ -137,8 +137,8 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
 
 def _cmd_refresh(_args: argparse.Namespace) -> int:
-    registry_mod.purge_registry_cache()
-    print("registry cache purged")
+    catalog_mod.purge_catalog_cache()
+    print("catalog cache purged")
     return 0
 
 
@@ -151,6 +151,6 @@ def dispatch(argv: list[str]) -> int:
         return _cmd_show(args)
     if args.subcmd == "install":
         return _cmd_install(args)
-    if args.subcmd == "refresh-registry":
+    if args.subcmd == "refresh-catalog":
         return _cmd_refresh(args)
     parser.error(f"unknown subcommand: {args.subcmd}")  # raises SystemExit

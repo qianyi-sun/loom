@@ -1,4 +1,4 @@
-"""union_entries: precedence builtin > remote > registry on slug dedup."""
+"""union_entries: precedence builtin > remote > catalog on slug dedup."""
 
 from __future__ import annotations
 
@@ -15,21 +15,21 @@ def _e(slug: str, source: str, status: str) -> DatasetEntry:
 
 def test_union_dedupes_with_builtin_winning() -> None:
     builtin = [_e("humaneval", "builtin", "installed")]
-    registry = [_e("humaneval", "registry", "available"),
-                _e("terminal-bench-2", "registry", "available")]
+    catalog = [_e("humaneval", "catalog", "available"),
+                _e("terminal-bench-2", "catalog", "available")]
     remote = [_e("custom", "remote", "remote-only")]
-    out = union_entries(builtin=builtin, registry=registry, remote=remote)
+    out = union_entries(builtin=builtin, catalog=catalog, remote=remote)
     by_slug = {e.slug: e for e in out}
     assert by_slug["humaneval"].source == "builtin"
     assert by_slug["humaneval"].status == "installed"
-    assert by_slug["terminal-bench-2"].source == "registry"
+    assert by_slug["terminal-bench-2"].source == "catalog"
     assert by_slug["custom"].source == "remote"
     assert [e.slug for e in out] == sorted(by_slug)
 
 
-def test_union_remote_wins_over_registry() -> None:
-    registry = [_e("rl-bench", "registry", "available")]
+def test_union_remote_wins_over_catalog() -> None:
+    catalog = [_e("rl-bench", "catalog", "available")]
     remote = [_e("rl-bench", "remote", "remote-only")]
-    out = union_entries(builtin=[], registry=registry, remote=remote)
+    out = union_entries(builtin=[], catalog=catalog, remote=remote)
     assert len(out) == 1
     assert out[0].source == "remote"

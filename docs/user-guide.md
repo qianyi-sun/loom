@@ -81,15 +81,15 @@ local disk.
 ## `loom datasets` reference
 
 ```
-loom datasets list                  # union: installed + registry + remote
+loom datasets list                  # union: installed + catalog + remote
 loom datasets list --installed      # only adapters in this venv
-loom datasets list --available      # only registry entries not installed
+loom datasets list --available      # only catalog entries not installed
 loom datasets list --remote         # only entries from LOOM_SERVER_URL/api/v1/benchmarks
 loom datasets list --json           # machine-readable output
 
 loom datasets show <slug>           # full detail for one adapter
-loom datasets install <slug>        # pip-install a registry entry
-loom datasets refresh-registry      # drop the 24h registry HTTP cache
+loom datasets install <slug>        # pip-install a catalog entry
+loom datasets refresh-catalog      # drop the 24h catalog HTTP cache
 ```
 
 Discovery sources, in precedence order (builtin wins on slug
@@ -99,8 +99,8 @@ conflict):
    `[project.entry-points."loom.benchmarks"]`
 2. **remote** — `GET <LOOM_SERVER_URL>/api/v1/benchmarks` when a Loom
    service is reachable
-3. **registry** — `src/loom_cli/registry_data/default-registry.json`
-   (override via `--registry-url` or `LOOM_REGISTRY_URL`)
+3. **catalog** — `src/loom_cli/catalog_data/default-catalog.json`
+   (override via `--catalog-url` or `LOOM_CATALOG_URL`)
 
 ## `loom config` reference
 

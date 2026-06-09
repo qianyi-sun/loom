@@ -20,9 +20,9 @@ def patched_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
             entry_point="loom_benchmarks.adapters.humaneval:HumanEvalAdapter",
         )]
 
-    def fake_registry(*, url: str | None) -> list[DatasetEntry]:
+    def fake_catalog(*, url: str | None) -> list[DatasetEntry]:
         return [DatasetEntry(
-            slug="terminal-bench-2", source="registry",
+            slug="terminal-bench-2", source="catalog",
             display_name="Terminal-Bench 2.0", license_spdx="Apache-2.0",
             license_url="", task_count=None, status="available",
             available_pip_spec="loom-benchmark-terminal-bench-2",
@@ -40,7 +40,7 @@ def patched_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
         )]
 
     monkeypatch.setattr("loom_cli.builtin.load_builtin_entries", fake_builtin)
-    monkeypatch.setattr("loom_cli.registry.load_registry_entries", fake_registry)
+    monkeypatch.setattr("loom_cli.catalog.load_catalog_entries", fake_catalog)
     monkeypatch.setattr("loom_cli.remote.load_remote_entries", fake_remote)
 
 
@@ -139,7 +139,7 @@ def test_install_unknown_slug(
     assert "not found" in capsys.readouterr().err.lower()
 
 
-def test_refresh_registry_purges_cache(
+def test_refresh_catalog_purges_cache(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     called = {"n": 0}
@@ -147,8 +147,8 @@ def test_refresh_registry_purges_cache(
     def fake_purge() -> None:
         called["n"] += 1
 
-    monkeypatch.setattr("loom_cli.registry.purge_registry_cache", fake_purge)
-    rc = dispatch(["refresh-registry"])
+    monkeypatch.setattr("loom_cli.catalog.purge_catalog_cache", fake_purge)
+    rc = dispatch(["refresh-catalog"])
     assert rc == 0
     assert called["n"] == 1
     assert "purged" in capsys.readouterr().out.lower()

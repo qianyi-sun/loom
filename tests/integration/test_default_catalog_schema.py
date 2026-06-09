@@ -1,4 +1,4 @@
-"""The shipped default-registry.json must parse + satisfy the
+"""The shipped default-catalog.json must parse + satisfy the
 DatasetEntry-compatible shape the loader expects."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 
 REG_PATH = (
     Path(__file__).resolve().parents[2]
-    / "src" / "loom_cli" / "registry_data" / "default-registry.json"
+    / "src" / "loom_cli" / "catalog_data" / "default-catalog.json"
 )
 
 REQUIRED_FIELDS = {
@@ -19,13 +19,13 @@ REQUIRED_FIELDS = {
 }
 
 
-def test_registry_file_exists() -> None:
+def test_catalog_file_exists() -> None:
     assert REG_PATH.is_file(), REG_PATH
 
 
-def test_registry_is_a_versioned_object_with_entries_list() -> None:
+def test_catalog_is_a_versioned_object_with_entries_list() -> None:
     data = json.loads(REG_PATH.read_text())
-    assert data["registry_version"] == 1
+    assert data["catalog_version"] == 1
     assert isinstance(data["entries"], list)
     # Registry holds non-builtin entries only — currently just terminal-
     # bench-2 ahead of Plan 25. Bump the floor as the slate grows.
@@ -46,13 +46,13 @@ def test_terminal_bench_2_entry_present_with_pip_spec() -> None:
     assert tb2["license_spdx"] == "Apache-2.0"
 
 
-def test_cli_list_includes_terminal_bench_2_from_default_registry(
+def test_cli_list_includes_terminal_bench_2_from_default_catalog(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """End-to-end: with no remote service + default registry, `list`
-    surfaces both installed builtins and the registry-only TB-2 entry."""
+    """End-to-end: with no remote service + default catalog, `list`
+    surfaces both installed builtins and the catalog-only TB-2 entry."""
     monkeypatch.delenv("LOOM_SERVER_URL", raising=False)
-    monkeypatch.delenv("LOOM_REGISTRY_URL", raising=False)
+    monkeypatch.delenv("LOOM_CATALOG_URL", raising=False)
 
     from loom_cli.datasets_cmd import dispatch
 

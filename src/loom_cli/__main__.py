@@ -71,12 +71,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # `datasets` is registered as a help-only stub here so it appears in
     # `loom --help`. The real subcommand surface (list/show/install/
-    # refresh-registry plus filters) is owned by loom_cli.datasets_cmd.dispatch
+    # refresh-catalog plus filters) is owned by loom_cli.datasets_cmd.dispatch
     # which receives raw argv from main() via a pre-route before argparse sees
     # the subcommand.
     sub.add_parser(
         "datasets",
-        help="Discover datasets (list/show/install/refresh-registry)",
+        help="Discover datasets (list/show/install/refresh-catalog)",
         add_help=False,
     )
 

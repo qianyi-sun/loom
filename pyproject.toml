@@ -63,7 +63,7 @@ include = ["loom*", "loom_drivers*"]
 
 [tool.setuptools.package-data]
 "loom_cli.data" = ["*.toml"]
-"loom_cli.registry_data" = ["*.json"]
+"loom_cli.catalog_data" = ["*.json"]
 
 [tool.ruff]
 line-length = 100

@@ -1,4 +1,4 @@
-"""Discovery layer — dataclass + union(builtin, registry, remote)."""
+"""Discovery layer — dataclass + union(builtin, catalog, remote)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-Source = Literal["builtin", "registry", "remote"]
+Source = Literal["builtin", "catalog", "remote"]
 Status = Literal["installed", "available", "remote-only"]
 
 
@@ -26,19 +26,19 @@ class DatasetEntry:
 def union_entries(
     *,
     builtin: Iterable[DatasetEntry],
-    registry: Iterable[DatasetEntry],
+    catalog: Iterable[DatasetEntry],
     remote: Iterable[DatasetEntry],
 ) -> list[DatasetEntry]:
     """Merge the three sources, deduping on slug.
 
-    Precedence: builtin > remote > registry. Rationale:
+    Precedence: builtin > remote > catalog. Rationale:
     - If pip-installed locally, that's the source of truth.
     - Else, if a CP service has it, prefer the live service over a
-      potentially-stale registry snapshot.
-    - Else, surface as "available" from the registry.
+      potentially-stale catalog snapshot.
+    - Else, surface as "available" from the catalog.
     """
     seen: dict[str, DatasetEntry] = {}
-    for e in registry:
+    for e in catalog:
         seen[e.slug] = e
     for e in remote:
         seen[e.slug] = e
@@ -49,18 +49,18 @@ def union_entries(
 
 def discover_all(
     *,
-    registry_url: str | None,
+    catalog_url: str | None,
     server_url: str | None,
     token: str | None,
 ) -> list[DatasetEntry]:
     from loom_cli.builtin import load_builtin_entries
-    from loom_cli.registry import RegistryFetchError, load_registry_entries
+    from loom_cli.catalog import CatalogFetchError, load_catalog_entries
     from loom_cli.remote import load_remote_entries
 
     builtin = load_builtin_entries()
     try:
-        registry = load_registry_entries(url=registry_url)
-    except RegistryFetchError:
-        registry = []
+        catalog = load_catalog_entries(url=catalog_url)
+    except CatalogFetchError:
+        catalog = []
     remote = load_remote_entries(server_url=server_url, token=token)
-    return union_entries(builtin=builtin, registry=registry, remote=remote)
+    return union_entries(builtin=builtin, catalog=catalog, remote=remote)

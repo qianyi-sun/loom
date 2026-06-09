@@ -1,9 +1,15 @@
-"""Remote registry loader. Defaults to the in-tree
-`registry_data/default-registry.json`. URL overridable via
-`--registry-url` (passed as `url=`) or the `LOOM_REGISTRY_URL` env var.
+"""Remote catalog loader — list of pip-installable benchmark/task
+adapters Loom knows about. Defaults to the in-tree
+`catalog_data/default-catalog.json`. URL overridable via
+`--catalog-url` (passed as `url=`) or the `LOOM_CATALOG_URL` env var.
+
+Distinct from the in-process `loom_benchmarks.registry` and
+`loom_launcher.registry` dicts (which hold *already-loaded* adapter
+instances); this module is about the *catalog of installable
+packages* — what `loom datasets list` shows under "available."
 
 Responses are cached on disk at `${LOOM_CACHE_DIR:-${XDG_CACHE_HOME:-
-~/.cache}}/loom/registry/<sha256(url)>.json` for 24h.
+~/.cache}}/loom/catalog/<sha256(url)>.json` for 24h.
 """
 
 from __future__ import annotations
@@ -24,32 +30,32 @@ from loom_cli.discovery import DatasetEntry
 _DEFAULT_TTL_SECONDS = 24 * 60 * 60
 
 
-class RegistryFetchError(RuntimeError):
-    """Raised when the remote registry cannot be retrieved."""
+class CatalogFetchError(RuntimeError):
+    """Raised when the catalog cannot be retrieved."""
 
 
-def _default_registry_path() -> Path:
+def _default_catalog_path() -> Path:
     return (
-        Path(__file__).parent / "registry_data" / "default-registry.json"
+        Path(__file__).parent / "catalog_data" / "default-catalog.json"
     )
 
 
-def resolve_registry_url(explicit: str | None) -> str:
+def resolve_catalog_url(explicit: str | None) -> str:
     if explicit:
         return explicit
-    env = os.environ.get("LOOM_REGISTRY_URL")
+    env = os.environ.get("LOOM_CATALOG_URL")
     if env:
         return env
-    return _default_registry_path().as_uri()
+    return _default_catalog_path().as_uri()
 
 
 def _cache_dir() -> Path:
     base = os.environ.get("LOOM_CACHE_DIR")
     if base:
-        return Path(base) / "loom" / "registry"
+        return Path(base) / "loom" / "catalog"
     xdg = os.environ.get("XDG_CACHE_HOME")
     root = Path(xdg) if xdg else Path.home() / ".cache"
-    return root / "loom" / "registry"
+    return root / "loom" / "catalog"
 
 
 def _normalize_url(url: str) -> str:
@@ -66,7 +72,7 @@ def _cache_path(url: str) -> Path:
     return _cache_dir() / f"{digest}.json"
 
 
-def purge_registry_cache() -> None:
+def purge_catalog_cache() -> None:
     d = _cache_dir()
     if not d.exists():
         return
@@ -85,7 +91,7 @@ def _fetch_payload(url: str) -> dict[str, Any]:
         try:
             return json.loads(Path(parsed.path).read_text())  # type: ignore[no-any-return]
         except (OSError, json.JSONDecodeError) as exc:
-            raise RegistryFetchError(f"failed to read {url}: {exc}") from exc
+            raise CatalogFetchError(f"failed to read {url}: {exc}") from exc
     cache = _cache_path(url)
     if cache.exists() and (time.time() - cache.stat().st_mtime) < _DEFAULT_TTL_SECONDS:
         try:
@@ -98,7 +104,7 @@ def _fetch_payload(url: str) -> dict[str, Any]:
             resp.raise_for_status()
             payload: dict[str, Any] = resp.json()
     except httpx.HTTPError as exc:
-        raise RegistryFetchError(f"failed to fetch {url}: {exc}") from exc
+        raise CatalogFetchError(f"failed to fetch {url}: {exc}") from exc
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(payload))
     return payload
@@ -125,19 +131,19 @@ def _coerce(raw: dict[str, Any]) -> _RawEntry:
     )
 
 
-def load_registry_entries(*, url: str | None) -> list[DatasetEntry]:
-    resolved = resolve_registry_url(url)
+def load_catalog_entries(*, url: str | None) -> list[DatasetEntry]:
+    resolved = resolve_catalog_url(url)
     payload = _fetch_payload(resolved)
-    if payload.get("registry_version") != 1:
-        raise RegistryFetchError(
-            f"unsupported registry_version: {payload.get('registry_version')!r}",
+    if payload.get("catalog_version") != 1:
+        raise CatalogFetchError(
+            f"unsupported catalog_version: {payload.get('catalog_version')!r}",
         )
     out: list[DatasetEntry] = []
     for raw in payload.get("entries", []):
         r = _coerce(raw)
         out.append(DatasetEntry(
             slug=r.slug,
-            source="registry",
+            source="catalog",
             display_name=r.display_name,
             license_spdx=r.license_spdx,
             license_url=r.license_url,

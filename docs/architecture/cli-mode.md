@@ -175,11 +175,11 @@ Internals:
   + `server_url`. `loom config show` redacts token values to
   `<first2>***<last2>`.
 - **Datasets discovery** — three sources merged with precedence
-  `builtin > remote > registry`:
+  `builtin > remote > catalog`:
   - `src/loom_cli/builtin.py` — entry-points loader
   - `src/loom_cli/remote.py` — `GET LOOM_SERVER_URL/api/v1/benchmarks`
-  - `src/loom_cli/registry.py` — JSON fetch + 24h on-disk cache;
-    in-tree default at `src/loom_cli/registry_data/default-registry.json`
+  - `src/loom_cli/catalog.py` — JSON fetch + 24h on-disk cache;
+    in-tree default at `src/loom_cli/catalog_data/default-catalog.json`
 - **Install** — `src/loom_cli/install.py`. Shells out to
   `[sys.executable, "-m", "pip", "install", spec]` after rejecting
   shell metacharacters in spec (policy-only — `subprocess.run` with a
