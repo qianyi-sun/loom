@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: loom-web }
+  template:
+    metadata:
+      labels: { app: loom-web }
+    spec:
+      # `nginxinc/nginx-unprivileged` runs as uid 101 (`nginx`) and
+      # listens on 8080. Refuse to schedule the pod if the cluster
+      # downgrades the image to a root-running variant.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+      containers:
+        - name: loom-web
+          image: loom-web:0.7
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /, port: 8080 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-web
+spec:
+  selector: { app: loom-web }
+  # Service-facing port stays 80 (other in-cluster things, the
+  # Ingress, expect a conventional :80). Forwarded to the pod's
+  # unprivileged :8080.
+  ports:
+    - port: 80
+      targetPort: 8080

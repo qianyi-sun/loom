@@ -295,6 +295,19 @@ Auth model: token-paste into the SPA login form, stored in
 `localStorage`. The API client surfaces 401s via a callback that
 auto-clears the token and bounces back to the login form.
 
+**Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
+node-slim builds the Vite bundle, nginx-alpine serves it.
+`deploy/k8s/web.yaml` is a 2-replica Deployment + Service on port
+80. The `loom-ingress` routes `loom.example.com/api/v1/*` to
+`loom-service:8090` and everything else to `loom-web:80`; nginx
+inside `loom-web` falls back to `index.html` for client-side
+React Router paths.
+
+For local dev: `cd web && npm run dev` runs Vite's dev server on
+:5173 with HMR. Vite's `server.proxy` config sends `/api/*` to
+`localhost:8090`, which is what `docker-compose.dev.yml` exposes
+`loom-service` at — no separate proxy config needed.
+
 ## Cross-cutting concerns
 
 - **Logging** — structlog JSON to stdout. Correlation IDs via

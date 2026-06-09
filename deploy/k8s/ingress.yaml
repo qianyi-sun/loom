@@ -8,20 +8,31 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
 spec:
   rules:
-    # External REST surface. `loom_service` mounts everything under
-    # `/api/v1/*` and forwards trial CRUD to the Control Plane over
-    # cluster-internal DNS. Use this for SPA, curl, and customer
-    # scripts.
+    # On `loom.example.com`:
+    #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
+    #   anything else → loom_web (React SPA; nginx falls back to
+    #                   index.html for client-side React Router paths)
+    #
+    # Path order matters: more-specific `/api/v1` MUST precede the
+    # catch-all `/`. Nginx ingress evaluates Prefix paths longest-first
+    # by default, but listing in this order keeps it obvious to humans.
     - host: loom.example.com
       http:
         paths:
-          - path: /
+          - path: /api/v1
             pathType: Prefix
             backend:
               service:
                 name: loom-service
                 port:
                   number: 8090
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-web
+                port:
+                  number: 80
     # LLM Gateway is exposed at its own host because agents inside
     # sandboxes need a stable URL to call from outside the cluster.
     # Bearer auth is enforced at the route level.

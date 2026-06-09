@@ -11,8 +11,11 @@ top-level README + `deploy/docker-compose.dev.yml`.
    docker build -f deploy/Dockerfile.gateway       -t loom-llm-gateway:0.7   .
    docker build -f deploy/Dockerfile.service       -t loom-service:0.7       .
    docker build -f deploy/Dockerfile.worker        -t loom-worker:0.7        .
+   docker build -f deploy/Dockerfile.web           -t loom-web:0.7           .
    ```
-   Push to your registry, then update `image:` refs in `deploy/k8s/*.yaml`.
+   `Dockerfile.web` is multi-stage (node-slim builds the Vite bundle
+   → nginx-alpine serves it). Push to your registry, then update
+   `image:` refs in `deploy/k8s/*.yaml`.
 
 2. **Create the `loom-secrets` Secret.** Required keys:
 
@@ -38,6 +41,7 @@ top-level README + `deploy/docker-compose.dev.yml`.
    kubectl apply -f deploy/k8s/llm-gateway.yaml
    kubectl apply -f deploy/k8s/control-plane.yaml
    kubectl apply -f deploy/k8s/loom-service.yaml
+   kubectl apply -f deploy/k8s/web.yaml
    kubectl apply -f deploy/k8s/worker.yaml
    kubectl apply -f deploy/k8s/ingress.yaml
    ```
@@ -104,11 +108,12 @@ docker build -t loom-control-plane:${NEW_TAG} -f deploy/Dockerfile.control-plane
 kubectl set image deploy/loom-control-plane control-plane=loom-control-plane:${NEW_TAG}
 kubectl set image deploy/loom-llm-gateway   gateway=loom-llm-gateway:${NEW_TAG}
 kubectl set image deploy/loom-service       loom-service=loom-service:${NEW_TAG}
+kubectl set image deploy/loom-web           loom-web=loom-web:${NEW_TAG}
 kubectl set image deploy/loom-worker        worker=loom-worker:${NEW_TAG}
 ```
 
 Workers drain on SIGTERM (default 600 s); k8s sends SIGTERM during rollout.
-`loom-service` and the Control Plane are stateless — restart-safe.
+`loom-service`, Control Plane, and `loom-web` are stateless — restart-safe.
 
 ## Rollback
 
@@ -116,6 +121,7 @@ Workers drain on SIGTERM (default 600 s); k8s sends SIGTERM during rollout.
 kubectl rollout undo deploy/loom-control-plane
 kubectl rollout undo deploy/loom-llm-gateway
 kubectl rollout undo deploy/loom-service
+kubectl rollout undo deploy/loom-web
 kubectl rollout undo deploy/loom-worker
 ```
 
