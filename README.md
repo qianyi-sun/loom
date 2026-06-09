@@ -98,7 +98,9 @@ docker compose -f deploy/docker-compose.dev.yml up -d
 alembic -c migrations/alembic.ini upgrade head
 TEAM_TOKEN=$(python scripts/seed_test_data.py)
 
-curl -X POST http://localhost:8080/api/v1/trials \
+# loom_service is the user-facing REST surface on :8090 — Control
+# Plane sits at :8080 behind it on the internal compose network.
+curl -X POST http://localhost:8090/api/v1/trials \
   -H "Authorization: Bearer $TEAM_TOKEN" \
   -d '{"task_id":"hello-world","config":{}}'
 ```
@@ -126,32 +128,26 @@ service-mode run.
 
 ## Status
 
-Plans 0–26 + #260 Phase 1 shipped. Latest plan tag:
-`loom-service-v0.22`. Newer ships are on `dev` tip:
+What's shipped: the full runtime + REST surface + React SPA + CLI +
+14 benchmark adapters + 11 agent adapters + Docker and Daytona cloud
+drivers. Both modes (CLI on laptop, service on cluster) are
+production-ready.
 
-| Plan | What | Closed |
-|---|---|---|
-| 22.5 | Real CI on push/PR (ruff + mypy --strict + pytest) | #247 |
-| 23 | `loom` CLI scaffold (`run` / `config` / `datasets`) | #249 |
-| 24 | Dataset discovery via entry-points + registry JSON | #250 |
-| 25 | Terminal-Bench-2.0 canonical adapter | #251 |
-| 26 | Daytona cloud driver + `cloud_compute_records` rollup | #252 |
-| #255 | SPA dev-deps security bump (vite/vitest/happy-dom) | #255 |
-| #260 | pytest-cov measurement in CI (Phase 1: no gate) | #260 |
-
-Plan 27 (Modal cloud driver) is queued but deferred —
-`cloud_compute_records` schema is already generic via the
-`cloud_provider` column, so Plan 27 ships zero schema work when picked
-up.
+Queue:
+- **Modal cloud driver** ([#253](https://github.com/carinrc/loom/issues/253)) — `cloud_compute_records` schema is already generic via the `cloud_provider` column, so ships zero schema work
+- **Production topology decisions** ([#134](https://github.com/carinrc/loom/issues/134))
+- Several `deferred:v1.5` items (SPA SSE, rate-card catalog, skill objects, weights inference, ops/governance policy, research-team intake)
 
 - **What shipped when:** GitHub releases + `git log` (no separate CHANGELOG)
 - **Docs index:** `docs/index.md` (start here)
 - **Architecture & contracts:** `docs/architecture/overview.md`
+- **Design tradeoffs vs Harbor:** `docs/loom-vs-harbor.md`
 
 ## What Loom does
 
 - Runs benchmark tasks against arbitrary agents (Claude Code, custom,
-  Oracle baseline, 11 concrete CLI adapters in `loom-launcher`).
+  Oracle baseline, 11 production CLI adapters in `loom-launcher` plus
+  a `hello` test-reference adapter).
 - Captures full agent trajectories as event-sourced JSONL on MinIO
   (or local disk in CLI mode).
 - Projects to **ATIF v1.7** at finalize for downstream tooling.
@@ -199,13 +195,18 @@ DAYTONA_API_KEY=... \
 pytest tests/integration/test_daytona_driver.py -v   # live Daytona, costs ~$0.01
 ```
 
-Coverage is measured + posted to PRs (no `--cov-fail-under` gate yet —
-Phase 1 of #260; baseline 72% at latest dev tip). `coverage.xml` ships
-as a workflow artifact.
+Coverage is measured + posted to PRs. The fast tier is gated at
+**70 %** (`coverage report --fail-under=70`) — drops below fail
+`repository-checks` for everyone. Combined fast+integration coverage
+is also computed (when integration ran via the `ci:integration`
+label) and posted to the PR comment, but isn't yet gated. Baseline
+~72 % fast tier, ~85 % combined. `coverage.xml` ships as a
+workflow artifact.
 
 ## Repo layout
 
 ```
+LICENSE                            # Apache-2.0
 src/loom/                          # foundation library (types, errors, models)
 src/loom_cli/                      # `loom` CLI entry point
 src/loom_drivers/                  # cloud Driver implementations (daytona/)
@@ -220,8 +221,12 @@ packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter
 migrations/                        # Alembic
 tests/{unit,contract,integration,system,property,loom_cli,fixtures}/
 web/                               # React SPA
-deploy/                            # docker-compose + k8s manifests
-docs/                              # index.md → user-guide, architecture/, operator-runbook, authoring-a-task
+deploy/                            # Dockerfile.{control-plane,gateway,worker,service,web}
+                                   # + k8s/{postgres,minio,llm-gateway,control-plane,
+                                   #        loom-service,web,worker,ingress}.yaml
+                                   # + nginx-spa.conf + docker-compose.{dev,test}.yml
+docs/                              # index.md → user-guide, architecture/, operator-runbook,
+                                   # authoring-a-task, loom-vs-harbor
 scripts/                           # operator + test helpers
 ```
 
