@@ -73,6 +73,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Discover datasets (list/show/install/refresh-registry)",
         add_help=False,
     )
+
+    # `loom service {up,down,status}` — one-liner wrapper around
+    # docker-compose + migrations + test-data seeding for the dev stack.
+    from loom_cli.service_cmd import add_service_subparser
+    add_service_subparser(sub)
+
     return p
 
 

@@ -48,6 +48,12 @@ Start with the overview, drill into the area you care about:
 - **[loom-vs-harbor.md](loom-vs-harbor.md)** — what Loom does better,
   what Loom does worse, and why we replaced Harbor instead of forking
 
+## I'm contributing to Loom
+
+- **[contributor-quickstart.md](contributor-quickstart.md)** — repo
+  layout, dev setup, tests + coverage gates, workflow + merge
+  mechanics
+
 ## Reference
 
 - `../CONTRIBUTING.md` — single-owner workflow, commit style,
