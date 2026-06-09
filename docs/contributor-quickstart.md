@@ -37,7 +37,7 @@ scripts/                           # operator + test helpers
 |---|---|---|
 | Foundation library | `src/loom/` | (used by all) |
 | `loom` CLI | `src/loom_cli/` | adapters, local disk, provider SDKs |
-| Cloud drivers | `src/loom_drivers/` | Daytona (Modal pending) |
+| Cloud drivers | `src/loom_drivers/` | Daytona, Modal |
 | Control Plane | `src/loom_control_plane/` | Postgres, MinIO |
 | LLM Gateway | `src/loom_llm_gateway/` | Anthropic / OpenAI / Google, Postgres |
 | Worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
@@ -72,7 +72,7 @@ CI gates the fast tier on every push + PR:
 pytest tests/unit tests/contract tests/property tests/loom_cli \
        packages/loom-launcher/tests packages/loom-benchmarks/tests \
        packages/loom-benchmark-terminal-bench-2/tests
-       # ~10 s, 649+ tests, no external deps
+       # ~10 s, no external deps
 ```
 
 Heavier suites are opt-in:
@@ -103,10 +103,11 @@ for the speedup history.
 - **Fast tier:** gated at **70 %** via
   `coverage report --fail-under=70` in CI. Drops below fail
   `repository-checks` for everyone.
-- **Combined fast + integration:** measured + posted to PR comments
-  when integration ran (i.e., `ci:integration` label or push). Not
-  yet gated — see [`#260`](https://github.com/carinrc/loom/issues/260)
-  for the staged rollout.
+- **Combined fast + integration:** measured + posted to the GitHub
+  Actions step summary (workflow run page) when integration ran
+  (i.e., `ci:integration` label or push). Not yet gated — see
+  [`#260`](https://github.com/carinrc/loom/issues/260) for the
+  staged rollout.
 - Baseline at latest dev tip: ~72 % fast, ~85 % combined.
 - `coverage.xml` ships as a workflow artifact for external tools.
 

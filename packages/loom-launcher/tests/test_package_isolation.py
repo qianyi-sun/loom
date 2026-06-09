@@ -29,7 +29,6 @@ _ALLOWED_TOP_LEVEL_PREFIXES = frozenset({
     "shlex",
     # External deps from pyproject.toml [project.dependencies]:
     "pydantic",
-    "httpx",
     # Internal launcher imports:
     "loom_launcher",
 })

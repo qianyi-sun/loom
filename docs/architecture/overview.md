@@ -21,7 +21,7 @@ bit-identical event-sourced JSONL trajectories.
 |---|---|---|
 | Foundation library | `src/loom/` | Types, errors, models, Driver Protocol, Trial orchestrator, Trajectory writer/reader, ATIF projection, Verifier base |
 | `loom` CLI | `src/loom_cli/` | `loom run/config/datasets`; stateless wrapper around `Trial.run()` |
-| Cloud drivers | `src/loom_drivers/` | `Driver` Protocol impls for cloud sandboxes (Daytona; Modal pending) |
+| Cloud drivers | `src/loom_drivers/` | `Driver` Protocol impls for cloud sandboxes (Daytona, Modal) |
 | Control Plane | `src/loom_control_plane/` | Trial state machine, DRF claim, trajectory index, signed-URL artifact upload |
 | LLM Gateway | `src/loom_llm_gateway/` | LiteLLM-backed provider proxy with rate-card cost compute + per-call attribution |
 | Worker | `src/loom_worker/` | Polls Control Plane for trials, runs them locally, emits trajectory to MinIO, reports state via fenced PATCH |

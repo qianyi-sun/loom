@@ -3,8 +3,8 @@
 
 # Governance and CI changes need platform-owner review.
 /.github/ @carinrc/platform-admins
-/docs/engineering/ @carinrc/platform-admins
-/Dockerfile.dev @carinrc/platform-admins
-/docker-compose.dev.yml @carinrc/platform-admins
+/deploy/ @carinrc/platform-admins
+/migrations/ @carinrc/platform-admins
 /CONTRIBUTING.md @carinrc/platform-admins
 /SECURITY.md @carinrc/platform-admins
+/LICENSE @carinrc/platform-admins

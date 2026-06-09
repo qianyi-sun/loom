@@ -152,19 +152,26 @@ Cloud Daytona sandboxes. See
 - Cost telemetry via `cloud_compute_records` table when constructed
   with `trial_id` + `team_id` + `session_factory`
 
-### Modal (pending)
+### Modal
 
-Tracked at issue [#253](https://github.com/carinrc/loom/issues/253).
-`cloud_compute_records` schema is generic via the `cloud_provider`
-column, so a Modal driver ships with zero schema work — just a
-`src/loom_drivers/modal/` sibling.
+`src/loom_drivers/modal/`. Bridges Modal's sync SDK via
+`asyncio.to_thread` (same pattern DockerDriver uses for docker-py).
+Snapshot reuse via per-process `modal.Image.from_id()` cache keeps
+cold starts down. GPU passthrough via `Capabilities.gpu_types` (added
+additively when this driver shipped) + a `--gpu <TYPE>` CLI flag on
+`loom run`. Cost telemetry routes through the same
+`cloud_compute_records` table as Daytona, tagged
+`cloud_provider="modal"`; `/api/v1/usage` exposes
+`modal_compute_seconds` + `modal_cost_usd` alongside the Daytona
+fields. Auth via `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`. Live
+integration test opt-in via `LOOM_RUN_MODAL_INTEGRATION=1`.
 
 ## Adding a new driver
 
 1. Pick a Driver as reference. For cloud sandbox APIs that are
    async-native, copy `loom_drivers/daytona/`. For SDK-bridged
-   sync-style APIs that need a threadpool, see the (pending) Modal
-   plan.
+   sync-style APIs that need a threadpool, copy `loom_drivers/modal/`
+   (specifically its `client.py` `asyncio.to_thread` bridge pattern).
 2. Implement every Protocol method. Run
    `pytest tests/contract/test_driver_contract.py` — the parametrized
    contract suite exercises Protocol conformance against every

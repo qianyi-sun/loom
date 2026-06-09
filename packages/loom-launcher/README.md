@@ -1,6 +1,6 @@
 # loom-launcher
 
-Per-agent adapters + sandbox capture utilities for the [Loom](https://github.com/carin-research/loom) agent-evaluation runtime.
+Pluggable agent harnesses + sandbox capture utilities for [Loom](https://github.com/carinrc/loom) — a team platform for running LLMs on customizable tasks.
 
 Two consumers:
 - **Workers** install this package to read adapter metadata (env vars, argv, capture pattern) and construct a `SubprocessAgent`.
