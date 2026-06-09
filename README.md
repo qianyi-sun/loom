@@ -144,7 +144,7 @@ Plan 27 (Modal cloud driver) is queued but deferred —
 `cloud_provider` column, so Plan 27 ships zero schema work when picked
 up.
 
-- **CHANGELOG:** `CHANGELOG.md`
+- **What shipped when:** GitHub releases + `git log` (no separate CHANGELOG)
 - **Docs index:** `docs/index.md` (start here)
 - **Architecture & contracts:** `docs/architecture/overview.md`
 
@@ -235,7 +235,7 @@ scripts/                           # operator + test helpers
   CLI mode, service mode)
 - `docs/operator-runbook.md` — production deployment + ops
 - `docs/authoring-a-task.md` — writing a new benchmark task
-- `CHANGELOG.md` — what shipped and when
+- `docs/loom-vs-harbor.md` — design tradeoffs vs. Harbor + current gaps
 
 ## Contributing
 

@@ -43,8 +43,14 @@ Start with the overview, drill into the area you care about:
   Control Plane + Worker + LLM Gateway + Postgres + MinIO; DRF
   scheduling; auth model; persistence schema
 
+## I want to know how Loom compares to Harbor
+
+- **[loom-vs-harbor.md](loom-vs-harbor.md)** — what Loom does better,
+  what Loom does worse, and why we replaced Harbor instead of forking
+
 ## Reference
 
-- `../CHANGELOG.md` — what shipped and when
 - `../CONTRIBUTING.md` — single-owner workflow, commit style,
   Definition of Done
+- GitHub releases + `git log` — what shipped when (no separate
+  CHANGELOG; release notes auto-generated from squash-merge PR titles)

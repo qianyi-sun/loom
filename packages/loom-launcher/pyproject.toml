@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Loom — agent adapter registry and capture utilities."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
 authors = [{ name = "CARIN Research Center" }]
 dependencies = [
   "pydantic>=2.6,<3.0",

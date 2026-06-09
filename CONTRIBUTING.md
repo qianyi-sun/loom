@@ -58,7 +58,6 @@ Before declaring work shipped:
 - `pytest tests/integration` passes for Docker-touching changes
   (use `sg docker -c "pytest tests/integration"` if your shell lacks
   the docker group)
-- `CHANGELOG.md` has an `[Unreleased]` entry under Added / Changed / Fixed
 - `README.md` / relevant `docs/architecture/*.md` updated if the
   architectural surface changed
 - Post-ship self-audit pass (re-read each touched file once more for
@@ -110,7 +109,9 @@ for release promotion PRs from `dev`.
 1. After dev validation passes for a planned release, open a release
    issue
 2. Bump `pyproject.toml [project] version` (root + any published
-   `packages/<name>/pyproject.toml`) and update `CHANGELOG.md`
+   `packages/<name>/pyproject.toml`); the GitHub release notes are
+   the user-facing changelog (auto-generated from squash-merge PR
+   titles between tags)
 3. Open a PR from `dev` to `main`
 4. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
    release
