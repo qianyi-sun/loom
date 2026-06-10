@@ -34,14 +34,33 @@ Start with the overview, drill into the area you care about:
 - **[architecture/agent-adapter.md](architecture/agent-adapter.md)**
   — `loom-launcher` framework; the 11 shipped CLI adapters;
   `SubprocessAgent`; how to add an agent
+- **[architecture/verifier-protocol.md](architecture/verifier-protocol.md)**
+  — typed `VerifierResult`; the 5 shipped verifiers (pytest,
+  script, structured, llm_judge, composite); how to add one
 - **[architecture/trajectory-and-atif.md](architecture/trajectory-and-atif.md)**
   — event-sourced JSONL trajectories; ATIF v1.7 projection; how
   trajectories flow from sandbox to MinIO to ATIF
 - **[architecture/cli-mode.md](architecture/cli-mode.md)** — how the
   `loom` CLI reuses `Trial.run()` statelessly with no server stack
+- **[architecture/local-llm.md](architecture/local-llm.md)** — local
+  OpenAI-compatible server dispatch (vLLM / ollama / llama.cpp /
+  lm-studio); inline `--local-server`; managed-vLLM (`--model hf:` / `/path/`)
+- **[architecture/multi-server-local-llm.md](architecture/multi-server-local-llm.md)**
+  — *(design, not yet shipped)* `loom serve` + repeatable `--model`
+  for comparing N models on the same dataset; sequential-by-default
+  load loop; `--parallel-models` opt-in
 - **[architecture/service-mode.md](architecture/service-mode.md)** —
-  Control Plane + Worker + LLM Gateway + Postgres + MinIO; DRF
-  scheduling; auth model; persistence schema
+  Control Plane + Worker + LLM Gateway + Postgres + MinIO; auth
+  model; persistence schema
+- **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
+  — the single-SQL claim query; DRF tie-break + priority + FIFO;
+  caps eligibility; crash recovery
+- **[architecture/llm-gateway.md](architecture/llm-gateway.md)** —
+  multi-dialect routing; per-(team, trial, step) attribution; why
+  we centralise the LLM call
+- **[architecture/cost-and-rate-cards.md](architecture/cost-and-rate-cards.md)**
+  — usage frozen, cost derived; rate-card shape; CLI vs. service
+  storage; re-pricing history
 
 ## I want to know how Loom compares to Harbor
 

@@ -47,6 +47,13 @@ NEW_SESSION_BRIEFING.md
 # the IDE source-control panel with phantom "untracked" entries.
 .claude/
 
+# `docs/superpowers/` is the working folder for the brainstorming +
+# writing-plans skills. Real design docs go under
+# `docs/architecture/` (with a "Status: design" header if not yet
+# shipped); plans archive with the PR on GitHub. Local drafts sit
+# under `.claude/{plans,specs}/` (already ignored above).
+docs/superpowers/
+
 # uv lockfile — opted out of tracking (env-specific resolution;
 # pyproject.toml is the version source of truth).
 uv.lock

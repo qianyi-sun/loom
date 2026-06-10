@@ -80,8 +80,86 @@ local disk.
 
 ## Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 
-Loom supports locally-served LLMs via any OpenAI-compatible HTTP
-endpoint. Workflow:
+Three paths, ordered by what most users reach for first.
+
+### Path A: inline — your server is already running
+
+Pass the server URL on the command line. No config, no state.
+
+```bash
+loom run --task humaneval/HumanEval/0 \
+         --agent claude-code \
+         --local-server http://localhost:8000/v1 \
+         --model meta-llama/Llama-3.1-8B-Instruct \
+         --backend docker
+```
+
+With `--local-server` present, `--model` is the upstream model id
+verbatim — no `provider/` split, no `local/<name>/` dance. Loom
+registers a transient `_inline` provider just for this trial.
+
+Auth flag if the server requires it:
+
+```bash
+loom run ... --local-server http://my-vllm.internal/v1 \
+             --local-api-key sk-foo
+# or
+LOOM_LOCAL_API_KEY=sk-foo loom run ...
+```
+
+CLI flag > env var > none. Cost defaults to `$0` (no rate-card row
+for `local:_inline` by default; add one keyed
+`provider="local:_inline"` if you want GPU attribution).
+
+### Path B: managed — Loom starts vLLM for you
+
+If you have weights on disk or a HuggingFace model id, install the
+optional vLLM extra and pass the spec directly:
+
+```bash
+pip install loom[vllm]      # one-time; vLLM has GPU requirements
+
+# HuggingFace model id
+loom run --task humaneval/HumanEval/0 \
+         --agent claude-code \
+         --model hf:meta-llama/Llama-3.1-8B-Instruct \
+         --backend docker
+
+# Local weights directory — pass the path directly
+loom run --task humaneval/HumanEval/0 \
+         --agent claude-code \
+         --model /data/checkpoints/my-llama-3.1-tune/ \
+         --backend docker
+```
+
+Path detection (no `file:` prefix needed): `--model` starting with
+`/`, `~`, `./`, or `../` is treated as a local weights directory.
+
+Loom:
+1. Finds a free TCP port (starting at 8234).
+2. Starts vLLM as a subprocess (`vllm serve <model> --port ...`).
+3. Polls `/v1/models` until healthy.
+4. Reads the canonical model id vLLM advertises (so HF ids that get
+   shortened by vLLM still resolve correctly).
+5. Runs the trial against `local/_auto_vllm/<served-name>`.
+6. Tears down vLLM at end-of-process (or on Ctrl-C / SIGTERM).
+
+vLLM tuning (passed through to `vllm serve`):
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--vllm-port N` | 0 (auto-pick from 8234) | Pin if you need a predictable port |
+| `--vllm-host HOST` | `127.0.0.1` (loopback) | Set to `0.0.0.0` to expose on the LAN |
+| `--tensor-parallel-size N` | 1 | GPUs across which to shard |
+| `--gpu-memory-utilization F` | 0.90 | 0.0–1.0 |
+| `--max-model-len N` | model's max | Cap context window |
+| `--enforce-eager` | off | Disable CUDA graphs (debug only) |
+| `--keep-alive` | off | Leave vLLM running after the trial (handy when iterating against the same model) |
+
+### Path C: persisted — same server, many runs
+
+If you target the same server every day, persist it once and skip
+typing the URL:
 
 1. **Start your local server.** Examples:
    ```bash
@@ -91,13 +169,12 @@ endpoint. Workflow:
    # or
    ./llama-server -m model.gguf --port 8080
    ```
-2. **Register it with Loom** (one-time per server):
+2. **Register it with Loom** (one-time):
    ```bash
    loom config set local.vllm.base_url http://localhost:8000/v1
-   # optional, only if your server requires auth (e.g. vLLM --api-key):
-   loom config set local.vllm.api_key sk-foo
+   loom config set local.vllm.api_key sk-foo   # optional
    ```
-   `vllm` is your chosen name; you can register several
+   `vllm` is your chosen name; register several
    (`local.ollama.base_url ...`, `local.lmstudio.base_url ...`)
    and pick one per trial.
 3. **Sanity-check it's reachable** (recommended):
@@ -107,8 +184,8 @@ endpoint. Workflow:
    #     models advertised by /v1/models: 1
    #       • meta-llama/Llama-3.1-8B-Instruct
    ```
-4. **Run a trial against it.** Model spec is `local/<server>/<model_id>`
-   where `<model_id>` is what your server's `/v1/models` returns:
+4. **Run a trial.** Model spec is `local/<server>/<model_id>` where
+   `<model_id>` is what `/v1/models` returns:
    ```bash
    loom run \
      --task humaneval/HumanEval/0 \

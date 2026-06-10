@@ -36,8 +36,78 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--split", default="test")
     p_run.add_argument("--agent", required=True,
                        help="Agent name (oracle / litellm / claude-code / ...)")
-    p_run.add_argument("--model", default=None,
-                       help="Model id in provider/name form, e.g. anthropic/claude-opus-4-7")
+    p_run.add_argument(
+        "--model", default=None,
+        help=(
+            "Model spec. Four shapes:\n"
+            "  <provider>/<name>           cloud or registered local server "
+            "(e.g. anthropic/claude-opus-4-7, local/vllm/Llama-3.1-8B)\n"
+            "  hf:<org>/<name>             HuggingFace model id; Loom "
+            "starts vLLM on it (e.g. hf:meta-llama/Llama-3.1-8B-Instruct)\n"
+            "  /path/ or ~/path/ or ./path/  local weights dir; Loom starts "
+            "vLLM on it\n"
+            "  <model_id>                  any string, when --local-server "
+            "is also set"
+        ),
+    )
+    p_run.add_argument(
+        "--local-server", dest="local_server", default=None,
+        help=(
+            "URL of an already-running OpenAI-compatible server (vLLM, "
+            "ollama, llama.cpp, lm-studio). With this flag, --model is "
+            "the upstream model id verbatim. Example: "
+            "--local-server http://localhost:8000/v1 "
+            "--model meta-llama/Llama-3.1-8B-Instruct"
+        ),
+    )
+    p_run.add_argument(
+        "--local-api-key", dest="local_api_key", default=None,
+        help=(
+            "Optional API key for --local-server (e.g. when vLLM was "
+            "started with --api-key). Falls back to LOOM_LOCAL_API_KEY "
+            "env var if unset."
+        ),
+    )
+    p_run.add_argument(
+        "--vllm-port", dest="vllm_port", type=int, default=0,
+        help=(
+            "vLLM port for hf:/path launches. 0 (default) auto-picks a "
+            "free port starting at 8234."
+        ),
+    )
+    p_run.add_argument(
+        "--vllm-host", dest="vllm_host", default="127.0.0.1",
+        help=(
+            "vLLM bind host for hf:/path launches. Default 127.0.0.1 "
+            "(loopback only); use 0.0.0.0 to expose on the LAN."
+        ),
+    )
+    p_run.add_argument(
+        "--gpu-memory-utilization", dest="gpu_memory_utilization",
+        type=float, default=0.90,
+        help="vLLM --gpu-memory-utilization (default 0.90).",
+    )
+    p_run.add_argument(
+        "--tensor-parallel-size", dest="tensor_parallel_size",
+        type=int, default=1,
+        help="vLLM --tensor-parallel-size (default 1).",
+    )
+    p_run.add_argument(
+        "--max-model-len", dest="max_model_len", type=int, default=None,
+        help="vLLM --max-model-len. Default: model's max.",
+    )
+    p_run.add_argument(
+        "--enforce-eager", dest="enforce_eager", action="store_true",
+        help="vLLM --enforce-eager (disable CUDA graph; debug only).",
+    )
+    p_run.add_argument(
+        "--keep-alive", dest="keep_alive", action="store_true",
+        help=(
+            "For hf:/path launches, leave vLLM running after the trial "
+            "completes (useful when iterating on tasks against the "
+            "same model)."
+        ),
+    )
     p_run.add_argument("--backend", default="docker",
                        choices=("docker", "fake", "daytona", "modal"),
                        help="Driver backend")

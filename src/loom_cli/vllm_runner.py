@@ -1,0 +1,302 @@
+"""vLLM launcher — start an OpenAI-compatible vLLM server on a HuggingFace
+model id or a local weights path, wait for it to be healthy, expose its
+base URL via the existing `local_providers` dispatch, and tear it down at
+trial end.
+
+User-facing UX:
+
+    loom run --task ... --agent ... --model hf:meta-llama/Llama-3.1-8B-Instruct
+    loom run --task ... --agent ... --model /path/to/weights/
+
+Loom handles vLLM subprocess lifecycle (start, health probe, port
+auto-pick, atexit + SIGTERM cleanup) so the user doesn't have to manage
+a separate server window.
+
+Inspired by Harbor's `harbor.vllm.manager.VLLMServerManager`
+(https://github.com/[REDACTED_CONTRIBUTOR]/harbor) but scoped to the local
+subprocess backend — batch scheduler + multi-launcher (ollama, llama.cpp) are
+follow-up work.
+
+The vLLM dep is optional (`pip install loom[vllm]`). Without it,
+`launch_vllm()` raises a `MissingVLLMDependencyError` with a copy-paste
+fix command.
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Public surface
+# ---------------------------------------------------------------------------
+
+
+class MissingVLLMDependencyError(RuntimeError):
+    """vLLM not installed in the active env."""
+
+
+@dataclass(frozen=True)
+class VLLMLaunchSpec:
+    """User-supplied launch knobs. All defaults match vLLM's own
+    defaults except `port` (we auto-pick to avoid collisions when
+    several `loom run` invocations share a machine)."""
+
+    # Model identifier — either a HuggingFace org/name (`hf:` prefix
+    # stripped by the CLI) or a local filesystem path.
+    model: str
+    # 0 = auto-pick a free port starting at 8234 (Harbor's default).
+    port: int = 0
+    # Bind to loopback by default — Loom is the only client, and
+    # exposing model weights / inference to the LAN by accident on an
+    # untrusted network is the kind of surprise we'd rather avoid.
+    # Override with `--vllm-host 0.0.0.0` for explicit LAN access.
+    host: str = "127.0.0.1"
+    gpu_memory_utilization: float = 0.90
+    tensor_parallel_size: int = 1
+    max_model_len: int | None = None
+    enforce_eager: bool = False
+    extra_args: tuple[str, ...] = ()
+    # Don't stop vLLM after the trial finishes — useful when iterating
+    # on tasks against the same model.
+    keep_alive: bool = False
+
+
+@dataclass
+class VLLMServerInfo:
+    """What the launcher returns to the caller."""
+
+    base_url: str          # `http://localhost:<port>/v1`
+    served_model_name: str # what /v1/models returns
+    pid: int               # so callers can also kill it themselves
+
+
+# Module-level registry of live processes so SIGINT/SIGTERM cleanup hits
+# everything. Matches the pattern Daytona uses (LiveSandboxRegistry).
+_LIVE_PROCESSES: list[subprocess.Popen[bytes]] = []
+_SIGNAL_HANDLERS_INSTALLED = False
+
+
+def launch_vllm(spec: VLLMLaunchSpec) -> VLLMServerInfo:
+    """Start a vLLM server matching `spec`, wait for healthy, return
+    its address + served-model name. Raises:
+
+    - `MissingVLLMDependencyError` if vLLM not installed.
+    - `RuntimeError` if the model path doesn't exist or the
+      server doesn't come up within the timeout.
+    """
+    _ensure_vllm_installed()
+    _install_cleanup_handlers()
+
+    port = spec.port or _find_free_port(8234)
+    model = _resolve_model_path(spec.model)
+    cmd = _build_cmd(model, port, spec)
+    logger.info("starting vLLM: %s", " ".join(cmd))
+    sys.stderr.write(
+        f"→ starting vLLM (model={model}, port={port}) ...\n",
+    )
+    proc = subprocess.Popen(cmd)
+    _LIVE_PROCESSES.append(proc)
+
+    base_url = f"http://localhost:{port}/v1"
+    try:
+        _wait_for_ready(base_url, proc, timeout_sec=300.0)
+        served = _query_served_model_name(base_url)
+    except Exception:
+        _stop_process(proc)
+        # Drop the dead/torn-down proc from the live list so atexit +
+        # signal handlers don't redundantly retry it later.
+        try:
+            _LIVE_PROCESSES.remove(proc)
+        except ValueError:
+            pass
+        raise
+
+    info = VLLMServerInfo(base_url=base_url, served_model_name=served, pid=proc.pid)
+    sys.stderr.write(
+        f"✓ vLLM ready (served_model_name={served}, base_url={base_url})\n",
+    )
+    return info
+
+
+def stop_all() -> None:
+    """Terminate every vLLM subprocess started in this session. Safe to
+    call multiple times. Honored by atexit + signal handlers."""
+    while _LIVE_PROCESSES:
+        _stop_process(_LIVE_PROCESSES.pop())
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _ensure_vllm_installed() -> None:
+    if shutil.which("vllm") is None:
+        raise MissingVLLMDependencyError(
+            "vLLM is not installed in the active environment. Install "
+            "with: `pip install loom[vllm]` or `pip install vllm`. "
+            "Note that vLLM has GPU requirements — see "
+            "https://docs.vllm.ai/en/latest/getting_started/installation.html.",
+        )
+
+
+def _resolve_model_path(spec_model: str) -> str:
+    """For local-path specs, sanity-check the path exists. For HF ids,
+    just return as-is — vLLM will resolve via the HuggingFace hub cache."""
+    if spec_model.startswith(("/", "./", "../", "~")):
+        path = Path(spec_model).expanduser().resolve()
+        if not path.exists():
+            raise RuntimeError(
+                f"model path {path!s} does not exist. Pass an absolute "
+                f"or relative path to a directory of weights, or use "
+                f"`hf:<org>/<name>` for a HuggingFace model id.",
+            )
+        return str(path)
+    return spec_model
+
+
+def _find_free_port(start: int) -> int:
+    """Return the first TCP port >= start that is free on this host."""
+    port = start
+    while port < start + 1000:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                port += 1
+    raise RuntimeError(f"no free port found in range {start}..{start + 1000}")
+
+
+def _build_cmd(model: str, port: int, spec: VLLMLaunchSpec) -> list[str]:
+    """Construct the `vllm serve ...` argv."""
+    args = [
+        "vllm", "serve", model,
+        "--host", spec.host,
+        "--port", str(port),
+        "--gpu-memory-utilization", str(spec.gpu_memory_utilization),
+        "--tensor-parallel-size", str(spec.tensor_parallel_size),
+    ]
+    if spec.max_model_len is not None:
+        args += ["--max-model-len", str(spec.max_model_len)]
+    if spec.enforce_eager:
+        args.append("--enforce-eager")
+    args += list(spec.extra_args)
+    return args
+
+
+def _wait_for_ready(
+    base_url: str, proc: subprocess.Popen[bytes], *, timeout_sec: float,
+) -> None:
+    """Poll `<base_url>/models` until 200 OK or timeout. Fails fast if
+    the subprocess has died (vLLM startup failure → SIGKILL or normal
+    exit — either way we surface a clear error rather than time out)."""
+    url = f"{base_url}/models"
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"vLLM process exited prematurely with code "
+                f"{proc.returncode} before /v1/models became reachable. "
+                "Check stderr above for the vLLM startup error.",
+            )
+        try:
+            r = httpx.get(url, timeout=2.0)
+            if r.status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(2.0)
+    raise RuntimeError(
+        f"vLLM did not become healthy within {timeout_sec:.0f}s at "
+        f"{url}. The process is still running (PID {proc.pid}); shut "
+        "it down manually with `kill ...` if needed.",
+    )
+
+
+def _query_served_model_name(base_url: str) -> str:
+    """Read the first model id from `/v1/models`. vLLM defaults to the
+    model path; users may also pass `--served-model-name X` via
+    extra_args."""
+    r = httpx.get(f"{base_url}/models", timeout=10.0)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    if not data:
+        raise RuntimeError(
+            f"vLLM /v1/models returned no entries at {base_url}. Server "
+            "may be starting up — try waiting longer.",
+        )
+    name = data[0].get("id")
+    if not isinstance(name, str):
+        raise RuntimeError(
+            f"vLLM /v1/models entry has no 'id' field: {data[0]!r}",
+        )
+    return name
+
+
+def _stop_process(proc: subprocess.Popen[bytes]) -> None:
+    """Graceful TERM → wait → KILL fallback. Synchronous so this works
+    inside atexit + signal handlers (no asyncio loop available)."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+            return
+        except subprocess.TimeoutExpired:
+            logger.warning("vLLM PID %d did not terminate in 30s; killing", proc.pid)
+            proc.kill()
+            proc.wait(timeout=10)
+    except Exception as exc:  # pragma: no cover — best-effort cleanup
+        logger.warning("failed to stop vLLM PID %d: %s", proc.pid, exc)
+
+
+def _install_cleanup_handlers() -> None:
+    """Register atexit + SIGTERM handler exactly once per process.
+
+    Why no SIGINT handler: the default Python SIGINT raises
+    `KeyboardInterrupt`, which propagates through `asyncio.run` and
+    triggers the `try/finally` in `_run_async` (the right place to
+    tear down vLLM + Docker + Daytona together). Installing our own
+    SIGINT handler here would short-circuit that path.
+
+    SIGTERM doesn't raise — atexit doesn't fire on it either — so we
+    do install a handler that tears down vLLM and then re-raises
+    default behavior so the host process exits.
+    """
+    global _SIGNAL_HANDLERS_INSTALLED
+    if _SIGNAL_HANDLERS_INSTALLED:
+        return
+    atexit.register(stop_all)
+
+    def _sigterm_handler(signum: int, frame: Any) -> None:
+        sys.stderr.write(
+            f"\n→ caught SIGTERM; tearing down "
+            f"{len(_LIVE_PROCESSES)} vLLM server(s) ...\n",
+        )
+        stop_all()
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except ValueError:  # pragma: no cover — not the main thread
+        pass
+    _SIGNAL_HANDLERS_INSTALLED = True

@@ -43,6 +43,12 @@ dependencies = [
 modal = [
   "modal>=0.66.55,<0.80",
 ]
+# `loom run --model hf:<id>` / `--model file:<path>` launches vLLM as a
+# managed subprocess. Optional because vLLM has GPU requirements + heavy
+# CUDA wheels that most users don't need.
+vllm = [
+  "vllm>=0.6,<1.0",
+]
 dev = [
   "hypothesis>=6.100,<7.0",
   "mypy>=1.10,<2.0",

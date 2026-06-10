@@ -126,6 +126,10 @@ Dispatches on `request.model.provider`:
 - `anthropic` → `messages.create(...)`
 - `openai` → `chat.completions.create(...)`
 - `google` → `generate_content_async(...)`
+- `local` → OpenAI-compatible HTTP against
+  `cfg.local_providers[server].base_url` (used for user-registered
+  servers AND for the transient `_auto_vllm` provider the launcher
+  installs — see [`local-llm.md`](local-llm.md))
 
 Cost is computed locally from `~/.config/loom/rate-cards.toml`
 (seeded from `src/loom_cli/data/default-rate-cards.toml` on first

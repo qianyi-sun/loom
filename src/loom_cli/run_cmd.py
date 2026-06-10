@@ -31,11 +31,17 @@ from loom.driver.fake import FakeDriver
 from loom.models.result import TrialResult, TrialState
 from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
-from loom_cli.config import load_config
+from loom_cli.config import LocalProvider, load_config
 from loom_cli.local_object_store import LocalDiskObjectStore
 from loom_cli.local_runner import LocalRunner
 from loom_cli.output import format_json_line, format_text_line
 from loom_cli.task_loader import LoadedTask, load_tasks
+from loom_cli.vllm_runner import (
+    MissingVLLMDependencyError,
+    VLLMLaunchSpec,
+    launch_vllm,
+    stop_all,
+)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -84,6 +90,81 @@ async def _run_async(args: argparse.Namespace) -> int:
             tokens[provider] = val
 
     model = _parse_model(args.model) if args.model else None
+
+    # --local-server: ad-hoc dispatch against an already-running
+    # OpenAI-compatible server. We register a transient `_inline`
+    # local provider and rewrite the model spec to address it. No
+    # vLLM subprocess; the server is the user's responsibility.
+    inline_local_name: str | None = None
+    if getattr(args, "local_server", None):
+        if model is not None and model.provider in ("hf", "file"):
+            raise SystemExit(
+                "--local-server is mutually exclusive with "
+                "--model hf:<id> or --model /path/ — those "
+                "launch their own vLLM; --local-server targets a "
+                "server you already started.",
+            )
+        if model is None:
+            raise SystemExit(
+                "--local-server requires --model <model_id>",
+            )
+        inline_local_name = "_inline"
+        cfg.local_providers[inline_local_name] = LocalProvider(
+            base_url=args.local_server,
+            api_key=(
+                getattr(args, "local_api_key", None)
+                or os.environ.get("LOOM_LOCAL_API_KEY")
+            ),
+        )
+        # The whole `--model` value is the upstream model id; rewrite
+        # to local/_inline/<full-id> so dispatch hits _call_local.
+        model = ModelSpec(
+            provider="local",
+            name=f"{inline_local_name}/{args.model}",
+        )
+
+    # If the user passed `--model hf:<id>` or a path, we launch a
+    # vLLM subprocess on those weights, register it as a transient
+    # local provider, and rewrite `model` to point at it. The
+    # trial(s) then dispatch through the existing local-provider
+    # path; vLLM is torn down at end-of-process via atexit.
+    auto_local_name: str | None = None
+    _maybe_warn_unused_vllm_flags(args, model)
+    if model is not None and model.provider in ("hf", "file"):
+        try:
+            info = launch_vllm(VLLMLaunchSpec(
+                model=model.name,
+                port=getattr(args, "vllm_port", 0),
+                host=getattr(args, "vllm_host", "127.0.0.1"),
+                gpu_memory_utilization=getattr(args, "gpu_memory_utilization", 0.90),
+                tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
+                max_model_len=getattr(args, "max_model_len", None),
+                enforce_eager=getattr(args, "enforce_eager", False),
+                keep_alive=getattr(args, "keep_alive", False),
+            ))
+        except MissingVLLMDependencyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        except RuntimeError as exc:
+            # Launch failure: missing path, no free port, vLLM startup
+            # crash, or 300s health-check timeout. Surface it as a clean
+            # CLI error rather than a stacktrace.
+            print(f"vLLM launch failed: {exc}", file=sys.stderr)
+            return 2
+        # Register under a fixed name so `loom config show` doesn't pick
+        # this up. The dispatch contract reads `cfg.local_providers`;
+        # we mutate cfg in-process only.
+        auto_local_name = "_auto_vllm"
+        cfg.local_providers[auto_local_name] = LocalProvider(
+            base_url=info.base_url, api_key=None,
+        )
+        # Rewrite the spec so `_call_local` resolves the right server +
+        # the right model id (vLLM may have shortened HF org/name into
+        # something different in served_model_name).
+        model = ModelSpec(
+            provider="local",
+            name=f"{auto_local_name}/{info.served_model_name}",
+        )
     store = LocalDiskObjectStore(root=output_dir / "_store")
 
     a_client, o_client, g_client = _build_sdk_clients(tokens)
@@ -129,8 +210,16 @@ async def _run_async(args: argparse.Namespace) -> int:
             await _maybe_post_result(args.server_url, result)
             return 0 if result.state == TrialState.SUCCEEDED else 1
 
-    exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
-    _maybe_write_tb2_report(args, completed)
+    try:
+        exit_codes = await asyncio.gather(*[_one(t) for t in tasks])
+        _maybe_write_tb2_report(args, completed)
+    finally:
+        # vLLM teardown happens on EVERY exit path (happy or exception)
+        # to close the GPU-orphan window. atexit catches Python exit
+        # but not OOM / SIGKILL — explicit cleanup is the safer default.
+        if auto_local_name is not None and not getattr(args, "keep_alive", False):
+            stop_all()
+
     return 0 if all(c == 0 for c in exit_codes) else 1
 
 
@@ -159,10 +248,39 @@ def _maybe_write_tb2_report(
 
 
 def _parse_model(spec: str) -> ModelSpec:
+    """Parse `--model VALUE` into a `ModelSpec`.
+
+    Recognized shapes:
+
+    - `<provider>/<name>` — cloud provider or registered local server.
+      Examples: `anthropic/claude-opus-4-7`,
+      `local/vllm/Llama-3.1-8B-Instruct`.
+    - `hf:<org>/<name>` — HuggingFace model id; Loom will launch vLLM
+      on this model for the duration of the run.
+      Example: `hf:meta-llama/Llama-3.1-8B-Instruct`.
+    - `<absolute-or-relative-path-to-weights-dir>` — local weights
+      directory; Loom launches vLLM on it. Detected by leading `/`,
+      `~`, `./`, or `../`. Example: `/data/checkpoints/my-model/`.
+    """
+    # Path detection — a leading filesystem marker is unambiguous and
+    # avoids forcing the user to type a `file:` prefix.
+    if spec.startswith(("/", "~", "./", "../")):
+        return ModelSpec(provider="file", name=spec)
+    if spec.startswith("hf:"):
+        body = spec[len("hf:"):]
+        if "/" not in body:
+            raise SystemExit(
+                f"hf:<id> must be `<org>/<name>` (got hf:{body!r}). "
+                "Example: hf:meta-llama/Llama-3.1-8B-Instruct",
+            )
+        return ModelSpec(provider="hf", name=body)
     if "/" not in spec:
         raise SystemExit(
-            f"--model must be 'provider/name' (got {spec!r}); "
-            f"e.g. anthropic/claude-opus-4-7",
+            f"--model must be 'provider/name', 'hf:<id>', or an "
+            f"absolute / relative path to weights (got {spec!r}); "
+            f"e.g. anthropic/claude-opus-4-7, "
+            f"hf:meta-llama/Llama-3.1-8B-Instruct, or "
+            f"/data/checkpoints/my-model/",
         )
     provider, name = spec.split("/", 1)
     return ModelSpec(provider=provider, name=name)
@@ -319,3 +437,36 @@ async def _maybe_post_result(
             )
     except Exception:
         pass
+
+
+def _maybe_warn_unused_vllm_flags(
+    args: argparse.Namespace, model: ModelSpec | None,
+) -> None:
+    """If the user set vLLM-launcher flags but the model spec doesn't
+    trigger a launch (e.g. they passed `--model anthropic/...
+    --tensor-parallel-size 2`), the flags are silently ignored. Warn
+    once on stderr so users notice the typo."""
+    if model is not None and model.provider in ("hf", "file"):
+        return
+    flagged: list[str] = []
+    if getattr(args, "vllm_port", 0):
+        flagged.append("--vllm-port")
+    if getattr(args, "vllm_host", "127.0.0.1") != "127.0.0.1":
+        flagged.append("--vllm-host")
+    if getattr(args, "tensor_parallel_size", 1) != 1:
+        flagged.append("--tensor-parallel-size")
+    if getattr(args, "max_model_len", None) is not None:
+        flagged.append("--max-model-len")
+    if abs(getattr(args, "gpu_memory_utilization", 0.90) - 0.90) > 1e-9:
+        flagged.append("--gpu-memory-utilization")
+    if getattr(args, "enforce_eager", False):
+        flagged.append("--enforce-eager")
+    if getattr(args, "keep_alive", False):
+        flagged.append("--keep-alive")
+    if flagged:
+        sys.stderr.write(
+            "warning: ignoring vLLM-launcher flags "
+            f"({', '.join(flagged)}) because --model is not "
+            "`hf:<id>` or a local weights path. These flags only apply when "
+            "Loom manages the vLLM lifecycle.\n",
+        )

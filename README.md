@@ -61,36 +61,67 @@ loom run --dataset swe-bench-verified \
          --backend docker --concurrency 4 --output-dir ./runs
 ```
 
-### Against a locally-served LLM
+### Running with local LLMs
 
-Loom accepts any OpenAI-compatible local server (vLLM, ollama,
-llama.cpp, lm-studio) — point it at your model, register the
-server's URL once, run trials against it like any other provider:
+Three ways to point Loom at a local LLM, ordered by what most users
+reach for first.
+
+**A. Already have a server running?** Pass `--local-server` inline.
+No config, no state.
 
 ```bash
-# 1. Start your server. Example: vLLM.
-vllm serve meta-llama/Llama-3.1-8B-Instruct
-# or:  ollama serve  &&  ollama pull llama3.1
-# or:  ./llama-server -m model.gguf --port 8080
-
-# 2. Tell Loom where to find it (one-time per server).
-loom config set local.vllm.base_url http://localhost:8000/v1
-# optional, only if the server requires auth (e.g. vLLM --api-key):
-loom config set local.vllm.api_key sk-foo
-
-# 3. Sanity-check (recommended).
-loom models test local/vllm
-# → ✓ vllm reachable at http://localhost:8000/v1
-#     models advertised by /v1/models: 1
-#       • meta-llama/Llama-3.1-8B-Instruct
-
-# 4. Run a trial. Model spec is `local/<server>/<model_id>` —
-#    `<server>` is your chosen name; `<model_id>` is what
-#    /v1/models returns.
+# Your vLLM (or ollama / llama.cpp / lm-studio) is already up at :8000
 loom run --task humaneval/HumanEval/0 \
-         --agent litellm \
+         --agent claude-code \
+         --local-server http://localhost:8000/v1\
+         --model meta-llama/Llama-3.1-8B-Instruct \
+         --backend docker
+
+# With auth (e.g. vLLM started with --api-key, or via env var):
+loom run ... --local-server http://my-vllm.internal/v1 \
+             --local-api-key sk-foo
+# or  LOOM_LOCAL_API_KEY=sk-foo loom run ...
+```
+
+**B. Want Loom to start vLLM for you?** Pass weights directly.
+
+```bash
+pip install loom[vllm]   # one-time, adds the vLLM dep (GPU required)
+
+# HuggingFace model id — Loom downloads + serves
+loom run --task humaneval/HumanEval/0 \
+         --agent claude-code \
+         --model hf:meta-llama/Llama-3.1-8B-Instruct \
+         --backend docker
+
+# Local weights directory — pass the path directly (no `file:` prefix)
+loom run --task humaneval/HumanEval/0 \
+         --agent claude-code \
+         --model /data/checkpoints/my-llama-3.1-tune/ \
+         --backend docker
+```
+
+Loom finds a free port (starting at 8234), starts vLLM, waits until
+`/v1/models` reports healthy, runs the trial, and tears down vLLM at
+the end. Ctrl-C cleans up too.
+
+vLLM tuning flags (forwarded to `vllm serve`):
+`--tensor-parallel-size N`, `--max-model-len N`,
+`--gpu-memory-utilization 0.85`, `--vllm-port 18234`,
+`--vllm-host 0.0.0.0` (default `127.0.0.1`; loopback-only by design —
+opt in explicitly to expose on the LAN), `--enforce-eager`,
+`--keep-alive` (leave server running between iterations).
+
+**C. Use the same server repeatedly?** Persist it with `loom config`.
+
+```bash
+loom config set local.vllm.base_url http://localhost:8000/v1
+loom config set local.vllm.api_key sk-foo   # optional
+
+loom run --task humaneval/HumanEval/0 \
+         --agent claude-code \
          --model local/vllm/meta-llama/Llama-3.1-8B-Instruct \
-         --backend docker --output-dir ./runs
+         --backend docker
 ```
 
 Register multiple servers (`local.ollama.base_url ...`,
@@ -102,7 +133,9 @@ Per-trial outputs land at `./runs/<trial-id>/events.jsonl` (full
 event trajectory) + `./runs/<trial-id>/atif.json` (ATIF v1.7
 projection). Full CLI reference, including service-mode env-var
 config (`LOOM_GW_LOCAL_<NAME>_BASE_URL`):
-[`docs/user-guide.md`](docs/user-guide.md).
+[`docs/user-guide.md`](docs/user-guide.md). Internals
+(subprocess lifecycle, model-spec rewrite, cleanup model):
+[`docs/architecture/local-llm.md`](docs/architecture/local-llm.md).
 
 ---
 
