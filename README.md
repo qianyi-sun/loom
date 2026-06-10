@@ -48,22 +48,61 @@ Two ways to consume:
 pip install -e . -e packages/loom-launcher -e packages/loom-benchmarks
 
 loom datasets list                          # what's available
-loom config set token.anthropic sk-ant-xxx  # one-time API key setup
+loom config set token.anthropic sk-ant-xxx  # one-time provider key setup
 
 # Smoke test: one HumanEval task, oracle baseline, no real agent.
 loom run --task humaneval/HumanEval/0 \
          --agent oracle --backend fake \
          --output-dir /tmp/loom-smoke --json
 
-# Real eval: SWE-Bench Verified against Claude Code in Docker sandboxes.
+# Real eval against a cloud provider (Anthropic, OpenAI, Google).
 loom run --dataset swe-bench-verified \
          --agent claude-code --model anthropic/claude-opus-4-7 \
          --backend docker --concurrency 4 --output-dir ./runs
 ```
 
+### Against a locally-served LLM
+
+Loom accepts any OpenAI-compatible local server (vLLM, ollama,
+llama.cpp, lm-studio) — point it at your model, register the
+server's URL once, run trials against it like any other provider:
+
+```bash
+# 1. Start your server. Example: vLLM.
+vllm serve meta-llama/Llama-3.1-8B-Instruct
+# or:  ollama serve  &&  ollama pull llama3.1
+# or:  ./llama-server -m model.gguf --port 8080
+
+# 2. Tell Loom where to find it (one-time per server).
+loom config set local.vllm.base_url http://localhost:8000/v1
+# optional, only if the server requires auth (e.g. vLLM --api-key):
+loom config set local.vllm.api_key sk-foo
+
+# 3. Sanity-check (recommended).
+loom models test local/vllm
+# → ✓ vllm reachable at http://localhost:8000/v1
+#     models advertised by /v1/models: 1
+#       • meta-llama/Llama-3.1-8B-Instruct
+
+# 4. Run a trial. Model spec is `local/<server>/<model_id>` —
+#    `<server>` is your chosen name; `<model_id>` is what
+#    /v1/models returns.
+loom run --task humaneval/HumanEval/0 \
+         --agent litellm \
+         --model local/vllm/meta-llama/Llama-3.1-8B-Instruct \
+         --backend docker --output-dir ./runs
+```
+
+Register multiple servers (`local.ollama.base_url ...`,
+`local.lmstudio.base_url ...`) and pick one per trial. Local trials
+cost $0 by default; add a rate-card row keyed
+`provider="local:<server>"` to attribute internal GPU cost.
+
 Per-trial outputs land at `./runs/<trial-id>/events.jsonl` (full
 event trajectory) + `./runs/<trial-id>/atif.json` (ATIF v1.7
-projection). Full CLI reference: [`docs/user-guide.md`](docs/user-guide.md).
+projection). Full CLI reference, including service-mode env-var
+config (`LOOM_GW_LOCAL_<NAME>_BASE_URL`):
+[`docs/user-guide.md`](docs/user-guide.md).
 
 ---
 
