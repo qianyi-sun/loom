@@ -3,19 +3,28 @@
 Everything a researcher needs to run LLMs against customizable tasks
 from a laptop. Pluggable agents (use one of the 11 shipped harnesses
 or write your own); pluggable task adapters (14 ship). One
-`pip install`, then `loom run`.
+`uv sync`, then `loom run`.
 
 ## Install
 
 ```bash
-pip install -e . \
-            -e packages/loom-launcher \
-            -e packages/loom-benchmarks \
-            -e packages/loom-benchmark-terminal-bench-2
+uv sync                                          # core deps; creates .venv/
+uv pip install -e packages/loom-launcher \
+               -e packages/loom-benchmarks \
+               -e packages/loom-benchmark-terminal-bench-2
+source .venv/bin/activate                        # so `loom` is on PATH
 ```
 
 The last package is optional (TB-2 adapter). All others ship the core
 14-adapter slate.
+
+> Why `uv`? It's what the repo's tests + CI use; it creates the venv
+> for you on first sync, sidestepping the PEP 668 "externally managed
+> environment" error you get from `pip install` on modern
+> Debian / Ubuntu. Install: <https://docs.astral.sh/uv/getting-started/installation/>.
+> Prefer plain `pip`? Run `python3 -m venv .venv && source
+> .venv/bin/activate` first, then `pip install -e . -e
+> packages/loom-launcher -e packages/loom-benchmarks`.
 
 ## First run (smoke)
 
@@ -117,7 +126,7 @@ If you have weights on disk or a HuggingFace model id, install the
 optional vLLM extra and pass the spec directly:
 
 ```bash
-pip install loom[vllm]      # one-time; vLLM has GPU requirements
+uv sync --extra vllm        # one-time; vLLM has GPU requirements
 
 # HuggingFace model id
 loom run --task humaneval/HumanEval/0 \

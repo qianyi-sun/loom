@@ -33,7 +33,7 @@ research org, not just one user.
 
 Two ways to consume:
 
-- **`loom` CLI** — `pip install` and run benchmarks against agents on
+- **`loom` CLI** — `uv sync` and run benchmarks against agents on
   your laptop. No server stack.
 - **Service mode** — Control Plane + Workers + LLM Gateway + Postgres
   + MinIO, with a React SPA at `web/` for browsing trials, campaigns,
@@ -45,7 +45,12 @@ Two ways to consume:
 ## Quick start — laptop (`loom run`)
 
 ```bash
-pip install -e . -e packages/loom-launcher -e packages/loom-benchmarks
+# Install with uv (recommended — what the repo's tests + CI use). uv
+# creates `.venv/` on first run, so no separate `python3 -m venv` step.
+# See https://docs.astral.sh/uv/getting-started/installation/ to install uv.
+uv sync                                           # core deps
+uv pip install -e packages/loom-launcher -e packages/loom-benchmarks
+source .venv/bin/activate                         # so `loom` is on PATH
 
 loom datasets list                          # what's available
 loom config set token.anthropic sk-ant-xxx  # one-time provider key setup
@@ -86,7 +91,7 @@ loom run ... --local-server http://my-vllm.internal/v1 \
 **B. Want Loom to start vLLM for you?** Pass weights directly.
 
 ```bash
-pip install loom[vllm]   # one-time, adds the vLLM dep (GPU required)
+uv sync --extra vllm   # one-time, adds the vLLM dep (GPU required)
 
 # HuggingFace model id — Loom downloads + serves
 loom run --task humaneval/HumanEval/0 \

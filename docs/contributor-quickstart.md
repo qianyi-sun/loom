@@ -50,11 +50,12 @@ scripts/                           # operator + test helpers
 ## Dev setup
 
 ```bash
-# One-time
-pip install -e ".[dev]"
-pip install -e packages/loom-launcher \
-            -e packages/loom-benchmarks \
-            -e packages/loom-benchmark-terminal-bench-2
+# One-time — uv creates .venv/ on first sync; activate it after.
+uv sync --extra dev
+uv pip install -e packages/loom-launcher \
+               -e packages/loom-benchmarks \
+               -e packages/loom-benchmark-terminal-bench-2
+source .venv/bin/activate
 
 # Provider keys + stack bootstrap
 cp .env.example .env       # then edit
