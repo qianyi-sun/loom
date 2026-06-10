@@ -141,6 +141,34 @@ def test_seed_test_data_parses_all_tokens(
     }
 
 
+def test_seed_test_data_invokes_dev_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`loom service up` must call the seed script with `--mode dev`
+    so the Benchmarks table is populated and no placeholder
+    (hello-world Task, card-e2e RateCard) is seeded into the dev
+    stack."""
+    from subprocess import CompletedProcess
+
+    from loom_cli.service_cmd import _seed_test_data
+
+    captured_argv: list[list[str]] = []
+
+    def _fake_run(argv, *_args, **_kwargs):
+        captured_argv.append(list(argv))
+        return CompletedProcess([], 0, "team: t\nworker: w\nadmin: a\n", "")
+
+    monkeypatch.setattr("loom_cli.service_cmd.subprocess.run", _fake_run)
+    rc, _tokens = _seed_test_data("postgresql://x/y")
+    assert rc == 0
+    assert captured_argv, "expected at least one subprocess.run call"
+    argv = captured_argv[0]
+    assert "--mode" in argv
+    assert argv[argv.index("--mode") + 1] == "dev"
+    assert "--print" in argv
+    assert argv[argv.index("--print") + 1] == "all"
+
+
 def test_print_summary_labels_admin_as_dev_only(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

@@ -7,9 +7,17 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
+import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
+import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
+import { StatCard } from "../components/StatCard";
+
+const SELECT_CLASSES =
+  "rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700";
+const DATE_INPUT_CLASSES =
+  "rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700";
 
 function defaultStart(): string {
   const d = new Date();
@@ -23,9 +31,7 @@ function defaultEnd(): string {
 export default function UsageDashboard(): JSX.Element {
   const [start, setStart] = useState(defaultStart());
   const [end, setEnd] = useState(defaultEnd());
-  const [groupBy, setGroupBy] = useState<"day" | "week" | "month">(
-    "day",
-  );
+  const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [teamId, setTeamId] = useState("");
 
   const query = useQuery({
@@ -40,48 +46,61 @@ export default function UsageDashboard(): JSX.Element {
   });
 
   return (
-    <>
-      <div className="loom-page-header">
-        <h1>Usage</h1>
-      </div>
+    <div className="space-y-6">
+      <header>
+        <h1 className="text-2xl font-bold text-slate-900">Usage</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Trials, tokens, and cost per bucket over the selected range.
+        </p>
+      </header>
 
-      <div className="loom-filters">
-        <label>
-          Start:&nbsp;
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Start
+          </span>
           <input
             type="date"
             value={start}
             onChange={(e) => setStart(e.target.value)}
+            className={DATE_INPUT_CLASSES}
           />
         </label>
-        <label>
-          End:&nbsp;
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            End
+          </span>
           <input
             type="date"
             value={end}
             onChange={(e) => setEnd(e.target.value)}
+            className={DATE_INPUT_CLASSES}
           />
         </label>
-        <label>
-          Group by:&nbsp;
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Group by
+          </span>
           <select
             value={groupBy}
             onChange={(e) =>
               setGroupBy(e.target.value as "day" | "week" | "month")
             }
+            className={SELECT_CLASSES}
           >
             <option value="day">day</option>
             <option value="week">week</option>
             <option value="month">month</option>
           </select>
         </label>
-        <label>
-          Team:&nbsp;
-          <input
+        <label className="block min-w-[260px] flex-1">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Team
+          </span>
+          <Input
             placeholder="UUID, blank for own team"
             value={teamId}
             onChange={(e) => setTeamId(e.target.value)}
-            style={{ width: "240px" }}
           />
         </label>
       </div>
@@ -97,23 +116,21 @@ export default function UsageDashboard(): JSX.Element {
           <UsageContent buckets={query.data.buckets} />
         )
       ) : null}
-    </>
+    </div>
   );
 }
 
-function UsageContent({
-  buckets,
-}: {
-  buckets: {
-    start_at: string;
-    trial_count: number;
-    total_cost_usd: number;
-    llm_input_tokens: number;
-    llm_output_tokens: number;
-    trials_currently_succeeded: number;
-    trials_currently_failed: number;
-  }[];
-}): JSX.Element {
+type Bucket = {
+  start_at: string;
+  trial_count: number;
+  total_cost_usd: number;
+  llm_input_tokens: number;
+  llm_output_tokens: number;
+  trials_currently_succeeded: number;
+  trials_currently_failed: number;
+};
+
+function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
   const totals = useMemo(
     () =>
       buckets.reduce(
@@ -134,70 +151,86 @@ function UsageContent({
   );
 
   return (
-    <>
-      <div className="loom-card">
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-            gap: "0.6rem",
-          }}
-        >
-          <Stat label="Trials" value={totals.trial_count.toLocaleString()} />
-          <Stat
-            label="Cost"
-            value={`$${totals.total_cost_usd.toFixed(4)}`}
-          />
-          <Stat
-            label="Input tokens"
-            value={totals.llm_input_tokens.toLocaleString()}
-          />
-          <Stat
-            label="Output tokens"
-            value={totals.llm_output_tokens.toLocaleString()}
-          />
-        </div>
-      </div>
-
-      <div className="loom-card">
-        <h2 style={{ marginTop: 0 }}>Cost per bucket</h2>
-        <Chart
-          buckets={buckets}
-          getValue={(b) => b.total_cost_usd}
-          formatValue={(v) => `$${v.toFixed(4)}`}
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <StatCard label="Trials" value={totals.trial_count.toLocaleString()} />
+        <StatCard label="Cost" value={`$${totals.total_cost_usd.toFixed(4)}`} />
+        <StatCard
+          label="Input tokens"
+          value={totals.llm_input_tokens.toLocaleString()}
+        />
+        <StatCard
+          label="Output tokens"
+          value={totals.llm_output_tokens.toLocaleString()}
         />
       </div>
 
-      <div className="loom-card">
-        <h2 style={{ marginTop: 0 }}>Breakdown</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Bucket</th>
-              <th>Trials</th>
-              <th>Succeeded</th>
-              <th>Failed</th>
-              <th>Input</th>
-              <th>Output</th>
-              <th>Cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {buckets.map((b) => (
-              <tr key={b.start_at}>
-                <td className="loom-mono">{b.start_at.slice(0, 10)}</td>
-                <td>{b.trial_count}</td>
-                <td>{b.trials_currently_succeeded}</td>
-                <td>{b.trials_currently_failed}</td>
-                <td>{b.llm_input_tokens.toLocaleString()}</td>
-                <td>{b.llm_output_tokens.toLocaleString()}</td>
-                <td>${b.total_cost_usd.toFixed(4)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </>
+      <Card>
+        <Card.Header title="Cost per bucket" />
+        <Card.Body>
+          <Chart
+            buckets={buckets}
+            getValue={(b) => b.total_cost_usd}
+            formatValue={(v) => `$${v.toFixed(4)}`}
+          />
+        </Card.Body>
+      </Card>
+
+      <Card>
+        <Card.Header title="Breakdown" />
+        <Card.Body className="p-0">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <thead>
+                <tr className="bg-slate-50/50">
+                  {[
+                    "Bucket",
+                    "Trials",
+                    "Succeeded",
+                    "Failed",
+                    "Input",
+                    "Output",
+                    "Cost",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {buckets.map((b) => (
+                  <tr key={b.start_at} className="hover:bg-slate-50">
+                    <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                      {b.start_at.slice(0, 10)}
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">{b.trial_count}</td>
+                    <td className="px-4 py-3 text-emerald-700">
+                      {b.trials_currently_succeeded}
+                    </td>
+                    <td className="px-4 py-3 text-red-700">
+                      {b.trials_currently_failed}
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {b.llm_input_tokens.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {b.llm_output_tokens.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      ${b.total_cost_usd.toFixed(4)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card.Body>
+      </Card>
+    </div>
   );
 }
 
@@ -206,15 +239,11 @@ function Chart({
   getValue,
   formatValue,
 }: {
-  buckets: { start_at: string }[] & { length: number };
-  getValue: (
-    b: { start_at: string; total_cost_usd: number },
-  ) => number;
+  buckets: Bucket[];
+  getValue: (b: Bucket) => number;
   formatValue: (v: number) => string;
 }): JSX.Element {
-  const values = (
-    buckets as { start_at: string; total_cost_usd: number }[]
-  ).map(getValue);
+  const values = buckets.map(getValue);
   const max = Math.max(1e-9, ...values);
   const width = 800;
   const height = 200;
@@ -228,56 +257,37 @@ function Chart({
     <svg
       viewBox={`0 0 ${width} ${height + 30}`}
       preserveAspectRatio="none"
-      style={{ width: "100%", height: "auto" }}
+      className="h-auto w-full"
     >
-      {(buckets as { start_at: string; total_cost_usd: number }[]).map(
-        (b, i) => {
-          const v = getValue(b);
-          const h = (v / max) * height;
-          const x = barGap + i * (barWidth + barGap);
-          const y = height - h;
-          return (
-            <g key={b.start_at}>
-              <rect
-                x={x}
-                y={y}
-                width={barWidth}
-                height={h}
-                fill="var(--color-accent)"
-                opacity={0.8}
-              >
-                <title>{`${b.start_at.slice(0, 10)} — ${formatValue(v)}`}</title>
-              </rect>
-              <text
-                x={x + barWidth / 2}
-                y={height + 14}
-                fontSize="9"
-                textAnchor="middle"
-                fill="var(--color-muted)"
-              >
-                {b.start_at.slice(5, 10)}
-              </text>
-            </g>
-          );
-        },
-      )}
+      {buckets.map((b, i) => {
+        const v = getValue(b);
+        const h = (v / max) * height;
+        const x = barGap + i * (barWidth + barGap);
+        const y = height - h;
+        return (
+          <g key={b.start_at}>
+            <rect
+              x={x}
+              y={y}
+              width={barWidth}
+              height={h}
+              fill="#6366f1"
+              opacity={0.85}
+            >
+              <title>{`${b.start_at.slice(0, 10)} — ${formatValue(v)}`}</title>
+            </rect>
+            <text
+              x={x + barWidth / 2}
+              y={height + 14}
+              fontSize="9"
+              textAnchor="middle"
+              fill="#64748b"
+            >
+              {b.start_at.slice(5, 10)}
+            </text>
+          </g>
+        );
+      })}
     </svg>
-  );
-}
-
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}): JSX.Element {
-  return (
-    <div>
-      <div className="loom-muted" style={{ fontSize: "0.8em" }}>
-        {label}
-      </div>
-      <div>{value}</div>
-    </div>
   );
 }

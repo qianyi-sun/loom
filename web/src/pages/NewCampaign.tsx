@@ -10,7 +10,10 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { Button } from "../components/Button";
+import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
+import { Input, Textarea } from "../components/Input";
 
 const DEFAULT_FILTER = `{
   "license": "MIT"
@@ -35,6 +38,23 @@ function tryParse(input: string): {
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+function FieldLabel({
+  children,
+  hint,
+}: {
+  children: React.ReactNode;
+  hint?: React.ReactNode;
+}): JSX.Element {
+  return (
+    <div className="mb-1 flex items-baseline justify-between">
+      <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+        {children}
+      </span>
+      {hint ? <span className="text-xs text-slate-400">{hint}</span> : null}
+    </div>
+  );
 }
 
 export default function NewCampaign(): JSX.Element {
@@ -78,85 +98,78 @@ export default function NewCampaign(): JSX.Element {
   };
 
   return (
-    <>
-      <div className="loom-page-header">
-        <h1>New campaign</h1>
-      </div>
+    <div className="space-y-6">
+      <header>
+        <h1 className="text-2xl font-bold text-slate-900">New campaign</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Submit N trials in one batch — pick the task list with the
+          filter, the run shape with the trial config.
+        </p>
+      </header>
 
-      <div className="loom-card">
-        <label style={{ display: "block", marginBottom: "0.8rem" }}>
-          <div>Name</div>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. MIT slate — run 7"
-            style={{ width: "100%", maxWidth: "400px" }}
-          />
-        </label>
-        <label style={{ display: "block", marginBottom: "0.8rem" }}>
-          <div>Description</div>
-          <input
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="optional"
-            style={{ width: "100%", maxWidth: "400px" }}
-          />
-        </label>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: "1rem",
-          }}
-        >
-          <label style={{ display: "block" }}>
-            <div>
-              Task filter (JSON)
-              <span className="loom-muted">
-                {" "}
-                — keys: license, task_ids, benchmark_id
-              </span>
+      <Card>
+        <Card.Body className="space-y-5">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <label className="block">
+              <FieldLabel>Name</FieldLabel>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. MIT slate — run 7"
+              />
+            </label>
+            <label className="block">
+              <FieldLabel hint="optional">Description</FieldLabel>
+              <Input
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What's this campaign testing?"
+              />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <label className="block">
+              <FieldLabel hint="keys: license, task_ids, benchmark_id">
+                Task filter (JSON)
+              </FieldLabel>
+              <Textarea
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                rows={8}
+              />
+            </label>
+            <label className="block">
+              <FieldLabel hint="agent / model / backend">
+                Trial config (JSON)
+              </FieldLabel>
+              <Textarea
+                value={configText}
+                onChange={(e) => setConfigText(e.target.value)}
+                rows={8}
+              />
+            </label>
+          </div>
+
+          {localError ? (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {localError}
             </div>
-            <textarea
-              className="loom-mono"
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              rows={8}
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label style={{ display: "block" }}>
-            <div>Trial config (JSON)</div>
-            <textarea
-              className="loom-mono"
-              value={configText}
-              onChange={(e) => setConfigText(e.target.value)}
-              rows={8}
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
-
-        <div style={{ marginTop: "1rem" }}>
-          <button
-            onClick={submit}
-            disabled={!name.trim() || create.isPending}
-          >
-            {create.isPending ? "Creating…" : "Create campaign"}
-          </button>
-        </div>
-
-        {localError ? (
-          <div className="loom-error" style={{ marginTop: "0.8rem" }}>
-            {localError}
+          ) : null}
+          {create.isError ? <ErrorState error={create.error} /> : null}
+        </Card.Body>
+        <Card.Footer>
+          <div className="flex items-center justify-end">
+            <Button
+              variant="primary"
+              onClick={submit}
+              disabled={!name.trim() || create.isPending}
+            >
+              {create.isPending ? "Creating…" : "Create campaign"}
+            </Button>
           </div>
-        ) : null}
-        {create.isError ? (
-          <div style={{ marginTop: "0.8rem" }}>
-            <ErrorState error={create.error} />
-          </div>
-        ) : null}
-      </div>
-    </>
+        </Card.Footer>
+      </Card>
+    </div>
   );
 }

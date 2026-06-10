@@ -1,10 +1,21 @@
+/**
+ * Campaign detail — one campaign's aggregate stats + per-state trial
+ * counts + the original filter/config that submitted it. Live-polls
+ * while the campaign is active, stops once terminal.
+ */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
+import { Button } from "../components/Button";
+import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import JsonViewer from "../components/JsonViewer";
 import LoadingState from "../components/LoadingState";
+import { StatCard } from "../components/StatCard";
+import { StatusPill } from "../components/StatusPill";
+import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { campaignStateVariant, trialStateVariant } from "../lib/statusVariant";
 
 const ACTIVE_STATES = new Set(["submitted", "running"]);
 
@@ -12,17 +23,22 @@ export default function CampaignDetail(): JSX.Element {
   const { campaignId } = useParams<{ campaignId: string }>();
   const queryClient = useQueryClient();
 
+  const polling = useAdaptivePolling({
+    baseIntervalMs: 5_000,
+    minIntervalMs: 3_000,
+    maxIntervalMs: 60_000,
+    hiddenBehavior: "pause",
+    blurBehavior: "slow",
+  });
+
   const query = useQuery({
     queryKey: ["campaign", campaignId],
     queryFn: () => api.getCampaign(campaignId!),
     enabled: !!campaignId,
-    // Live-poll while the campaign is fanning out; once terminal,
-    // stop hitting the API.
     refetchInterval: (q) => {
-      const data = q.state.data as
-        | { state: string }
-        | undefined;
-      return data && ACTIVE_STATES.has(data.state) ? 5000 : false;
+      const data = q.state.data as { state: string } | undefined;
+      if (!data || !ACTIVE_STATES.has(data.state)) return false;
+      return polling.refetchInterval;
     },
   });
 
@@ -41,131 +57,121 @@ export default function CampaignDetail(): JSX.Element {
   const c = query.data;
 
   return (
-    <>
-      <p>
-        <Link to="/campaigns">← All campaigns</Link>
-      </p>
-      <div className="loom-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-          }}
+    <div className="space-y-6">
+      <div>
+        <Link
+          to="/campaigns"
+          className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
+          ← All campaigns
+        </Link>
+      </div>
+
+      <Card>
+        <Card.Body className="space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-bold text-slate-900">{c.name}</h1>
+              {c.description ? (
+                <p className="mt-1 text-sm text-slate-500">{c.description}</p>
+              ) : null}
+              <p className="mt-2 font-mono text-xs text-slate-500">
+                id = {c.id}
+              </p>
+            </div>
+            <StatusPill variant={campaignStateVariant(c.state)}>
+              {c.state}
+            </StatusPill>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+            <StatCard label="Expected" value={c.expected_trial_count} />
+            <StatCard
+              label="Reward (avg)"
+              value={
+                c.aggregate_reward != null
+                  ? c.aggregate_reward.toFixed(3)
+                  : "—"
+              }
+            />
+            <StatCard
+              label="Cost"
+              value={`$${c.total_cost_usd.toFixed(4)}`}
+            />
+            <StatCard
+              label="Created"
+              value={c.created_at.slice(0, 16).replace("T", " ")}
+            />
+            <StatCard
+              label="Finished"
+              value={c.finished_at?.slice(0, 16).replace("T", " ") ?? "—"}
+            />
+          </div>
+
+          {ACTIVE_STATES.has(c.state) ? (
+            <div className="space-y-2">
+              <Button
+                variant="danger"
+                onClick={() => cancel.mutate()}
+                disabled={cancel.isPending}
+              >
+                {cancel.isPending ? "Cancelling…" : "Cancel campaign"}
+              </Button>
+              {cancel.isError ? <ErrorState error={cancel.error} /> : null}
+            </div>
+          ) : null}
+        </Card.Body>
+      </Card>
+
+      <Card>
+        <Card.Header title="Trial summary" />
+        <Card.Body className="p-0">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <thead>
+                <tr className="bg-slate-50/50">
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    State
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    Count
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {Object.entries(c.trial_summary).map(([state, n]) => (
+                  <tr key={state}>
+                    <td className="px-4 py-3">
+                      <StatusPill variant={trialStateVariant(state)}>
+                        {state}
+                      </StatusPill>
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">{n}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card.Body>
+      </Card>
+
+      <Card>
+        <Card.Header title="Filter + config" />
+        <Card.Body className="space-y-4 lg:grid lg:grid-cols-2 lg:gap-4 lg:space-y-0">
           <div>
-            <h1 style={{ margin: 0 }}>{c.name}</h1>
-            {c.description ? (
-              <p className="loom-muted">{c.description}</p>
-            ) : null}
-            <p className="loom-mono loom-muted">id={c.id}</p>
-          </div>
-          <span className={`loom-state-pill ${c.state}`}>{c.state}</span>
-        </div>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-            gap: "0.6rem",
-            marginTop: "1rem",
-          }}
-        >
-          <Stat label="Expected" value={String(c.expected_trial_count)} />
-          <Stat
-            label="Reward (avg)"
-            value={
-              c.aggregate_reward != null
-                ? c.aggregate_reward.toFixed(3)
-                : "—"
-            }
-          />
-          <Stat label="Cost" value={`$${c.total_cost_usd.toFixed(4)}`} />
-          <Stat
-            label="Created"
-            value={c.created_at.slice(0, 16).replace("T", " ")}
-          />
-          <Stat
-            label="Finished"
-            value={c.finished_at?.slice(0, 16).replace("T", " ") ?? "—"}
-          />
-        </div>
-
-        {ACTIVE_STATES.has(c.state) ? (
-          <div style={{ marginTop: "1rem" }}>
-            <button
-              onClick={() => cancel.mutate()}
-              disabled={cancel.isPending}
-            >
-              {cancel.isPending ? "Cancelling…" : "Cancel campaign"}
-            </button>
-            {cancel.isError ? (
-              <div style={{ marginTop: "0.6rem" }}>
-                <ErrorState error={cancel.error} />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-
-      <div className="loom-card">
-        <h2 style={{ marginTop: 0 }}>Trial summary</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>State</th>
-              <th>Count</th>
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(c.trial_summary).map(([state, n]) => (
-              <tr key={state}>
-                <td>
-                  <span className={`loom-state-pill ${state}`}>{state}</span>
-                </td>
-                <td>{n}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="loom-card">
-        <h2 style={{ marginTop: 0 }}>Filter + config</h2>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: "1rem",
-          }}
-        >
-          <div>
-            <div className="loom-muted">task_filter</div>
-            <JsonViewer data={c.task_filter} />
+            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
+              task_filter
+            </p>
+            <JsonViewer data={c.task_filter} expanded />
           </div>
           <div>
-            <div className="loom-muted">trial_config</div>
-            <JsonViewer data={c.trial_config} />
+            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
+              trial_config
+            </p>
+            <JsonViewer data={c.trial_config} expanded />
           </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}): JSX.Element {
-  return (
-    <div>
-      <div className="loom-muted" style={{ fontSize: "0.8em" }}>
-        {label}
-      </div>
-      <div>{value}</div>
+        </Card.Body>
+      </Card>
     </div>
   );
 }

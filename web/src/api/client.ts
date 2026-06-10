@@ -101,6 +101,11 @@ export const api = {
     apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
   getTrial: (id: string) =>
     apiFetch<TrialDetail>(`/api/v1/trials/${id}`),
+  submitTrial: (body: { task_id: string; config: Record<string, unknown> }) =>
+    apiFetch<{ trial_id: string; state: string }>("/api/v1/trials", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getTrajectoryPage: (id: string, cursor?: number, limit = 200) =>
     apiFetch<TrajectoryPage>(
       `/api/v1/trials/${id}/trajectory${qs({ cursor, limit })}`,

@@ -9,6 +9,7 @@ import NotFound from "./pages/NotFound";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
 import Settings from "./pages/Settings";
 import Tasks from "./pages/Tasks";
+import TrialCompare from "./pages/TrialCompare";
 import TrialDetail from "./pages/TrialDetail";
 import TrialsList from "./pages/TrialsList";
 import UsageDashboard from "./pages/UsageDashboard";
@@ -19,6 +20,7 @@ export default function App(): JSX.Element {
       <Route path="/" element={<Layout />}>
         <Route index element={<TrialsList />} />
         <Route path="trials" element={<TrialsList />} />
+        <Route path="trials/compare" element={<TrialCompare />} />
         <Route path="trials/:trialId" element={<TrialDetail />} />
         <Route path="campaigns" element={<CampaignsList />} />
         <Route path="campaigns/new" element={<NewCampaign />} />

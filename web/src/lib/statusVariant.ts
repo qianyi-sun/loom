@@ -29,3 +29,19 @@ export function trialStateVariant(state: string): StatusVariant {
       return "neutral";
   }
 }
+
+/** Map a `campaign.state` from the Loom API to a `StatusPill` variant. */
+export function campaignStateVariant(state: string): StatusVariant {
+  switch (state) {
+    case "finished":
+      return "success";
+    case "running":
+      return "running";
+    case "submitted":
+      return "queued";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "neutral";
+  }
+}

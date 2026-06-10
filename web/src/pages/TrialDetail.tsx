@@ -1,19 +1,33 @@
 /**
- * Per-trial detail: header card + trajectory viewer + ATIF link.
- * Trajectory is paginated; loads more on demand.
+ * Per-trial detail: header card with summary stats, trajectory
+ * viewer with action-type-pill rows + JSON expansion, download links
+ * for ATIF and the raw trajectory. Live-polls while the trial is
+ * non-terminal; pauses cleanly once done.
  */
-
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { components } from "../api/schema";
-import EventTimeline from "../components/EventTimeline";
+import { Button } from "../components/Button";
+import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
+import EventTimeline from "../components/EventTimeline";
 import LoadingState from "../components/LoadingState";
+import { StatCard } from "../components/StatCard";
+import { StatusPill } from "../components/StatusPill";
+import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { trialStateVariant } from "../lib/statusVariant";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
+
+const ACTIVE_TRIAL_STATES = new Set([
+  "queued",
+  "submitted",
+  "claimed",
+  "running",
+]);
 
 function TrialHeader({
   trial,
@@ -21,141 +35,115 @@ function TrialHeader({
   trial: components["schemas"]["TrialDetail"];
 }): JSX.Element {
   return (
-    <div className="loom-card">
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-        }}
-      >
-        <div>
-          <h1 style={{ margin: 0 }}>
-            <span className="loom-mono">{trial.id}</span>
-          </h1>
-          <p className="loom-muted" style={{ margin: "0.4rem 0" }}>
-            Task <code className="loom-mono">{trial.task_id}</code>
-          </p>
+    <Card>
+      <Card.Body className="space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs uppercase tracking-wider text-slate-400">
+              Trial
+            </p>
+            <h1 className="mt-1 font-mono text-xl font-semibold text-slate-900 break-all">
+              {trial.id}
+            </h1>
+            <p className="mt-2 text-sm text-slate-500">
+              Task{" "}
+              <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">
+                {trial.task_id}
+              </code>
+            </p>
+          </div>
+          <StatusPill variant={trialStateVariant(trial.state)}>
+            {trial.state}
+          </StatusPill>
         </div>
-        <span className={`loom-state-pill ${trial.state}`}>
-          {trial.state}
-        </span>
-      </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-          gap: "0.6rem",
-          marginTop: "1rem",
-        }}
-      >
-        <Stat label="Agent" value={trial.agent_name ?? "—"} />
-        <Stat
-          label="Model"
-          value={trial.model ?? "—"}
-        />
-        <Stat
-          label="Reward"
-          value={
-            trial.aggregate_reward != null
-              ? trial.aggregate_reward.toFixed(3)
-              : "—"
-          }
-        />
-        <Stat label="Cost" value={`$${trial.cost_usd.toFixed(4)}`} />
-        <Stat
-          label="Submitted"
-          value={trial.submitted_at.slice(0, 16).replace("T", " ")}
-        />
-        <Stat
-          label="Finished"
-          value={
-            trial.finished_at?.slice(0, 16).replace("T", " ") ?? "—"
-          }
-        />
-        <Stat label="Attempts" value={String(trial.attempt_count)} />
-      </div>
-
-      {trial.failure_reason ? (
-        <div style={{ marginTop: "0.8rem" }}>
-          <strong>Failure reason: </strong>
-          <span className="loom-mono">{trial.failure_reason}</span>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+          <StatCard label="Agent" value={trial.agent_name ?? "—"} />
+          <StatCard label="Model" value={trial.model ?? "—"} />
+          <StatCard
+            label="Reward"
+            value={
+              trial.aggregate_reward != null
+                ? trial.aggregate_reward.toFixed(3)
+                : "—"
+            }
+          />
+          <StatCard
+            label="Cost"
+            value={`$${trial.cost_usd.toFixed(4)}`}
+          />
+          <StatCard
+            label="Submitted"
+            value={trial.submitted_at.slice(0, 16).replace("T", " ")}
+          />
+          <StatCard
+            label="Finished"
+            value={
+              trial.finished_at?.slice(0, 16).replace("T", " ") ?? "—"
+            }
+          />
+          <StatCard label="Attempts" value={trial.attempt_count} />
         </div>
-      ) : null}
 
-      <div
-        style={{
-          marginTop: "1rem",
-          display: "flex",
-          gap: "0.6rem",
-          flexWrap: "wrap",
-        }}
-      >
-        {trial.atif_ready ? (
-          <a
-            href={trial.atif_url}
-            target="_blank"
-            rel="noreferrer"
-            className="loom-button-link"
-          >
-            <button>Download ATIF</button>
-          </a>
-        ) : (
-          <button disabled title="ATIF is generated at finalize.">
-            ATIF unavailable
-          </button>
-        )}
-        {trial.trajectory_ready ? (
-          <a
-            href={trial.trajectory_url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <button>Download trajectory</button>
-          </a>
-        ) : (
-          <button
-            disabled
-            title="Trajectory is written once the worker starts the trial."
-          >
-            Trajectory pending
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
+        {trial.failure_reason ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-red-800">
+              Failure reason
+            </p>
+            <p className="mt-1 font-mono text-xs text-red-700">
+              {trial.failure_reason}
+            </p>
+          </div>
+        ) : null}
 
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}): JSX.Element {
-  return (
-    <div>
-      <div className="loom-muted" style={{ fontSize: "0.8em" }}>
-        {label}
-      </div>
-      <div>{value}</div>
-    </div>
+        <div className="flex flex-wrap gap-2">
+          {trial.atif_ready ? (
+            <a
+              href={trial.atif_url}
+              target="_blank"
+              rel="noreferrer"
+              className="contents"
+            >
+              <Button variant="secondary">Download ATIF</Button>
+            </a>
+          ) : (
+            <Button
+              variant="secondary"
+              disabled
+              title="ATIF is generated at finalize."
+            >
+              ATIF unavailable
+            </Button>
+          )}
+          {trial.trajectory_ready ? (
+            <a
+              href={trial.trajectory_url}
+              target="_blank"
+              rel="noreferrer"
+              className="contents"
+            >
+              <Button variant="secondary">Download trajectory</Button>
+            </a>
+          ) : (
+            <Button
+              variant="secondary"
+              disabled
+              title="Trajectory is written once the worker starts the trial."
+            >
+              Trajectory pending
+            </Button>
+          )}
+        </div>
+      </Card.Body>
+    </Card>
   );
 }
 
 function Trajectory({ trialId }: { trialId: string }): JSX.Element {
-  // Accumulated pages: cursor `null` means we still have more, the
-  // explicit number is the next-page cursor to fetch.
   const [pages, setPages] = useState<TrajEvent[][]>([]);
-  const [nextCursor, setNextCursor] = useState<number | undefined>(
-    undefined,
-  );
+  const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
   const [done, setDone] = useState(false);
 
-  // We only kick a query when the user clicks "Load more" (or on
-  // first mount). The query key uses `pages.length` so each call is
-  // a fresh fetch — TanStack Query caches by key.
   const page = useQuery({
     queryKey: ["trajectory", trialId, pages.length],
     queryFn: async () => {
@@ -174,37 +162,54 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
   const flat = pages.flat();
 
   return (
-    <div className="loom-card">
-      <h2 style={{ marginTop: 0 }}>Trajectory</h2>
-      {page.isPending && pages.length === 0 ? <LoadingState /> : null}
-      {page.isError ? <ErrorState error={page.error} /> : null}
-      <EventTimeline events={flat} />
-      {!done ? (
-        <button
-          style={{ marginTop: "0.6rem" }}
-          onClick={() => page.refetch()}
-          disabled={page.isFetching}
-        >
-          {page.isFetching ? "Loading…" : "Load more"}
-        </button>
-      ) : (
-        <div
-          className="loom-muted"
-          style={{ marginTop: "0.6rem", textAlign: "center" }}
-        >
-          End of trajectory ({flat.length} events).
-        </div>
-      )}
-    </div>
+    <Card>
+      <Card.Header
+        title="Trajectory"
+        description={
+          done ? `${flat.length} events` : `${flat.length} events loaded`
+        }
+      />
+      <Card.Body className="space-y-3">
+        {page.isPending && pages.length === 0 ? <LoadingState /> : null}
+        {page.isError ? <ErrorState error={page.error} /> : null}
+        <EventTimeline events={flat} />
+        {!done ? (
+          <Button
+            onClick={() => page.refetch()}
+            disabled={page.isFetching}
+          >
+            {page.isFetching ? "Loading…" : "Load more"}
+          </Button>
+        ) : (
+          <p className="pt-1 text-center text-xs text-slate-400">
+            End of trajectory.
+          </p>
+        )}
+      </Card.Body>
+    </Card>
   );
 }
 
 export default function TrialDetail(): JSX.Element {
   const { trialId } = useParams<{ trialId: string }>();
+
+  const polling = useAdaptivePolling({
+    baseIntervalMs: 4_000,
+    minIntervalMs: 2_000,
+    maxIntervalMs: 60_000,
+    hiddenBehavior: "pause",
+    blurBehavior: "slow",
+  });
+
   const trial = useQuery({
     queryKey: ["trial", trialId],
     queryFn: () => api.getTrial(trialId!),
     enabled: !!trialId,
+    refetchInterval: (q) => {
+      const data = q.state.data as { state: string } | undefined;
+      if (!data || !ACTIVE_TRIAL_STATES.has(data.state)) return false;
+      return polling.refetchInterval;
+    },
   });
 
   if (!trialId) {
@@ -215,12 +220,23 @@ export default function TrialDetail(): JSX.Element {
   if (!trial.data) return <ErrorState error={new Error("no data")} />;
 
   return (
-    <>
-      <p>
-        <Link to="/trials">← All trials</Link>
-      </p>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <Link
+          to="/trials"
+          className="text-xs font-medium text-slate-500 hover:text-slate-700"
+        >
+          ← All trials
+        </Link>
+        <Link
+          to={`/trials/compare?a=${trialId}`}
+          className="text-xs font-medium text-slate-500 hover:text-slate-700"
+        >
+          Compare with another trial →
+        </Link>
+      </div>
       <TrialHeader trial={trial.data} />
       <Trajectory trialId={trialId} />
-    </>
+    </div>
   );
 }

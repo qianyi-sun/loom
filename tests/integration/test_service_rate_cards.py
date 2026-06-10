@@ -150,9 +150,12 @@ async def test_admin_can_get_detail(
     assert captured[0]["path"] == "/admin/rate-cards/rc-foo"
 
 
-async def test_team_token_403_on_list(
+async def test_team_token_can_read_list(
     rc_setup: tuple[FastAPI, str, str, list[dict[str, str]]],
 ) -> None:
+    """Rate-card READS are open to any team user — they need to be
+    able to interpret their own bills. Mutations stay admin-only
+    (covered by `test_team_token_403_on_post`)."""
     app, _admin_raw, team_raw, captured = rc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -161,6 +164,25 @@ async def test_team_token_403_on_list(
         r = await ac.get(
             "/api/v1/rate-cards",
             headers={"Authorization": f"Bearer {team_raw}"},
+        )
+    assert r.status_code == 200
+    assert captured[0]["method"] == "GET"
+    assert captured[0]["path"] == "/admin/rate-cards"
+
+
+async def test_team_token_403_on_post(
+    rc_setup: tuple[FastAPI, str, str, list[dict[str, str]]],
+) -> None:
+    """Rate-card MUTATIONS still require `admin:rate_cards`."""
+    app, _admin_raw, team_raw, captured = rc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/rate-cards",
+            headers={"Authorization": f"Bearer {team_raw}"},
+            json={"id": "rc-team", "table": {"entries": []}},
         )
     assert r.status_code == 403
     # No upstream call was made.

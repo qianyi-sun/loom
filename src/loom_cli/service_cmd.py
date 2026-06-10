@@ -91,12 +91,16 @@ def _alembic_upgrade(db_url: str) -> int:
 
 
 def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
-    """Run seed_test_data.py with --print all; return (exit_code,
-    {label: token}). The script prints each token on its own line as
-    `<label>: <token>`."""
+    """Run seed_test_data.py with `--mode dev --print all`. Dev mode
+    registers the benchmark slate so the SPA's Benchmarks page is
+    populated out of the box and SKIPS the hello-world Task + card-e2e
+    RateCard placeholders that test mode keeps for system tests.
+
+    Returns (exit_code, {label: token}); the script prints each token
+    on its own line as `<label>: <token>`."""
     r = subprocess.run(
         [sys.executable, "scripts/seed_test_data.py",
-         "--db-url", db_url, "--print", "all"],
+         "--db-url", db_url, "--mode", "dev", "--print", "all"],
         capture_output=True, text=True, check=False,
     )
     if r.returncode != 0:
