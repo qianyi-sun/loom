@@ -153,6 +153,12 @@ services:
   web:
     image: node:20-slim
     working_dir: /app
+    # VITE_API_PROXY_TARGET overrides the default (localhost:8090)
+    # because inside the docker network `localhost` is the web
+    # container itself; loom_service is reachable via its compose
+    # service name.
+    environment:
+      VITE_API_PROXY_TARGET: http://loom-service:8090
     command: ["sh", "-c", "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173"]
     volumes:
       - ../web:/app
