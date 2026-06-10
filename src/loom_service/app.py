@@ -125,6 +125,29 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
+
+    @app.get("/", include_in_schema=False)
+    async def _root() -> dict[str, object]:
+        """Root landing — every other surface lives under `/api/v1/*`
+        or `/docs`. Without this handler users hitting the bare URL
+        see FastAPI's `{"detail": "Not Found"}` and assume the
+        service is broken; return a tiny manifest of where to go
+        next instead."""
+        return {
+            "service": "loom-service",
+            "version": app.version,
+            "links": {
+                "swagger_ui": "/docs",
+                "openapi_schema": "/openapi.json",
+                "health": "/api/v1/health",
+            },
+            "note": (
+                "API surface lives under /api/v1/* (most routes "
+                "require a Bearer token; mint one with `loom service "
+                "up` or via the admin tooling)."
+            ),
+        }
+
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(tokens.router, prefix="/api/v1")
     app.include_router(trials.router, prefix="/api/v1")
