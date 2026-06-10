@@ -3,6 +3,7 @@
  * `next_cursor: string | null`; we keep a stack of previous cursors
  * so the user can go back without reloading.
  */
+import { Button } from "./Button";
 
 export type PageState = {
   current: string | null;
@@ -34,28 +35,23 @@ export default function Pagination({
   onPrev: () => void;
 }): JSX.Element {
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: "0.6rem",
-        justifyContent: "flex-end",
-        marginTop: "1rem",
-      }}
-    >
-      <button
+    <div className="mt-4 flex items-center justify-end gap-2">
+      <Button
+        size="sm"
         onClick={onPrev}
         disabled={state.stack.length === 0}
         aria-label="previous page"
       >
         ← Prev
-      </button>
-      <button
+      </Button>
+      <Button
+        size="sm"
         onClick={onNext}
         disabled={!hasNext}
         aria-label="next page"
       >
         Next →
-      </button>
+      </Button>
     </div>
   );
 }

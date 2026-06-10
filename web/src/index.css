@@ -1,80 +1,184 @@
+/* DM Sans + JetBrains Mono are loaded via <link> in index.html so
+ * stylesheet parsing isn't blocked. Keeping the import out of the
+ * CSS bundle avoids a render-blocking dependency on Google Fonts. */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens. Light theme by intent — borrowing the reference
+ * design system shape: soft slate grays, indigo accent, rounded-xl
+ * cards, generous whitespace. Dark theme is deliberately not shipped
+ * yet; revisit when a user asks.
+ */
 :root {
-  --color-bg: #0f1117;
-  --color-surface: #181b24;
-  --color-border: #2a2e3a;
-  --color-text: #e4e7ec;
-  --color-muted: #8a92a3;
-  --color-accent: #6aa6ff;
-  --color-success: #7ed085;
-  --color-warn: #f0c060;
-  --color-danger: #ef6f6f;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    Oxygen, Ubuntu, Cantarell, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--color-text);
-  background: var(--color-bg);
+  --bg-primary: #f8fafc;       /* slate-50 — app background */
+  --bg-secondary: #ffffff;      /* surfaces */
+  --bg-card: #ffffff;
+  --bg-card-hover: #f1f5f9;     /* slate-100 */
+  --border-subtle: #e2e8f0;     /* slate-200 */
+  --border-medium: #cbd5e1;     /* slate-300 */
+  --text-primary: #1e293b;      /* slate-800 */
+  --text-secondary: #475569;    /* slate-600 */
+  --text-muted: #64748b;        /* slate-500 */
+  --accent: #6366f1;             /* indigo-500 */
+  --accent-hover: #4f46e5;       /* indigo-600 */
+  --accent-glow: rgba(99, 102, 241, 0.15);
 }
 
 * {
   box-sizing: border-box;
 }
 
-body {
+html, body {
   margin: 0;
+  padding: 0;
   min-height: 100vh;
 }
 
-a {
-  color: var(--color-accent);
-  text-decoration: none;
-}
-a:hover {
-  text-decoration: underline;
+body {
+  font-family: "DM Sans", system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 
-button {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
+/*
+ * Subtle scrollbars. WebKit-flavoured; Firefox gets the standard
+ * `scrollbar-width: thin` via the global rule below.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.24);
+}
+
+/* Smooth interactive transitions across the surface. */
+button, a, input, select, textarea {
+  transition: border-color 0.15s ease, background-color 0.15s ease,
+    color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Accent focus ring across all interactive controls. */
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+button:focus-visible, a:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/*
+ * Surface primitive. Used for cards, panels, anywhere a content
+ * surface needs to sit on the slate-50 app background.
+ */
+@layer components {
+  .glass-card {
+    @apply rounded-xl border border-slate-200 bg-white;
+  }
+  .glass-card-hover {
+    @apply hover:border-slate-300 hover:bg-slate-50;
+  }
+  .modal-backdrop {
+    @apply bg-black/30 backdrop-blur-sm;
+  }
+  .accent-glow {
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+}
+
+/*
+ * ----------------------------------------------------------------------
+ * TRANSITIONAL — keep legacy class names AND bare-element styling alive
+ * so pages not yet restyled in PR A (Trial detail, Campaigns list/new/
+ * detail, Benchmarks, Tasks, Usage, RateCardsAdmin) don't read as
+ * completely broken between PR A and PR B. Tailwind's @tailwind base
+ * resets browser default styling for button/input/table/etc., so the
+ * raw-element rules below restore enough visual to keep the un-restyled
+ * pages usable. PR B restyles every remaining page using the new
+ * primitives and DELETES this entire block.
+ * ----------------------------------------------------------------------
+ */
+
+/* Bare elements — restored so un-restyled pages remain usable. The new
+ * primitive components (Button, Input, Card, etc.) override these with
+ * their own classes so restyled pages aren't affected. */
+button:not([class]) {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: var(--text-primary);
   cursor: pointer;
   font: inherit;
   padding: 0.4rem 0.8rem;
 }
-button:hover {
-  border-color: var(--color-accent);
+button:not([class]):hover {
+  border-color: var(--accent);
 }
-button:disabled {
+button:not([class]):disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-
-input,
-textarea,
-select {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  color: var(--color-text);
+input:not([class]),
+textarea:not([class]),
+select:not([class]) {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-primary);
   font: inherit;
   padding: 0.4rem 0.6rem;
 }
-
-table {
+a:not([class]) {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:not([class]):hover {
+  text-decoration: underline;
+}
+table:not([class]) {
   border-collapse: collapse;
   width: 100%;
 }
-th,
-td {
-  border-bottom: 1px solid var(--color-border);
+table:not([class]) th,
+table:not([class]) td {
+  border-bottom: 1px solid var(--border-subtle);
   padding: 0.5rem 0.8rem;
   text-align: left;
   vertical-align: top;
 }
-th {
+table:not([class]) th {
   font-weight: 600;
-  color: var(--color-muted);
+  color: var(--text-muted);
+}
+h1:not([class]) {
+  font-size: 1.4rem;
+  margin: 0 0 0.5rem;
+}
+h2:not([class]) {
+  font-size: 1.15rem;
+  margin: 0 0 0.5rem;
+}
+h3:not([class]) {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
 }
 
 .loom-root {
@@ -82,32 +186,29 @@ th {
   grid-template-rows: auto 1fr;
   min-height: 100vh;
 }
-
 .loom-nav {
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   gap: 0.5rem;
   padding: 0.6rem 1rem;
 }
 .loom-nav a {
-  color: var(--color-muted);
+  color: var(--text-muted);
   font-weight: 500;
   padding: 0.3rem 0.6rem;
   border-radius: 4px;
 }
 .loom-nav a.active {
-  background: var(--color-bg);
-  color: var(--color-text);
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
-
 .loom-main {
   padding: 1rem;
   max-width: 1400px;
   margin: 0 auto;
   width: 100%;
 }
-
 .loom-page-header {
   display: flex;
   align-items: center;
@@ -118,83 +219,78 @@ th {
   font-size: 1.4rem;
   margin: 0;
 }
-
 .loom-filters {
   display: flex;
   gap: 0.6rem;
   align-items: center;
   margin-bottom: 1rem;
 }
-
 .loom-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
   padding: 1rem;
   margin-bottom: 1rem;
 }
-
 .loom-state-pill {
   border-radius: 999px;
   padding: 0.1rem 0.6rem;
   font-size: 0.85em;
   font-weight: 500;
+  background: #f1f5f9;
+  color: #475569;
 }
 .loom-state-pill.succeeded {
-  background: rgba(126, 208, 133, 0.15);
-  color: var(--color-success);
+  background: #ecfdf5;
+  color: #047857;
 }
 .loom-state-pill.failed,
 .loom-state-pill.cancelled {
-  background: rgba(239, 111, 111, 0.15);
-  color: var(--color-danger);
+  background: #fef2f2;
+  color: #b91c1c;
 }
 .loom-state-pill.running,
 .loom-state-pill.claimed {
-  background: rgba(240, 192, 96, 0.15);
-  color: var(--color-warn);
+  background: #eef2ff;
+  color: #4338ca;
 }
 .loom-state-pill.queued {
-  background: rgba(106, 166, 255, 0.15);
-  color: var(--color-accent);
+  background: #fef3c7;
+  color: #b45309;
 }
-
 .loom-muted {
-  color: var(--color-muted);
+  color: var(--text-muted);
 }
-
 .loom-mono {
-  font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
+    Monaco, Consolas, monospace;
   font-size: 0.9em;
 }
-
+.loom-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  padding: 1rem;
+  color: #991b1b;
+}
+.loom-empty {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-muted);
+}
 .loom-event-row {
-  border-left: 3px solid var(--color-border);
+  border-left: 3px solid var(--border-subtle);
   margin-bottom: 0.4rem;
   padding: 0.4rem 0.8rem;
 }
 .loom-event-row.llm_call {
-  border-color: var(--color-accent);
+  border-color: var(--accent);
 }
 .loom-event-row.step_start,
 .loom-event-row.step_end {
-  border-color: var(--color-warn);
+  border-color: #b45309;
 }
 .loom-event-row.trial_start,
 .loom-event-row.trial_end {
-  border-color: var(--color-success);
-}
-
-.loom-error {
-  background: rgba(239, 111, 111, 0.1);
-  border: 1px solid var(--color-danger);
-  border-radius: 6px;
-  padding: 1rem;
-  color: var(--color-danger);
-}
-
-.loom-empty {
-  text-align: center;
-  padding: 2rem;
-  color: var(--color-muted);
+  border-color: #047857;
 }

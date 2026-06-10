@@ -17,9 +17,13 @@ export default function ErrorState({
     detail = String(error);
   }
   return (
-    <div className="loom-error">
-      <strong>{title}</strong>
-      {detail ? <div className="loom-mono">{detail}</div> : null}
+    <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm">
+      <p className="font-semibold text-red-800">{title}</p>
+      {detail ? (
+        <p className="mt-1 font-mono text-xs leading-relaxed text-red-700">
+          {detail}
+        </p>
+      ) : null}
     </div>
   );
 }
