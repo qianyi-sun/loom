@@ -37,10 +37,12 @@ from loom_cli.local_runner import LocalRunner
 from loom_cli.output import format_json_line, format_text_line
 from loom_cli.task_loader import LoadedTask, load_tasks
 from loom_cli.vllm_runner import (
+    _LIVE_PROCESSES,
     MissingVLLMDependencyError,
     VLLMLaunchSpec,
     launch_vllm,
-    stop_all,
+    model_slug,
+    stop_one,
 )
 
 
@@ -49,7 +51,45 @@ def run(args: argparse.Namespace) -> int:
 
 
 async def _run_async(args: argparse.Namespace) -> int:
-    output_dir: Path = args.output_dir
+    """Top-level dispatcher. Single --model: today's behavior.
+    Multiple --model: sequential or parallel based on the flag."""
+    model_specs: list[str] = args.model or []
+
+    if args.parallel_models and len(model_specs) < 2:
+        sys.stderr.write(
+            "warning: --parallel-models has no effect with a single "
+            "--model (it only applies when multiple --model specs "
+            "are passed).\n",
+        )
+
+    if len(model_specs) == 0:
+        return await _run_one_model(args, model=None, output_dir=None)
+    if len(model_specs) == 1:
+        return await _run_one_model(
+            args,
+            model=_parse_model(model_specs[0]),
+            output_dir=None,
+        )
+    if args.parallel_models:
+        return await _run_parallel(args, model_specs)
+    return await _run_sequential(args, model_specs)
+
+
+async def _run_one_model(
+    args: argparse.Namespace,
+    model: ModelSpec | None,
+    output_dir: Path | None,
+) -> int:
+    """Run all selected tasks for one model.
+
+    Accepts an explicit `output_dir` override so the multi-model
+    sequential loop can bucket each model's outputs under
+    `<base-output-dir>/<slug>/`. When None, falls back to
+    `args.output_dir` (the original single-model behavior).
+    """
+    # Use the explicit override or fall back to args.output_dir.
+    if output_dir is None:
+        output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     workdir = output_dir / "_tasks"
@@ -89,8 +129,6 @@ async def _run_async(args: argparse.Namespace) -> int:
         if val:
             tokens[provider] = val
 
-    model = _parse_model(args.model) if args.model else None
-
     # --local-server: ad-hoc dispatch against an already-running
     # OpenAI-compatible server. We register a transient `_inline`
     # local provider and rewrite the model spec to address it. No
@@ -118,9 +156,12 @@ async def _run_async(args: argparse.Namespace) -> int:
         )
         # The whole `--model` value is the upstream model id; rewrite
         # to local/_inline/<full-id> so dispatch hits _call_local.
+        # Reassemble from the already-parsed `model` so each iteration
+        # in a multi-model loop uses its own spec (not args.model[0]).
+        raw_id = f"{model.provider}/{model.name}"
         model = ModelSpec(
             provider="local",
-            name=f"{inline_local_name}/{args.model}",
+            name=f"{inline_local_name}/{raw_id}",
         )
 
     # If the user passed `--model hf:<id>` or a path, we launch a
@@ -217,10 +258,82 @@ async def _run_async(args: argparse.Namespace) -> int:
         # vLLM teardown happens on EVERY exit path (happy or exception)
         # to close the GPU-orphan window. atexit catches Python exit
         # but not OOM / SIGKILL — explicit cleanup is the safer default.
+        # Use stop_one (not stop_all) so --parallel-models doesn't kill
+        # sibling vLLMs that are still running in concurrent iterations.
         if auto_local_name is not None and not getattr(args, "keep_alive", False):
-            stop_all()
+            proc = next(
+                (p for p in _LIVE_PROCESSES if p.pid == info.pid),
+                None,
+            )
+            if proc is not None:
+                stop_one(proc)
 
     return 0 if all(c == 0 for c in exit_codes) else 1
+
+
+async def _run_sequential(
+    args: argparse.Namespace, model_specs: list[str],
+) -> int:
+    """Run each model against the full dataset in turn. Outputs
+    bucket under <output-dir>/<slug>/<trial-id>/. Exit code is
+    max(all exit codes) so one failure surfaces."""
+    base_output = Path(args.output_dir)
+    base_output.mkdir(parents=True, exist_ok=True)
+
+    exit_codes: list[int] = []
+    for spec_str in model_specs:
+        slug = model_slug(spec_str)
+        sub_output = base_output / slug
+        sys.stderr.write(
+            f"\n→ [{slug}] starting trials for --model {spec_str}\n",
+        )
+        try:
+            model = _parse_model(spec_str)
+            code = await _run_one_model(args, model=model, output_dir=sub_output)
+        except SystemExit:
+            raise  # let argparse / explicit user-error exits propagate
+        except Exception as exc:
+            sys.stderr.write(
+                f"→ [{slug}] failed: {exc}\n",
+            )
+            code = 2
+        exit_codes.append(code)
+
+    return max(exit_codes) if exit_codes else 0
+
+
+async def _run_parallel(
+    args: argparse.Namespace, model_specs: list[str],
+) -> int:
+    """Run all models concurrently; outputs still bucket by slug.
+
+    Caller must ensure enough GPU memory for all models
+    simultaneously (no auto partitioning at v1).
+    """
+    base_output = Path(args.output_dir)
+    base_output.mkdir(parents=True, exist_ok=True)
+
+    async def _one_model(spec_str: str) -> int:
+        slug = model_slug(spec_str)
+        sub_output = base_output / slug
+        sys.stderr.write(
+            f"→ [{slug}] starting (parallel) for --model {spec_str}\n",
+        )
+        try:
+            model = _parse_model(spec_str)
+            return await _run_one_model(
+                args, model=model, output_dir=sub_output,
+            )
+        except SystemExit:
+            raise
+        except Exception as exc:
+            sys.stderr.write(f"→ [{slug}] failed: {exc}\n")
+            return 2
+
+    codes = await asyncio.gather(
+        *[_one_model(s) for s in model_specs], return_exceptions=False,
+    )
+    return max(codes) if codes else 0
 
 
 def _maybe_write_tb2_report(

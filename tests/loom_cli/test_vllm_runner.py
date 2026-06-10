@@ -78,20 +78,6 @@ def test_build_cmd_includes_required_flags() -> None:
     assert "mymodel" in cmd
 
 
-def test_find_free_port_skips_bound() -> None:
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("0.0.0.0", 0))
-    bound_port = s.getsockname()[1]
-    try:
-        # _find_free_port starts at our bound port; should return the
-        # next free one (not the bound one).
-        found = vr._find_free_port(bound_port)
-        assert found != bound_port
-        assert found > bound_port
-    finally:
-        s.close()
-
 
 def test_wait_for_ready_returns_on_200(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_resp = MagicMock(status_code=200)
@@ -194,6 +180,7 @@ def test_launch_vllm_end_to_end_with_mocks(
     health check returns 200, served-model-name is queried, info is
     returned, atexit hook is installed."""
     monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/vllm")
+    monkeypatch.setattr(vr.time, "sleep", lambda _: None)
 
     fake_proc = MagicMock()
     fake_proc.poll.return_value = None
@@ -220,11 +207,20 @@ def test_launch_vllm_cleans_up_on_startup_failure(
     """If wait_for_ready raises (server didn't come up), `_stop_process`
     is invoked on the subprocess rather than being orphaned. (When
     the subprocess died on its own, _stop_process detects this and
-    no-ops — but the launch function still called it.)"""
+    no-ops — but the launch function still called it.)
+
+    The proc passes the 2-second settle window (poll→None on the first
+    call) but then dies during _wait_for_ready (poll→1 on all
+    subsequent calls), so the retry path is NOT triggered.
+    """
     monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/vllm")
+    monkeypatch.setattr(vr.time, "sleep", lambda _: None)
 
     fake_proc = MagicMock()
-    fake_proc.poll.return_value = 1
+    # First poll() call is the settle-window check in launch_vllm → None
+    # (process alive). All subsequent calls are inside _wait_for_ready →
+    # 1 (process died), triggering the "exited prematurely" error.
+    fake_proc.poll.side_effect = [None, 1]
     fake_proc.returncode = 1
     fake_proc.pid = 99998
     monkeypatch.setattr(vr.subprocess, "Popen", lambda *a, **kw: fake_proc)
@@ -238,3 +234,101 @@ def test_launch_vllm_cleans_up_on_startup_failure(
         ))
     # _stop_process was called on the failed subprocess
     assert stop_calls == [fake_proc]
+
+
+def test_launch_vllm_retries_on_bind_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First Popen attempt 'binds' to a port that's actually busy:
+    it exits with code 1. launch_vllm should detect that, retry the
+    next port, and succeed on the second try."""
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/vllm")
+    monkeypatch.setattr(vr.time, "sleep", lambda _: None)
+
+    proc1 = MagicMock()
+    proc1.poll.return_value = 1  # exited (bind failure)
+    proc1.returncode = 1
+    proc1.pid = 11111
+
+    proc2 = MagicMock()
+    proc2.poll.return_value = None  # alive
+    proc2.pid = 22222
+
+    popens: list[MagicMock] = [proc1, proc2]
+    ports_used: list[int] = []
+
+    def _popen(cmd, *a, **kw):
+        port_idx = cmd.index("--port") + 1
+        ports_used.append(int(cmd[port_idx]))
+        return popens.pop(0)
+
+    monkeypatch.setattr(vr.subprocess, "Popen", _popen)
+
+    fake_resp = MagicMock(status_code=200)
+    fake_resp.json.return_value = {"data": [{"id": "model-x"}]}
+    fake_resp.raise_for_status = MagicMock()
+    monkeypatch.setattr(vr.httpx, "get", lambda *a, **kw: fake_resp)
+
+    info = vr.launch_vllm(vr.VLLMLaunchSpec(
+        model="model-x", port=18234,
+    ))
+
+    assert info.pid == 22222
+    assert ports_used == [18234, 18235]  # retried next port
+    assert proc1 not in vr._LIVE_PROCESSES   # bind-fail proc cleaned up
+    assert proc2 in vr._LIVE_PROCESSES        # success proc registered
+
+
+def test_model_slug_hf_id_uses_basename() -> None:
+    # HuggingFace ids: drop the org prefix, lowercase, replace dots
+    assert vr.model_slug("hf:meta-llama/Llama-3.1-8B-Instruct") == "llama-3-1-8b-instruct"
+
+
+def test_model_slug_absolute_path_uses_dirname() -> None:
+    assert vr.model_slug("/data/checkpoints/my-tune/") == "my-tune"
+
+
+def test_model_slug_home_path_uses_dirname() -> None:
+    assert vr.model_slug("~/weights/llama-3-1-8b") == "llama-3-1-8b"
+
+
+def test_model_slug_strips_trailing_slash() -> None:
+    assert vr.model_slug("./weights/v2/") == "v2"
+
+
+def test_model_slug_bare_local_server_name_passthrough() -> None:
+    # When called with a plain registered name (no prefix, no slash),
+    # slug == name (used for `loom serve --name` defaults from a
+    # pre-resolved id).
+    assert vr.model_slug("llama8b") == "llama8b"
+
+
+def test_model_slug_filesystem_safe() -> None:
+    # No spaces, no uppercase, no dots — safe for output dirs
+    slug = vr.model_slug("hf:Org/Name.With.Dots")
+    assert " " not in slug
+    assert slug == slug.lower()
+    assert "." not in slug
+
+
+def test_stop_one_terminates_and_removes_from_registry() -> None:
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.wait.return_value = 0
+    vr._LIVE_PROCESSES.append(proc)
+
+    vr.stop_one(proc)
+
+    assert proc not in vr._LIVE_PROCESSES
+    proc.terminate.assert_called_once()
+
+
+def test_stop_one_is_noop_for_unknown_proc() -> None:
+    proc = MagicMock()
+    proc.poll.return_value = 0  # already exited
+    # NOT in _LIVE_PROCESSES
+    vr.stop_one(proc)
+
+    # No exception, no terminate call (since already-exited)
+    proc.terminate.assert_not_called()
+    assert proc not in vr._LIVE_PROCESSES

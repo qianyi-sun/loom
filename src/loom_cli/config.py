@@ -46,6 +46,7 @@ class LocalProvider:
 
     base_url: str
     api_key: str | None = None
+    served_model_name: str | None = None
 
 
 @dataclass
@@ -68,6 +69,8 @@ class LoomConfig:
                 entry: dict[str, str] = {"base_url": p.base_url}
                 if p.api_key is not None:
                     entry["api_key"] = p.api_key
+                if p.served_model_name is not None:
+                    entry["served_model_name"] = p.served_model_name
                 local[name] = entry
             out["local_providers"] = local
         return out
@@ -106,8 +109,15 @@ def load_config() -> LoomConfig:
             raise ValueError(
                 f"{path}: [local_providers.{name}].api_key must be a string",
             )
+        served_model_name = entry.get("served_model_name")
+        if served_model_name is not None and not isinstance(served_model_name, str):
+            raise ValueError(
+                f"{path}: [local_providers.{name}].served_model_name must be a string",
+            )
         local_providers[str(name)] = LocalProvider(
-            base_url=base_url, api_key=api_key,
+            base_url=base_url,
+            api_key=api_key,
+            served_model_name=served_model_name,
         )
     return LoomConfig(
         tokens=tokens, server_url=server_url, local_providers=local_providers,
@@ -118,3 +128,31 @@ def save_config(cfg: LoomConfig) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomli_w.dumps(cfg.to_toml_dict()))
+
+
+def set_local_provider(
+    name: str,
+    *,
+    base_url: str,
+    api_key: str | None = None,
+    served_model_name: str | None = None,
+) -> None:
+    """Persist a `[local_providers.<name>]` entry to
+    `~/.config/loom/config.toml`. Overwrites any existing entry with
+    the same name."""
+    cfg = load_config()
+    cfg.local_providers[name] = LocalProvider(
+        base_url=base_url,
+        api_key=api_key,
+        served_model_name=served_model_name,
+    )
+    save_config(cfg)
+
+
+def unset_local_provider(name: str) -> None:
+    """Remove a `[local_providers.<name>]` entry. Silent no-op if
+    the entry doesn't exist."""
+    cfg = load_config()
+    if name in cfg.local_providers:
+        del cfg.local_providers[name]
+        save_config(cfg)

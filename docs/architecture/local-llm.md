@@ -202,6 +202,9 @@ model) would all be tracked.
   job submission; we scope to the local subprocess backend for now.
   batch scheduler is follow-up work if a multi-node need lands.
 
+For comparing N models in one run / pre-launching a server with
+`loom serve`, see [`multi-server-local-llm.md`](multi-server-local-llm.md).
+
 ## Test strategy
 
 `tests/loom_cli/test_vllm_runner.py` mocks `subprocess.Popen` and

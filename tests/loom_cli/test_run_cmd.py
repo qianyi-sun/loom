@@ -105,3 +105,31 @@ def test_run_unknown_agent_errors_cleanly(
         "--output-dir", str(tmp_path / "out"),
     ])
     assert rc == 1
+
+
+def test_single_model_run_layout_unchanged(
+    tmp_xdg_home: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: with a single --model, output layout is
+    <output-dir>/<trial-id>/ (no extra slug bucket)."""
+    from loom_benchmarks import registry
+    monkeypatch.setitem(
+        registry.REGISTRY, "stub-single", _StubAdapter(name="stub-single"),
+    )
+    rc = main([
+        "run",
+        "--dataset", "stub-single",
+        "--agent", "oracle",
+        "--backend", "fake",
+        "--output-dir", str(tmp_path / "out"),
+    ])
+    assert rc in {0, 1}
+    # No slug bucket — trial dirs land directly under out/
+    entries = list((tmp_path / "out").iterdir())
+    assert entries, "expected at least one trial dir"
+    # The only sub-dir should look like a trial UUID, not a slug.
+    for e in entries:
+        if e.is_dir():
+            # Trial dirs contain events.jsonl + atif.json
+            assert (e / "events.jsonl").exists() or e.name.startswith("_")

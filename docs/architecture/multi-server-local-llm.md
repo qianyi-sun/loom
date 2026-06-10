@@ -1,10 +1,10 @@
 # Multi-server local-LLM
 
-> **Status**: design — not yet implemented. Implementation tracked
-> against a follow-up PR (filed once the single-server launcher
-> from [`local-llm.md`](local-llm.md) merges). This page describes
-> the planned shape so reviewers and future contributors can
-> evaluate downstream design choices against it.
+> **Status**: shipped. Implementation in `src/loom_cli/serve_cmd.py`
+> + `src/loom_cli/run_cmd.py:_run_sequential`/`_run_parallel`. This
+> page documents the design decisions and the cross-component flow;
+> for the user-facing surface see
+> [`../user-guide.md#comparing-multiple-models`](../user-guide.md).
 
 ## Goals
 
@@ -50,7 +50,7 @@ Behavior:
 - Calls `launch_vllm(...)` from `vllm_runner.py` (reuses all of #288).
 - Writes config:
   ```toml
-  [local.<name>]
+  [local_providers.<name>]
   base_url = "http://localhost:<port>/v1"
   served_model_name = "<canonical>"
   ```
@@ -63,7 +63,7 @@ Behavior:
   `--gpu-memory-utilization`, `--max-model-len`, `--enforce-eager`).
 - On shutdown (Ctrl-C, SIGTERM, vLLM crash):
   - Stop the vLLM subprocess via the existing `stop_one(proc)`.
-  - **Remove** the `[local.<name>]` entry from config so a stale URL
+  - **Remove** the `[local_providers.<name>]` entry from config so a stale URL
     doesn't linger.
 
 ### `loom run --model M1 --model M2 [--parallel-models] …`
@@ -83,9 +83,10 @@ Multi-model (N ≥ 2) semantics:
 - **Output**: with N>1, trials land in
   `<output-dir>/<model-slug>/<trial-id>/`. With N=1, layout is
   unchanged (`<output-dir>/<trial-id>/`).
-- **ATIF metadata**: every trial's `atif.json` gains a `model_slug`
-  field. With one model this is just the slug; with N it's the
-  per-trial discriminator.
+- **Output-dir identity**: trials land under `<output-dir>/<model-slug>/<trial-id>/` 
+  so downstream tools can group by directory name. ATIF JSON itself does not 
+  carry a `model_slug` field today — filed as a follow-up if/when downstream 
+  consumers need it as a structured tag.
 
 Mutual exclusions:
 
@@ -121,7 +122,7 @@ def model_slug(spec: str) -> str:
 `launch_vllm` already supports N concurrent launches via the
 `_LIVE_PROCESSES` list. No change to its body.
 
-### `src/loom_cli/serve_cmd.py` (NEW)
+### `src/loom_cli/serve_cmd.py`
 
 ```python
 async def serve(args: argparse.Namespace) -> int:
@@ -185,16 +186,16 @@ infos = [launch_vllm(spec) for spec in models if needs_launch(spec)]
 # Stop all at the end.
 ```
 
-### `src/loom_cli/config.py` (small schema bump)
+### `src/loom_cli/config.py`
 
-`LocalProvider` gains an optional `served_model_name` field:
+`LocalProvider` carries an optional `served_model_name` field:
 
 ```python
 @dataclass
 class LocalProvider:
     base_url: str
     api_key: str | None = None
-    served_model_name: str | None = None  # NEW
+    served_model_name: str | None = None  # added for loom serve
 ```
 
 Used by `loom serve` to persist the canonical name. `loom run` reads
@@ -242,25 +243,25 @@ trial gather → outputs to runs/compare/llama-3-1-70b-instruct/<trial>/
 stop_one(70B proc); unregister _auto_vllm
 ```
 
-Peak GPU = `max(8B_mem, 70B_mem)`. ATIF `model_slug` field tells
-downstream aggregation which model produced each trial.
+Peak GPU = `max(8B_mem, 70B_mem)`. Downstream tools can identify which 
+model produced each trial by inspecting the output directory name.
 
 ### Serve + share
 
 ```
 # Terminal 1:
 loom serve hf:meta-llama/Llama-3.1-8B-Instruct --name llama8b
-# Writes [local.llama8b] to config, blocks.
+# Writes [local_providers.llama8b] to config, blocks.
 
 # Terminal 2:
 loom run --model local/llama8b/meta-llama/Llama-3.1-8B-Instruct \
          --dataset humaneval
 
-# Loom reads [local.llama8b] from config, dispatches via _call_local.
+# Loom reads [local_providers.llama8b] from config, dispatches via _call_local.
 # No new vLLM launch. Terminal 1's process owns the GPU.
 
 # Terminal 1: Ctrl-C
-# → stop_one() + delete [local.llama8b] from config
+# → stop_one() + delete [local_providers.llama8b] from config
 ```
 
 ### Mixed managed + persisted
@@ -284,7 +285,7 @@ loom run --dataset humaneval \
 | `loom serve` vLLM crashes during startup | exit 2, no config written (registration is post-health-check) |
 | `loom serve` Ctrl-C during health probe | vLLM stopped, no config written |
 | `loom serve` Ctrl-C after registration | vLLM stopped, config entry deleted |
-| `loom serve` SIGKILL | atexit doesn't fire; config entry left over. Documented; user can `loom config unset local.<name>.base_url` if they hit it. |
+| `loom serve` SIGKILL | atexit doesn't fire; config entry left over. Documented; user can `loom config unset local_providers.<name>.base_url` if they hit it. |
 | `loom run` sequential: model A fails | continue to B; final exit = max(A_code, B_code) |
 | `loom run` sequential: A succeeds, B fails to launch | A's outputs preserved; B's slot empty; exit 2 |
 | `loom run` parallel: one vLLM crashes mid-gather | trials targeting that model fail; others continue; `stop_all()` at end tears the rest down |
@@ -296,7 +297,7 @@ loom run --dataset humaneval \
 
 **`tests/loom_cli/test_serve_cmd.py`** (~10 tests):
 - Smoke: `loom serve hf:X` calls `launch_vllm` (mocked), writes
-  `[local.<name>]` to config, blocks on `signal.pause` (mocked).
+  `[local_providers.<name>]` to config, blocks on `signal.pause` (mocked).
 - `--name` default — slug derivation.
 - `--name` explicit.
 - Ctrl-C path: config entry removed.
@@ -349,19 +350,19 @@ loom run --dataset humaneval \
 - Not service-mode. Workers in service-mode dispatch through the
   LLM Gateway; this design is CLI-only.
 
-## Edge cases handled at implementation time
+## Edge cases resolved at implementation time
 
-Two micro-decisions resolved during design that the implementation
-must honor:
+Two micro-decisions resolved during design, honored in the
+implementation:
 
 1. **`model_slug` collision** — two models that produce the same
-   slug (e.g. two different paths both ending in `weights/`) clobber
-   each other's output bucket. Implementation suffixes with an index
-   (`weights-1`, `weights-2`) on conflict and warns on stderr.
-2. **`loom serve --name` already in config** — error with a clear
-   message rather than silently overwriting; user can `loom config
-   unset local.<name>.base_url` first. Silent override is too easy
-   to footgun.
+   slug (e.g. two different paths both ending in `weights/`) currently 
+   write to the same output bucket; the second iteration's outputs overwrite 
+   the first's. Detected by inspection but not blocked. If real users hit this, 
+   an index-suffix (`weights-1`, `weights-2`) is the planned fix.
+2. **`loom serve --name` collision** — if `local/<X>` is already 
+   registered in config, `loom serve` rejects with exit 2 and a clear message. 
+   Implemented in `serve_cmd.py`.
 
 ## See also
 

@@ -141,3 +141,62 @@ def test_set_does_not_warn_when_v1_present(
     assert rc == 0
     err = capsys.readouterr().err
     assert "warning" not in err.lower()
+
+
+def test_local_provider_served_model_name_optional(tmp_xdg_home: Path) -> None:
+    """A config block without served_model_name still loads (backward
+    compat)."""
+    cfg_path = tmp_xdg_home / "loom" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        '[local_providers.vllm]\n'
+        'base_url = "http://localhost:8000/v1"\n',
+    )
+    from loom_cli.config import load_config
+    cfg = load_config()
+    assert cfg.local_providers["vllm"].base_url == "http://localhost:8000/v1"
+    assert cfg.local_providers["vllm"].served_model_name is None
+
+
+def test_local_provider_served_model_name_round_trip(
+    tmp_xdg_home: Path,
+) -> None:
+    """A config block WITH served_model_name preserves it on round-trip."""
+    cfg_path = tmp_xdg_home / "loom" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        '[local_providers.llama8b]\n'
+        'base_url = "http://localhost:8234/v1"\n'
+        'served_model_name = "meta-llama/Llama-3.1-8B-Instruct"\n',
+    )
+    from loom_cli.config import load_config
+    cfg = load_config()
+    entry = cfg.local_providers["llama8b"]
+    assert entry.base_url == "http://localhost:8234/v1"
+    assert entry.served_model_name == "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def test_set_local_provider_round_trips(tmp_xdg_home: Path) -> None:
+    from loom_cli.config import load_config, set_local_provider
+    set_local_provider(
+        "llama8b",
+        base_url="http://localhost:8234/v1",
+        served_model_name="meta-llama/Llama-3.1-8B-Instruct",
+    )
+    cfg = load_config()
+    assert cfg.local_providers["llama8b"].base_url == "http://localhost:8234/v1"
+    assert cfg.local_providers["llama8b"].served_model_name == \
+        "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def test_unset_local_provider_removes_entry(tmp_xdg_home: Path) -> None:
+    from loom_cli.config import load_config, set_local_provider, unset_local_provider
+    set_local_provider("doomed", base_url="http://example.com/v1")
+    unset_local_provider("doomed")
+    cfg = load_config()
+    assert "doomed" not in cfg.local_providers
+
+
+def test_unset_local_provider_is_noop_if_missing(tmp_xdg_home: Path) -> None:
+    from loom_cli.config import unset_local_provider
+    unset_local_provider("never-existed")  # must not raise

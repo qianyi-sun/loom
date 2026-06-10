@@ -154,7 +154,7 @@ vLLM tuning (passed through to `vllm serve`):
 | `--gpu-memory-utilization F` | 0.90 | 0.0–1.0 |
 | `--max-model-len N` | model's max | Cap context window |
 | `--enforce-eager` | off | Disable CUDA graphs (debug only) |
-| `--keep-alive` | off | Leave vLLM running after the trial (handy when iterating against the same model) |
+| `--keep-alive` | off | Leave vLLM running after the trial (handy when iterating against the same model). Only meaningful for single-`--model` runs; multi-model loops always tear down each iteration's server. |
 
 ### Path C: persisted — same server, many runs
 
@@ -216,6 +216,55 @@ Service-mode operators register local providers via env vars:
 `LOOM_GW_LOCAL_<NAME>_API_KEY`). Route-level Gateway dispatch for
 `model=local/...` is the natural follow-up; today, service-mode
 clients reach local servers via `loom run` on the agent's host.
+
+## Comparing multiple models
+
+`loom run --model A --model B` runs the same tasks against each
+model. Default behavior:
+
+- **Sequential** — load A, run all tasks, unload A, then load B.
+  One vLLM in GPU memory at a time. Peak memory = max(A, B).
+- **Output bucketing** — trials land under
+  `<output-dir>/<model-slug>/<trial-id>/`. The slug is derived from
+  the model spec (HF basename, path basename, or registered name).
+- **Exit code** — `max` of all per-model exit codes, so any failure
+  surfaces.
+
+Opt into multi-GPU parallel:
+
+```bash
+loom run ... --model hf:A --model hf:B --parallel-models
+```
+
+You're responsible for ensuring enough GPU memory for both. Loom
+does not auto-partition `--gpu-memory-utilization` between models.
+
+## `loom serve` reference
+
+Foreground command that launches vLLM and registers it as
+`local/<name>`. No daemon, no PID files; closing the terminal
+closes the server.
+
+```
+loom serve <spec> [--name NAME] [vLLM tuning flags]
+```
+
+- `<spec>`: `hf:<org>/<name>` or a path (`/`, `~`, `./`, `../`).
+- `--name`: registration name; defaults to a slug of the spec.
+- Tuning flags: `--vllm-port`, `--vllm-host`,
+  `--gpu-memory-utilization`, `--tensor-parallel-size`,
+  `--max-model-len`, `--enforce-eager`.
+
+On startup, writes:
+
+```toml
+[local_providers.<name>]
+base_url = "http://localhost:<port>/v1"
+served_model_name = "<canonical>"
+```
+
+to `~/.config/loom/config.toml`. On shutdown (Ctrl-C, SIGTERM, or
+vLLM crash), the entry is removed.
 
 ## `loom datasets` reference
 

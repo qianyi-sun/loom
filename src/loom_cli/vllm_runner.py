@@ -29,7 +29,6 @@ import logging
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -97,41 +96,64 @@ def launch_vllm(spec: VLLMLaunchSpec) -> VLLMServerInfo:
     its address + served-model name. Raises:
 
     - `MissingVLLMDependencyError` if vLLM not installed.
-    - `RuntimeError` if the model path doesn't exist or the
-      server doesn't come up within the timeout.
+    - `RuntimeError` if the model path doesn't exist or no port in
+      the search window accepted the bind (or the server didn't
+      become healthy within the timeout).
     """
     _ensure_vllm_installed()
     _install_cleanup_handlers()
 
-    port = spec.port or _find_free_port(8234)
     model = _resolve_model_path(spec.model)
-    cmd = _build_cmd(model, port, spec)
-    logger.info("starting vLLM: %s", " ".join(cmd))
-    sys.stderr.write(
-        f"→ starting vLLM (model={model}, port={port}) ...\n",
-    )
-    proc = subprocess.Popen(cmd)
-    _LIVE_PROCESSES.append(proc)
+    start_port = spec.port or 8234
+    max_port = start_port + 1000
+    port = start_port
 
-    base_url = f"http://localhost:{port}/v1"
-    try:
-        _wait_for_ready(base_url, proc, timeout_sec=300.0)
-        served = _query_served_model_name(base_url)
-    except Exception:
-        _stop_process(proc)
-        # Drop the dead/torn-down proc from the live list so atexit +
-        # signal handlers don't redundantly retry it later.
+    while port < max_port:
+        cmd = _build_cmd(model, port, spec)
+        logger.info("starting vLLM: %s", " ".join(cmd))
+        sys.stderr.write(
+            f"→ starting vLLM (model={model}, port={port}) ...\n",
+        )
+        proc = subprocess.Popen(cmd)
+        _LIVE_PROCESSES.append(proc)
+
+        # Brief settling window: if vLLM is going to die from a bind
+        # failure, it does so within a few seconds. Sample its
+        # state, then continue with the normal health-probe flow.
+        time.sleep(2.0)
+        if proc.poll() is not None and proc.returncode != 0:
+            # Likely a bind failure on this port; try the next.
+            if proc in _LIVE_PROCESSES:
+                _LIVE_PROCESSES.remove(proc)
+            sys.stderr.write(
+                f"→ vLLM exited code {proc.returncode} on port "
+                f"{port}; retrying next port\n",
+            )
+            port += 1
+            continue
+
+        base_url = f"http://localhost:{port}/v1"
         try:
-            _LIVE_PROCESSES.remove(proc)
-        except ValueError:
-            pass
-        raise
+            _wait_for_ready(base_url, proc, timeout_sec=300.0)
+            served = _query_served_model_name(base_url)
+        except Exception:
+            _stop_process(proc)
+            if proc in _LIVE_PROCESSES:
+                _LIVE_PROCESSES.remove(proc)
+            raise
 
-    info = VLLMServerInfo(base_url=base_url, served_model_name=served, pid=proc.pid)
-    sys.stderr.write(
-        f"✓ vLLM ready (served_model_name={served}, base_url={base_url})\n",
+        info = VLLMServerInfo(
+            base_url=base_url, served_model_name=served, pid=proc.pid,
+        )
+        sys.stderr.write(
+            f"✓ vLLM ready (served_model_name={served}, base_url={base_url})\n",
+        )
+        return info
+
+    raise RuntimeError(
+        f"no port between {start_port} and {max_port} accepted vLLM; "
+        "see stderr above for individual failure reasons.",
     )
-    return info
 
 
 def stop_all() -> None:
@@ -139,6 +161,31 @@ def stop_all() -> None:
     call multiple times. Honored by atexit + signal handlers."""
     while _LIVE_PROCESSES:
         _stop_process(_LIVE_PROCESSES.pop())
+
+
+def model_slug(spec: str) -> str:
+    """Derive a stable, filesystem-safe slug from any model spec.
+
+    Used for output bucketing under `<output-dir>/<slug>/<trial-id>/`
+    when N>1 models, and for `loom serve --name` defaults.
+    """
+    # Strip CLI prefixes / trailing separators we don't care about.
+    body = spec.removeprefix("hf:").rstrip("/")
+    # HF ids and paths share the same "take the last segment" rule.
+    if "/" in body:
+        body = body.rsplit("/", 1)[-1]
+    return body.lower().replace(".", "-").replace(" ", "-")
+
+
+def stop_one(proc: subprocess.Popen[bytes]) -> None:
+    """Stop one specific vLLM subprocess and remove it from the live
+    list. Safe if the process was never registered (no-op) or already
+    exited. Used by the sequential-load loop when one model finishes
+    and the next is about to launch.
+    """
+    if proc in _LIVE_PROCESSES:
+        _LIVE_PROCESSES.remove(proc)
+    _stop_process(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -170,18 +217,6 @@ def _resolve_model_path(spec_model: str) -> str:
         return str(path)
     return spec_model
 
-
-def _find_free_port(start: int) -> int:
-    """Return the first TCP port >= start that is free on this host."""
-    port = start
-    while port < start + 1000:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                port += 1
-    raise RuntimeError(f"no free port found in range {start}..{start + 1000}")
 
 
 def _build_cmd(model: str, port: int, spec: VLLMLaunchSpec) -> list[str]:

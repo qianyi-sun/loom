@@ -110,7 +110,8 @@ vLLM tuning flags (forwarded to `vllm serve`):
 `--gpu-memory-utilization 0.85`, `--vllm-port 18234`,
 `--vllm-host 0.0.0.0` (default `127.0.0.1`; loopback-only by design —
 opt in explicitly to expose on the LAN), `--enforce-eager`,
-`--keep-alive` (leave server running between iterations).
+`--keep-alive` (leave server running between iterations; only meaningful for 
+single-`--model` runs; multi-model loops always tear down each iteration's server).
 
 **C. Use the same server repeatedly?** Persist it with `loom config`.
 
@@ -128,6 +129,40 @@ Register multiple servers (`local.ollama.base_url ...`,
 `local.lmstudio.base_url ...`) and pick one per trial. Local trials
 cost $0 by default; add a rate-card row keyed
 `provider="local:<server>"` to attribute internal GPU cost.
+
+### Compare N models on the same dataset
+
+Pass `--model` more than once. Loom runs your tasks against each
+model in turn, bucketing output under a per-model directory:
+
+```bash
+loom run --dataset humaneval \
+         --model hf:meta-llama/Llama-3.1-8B-Instruct \
+         --model hf:meta-llama/Llama-3.1-70B-Instruct \
+         --output-dir runs/compare/
+# → runs/compare/llama-3-1-8b-instruct/<trial-id>/
+# → runs/compare/llama-3-1-70b-instruct/<trial-id>/
+```
+
+Sequential by default: only one vLLM is loaded at a time, so peak
+GPU memory = max(A, B), not A + B. Pass `--parallel-models` to launch
+all upfront for multi-GPU users.
+
+### Pre-launch a server, share across runs
+
+If you'll target the same server many times, `loom serve` writes
+the URL into config on start and removes it on Ctrl-C — no `loom
+config set` housekeeping:
+
+```bash
+# Terminal 1
+loom serve hf:meta-llama/Llama-3.1-8B-Instruct --name llama8b
+# → ✓ vLLM ready; registered as local/llama8b; Ctrl-C to stop
+
+# Terminal 2
+loom run --dataset humaneval --backend docker \
+         --model local/llama8b/meta-llama/Llama-3.1-8B-Instruct
+```
 
 Per-trial outputs land at `./runs/<trial-id>/events.jsonl` (full
 event trajectory) + `./runs/<trial-id>/atif.json` (ATIF v1.7

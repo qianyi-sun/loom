@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 from typing import cast
@@ -37,9 +38,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--agent", required=True,
                        help="Agent name (oracle / litellm / claude-code / ...)")
     p_run.add_argument(
-        "--model", default=None,
+        "--model", action="append", default=None,
         help=(
-            "Model spec. Four shapes:\n"
+            "Model spec. Repeatable — pass --model N times to compare N "
+            "models on the same dataset.\n"
+            "Shapes:\n"
             "  <provider>/<name>           cloud or registered local server "
             "(e.g. anthropic/claude-opus-4-7, local/vllm/Llama-3.1-8B)\n"
             "  hf:<org>/<name>             HuggingFace model id; Loom "
@@ -48,6 +51,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "vLLM on it\n"
             "  <model_id>                  any string, when --local-server "
             "is also set"
+        ),
+    )
+    p_run.add_argument(
+        "--parallel-models", dest="parallel_models", action="store_true",
+        help=(
+            "With multiple --model specs, launch all servers upfront and "
+            "run trials in parallel. Default: sequential (load model → "
+            "run all tasks → unload). --parallel-models requires GPU "
+            "memory for all models simultaneously."
         ),
     )
     p_run.add_argument(
@@ -105,7 +117,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "For hf:/path launches, leave vLLM running after the trial "
             "completes (useful when iterating on tasks against the "
-            "same model)."
+            "same model). Only meaningful for single-`--model` runs; "
+            "multi-model loops always tear down each iteration's server."
         ),
     )
     p_run.add_argument("--backend", default="docker",
@@ -160,6 +173,56 @@ def _build_parser() -> argparse.ArgumentParser:
     from loom_cli.models_cmd import add_models_subparser
     add_models_subparser(sub)
 
+    # `loom serve <spec> --name X` — foreground vLLM launcher that
+    # auto-registers the server as local/<name> and removes the entry on
+    # Ctrl-C / SIGTERM.
+    p_serve = sub.add_parser(
+        "serve",
+        help=(
+            "Launch a vLLM server in the foreground and register it "
+            "as a local provider; Ctrl-C to stop."
+        ),
+    )
+    p_serve.add_argument(
+        "model_spec",
+        help=(
+            "Model spec: `hf:<org>/<name>` or an absolute/relative "
+            "path to weights (e.g. /data/checkpoints/my-tune/)."
+        ),
+    )
+    p_serve.add_argument(
+        "--name", default=None,
+        help=(
+            "Registration name under `local.<NAME>` in config. "
+            "Defaults to a sanitized slug of the model id."
+        ),
+    )
+    p_serve.add_argument(
+        "--vllm-port", dest="vllm_port", type=int, default=0,
+        help="vLLM port (0 = autopick from 8234)",
+    )
+    p_serve.add_argument(
+        "--vllm-host", dest="vllm_host", default="127.0.0.1",
+        help=(
+            "vLLM bind host (default 127.0.0.1; 0.0.0.0 for LAN)."
+        ),
+    )
+    p_serve.add_argument(
+        "--gpu-memory-utilization", dest="gpu_memory_utilization",
+        type=float, default=0.90,
+    )
+    p_serve.add_argument(
+        "--tensor-parallel-size", dest="tensor_parallel_size",
+        type=int, default=1,
+    )
+    p_serve.add_argument(
+        "--max-model-len", dest="max_model_len", type=int, default=None,
+    )
+    p_serve.add_argument(
+        "--enforce-eager", dest="enforce_eager", action="store_true",
+    )
+    p_serve.set_defaults(handler=_serve_handler)
+
     return p
 
 
@@ -173,6 +236,12 @@ def _config_handler(args: argparse.Namespace) -> int:
     from loom_cli.config_cmd import dispatch
 
     return dispatch(args)
+
+
+def _serve_handler(args: argparse.Namespace) -> int:
+    from loom_cli.serve_cmd import serve as serve_handler
+
+    return asyncio.run(serve_handler(args))
 
 
 def main(argv: list[str] | None = None) -> int:
