@@ -97,7 +97,7 @@ Production deployment: [`docs/operator-runbook.md`](docs/operator-runbook.md).
 
 ---
 
-## Architecture (one paragraph)
+## Architecture
 
 A FastAPI **Control Plane** owns the trial state machine, DRF
 (Dominant Resource Fairness) scheduling, and the trajectory index.
