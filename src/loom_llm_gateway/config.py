@@ -83,6 +83,11 @@ class GatewaySettings(BaseSettings):
     log_level: LogLevel = "info"
     metrics_port: int = 9101
 
+    # Dev-only: when truthy, uvicorn runs in `--reload` mode watching
+    # `/app/src` for changes. Set via `LOOM_GW_DEV_RELOAD=1` in the
+    # dev compose; leave unset in production.
+    dev_reload: bool = False
+
     # Rate-card cache TTL
     rate_card_cache_ttl_sec: int = 300
 

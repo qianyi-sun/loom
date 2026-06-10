@@ -33,7 +33,11 @@ _HEALTHCHECK_RETRIES = 30
 _HEALTHCHECK_INTERVAL_SEC = 2.0
 
 # Endpoint map (matches compose YAML port bindings + k8s ingress).
+# Order = order printed by `loom service up`. User panel goes first
+# because that's the URL most users actually want to open after the
+# stack is up.
 _ENDPOINTS = {
+    "user_panel": ("http://localhost:5173", "React SPA (Vite HMR)"),
     "loom_service": ("http://localhost:8090", "user-facing REST + Swagger UI at /docs"),
     "control_plane": ("http://localhost:8080", "worker-facing; normally internal in k8s"),
     "llm_gateway": ("http://localhost:9100", "agent-facing"),

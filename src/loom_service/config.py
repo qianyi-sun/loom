@@ -31,6 +31,11 @@ class LoomServiceSettings(BaseSettings):
     bind_port: int = 8090
     log_level: LogLevel = "info"
 
+    # Dev-only: when truthy, uvicorn runs in `--reload` mode watching
+    # `/app/src` for changes. Set via `LOOM_SVC_DEV_RELOAD=1` in the
+    # dev compose; leave unset in production.
+    dev_reload: bool = False
+
     # Trajectory / ATIF presigned URLs (Plan 18).
     signed_url_expiry_sec: int = 3600
 

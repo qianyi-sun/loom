@@ -25,6 +25,11 @@ class ControlPlaneSettings(BaseSettings):
     log_level: LogLevel = "info"
     metrics_port: int = 9090
 
+    # Dev-only: when truthy, uvicorn runs in `--reload` mode watching
+    # `/app/src` for changes. Set via `LOOM_CP_DEV_RELOAD=1` in the
+    # dev compose; leave unset in production.
+    dev_reload: bool = False
+
     # Worker liveness — claim is reclaimable once heartbeat is this stale.
     worker_heartbeat_expiry_sec: int = 15
     worker_reclaim_sweep_interval_sec: int = 30

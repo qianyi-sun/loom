@@ -11,11 +11,18 @@
 #   # The team token printed by seed_test_data.py is your bearer.
 #
 # Endpoint map (matches the k8s ingress in deploy/k8s/):
+#   localhost:5173   React SPA via Vite HMR (the user panel)
 #   localhost:8090   loom_service (user-facing REST at /api/v1/*)
 #   localhost:8080   control_plane (worker-facing, normally internal-only)
 #   localhost:9100   llm_gateway   (agent-facing)
 #   localhost:9000   minio S3 API
 #   localhost:9001   minio console
+#
+# Hot-reload: the three uvicorn services (loom_service / control_plane /
+# llm_gateway) run with `LOOM_*_DEV_RELOAD=1` so Python edits to
+# anything under `src/` hot-restart the process. The SPA runs through
+# Vite's own HMR. Worker stays manual: `docker compose restart worker`
+# after editing worker code.
 
 services:
   postgres:
@@ -60,6 +67,7 @@ services:
       LOOM_GW_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
       LOOM_GW_ANTHROPIC_API_KEY: ${LOOM_GW_ANTHROPIC_API_KEY:-stub-key}
       LOOM_GW_OPENAI_API_KEY: ${LOOM_GW_OPENAI_API_KEY:-stub-key}
+      LOOM_GW_DEV_RELOAD: "1"
     volumes:
       - ../src:/app/src
     depends_on:
@@ -80,6 +88,7 @@ services:
       LOOM_CP_MINIO_SECRET_KEY: loomdev123
       LOOM_CP_LLM_GATEWAY_URL: http://llm-gateway:9100
       LOOM_CP_LOG_LEVEL: debug
+      LOOM_CP_DEV_RELOAD: "1"
     volumes:
       - ../src:/app/src
     depends_on:
@@ -103,6 +112,7 @@ services:
       LOOM_SVC_CONTROL_PLANE_URL: http://control-plane:8080/
       LOOM_SVC_GATEWAY_URL: http://llm-gateway:9100/
       LOOM_SVC_LOG_LEVEL: debug
+      LOOM_SVC_DEV_RELOAD: "1"
       # LOOM_SVC_CAMPAIGN_RUNNER_CP_TOKEN unset → runner skips its tick
       # with a warning. Set it after seeding a submit-scoped token if
       # you want to exercise the campaign-runner locally.
@@ -137,7 +147,24 @@ services:
       control-plane:
         condition: service_started
 
+  # React SPA — Vite dev server with HMR. `npm install` runs on first
+  # boot (the named volume preserves node_modules across restarts).
+  # Edits to web/ files reload in the browser instantly.
+  web:
+    image: node:20-slim
+    working_dir: /app
+    command: ["sh", "-c", "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173"]
+    volumes:
+      - ../web:/app
+      - web_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      loom-service:
+        condition: service_started
+
 volumes:
   postgres_data:
   minio_data:
   worker_trajectories:
+  web_node_modules:

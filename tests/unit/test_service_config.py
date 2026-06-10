@@ -31,6 +31,17 @@ def test_env_vars_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     # Forward-compat defaults are stable.
     assert s.signed_url_expiry_sec == 3600
     assert s.campaign_runner_batch_size == 50
+    # Dev-reload defaults off so production never accidentally
+    # ships with a file-watcher in each container.
+    assert s.dev_reload is False
+
+
+def test_dev_reload_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("LOOM_SVC_DEV_RELOAD", "1")
+    s = LoomServiceSettings(_env_file=None)
+    assert s.dev_reload is True
 
 
 def test_extra_forbid_on_dict_init(monkeypatch: pytest.MonkeyPatch) -> None:
