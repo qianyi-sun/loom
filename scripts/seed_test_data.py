@@ -1,18 +1,28 @@
 """Bootstrap a team + task + tokens for tests.
 
 Invoked by `tests/system/*` to seed the docker-compose stack with the
-canonical fixture data. Prints the team token to stdout (system tests
-capture it as the bearer for their submit calls).
+canonical fixture data. Prints tokens to stdout (system tests capture
+them as the bearer for their submit calls; the SPA login screen
+accepts them as paste-ins).
 
 In production, an admin uses /admin/* + the rate-card admin endpoint;
 this script side-channels straight into Postgres for speed.
+
+NOTE: this script also seeds a `loom_admin_<…>` token in the DB so the
+SPA admin views work in dev. This is a DEVELOPMENT-ONLY crutch — the
+production model (singleton admin from secret-store, not multi-row DB
+tokens) is tracked in https://github.com/carinrc/loom/issues/295. The
+script refuses to run when `LOOM_ENV=production` so it can't be
+fired against a prod cluster by accident.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import secrets
+import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,16 +49,31 @@ def main() -> None:
         help="Which fixture under tests/fixtures/tasks/ to register.",
     )
     parser.add_argument(
-        "--print", choices=("team", "worker", "both"), default="team",
-        help="Which token to print to stdout (default: team).",
+        "--print", choices=("team", "worker", "admin", "all"), default="team",
+        help=(
+            "Which token to print to stdout (default: team). "
+            "`admin` is dev-only — see issue #295."
+        ),
     )
     args = parser.parse_args()
+
+    # Hard guard: this script side-channels into the DB and ships a
+    # dev-only admin token. Refuse to run against a production env
+    # so a stray invocation can't manufacture an admin token.
+    if os.environ.get("LOOM_ENV", "").lower() == "production":
+        sys.stderr.write(
+            "seed_test_data.py refuses to run with LOOM_ENV=production. "
+            "It is a development crutch; production admin bootstrap is "
+            "tracked in https://github.com/carinrc/loom/issues/295.\n",
+        )
+        raise SystemExit(2)
 
     engine = create_engine(args.db_url)
     session_local = sessionmaker(engine)
     team_id = uuid4()
     raw_team = "loom_team_" + secrets.token_hex(8)
     raw_worker = "loom_w_" + secrets.token_hex(8)
+    raw_admin = "loom_admin_" + secrets.token_urlsafe(32)
     now = datetime.now(UTC)
 
     fixture_dir = REPO_ROOT / "tests" / "fixtures" / "tasks" / args.task_id
@@ -71,6 +96,15 @@ def main() -> None:
             token_hash=hashlib.sha256(raw_worker.encode()).digest(),
             type="worker",
             scopes=["worker:claim", "worker:report", "worker:index"],
+            team_id=None,
+            issued_at=now, expires_at=None,
+        ))
+        # Dev-only admin token so the SPA admin views work. See the
+        # module docstring + issue #295 for the production model.
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw_admin.encode()).digest(),
+            type="admin",
+            scopes=["admin:tokens", "admin:rate_cards"],
             team_id=None,
             issued_at=now, expires_at=None,
         ))
@@ -105,9 +139,12 @@ def main() -> None:
         print(raw_team)
     elif args.print == "worker":
         print(raw_worker)
-    else:
-        print(raw_team)
-        print(raw_worker)
+    elif args.print == "admin":
+        print(raw_admin)
+    else:  # "all"
+        print(f"team: {raw_team}")
+        print(f"worker: {raw_worker}")
+        print(f"admin: {raw_admin}")
 
 
 if __name__ == "__main__":

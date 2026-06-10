@@ -90,22 +90,27 @@ def _alembic_upgrade(db_url: str) -> int:
     ).returncode
 
 
-def _seed_test_data(db_url: str) -> tuple[int, str | None]:
-    """Run seed_test_data.py; return (exit_code, team_token_or_None).
-    The script prints the team token as its last stdout line."""
+def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
+    """Run seed_test_data.py with --print all; return (exit_code,
+    {label: token}). The script prints each token on its own line as
+    `<label>: <token>`."""
     r = subprocess.run(
         [sys.executable, "scripts/seed_test_data.py",
-         "--db-url", db_url, "--print", "team"],
+         "--db-url", db_url, "--print", "all"],
         capture_output=True, text=True, check=False,
     )
     if r.returncode != 0:
         sys.stderr.write(r.stderr)
-        return r.returncode, None
-    token = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else None
-    return 0, token
+        return r.returncode, {}
+    tokens: dict[str, str] = {}
+    for line in r.stdout.strip().splitlines():
+        label, _, value = line.partition(":")
+        if value:
+            tokens[label.strip()] = value.strip()
+    return 0, tokens
 
 
-def _print_summary(team_token: str | None) -> None:
+def _print_summary(tokens: dict[str, str]) -> None:
     print()
     print("=" * 60)
     print("Loom dev stack is up.")
@@ -115,13 +120,20 @@ def _print_summary(team_token: str | None) -> None:
     for name, (url, desc) in _ENDPOINTS.items():
         print(f"  {name:18} {url:48} {desc}")
     print()
-    if team_token:
-        print("Team token (use as Bearer):")
+    if tokens.get("team"):
+        team_token = tokens["team"]
+        print("Team token (use as Bearer; SPA login as a team user):")
         print(f"  {team_token}")
         print()
+    if tokens.get("admin"):
+        # Dev-only admin token. Production model tracked in issue #295.
+        print("Admin token (DEV-ONLY; SPA login as admin — see issue #295):")
+        print(f"  {tokens['admin']}")
+        print()
+    if tokens.get("team"):
         print("Try it:")
         print("  curl http://localhost:8090/api/v1/health")
-        print(f"  curl -H 'Authorization: Bearer {team_token}' \\")
+        print(f"  curl -H 'Authorization: Bearer {tokens['team']}' \\")
         print("       http://localhost:8090/api/v1/trials")
         print()
     print("Shut down:")
@@ -159,13 +171,13 @@ def _up(args: argparse.Namespace) -> int:
         sys.stderr.write("error: alembic upgrade failed.\n")
         return rc
 
-    print("→ seeding team token + hello-world task fixture")
-    rc, token = _seed_test_data(args.db_url)
+    print("→ seeding team + admin tokens + hello-world task fixture")
+    rc, tokens = _seed_test_data(args.db_url)
     if rc != 0:
         sys.stderr.write("error: seed_test_data.py failed.\n")
         return rc
 
-    _print_summary(token)
+    _print_summary(tokens)
     return 0
 
 

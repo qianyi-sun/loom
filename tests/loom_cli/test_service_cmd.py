@@ -111,3 +111,46 @@ def test_up_invokes_docker_compose_up(
         first_args = mock_run.call_args_list[0].args[0]
         assert "up" in first_args and "-d" in first_args
         assert mock_wait.called
+
+
+def test_seed_test_data_parses_all_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--print all` emits `<label>: <token>` per line; the wrapper
+    parses them into a dict so the summary can label each clearly."""
+    from subprocess import CompletedProcess
+
+    from loom_cli.service_cmd import _seed_test_data
+
+    fake_stdout = (
+        "team: loom_team_aaaaaa\n"
+        "worker: loom_w_bbbbbb\n"
+        "admin: loom_admin_cccccc\n"
+    )
+
+    def _fake_run(*_args, **_kwargs):
+        return CompletedProcess([], 0, fake_stdout, "")
+
+    monkeypatch.setattr("loom_cli.service_cmd.subprocess.run", _fake_run)
+    rc, tokens = _seed_test_data("postgresql://x/y")
+    assert rc == 0
+    assert tokens == {
+        "team": "loom_team_aaaaaa",
+        "worker": "loom_w_bbbbbb",
+        "admin": "loom_admin_cccccc",
+    }
+
+
+def test_print_summary_labels_admin_as_dev_only(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The summary must call out the admin token as DEV-ONLY so users
+    don't carry it into production assumptions. See issue #295."""
+    from loom_cli.service_cmd import _print_summary
+
+    _print_summary({"team": "loom_team_x", "admin": "loom_admin_y"})
+    out = capsys.readouterr().out
+    assert "loom_team_x" in out
+    assert "loom_admin_y" in out
+    assert "DEV-ONLY" in out
+    assert "issue #295" in out
