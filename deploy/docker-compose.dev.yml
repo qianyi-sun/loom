@@ -68,6 +68,11 @@ services:
       LOOM_GW_ANTHROPIC_API_KEY: ${LOOM_GW_ANTHROPIC_API_KEY:-stub-key}
       LOOM_GW_OPENAI_API_KEY: ${LOOM_GW_OPENAI_API_KEY:-stub-key}
       LOOM_GW_DEV_RELOAD: "1"
+      # HS256 secret shared with the Control Plane to sign + verify
+      # step-scoped agent JWTs. Dev-only; production deploys provide
+      # this via a k8s Secret. MUST match LOOM_CP_STEP_JWT_SIGNING_KEY
+      # below — both services need to derive the same MAC.
+      LOOM_GW_STEP_JWT_SIGNING_KEY: dev-only-shared-jwt-key-do-not-use-in-prod
     volumes:
       - ../src:/app/src
     depends_on:
@@ -89,6 +94,10 @@ services:
       LOOM_CP_LLM_GATEWAY_URL: http://llm-gateway:9100
       LOOM_CP_LOG_LEVEL: debug
       LOOM_CP_DEV_RELOAD: "1"
+      # MUST match LOOM_GW_STEP_JWT_SIGNING_KEY on the llm-gateway
+      # service — the two derive the same HS256 MAC to sign + verify
+      # step-scoped agent JWTs. Dev-only; production uses k8s Secret.
+      LOOM_CP_STEP_JWT_SIGNING_KEY: dev-only-shared-jwt-key-do-not-use-in-prod
     volumes:
       - ../src:/app/src
     depends_on:
