@@ -1,17 +1,19 @@
 /**
- * Submit-trial confirm dialog. Posts a fresh trial against the
- * registered task using its built-in agent + verifier defaults.
+ * Submit-trial dialog. Plan 23: TrialConfig requires explicit
+ * `agent_name` + `agent_model` — no fallback to the task's
+ * TaskConfig. The dialog collects both up front:
  *
- * Per-trial agent/model/backend overrides are NOT exposed here:
- * the server-side `TrialConfig` schema (src/loom/models/trial.py) is
- * declared with `extra="forbid"` and accepts only retry/timeout/skip
- * knobs — the agent and model come from the task's registered
- * `TaskConfig`. For richer control (override agent, swap model,
- * compare N models), point users at `loom run` on the CLI; the SPA
- * Submit-trial action stays simple and end-to-end correct.
+ *   - Agent (required text, default "oracle")
+ *   - Model provider + name (optional pair) — leave both blank to
+ *     send `agent_model: null` (correct for agents that don't call
+ *     an LLM, like oracle or in-box runtimes)
  *
- * Tracked separately in PR C (Workflows): saved global recipes that
- * pin agent + model + backend up front, with `launch` ↦ Campaign.
+ * Body shape sent to /api/v1/trials:
+ *   { task_id, config: { agent_name, agent_model: {provider,name} | null } }
+ *
+ * For richer multi-trial flows (n-sampling, model comparison), use
+ * a Workflow or campaign — this modal stays focused on the
+ * single-trial path.
  */
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -19,6 +21,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { Button } from "./Button";
 import ErrorState from "./ErrorState";
+import { Input } from "./Input";
 import { Modal } from "./Modal";
 
 export interface SubmitTrialModalProps {
@@ -27,27 +30,56 @@ export interface SubmitTrialModalProps {
   onClose: () => void;
 }
 
+function buildAgentModel(
+  provider: string,
+  name: string,
+): { ok: true; value: { provider: string; name: string } | null }
+  | { ok: false; error: string } {
+  const p = provider.trim();
+  const n = name.trim();
+  if (!p && !n) return { ok: true, value: null };
+  if (!p || !n) {
+    return {
+      ok: false,
+      error:
+        "Model provider and model name must both be set, or both left blank.",
+    };
+  }
+  return { ok: true, value: { provider: p, name: n } };
+}
+
 export function SubmitTrialModal({
   taskId,
   open,
   onClose,
 }: SubmitTrialModalProps): JSX.Element {
   const navigate = useNavigate();
+  const [agentName, setAgentName] = useState("oracle");
+  const [modelProvider, setModelProvider] = useState("");
+  const [modelName, setModelName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
   const handleSubmit = async (): Promise<void> => {
     setError(null);
+    const trimmedAgent = agentName.trim();
+    if (!trimmedAgent) {
+      setError(new Error("Agent is required."));
+      return;
+    }
+    const agentModel = buildAgentModel(modelProvider, modelName);
+    if (!agentModel.ok) {
+      setError(new Error(agentModel.error));
+      return;
+    }
     setSubmitting(true);
     try {
-      // Plan 23: TrialConfig requires agent_name + agent_model. This
-      // modal currently submits the "run with task's oracle agent and
-      // no LLM" preset; the upcoming PR F replaces the modal with a
-      // picker that lets the user choose both. Until then, the literal
-      // "oracle" + null model matches the canary hello-world task.
       const result = await api.submitTrial({
         task_id: taskId,
-        config: { agent_name: "oracle", agent_model: null },
+        config: {
+          agent_name: trimmedAgent,
+          agent_model: agentModel.value,
+        },
       });
       onClose();
       navigate(`/trials/${result.trial_id}`);
@@ -58,22 +90,29 @@ export function SubmitTrialModal({
     }
   };
 
+  const reset = (): void => {
+    setError(null);
+    setAgentName("oracle");
+    setModelProvider("");
+    setModelName("");
+  };
+
   return (
     <Modal
       open={open}
       onClose={() => {
-        setError(null);
+        reset();
         onClose();
       }}
       title="Submit trial"
-      description="Run this task once against its registered agent + verifier."
+      description="Run this task once against the agent + model you pick."
       size="sm"
       footer={
         <>
           <Button
             variant="secondary"
             onClick={() => {
-              setError(null);
+              reset();
               onClose();
             }}
             disabled={submitting}
@@ -90,24 +129,50 @@ export function SubmitTrialModal({
         </>
       }
     >
-      <div className="space-y-3">
+      <div className="space-y-4">
         {error ? <ErrorState error={error} /> : null}
         <p className="text-sm text-slate-600">
           A new trial will be queued for{" "}
           <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">
             {taskId}
-          </code>{" "}
-          using the task's registered configuration. You'll be redirected
-          to its detail page on submit.
+          </code>
+          .
         </p>
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Agent
+          </span>
+          <Input
+            value={agentName}
+            onChange={(e) => setAgentName(e.target.value)}
+            placeholder="oracle"
+          />
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Model provider
+            </span>
+            <Input
+              value={modelProvider}
+              onChange={(e) => setModelProvider(e.target.value)}
+              placeholder="anthropic"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Model name
+            </span>
+            <Input
+              value={modelName}
+              onChange={(e) => setModelName(e.target.value)}
+              placeholder="claude-opus-4-7"
+            />
+          </label>
+        </div>
         <p className="text-xs text-slate-500">
-          For richer control — pick a different agent, swap the model,
-          run with `--parallel-models` — use{" "}
-          <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">
-            loom run
-          </code>{" "}
-          on the CLI. Per-trial overrides via the SPA are coming with
-          the Workflows feature.
+          Leave both model fields blank for agents that don't call an LLM
+          (oracle, in-box runtimes).
         </p>
       </div>
     </Modal>

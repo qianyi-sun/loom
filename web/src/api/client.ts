@@ -136,6 +136,7 @@ export const api = {
     description?: string;
     task_filter: Record<string, unknown>;
     trial_config: Record<string, unknown>;
+    n_per_task?: number;
   }) =>
     apiFetch<CampaignCreate>("/api/v1/campaigns", {
       method: "POST",
