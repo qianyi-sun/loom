@@ -1,16 +1,19 @@
 /**
  * Agent + model picker shared by SubmitTrialModal + NewCampaign.
  *
- * Plan 26 polish based on user feedback ("(builtin) label is ugly";
- * "the model should list available models — if you cannot enumerate
- * all available, have a customizable model name"):
- *   - Agents group into <optgroup> by kind so users see the
- *     "Built-in" vs "Adapter" structure without per-option suffix
- *     labels.
- *   - Models group by provider via <optgroup>, and an explicit
- *     "Custom model…" option at the bottom of the list reveals a
- *     pair of free-text inputs so users can target a model the
- *     rate card hasn't been imported for yet.
+ * Behavior:
+ *   - Agents: one flat alphabetical dropdown. Built-in vs
+ *     loom-launcher adapter is implementation detail — they're
+ *     peers at runtime, so the picker treats them the same and the
+ *     UI doesn't expose the source. The selected agent's
+ *     description renders below the select so users still see what
+ *     they're picking.
+ *   - Models: grouped by provider via <optgroup> because billing
+ *     differs across providers and users browse by provider when
+ *     hunting for a model. A "Custom model…" option at the bottom
+ *     reveals a (provider, name) pair so users can target a model
+ *     the rate-card catalog hasn't been imported for yet; typed
+ *     custom values survive an agent toggle.
  *
  * The pair `(agent_name, agent_model)` is what TrialConfig requires.
  * `agent_model` is either `{provider, name}` or `null` depending on
@@ -39,6 +42,8 @@ export interface AgentModelPickerProps {
 interface AgentEntry {
   name: string;
   needs_model: boolean;
+  // The server reports kind ("builtin" vs "adapter") for completeness;
+  // the SPA intentionally doesn't surface it — at runtime they're peers.
   kind: "builtin" | "adapter";
   description: string;
 }
@@ -98,19 +103,17 @@ export function AgentModelPicker({
     });
   }, [agents.data, value.agentName, onChange]);
 
-  // Group agents by kind for the <optgroup> structure. Order: builtin
-  // first (most common), then adapters.
-  const agentGroups = useMemo(() => {
-    const groups: Record<AgentEntry["kind"], AgentEntry[]> = {
-      builtin: [],
-      adapter: [],
-    };
-    for (const a of agents.data?.items ?? []) groups[a.kind].push(a);
-    for (const k of ["builtin", "adapter"] as const) {
-      groups[k].sort((a, b) => a.name.localeCompare(b.name));
-    }
-    return groups;
-  }, [agents.data]);
+  // Plan 27: flat alphabetical list. The builtin/adapter split is
+  // implementation detail (one is hardcoded in the worker, the other
+  // self-registers via loom-launcher) — at runtime they're peers, so
+  // the picker treats them the same.
+  const agentList = useMemo(
+    () =>
+      [...(agents.data?.items ?? [])].sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ),
+    [agents.data],
+  );
 
   // Same shape for models — grouped by provider.
   const modelGroups = useMemo(() => {
@@ -227,26 +230,11 @@ export function AgentModelPicker({
           {agents.isPending ? (
             <option value="">Loading…</option>
           ) : (
-            <>
-              {agentGroups.builtin.length > 0 ? (
-                <optgroup label="Built-in">
-                  {agentGroups.builtin.map((a) => (
-                    <option key={a.name} value={a.name}>
-                      {a.name}
-                    </option>
-                  ))}
-                </optgroup>
-              ) : null}
-              {agentGroups.adapter.length > 0 ? (
-                <optgroup label="Adapters">
-                  {agentGroups.adapter.map((a) => (
-                    <option key={a.name} value={a.name}>
-                      {a.name}
-                    </option>
-                  ))}
-                </optgroup>
-              ) : null}
-            </>
+            agentList.map((a) => (
+              <option key={a.name} value={a.name}>
+                {a.name}
+              </option>
+            ))
           )}
         </select>
         {selectedAgent ? (
