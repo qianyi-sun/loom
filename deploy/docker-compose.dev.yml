@@ -1,14 +1,19 @@
 # Local development stack. Differs from docker-compose.test.yml in three
 # ways: (1) mounts ../src into each loom_* container so edits land
 # without a rebuild, (2) persists postgres + minio data across runs,
-# (3) exposes the LLM gateway token through a .env file at repo root so
+# (3) reads tokens (worker/team/admin) from `.env` at the repo root so
 # you can submit trials with `curl` directly.
 #
-# Quickstart:
-#   docker compose -f deploy/docker-compose.dev.yml up -d
+# Quickstart (run from the repo root):
+#   docker compose -f deploy/docker-compose.dev.yml --project-directory . up -d
 #   alembic -c migrations/alembic.ini upgrade head
-#   python scripts/seed_test_data.py
+#   python scripts/seed_test_data.py --mode dev --print all >> .env
 #   # The team token printed by seed_test_data.py is your bearer.
+#
+# `--project-directory .` is REQUIRED so compose resolves `.env` at the
+# repo root (not next to the compose file in deploy/). Without it
+# `${LOOM_WORKER_TOKEN:-placeholder}` falls back to "placeholder" and
+# the worker 401s at /workers/register.
 #
 # Endpoint map (matches the k8s ingress in deploy/k8s/):
 #   localhost:5173   React SPA via Vite HMR (the user panel)
