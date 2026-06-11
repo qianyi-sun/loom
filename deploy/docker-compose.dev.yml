@@ -80,6 +80,15 @@ services:
         condition: service_healthy
     ports:
       - "9100:9100"
+    restart: on-failure
+    # python -c probe rather than curl because Dockerfile.gateway is
+    # python:3.11-slim and slim images don't ship curl. Reusing the
+    # base interpreter keeps the image size unchanged.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9100/healthz', timeout=1).status == 200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   control-plane:
     image: loom-control-plane:dev
@@ -107,6 +116,13 @@ services:
         condition: service_healthy
     ports:
       - "8080:8080"
+    restart: on-failure
+    # python -c probe (see llm-gateway above for rationale).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=1).status == 200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   loom-service:
     image: loom-service:dev
@@ -131,9 +147,10 @@ services:
       postgres:
         condition: service_healthy
       control-plane:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8090:8090"
+    restart: on-failure
 
   worker:
     image: loom-worker:dev
@@ -154,7 +171,8 @@ services:
       - worker_trajectories:/var/lib/loom/trajectories
     depends_on:
       control-plane:
-        condition: service_started
+        condition: service_healthy
+    restart: on-failure
 
   # React SPA — Vite dev server with HMR. `npm install` runs on first
   # boot (the named volume preserves node_modules across restarts).
