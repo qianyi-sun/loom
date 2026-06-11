@@ -114,6 +114,19 @@ export const api = {
     apiFetch<TaskList>(`/api/v1/tasks${qs(q)}`),
   listBenchmarks: (q: Record<string, string | undefined> = {}) =>
     apiFetch<BenchmarkList>(`/api/v1/benchmarks${qs(q)}`),
+  listAgents: () =>
+    apiFetch<{
+      items: {
+        name: string;
+        needs_model: boolean;
+        kind: "builtin" | "adapter";
+        description: string;
+      }[];
+    }>("/api/v1/agents"),
+  listModels: () =>
+    apiFetch<{
+      items: { provider: string; name: string }[];
+    }>("/api/v1/models"),
   listTokens: () => apiFetch<TokenList>("/api/v1/tokens"),
   createToken: (body: {
     type: string;

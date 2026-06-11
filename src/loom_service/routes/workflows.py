@@ -38,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Benchmark, Campaign, Workflow
+from loom_service.agent_catalog import known_names
 from loom_service.auth_guards import (
     require_human_or_admin,
     require_scope,
@@ -117,6 +118,15 @@ def _validate_payload_field_choices(payload: _WorkflowPayload) -> None:
             detail=(
                 f"unknown backend: {payload.backend!r}. "
                 f"valid: {sorted(_BACKENDS)}"
+            ),
+        )
+    # Plan 25: catalog membership for the pinned agent_name.
+    if payload.agent_name not in known_names():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown agent_name {payload.agent_name!r}. "
+                "GET /api/v1/agents for the catalog."
             ),
         )
 

@@ -1,27 +1,23 @@
 /**
- * Submit-trial dialog. Plan 23: TrialConfig requires explicit
- * `agent_name` + `agent_model` — no fallback to the task's
- * TaskConfig. The dialog collects both up front:
- *
- *   - Agent (required text, default "oracle")
- *   - Model provider + name (optional pair) — leave both blank to
- *     send `agent_model: null` (correct for agents that don't call
- *     an LLM, like oracle or in-box runtimes)
- *
- * Body shape sent to /api/v1/trials:
- *   { task_id, config: { agent_name, agent_model: {provider,name} | null } }
- *
- * For richer multi-trial flows (n-sampling, model comparison), use
- * a Workflow or campaign — this modal stays focused on the
- * single-trial path.
+ * Submit-trial dialog. Plan 25 redesign: the agent + model values
+ * are pulled from server-side catalogs (`/agents`, `/models`) and
+ * presented as dropdowns by AgentModelPicker. The model dropdown
+ * is hidden when the selected agent doesn't call an LLM (oracle,
+ * in-box runtimes), and the form rejects a half-filled "needs-a-
+ * model" state client-side rather than letting the server 400.
  */
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import {
+  AgentModelPicker,
+  buildAgentModel,
+  type AgentModelValue,
+} from "./AgentModelPicker";
 import { Button } from "./Button";
 import ErrorState from "./ErrorState";
-import { Input } from "./Input";
 import { Modal } from "./Modal";
 
 export interface SubmitTrialModalProps {
@@ -30,23 +26,11 @@ export interface SubmitTrialModalProps {
   onClose: () => void;
 }
 
-function buildAgentModel(
-  provider: string,
-  name: string,
-): { ok: true; value: { provider: string; name: string } | null }
-  | { ok: false; error: string } {
-  const p = provider.trim();
-  const n = name.trim();
-  if (!p && !n) return { ok: true, value: null };
-  if (!p || !n) {
-    return {
-      ok: false,
-      error:
-        "Model provider and model name must both be set, or both left blank.",
-    };
-  }
-  return { ok: true, value: { provider: p, name: n } };
-}
+const INITIAL_VALUE: AgentModelValue = {
+  agentName: "",
+  modelProvider: "",
+  modelName: "",
+};
 
 export function SubmitTrialModal({
   taskId,
@@ -54,32 +38,37 @@ export function SubmitTrialModal({
   onClose,
 }: SubmitTrialModalProps): JSX.Element {
   const navigate = useNavigate();
-  const [agentName, setAgentName] = useState("oracle");
-  const [modelProvider, setModelProvider] = useState("");
-  const [modelName, setModelName] = useState("");
+  const [value, setValue] = useState<AgentModelValue>(INITIAL_VALUE);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
+  const agents = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.listAgents(),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const handleSubmit = async (): Promise<void> => {
     setError(null);
-    const trimmedAgent = agentName.trim();
-    if (!trimmedAgent) {
-      setError(new Error("Agent is required."));
+    const selected = agents.data?.items.find((a) => a.name === value.agentName);
+    if (!selected) {
+      setError(new Error("Pick an agent before submitting."));
       return;
     }
-    const agentModel = buildAgentModel(modelProvider, modelName);
-    if (!agentModel.ok) {
-      setError(new Error(agentModel.error));
+    const agentModel = buildAgentModel(value, selected.needs_model);
+    if (selected.needs_model && agentModel === null) {
+      setError(
+        new Error(
+          `${selected.name} needs a model — choose one from the dropdown.`,
+        ),
+      );
       return;
     }
     setSubmitting(true);
     try {
       const result = await api.submitTrial({
         task_id: taskId,
-        config: {
-          agent_name: trimmedAgent,
-          agent_model: agentModel.value,
-        },
+        config: { agent_name: selected.name, agent_model: agentModel },
       });
       onClose();
       navigate(`/trials/${result.trial_id}`);
@@ -92,9 +81,7 @@ export function SubmitTrialModal({
 
   const reset = (): void => {
     setError(null);
-    setAgentName("oracle");
-    setModelProvider("");
-    setModelName("");
+    setValue(INITIAL_VALUE);
   };
 
   return (
@@ -105,7 +92,7 @@ export function SubmitTrialModal({
         onClose();
       }}
       title="Submit trial"
-      description="Run this task once against the agent + model you pick."
+      description="Pick the agent + model that will run this task."
       size="sm"
       footer={
         <>
@@ -122,7 +109,7 @@ export function SubmitTrialModal({
           <Button
             variant="primary"
             onClick={handleSubmit}
-            disabled={submitting}
+            disabled={submitting || agents.isPending}
           >
             {submitting ? "Submitting…" : "Submit trial"}
           </Button>
@@ -138,42 +125,11 @@ export function SubmitTrialModal({
           </code>
           .
         </p>
-        <label className="block">
-          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-            Agent
-          </span>
-          <Input
-            value={agentName}
-            onChange={(e) => setAgentName(e.target.value)}
-            placeholder="oracle"
-          />
-        </label>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Model provider
-            </span>
-            <Input
-              value={modelProvider}
-              onChange={(e) => setModelProvider(e.target.value)}
-              placeholder="anthropic"
-            />
-          </label>
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Model name
-            </span>
-            <Input
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-              placeholder="claude-opus-4-7"
-            />
-          </label>
-        </div>
-        <p className="text-xs text-slate-500">
-          Leave both model fields blank for agents that don't call an LLM
-          (oracle, in-box runtimes).
-        </p>
+        <AgentModelPicker
+          value={value}
+          onChange={setValue}
+          disabled={submitting}
+        />
       </div>
     </Modal>
   );

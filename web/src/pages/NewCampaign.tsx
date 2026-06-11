@@ -1,24 +1,28 @@
 /**
- * Create a new campaign. Plan 23 reshape:
+ * Create a new campaign. Plan 25 redesign:
  *
- *   - Agent + model are required at submission, so they appear as
- *     structured fields (not buried inside a trial_config JSON blob).
+ *   - Agent + model are pulled from the server-side catalogs
+ *     (`/agents`, `/models`) via the shared AgentModelPicker.
  *   - `n_per_task` is a campaign-level integer for n-sampling fan-out.
  *   - task_filter stays a JSON textarea — it's a free-form operator
  *     surface (license / task_ids / benchmark_id) and the existing
  *     user base already knows the schema.
- *   - The legacy trial_config JSON textarea is exposed as an
- *     "Advanced" disclosure for the remaining timeout / retry /
- *     skip_verifier knobs; agent_name + agent_model are injected
- *     into it at submit time and override any duplicates in the
- *     advanced JSON.
+ *   - An "Advanced" disclosure exposes the remaining TrialConfig
+ *     knobs (timeouts, retry, skip_verifier) as JSON; agent_name +
+ *     agent_model are taken from the picker and override anything
+ *     in the advanced JSON.
  */
 
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import {
+  AgentModelPicker,
+  buildAgentModel,
+  type AgentModelValue,
+} from "../components/AgentModelPicker";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
@@ -46,24 +50,6 @@ function tryParse(input: string): {
   }
 }
 
-function buildAgentModel(
-  provider: string,
-  name: string,
-): { ok: true; value: { provider: string; name: string } | null }
-  | { ok: false; error: string } {
-  const p = provider.trim();
-  const n = name.trim();
-  if (!p && !n) return { ok: true, value: null };
-  if (!p || !n) {
-    return {
-      ok: false,
-      error:
-        "Model provider and model name must both be set, or both left blank.",
-    };
-  }
-  return { ok: true, value: { provider: p, name: n } };
-}
-
 function FieldLabel({
   children,
   hint,
@@ -81,19 +67,28 @@ function FieldLabel({
   );
 }
 
+const INITIAL_AGENT_MODEL: AgentModelValue = {
+  agentName: "",
+  modelProvider: "",
+  modelName: "",
+};
+
 export default function NewCampaign(): JSX.Element {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [filterText, setFilterText] = useState(DEFAULT_FILTER);
-  const [agentName, setAgentName] = useState("oracle");
-  const [modelProvider, setModelProvider] = useState("");
-  const [modelName, setModelName] = useState("");
+  const [picker, setPicker] = useState<AgentModelValue>(INITIAL_AGENT_MODEL);
   const [nPerTask, setNPerTask] = useState("1");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advancedText, setAdvancedText] = useState("{}");
   const [localError, setLocalError] = useState<string | null>(null);
 
   const navigate = useNavigate();
+  const agents = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.listAgents(),
+    staleTime: 5 * 60 * 1000,
+  });
   const create = useMutation({
     mutationFn: (body: {
       name: string;
@@ -114,14 +109,18 @@ export default function NewCampaign(): JSX.Element {
       setLocalError(`task_filter: ${filter.error}`);
       return;
     }
-    const trimmedAgent = agentName.trim();
-    if (!trimmedAgent) {
-      setLocalError("Agent is required.");
+    const selectedAgent = agents.data?.items.find(
+      (a) => a.name === picker.agentName,
+    );
+    if (!selectedAgent) {
+      setLocalError("Pick an agent before submitting.");
       return;
     }
-    const agentModel = buildAgentModel(modelProvider, modelName);
-    if (!agentModel.ok) {
-      setLocalError(agentModel.error);
+    const agentModel = buildAgentModel(picker, selectedAgent.needs_model);
+    if (selectedAgent.needs_model && agentModel === null) {
+      setLocalError(
+        `${selectedAgent.name} needs a model — choose one from the dropdown.`,
+      );
       return;
     }
     const n = Number.parseInt(nPerTask, 10);
@@ -143,11 +142,12 @@ export default function NewCampaign(): JSX.Element {
       description: description.trim() || undefined,
       task_filter: filter.value,
       // Plan 23: agent_name + agent_model are required on TrialConfig;
-      // they override any duplicates in the advanced JSON.
+      // they come from the picker and override anything in the
+      // advanced JSON.
       trial_config: {
         ...extraConfig,
-        agent_name: trimmedAgent,
-        agent_model: agentModel.value,
+        agent_name: selectedAgent.name,
+        agent_model: agentModel,
       },
       n_per_task: n,
     });
@@ -196,36 +196,13 @@ export default function NewCampaign(): JSX.Element {
             />
           </label>
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            <label className="block">
-              <FieldLabel>Agent</FieldLabel>
-              <Input
-                value={agentName}
-                onChange={(e) => setAgentName(e.target.value)}
-                placeholder="oracle"
-              />
-            </label>
-            <label className="block">
-              <FieldLabel hint="optional">Model provider</FieldLabel>
-              <Input
-                value={modelProvider}
-                onChange={(e) => setModelProvider(e.target.value)}
-                placeholder="anthropic"
-              />
-            </label>
-            <label className="block">
-              <FieldLabel hint="optional">Model name</FieldLabel>
-              <Input
-                value={modelName}
-                onChange={(e) => setModelName(e.target.value)}
-                placeholder="claude-opus-4-7"
-              />
-            </label>
+          <div className="max-w-md">
+            <AgentModelPicker
+              value={picker}
+              onChange={setPicker}
+              disabled={create.isPending}
+            />
           </div>
-          <p className="-mt-2 text-xs text-slate-500">
-            Leave both model fields blank for agents that don't call an LLM
-            (oracle, in-box runtimes).
-          </p>
 
           <label className="block max-w-xs">
             <FieldLabel hint="1 – 100">Samples per task</FieldLabel>

@@ -22,10 +22,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom_service.campaign_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
+    agents,
     atif,
     benchmarks,
     campaigns,
     health,
+    models,
     rate_cards,
     tasks,
     teams,
@@ -161,4 +163,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(teams.router, prefix="/api/v1")
     app.include_router(usage.router, prefix="/api/v1")
     app.include_router(workflows.router, prefix="/api/v1")
+    app.include_router(agents.router, prefix="/api/v1")
+    app.include_router(models.router, prefix="/api/v1")
     return app

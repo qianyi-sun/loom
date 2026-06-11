@@ -27,6 +27,7 @@ from sqlalchemy import and_, or_, select
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Trial
+from loom_service.agent_catalog import known_names
 from loom_service.auth_guards import (
     is_admin,
     require_human_or_admin,
@@ -234,6 +235,28 @@ class _SubmitReq(BaseModel):
     config: dict[str, Any]
 
 
+def _validate_agent_name(config: dict[str, Any]) -> None:
+    """Reject a trial_config whose `agent_name` isn't in the catalog.
+    Server-side defense in depth — the SPA already restricts the
+    dropdown to known names, but a direct API caller (curl, sdk) can
+    still send anything. Validating here keeps a typo'd or hostile
+    name from reaching the worker."""
+    agent_name = config.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name:
+        # The Control Plane's TrialConfig.model_validate will 422 this
+        # — propagate cleanly rather than 400 here so the error shape
+        # stays consistent.
+        return
+    if agent_name not in known_names():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown agent_name {agent_name!r}. "
+                "GET /api/v1/agents for the catalog."
+            ),
+        )
+
+
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
@@ -248,6 +271,7 @@ async def submit_trial(
         ctx = await verify_bearer_token(s, authorization)
         ctx = require_human_or_admin(ctx)
         require_scope(ctx, "submit")
+    _validate_agent_name(payload.config)
     resp = await forward(
         request.app.state.http_client,
         method="POST", path="/trials",

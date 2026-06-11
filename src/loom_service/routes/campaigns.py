@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Campaign, Task, Trial
+from loom_service.agent_catalog import known_names
 from loom_service.auth_guards import (
     is_admin,
     require_human_or_admin,
@@ -125,6 +126,19 @@ async def create_campaign(
                        "use the service's per-team admin token",
             )
 
+        # Plan 25: catalog-membership check on the agent_name embedded
+        # in trial_config. Mirrors POST /trials so a campaign that
+        # would 422 every fan-out is rejected up front.
+        agent_name = payload.trial_config.get("agent_name")
+        if isinstance(agent_name, str) and agent_name:
+            if agent_name not in known_names():
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"unknown agent_name {agent_name!r} in "
+                        "trial_config. GET /api/v1/agents for the catalog."
+                    ),
+                )
         task_ids = await _resolve_task_filter(s, payload.task_filter)
         # Audit M2: a filter materializing to zero tasks (empty
         # `task_ids`, or a license/benchmark that matches no row)

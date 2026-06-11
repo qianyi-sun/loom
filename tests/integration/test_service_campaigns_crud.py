@@ -163,6 +163,33 @@ async def test_post_campaign_rejects_n_per_task_out_of_range(
     assert r.status_code == 422
 
 
+async def test_post_campaign_rejects_unknown_agent_name(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """Plan 25: a campaign whose trial_config.agent_name isn't in the
+    catalog is rejected at the API boundary so the campaign runner
+    doesn't fan out trials that would all 422."""
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/campaigns",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "phantom-agent",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {
+                    "agent_name": "not-an-agent",
+                    "agent_model": None,
+                },
+            },
+        )
+    assert r.status_code == 400
+    assert "agent" in r.json()["detail"].lower()
+
+
 async def test_post_rejects_unknown_filter_key(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:

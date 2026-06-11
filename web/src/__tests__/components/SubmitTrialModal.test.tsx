@@ -2,10 +2,9 @@
  * SubmitTrialModal posts the agreed-on body shape to /api/v1/trials:
  *   { task_id, config: { agent_name, agent_model: {provider,name} | null } }
  *
- * Plan 23: TrialConfig requires `agent_name` + `agent_model` (no
- * fallback). The modal collects both up front and submits them
- * inside `config`. The server-side `extra="forbid"` means any
- * unexpected key would still 422 — these tests pin the contract.
+ * Plan 25: the agent + model values come from server-side catalogs
+ * (`/agents`, `/models`) presented as dropdowns. These tests mock
+ * both catalog endpoints + the trial submit POST.
  */
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -14,16 +13,77 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SubmitTrialModal } from "../../components/SubmitTrialModal";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
-function mockSubmit(): ReturnType<typeof vi.spyOn> {
-  return vi.spyOn(global, "fetch").mockResolvedValue(
-    new Response(
-      JSON.stringify({
-        trial_id: "00000000-0000-0000-0000-000000000abc",
-        state: "submitted",
-      }),
-      { status: 201, headers: { "Content-Type": "application/json" } },
-    ),
+const AGENTS_RESPONSE = {
+  items: [
+    {
+      name: "oracle",
+      needs_model: false,
+      kind: "builtin",
+      description: "Runs solution/solve.sh as ground truth.",
+    },
+    {
+      name: "claude-code-inbox",
+      needs_model: true,
+      kind: "builtin",
+      description: "Claude Code in-box runtime.",
+    },
+  ],
+};
+
+const MODELS_RESPONSE = {
+  items: [
+    { provider: "anthropic", name: "claude-opus-4-7" },
+    { provider: "openai", name: "gpt-4o" },
+  ],
+};
+
+function mockEndpoints(): ReturnType<typeof vi.spyOn> {
+  return vi
+    .spyOn(global, "fetch")
+    .mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/v1/agents")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(AGENTS_RESPONSE), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.includes("/api/v1/models")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(MODELS_RESPONSE), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.includes("/api/v1/trials")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              trial_id: "00000000-0000-0000-0000-000000000abc",
+              state: "submitted",
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    });
+}
+
+function trialSubmitCall(
+  spy: ReturnType<typeof vi.spyOn>,
+): { url: string; body: unknown } | null {
+  const found = spy.mock.calls.find(([u]) =>
+    String(u).includes("/api/v1/trials"),
   );
+  if (!found) return null;
+  return {
+    url: String(found[0]),
+    body: JSON.parse((found[1] as RequestInit).body as string),
+  };
 }
 
 describe("SubmitTrialModal", () => {
@@ -33,49 +93,48 @@ describe("SubmitTrialModal", () => {
     vi.restoreAllMocks();
   });
 
-  it("POSTs oracle/null when the model fields are left blank", async () => {
-    const spy = mockSubmit();
+  it("defaults to the first agent in the catalog (oracle) and sends agent_model:null", async () => {
+    const spy = mockEndpoints();
     const user = userEvent.setup();
     renderWithProviders(
       <SubmitTrialModal taskId="humaneval-0" open onClose={() => undefined} />,
     );
+    // Wait for the picker to populate with the first agent + show its description.
+    await screen.findByText(/Runs solution\/solve.sh/i);
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
 
-    await vi.waitFor(() => expect(spy).toHaveBeenCalled());
-    const [url, init] = spy.mock.calls[0];
-    expect(String(url)).toContain("/api/v1/trials");
-    expect((init as RequestInit).method).pilot groupe("POST");
-    const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({
+    await vi.waitFor(() => {
+      const call = trialSubmitCall(spy);
+      expect(call).not.pilot groupeNull();
+    });
+    const call = trialSubmitCall(spy)!;
+    expect(call.body).toEqual({
       task_id: "humaneval-0",
       config: { agent_name: "oracle", agent_model: null },
     });
   });
 
-  it("POSTs a {provider,name} model when both fields are filled", async () => {
-    const spy = mockSubmit();
+  it("switches to a needs-model agent and sends {provider,name}", async () => {
+    const spy = mockEndpoints();
     const user = userEvent.setup();
     renderWithProviders(
       <SubmitTrialModal taskId="humaneval-0" open onClose={() => undefined} />,
     );
-    const agent = screen.getByPlaceholderText(/^oracle$/i);
-    await user.clear(agent);
-    await user.type(agent, "claude-code-inbox");
-    await user.type(
-      screen.getByPlaceholderText(/anthropic/i),
-      "anthropic",
-    );
-    await user.type(
-      screen.getByPlaceholderText(/claude-opus-4-7/i),
-      "claude-opus-4-7",
-    );
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    const dropdowns = await screen.findAllByRole("combobox");
+    // First combobox = Agent.
+    await user.selectOptions(dropdowns[0], "claude-code-inbox");
+    // After the agent change, a Model combobox appears. Wait for it.
+    await vi.waitFor(() => {
+      expect(screen.getAllByRole("combobox").length).pilot groupeGreaterThan(1);
+    });
+    const modelCombo = screen.getAllByRole("combobox")[1];
+    // selectOptions matches by value — composite key is "provider|name".
+    await user.selectOptions(modelCombo, "anthropic|claude-opus-4-7");
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
-
-    await vi.waitFor(() => expect(spy).toHaveBeenCalled());
-    const body = JSON.parse(
-      (spy.mock.calls[0][1] as RequestInit).body as string,
-    );
-    expect(body).toEqual({
+    await vi.waitFor(() => expect(trialSubmitCall(spy)).not.pilot groupeNull());
+    const call = trialSubmitCall(spy)!;
+    expect(call.body).toEqual({
       task_id: "humaneval-0",
       config: {
         agent_name: "claude-code-inbox",
@@ -84,24 +143,25 @@ describe("SubmitTrialModal", () => {
     });
   });
 
-  it("shows an error when only one of (provider, name) is set", async () => {
-    const spy = mockSubmit();
+  it("shows an error when the selected agent needs a model and none is picked", async () => {
+    const spy = mockEndpoints();
     const user = userEvent.setup();
     renderWithProviders(
       <SubmitTrialModal taskId="humaneval-0" open onClose={() => undefined} />,
     );
-    await user.type(
-      screen.getByPlaceholderText(/anthropic/i),
-      "anthropic",
-    );
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    const dropdowns = await screen.findAllByRole("combobox");
+    await user.selectOptions(dropdowns[0], "claude-code-inbox");
+    // Don't pick a model; click submit.
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
     expect(
-      await screen.findByText(/both be set, or both left blank/i),
+      await screen.findByText(/needs a model/i),
     ).pilot groupeInTheDocument();
-    expect(spy).not.toHaveBeenCalled();
+    expect(trialSubmitCall(spy)).pilot groupeNull();
   });
 
-  it("displays the task id in the body copy", () => {
+  it("displays the task id in the body copy", async () => {
+    mockEndpoints();
     renderWithProviders(
       <SubmitTrialModal
         taskId="humaneval/HumanEval/0"
@@ -110,7 +170,7 @@ describe("SubmitTrialModal", () => {
       />,
     );
     expect(
-      screen.getByText(/humaneval\/HumanEval\/0/),
+      await screen.findByText(/humaneval\/HumanEval\/0/),
     ).pilot groupeInTheDocument();
   });
 });
