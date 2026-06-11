@@ -11,10 +11,10 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
-from loom.models.trial import TrialConfig
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import TrialContext
 from loom.verifier.pytest_verifier import PytestVerifier
+from tests._trial_config_defaults import stub_trial_config
 
 
 def test_trial_context_construction(tmp_path: Path):
@@ -33,7 +33,7 @@ def test_trial_context_construction(tmp_path: Path):
         task_config=task,
         task_checksum="0" * 64,
         task_dir=tmp_path,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(),
         agent=OracleAgent(task_dir=tmp_path, trial_id=trial_id),
         verifier=PytestVerifier(),

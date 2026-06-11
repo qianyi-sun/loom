@@ -103,6 +103,7 @@ async def runner_setup(
                         if body.get("campaign_id") else None
                     ),
                     idempotency_key=idem,
+                    sample_idx=int(body.get("sample_idx") or 0),
                 ))
                 s.commit()
             return httpx.Response(
@@ -178,11 +179,12 @@ async def test_runner_fans_out_5_trials(
 
     assert len(trials) == 5
     assert {t.task_id for t in trials} == set(task_ids)
-    # Each trial carries the deterministic idempotency_key.
+    # Each trial carries the deterministic idempotency_key (sample 0).
     assert all(
-        t.idempotency_key == _idempotency_key(cid, t.task_id)
+        t.idempotency_key == _idempotency_key(cid, t.task_id, 0)
         for t in trials
     )
+    assert all(t.sample_idx == 0 for t in trials)
     # State transitioned: submitted → running (trials in queued state).
     assert campaign_row.state == "running"
 
@@ -280,6 +282,58 @@ async def test_runner_advances_to_finished_when_all_terminal(
     sync_engine.dispose()
     assert campaign_row.state == "finished"
     assert campaign_row.finished_at is not None
+
+
+async def test_runner_fans_out_n_samples_per_task(
+    runner_setup: tuple[async_sessionmaker, httpx.AsyncClient, UUID, list[str]],
+    postgres_url: str,
+) -> None:
+    """Plan 23: campaign.n_per_task=3 produces 3 trials per matched
+    task, each with a distinct sample_idx 0..2, each carrying the
+    sample-aware idempotency key. Re-running the runner is still
+    idempotent — no duplicates."""
+    session_factory, http_client, team_id, task_ids = runner_setup
+    async with session_factory() as s:
+        c = Campaign(
+            team_id=team_id, name="C",
+            task_filter={"license": "MIT"},
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=15,
+            n_per_task=3,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    for _ in range(2):  # 2nd tick must NOT duplicate
+        await run_once(
+            session_factory=session_factory, http_client=http_client,
+            batch_size=10, submit_rate_per_sec=100,
+        )
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial).where(Trial.campaign_id == cid),
+        ).scalars().all()
+    sync_engine.dispose()
+
+    assert len(trials) == 15
+    # Every (task_id, sample_idx) pair shows up exactly once.
+    pairs = {(t.task_id, t.sample_idx) for t in trials}
+    assert pairs == {(tid, s_idx) for tid in task_ids for s_idx in range(3)}
+    # Idempotency keys include sample_idx and are unique.
+    keys = {t.idempotency_key for t in trials}
+    assert len(keys) == 15
+    assert all(
+        t.idempotency_key
+        == _idempotency_key(cid, t.task_id, t.sample_idx)
+        for t in trials
+    )
 
 
 # Sanity import to keep `next_campaign_state` referenced.

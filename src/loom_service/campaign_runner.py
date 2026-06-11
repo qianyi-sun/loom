@@ -91,9 +91,17 @@ async def _resolve_task_filter(
     return [row[0] for row in (await session.execute(stmt)).all()]
 
 
-def _idempotency_key(campaign_id: UUID, task_id: str) -> str:
-    """Stable, inspectable key — operators can grep for it in logs."""
-    return f"{campaign_id}::{task_id}"
+def _idempotency_key(
+    campaign_id: UUID, task_id: str, sample_idx: int,
+) -> str:
+    """Stable, inspectable key — operators can grep for it in logs.
+
+    Format changed in Plan 23 to include the sample index. The old
+    `{campaign}::{task}` keys are obsolete; any campaign that predates
+    the migration is already finished (its idempotency keys never need
+    to be derived again).
+    """
+    return f"{campaign_id}::{task_id}::{sample_idx}"
 
 
 async def _submit_one(
@@ -102,13 +110,17 @@ async def _submit_one(
     authorization: str | None,
     campaign_id: UUID,
     task_id: str,
+    sample_idx: int,
     trial_config: dict[str, Any],
 ) -> None:
     payload: dict[str, Any] = {
         "task_id": task_id,
         "config": trial_config,
         "campaign_id": str(campaign_id),
-        "idempotency_key": _idempotency_key(campaign_id, task_id),
+        "sample_idx": sample_idx,
+        "idempotency_key": _idempotency_key(
+            campaign_id, task_id, sample_idx,
+        ),
     }
     headers: dict[str, str] = {}
     if authorization:
@@ -190,7 +202,11 @@ async def run_once(
     delay = 1.0 / max(submit_rate_per_sec, 1)
 
     # Phase 1: pick + materialize work, then release the lock.
-    work: list[tuple[UUID, dict[str, Any], list[str]]] = []
+    # Pending unit is (task_id, sample_idx) — n_per_task > 1 fans out
+    # multiple samples per matched task. Existing (task_id, sample_idx)
+    # pairs are subtracted so a re-tick never re-submits a sample the
+    # CP already accepted.
+    work: list[tuple[UUID, dict[str, Any], list[tuple[str, int]]]] = []
     async with session_factory() as s:
         campaigns_to_process = (await s.execute(
             select(Campaign)
@@ -199,17 +215,19 @@ async def run_once(
         )).scalars().all()
         for c in campaigns_to_process:
             task_ids = await _resolve_task_filter(s, c.task_filter)
-            already_submitted = {
-                row[0]
+            existing = {
+                (row[0], row[1])
                 for row in (await s.execute(
-                    select(Trial.task_id).where(
+                    select(Trial.task_id, Trial.sample_idx).where(
                         Trial.campaign_id == c.id,
                     ),
                 )).all()
             }
-            pending = [
-                t for t in task_ids if t not in already_submitted
-            ]
+            pending: list[tuple[str, int]] = []
+            for t in task_ids:
+                for s_idx in range(c.n_per_task):
+                    if (t, s_idx) not in existing:
+                        pending.append((t, s_idx))
             work.append((c.id, dict(c.trial_config), pending))
         await s.commit()
 
@@ -217,12 +235,13 @@ async def run_once(
     for campaign_id, trial_config, pending in work:
         for chunk_start in range(0, len(pending), batch_size):
             chunk = pending[chunk_start:chunk_start + batch_size]
-            for tid in chunk:
+            for tid, s_idx in chunk:
                 await _submit_one(
                     http_client,
                     authorization=cp_authorization,
                     campaign_id=campaign_id,
                     task_id=tid,
+                    sample_idx=s_idx,
                     trial_config=trial_config,
                 )
                 await asyncio.sleep(delay)

@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from loom.models.result import AgentInfo, TrialResult, TrialState
-from loom.models.trial import TrialConfig
 from loom_cli.output import format_json_line, format_text_line
+from tests._trial_config_defaults import stub_trial_config
 
 
 def _result() -> TrialResult:
@@ -22,7 +22,7 @@ def _result() -> TrialResult:
             mode="out-of-box",
             model=None,
         ),
-        config=TrialConfig(),
+        config=stub_trial_config(),
         state=TrialState.SUCCEEDED,
         started_at=datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC),
         finished_at=datetime(2026, 6, 8, 0, 0, 5, tzinfo=UTC),

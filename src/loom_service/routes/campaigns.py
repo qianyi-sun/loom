@@ -41,6 +41,9 @@ class _CreateCampaign(BaseModel):
     description: str | None = None
     task_filter: dict[str, Any]
     trial_config: dict[str, Any]
+    # Plan 23: n-sampling. >1 fans out N trials per matched task.
+    # Upper bound is a soft guardrail against typos (n=10000 by accident).
+    n_per_task: int = Field(default=1, ge=1, le=100)
 
 
 # Recognized task_filter keys. Anything else is rejected so a typo
@@ -96,6 +99,7 @@ def _serialize(
         ),
         "created_by_token_prefix": c.created_by_token_prefix,
         "expected_trial_count": c.expected_trial_count,
+        "n_per_task": c.n_per_task,
     }
     if summary is not None:
         out["trial_summary"] = summary
@@ -138,6 +142,7 @@ async def create_campaign(
         token_prefix = (
             ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
         )
+        expected = len(task_ids) * payload.n_per_task
         c = Campaign(
             team_id=ctx.team_id,
             name=payload.name,
@@ -146,14 +151,16 @@ async def create_campaign(
             trial_config=payload.trial_config,
             state="submitted",
             created_by_token_prefix=token_prefix,
-            expected_trial_count=len(task_ids),
+            expected_trial_count=expected,
+            n_per_task=payload.n_per_task,
         )
         s.add(c)
         await s.commit()
         await s.refresh(c)
         return {
             "campaign_id": str(c.id),
-            "expected_trial_count": len(task_ids),
+            "expected_trial_count": expected,
+            "n_per_task": c.n_per_task,
             "state": c.state,
             "created_at": c.created_at.isoformat(),
         }

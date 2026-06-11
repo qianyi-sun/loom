@@ -20,10 +20,10 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
-from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
+from tests._trial_config_defaults import stub_trial_config
 
 
 class _AlwaysPassVerifier:
@@ -97,7 +97,7 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=sol.parent,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
         agent=OracleAgent(task_dir=sol.parent, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),  # type: ignore[arg-type]
@@ -159,7 +159,7 @@ async def test_trial_skips_fetcher_when_none(tmp_path: Path) -> None:
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=sol.parent,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
         agent=OracleAgent(task_dir=sol.parent, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),  # type: ignore[arg-type]

@@ -67,7 +67,9 @@ async def _drive_spawn(runner_target: object) -> Path:
         "trial_id": str(uuid4()),
         "team_id": str(uuid4()),
         "task_id": "fake",
-        "config": {},
+        # Plan 23: TrialConfig requires agent_name + agent_model.
+        # `agent_model: None` is allowed for agents that don't call an LLM.
+        "config": {"agent_name": "oracle", "agent_model": None},
     }
 
     pool = RunnerPool(max_concurrent=1)
@@ -144,7 +146,7 @@ async def test_tempdir_cleaned_on_cancellation() -> None:
                 "trial_id": str(uuid4()),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
-                "config": {},
+                "config": {"agent_name": "oracle", "agent_model": None},
             },
         )
         await asyncio.sleep(0.05)

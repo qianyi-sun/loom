@@ -7,7 +7,7 @@ from loom.models.result import (
     TrialResult,
     TrialState,
 )
-from loom.models.trial import TrialConfig
+from tests._trial_config_defaults import stub_trial_config
 
 
 def _trial_skeleton() -> TrialResult:
@@ -17,7 +17,7 @@ def _trial_skeleton() -> TrialResult:
         task_checksum="0" * 64,
         team_id=uuid4(),
         agent=AgentInfo(name="oracle", version="1.0", mode="out-of-box"),
-        config=TrialConfig(),
+        config=stub_trial_config(),
         state=TrialState.QUEUED,
     )
 

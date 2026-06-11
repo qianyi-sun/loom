@@ -155,6 +155,11 @@ class Campaign(Base):
         ForeignKey("workflows.id"),
         nullable=True,
     )
+    # Plan 23: n-sampling. Runner submits n_per_task trials per matched
+    # task; expected_trial_count = len(task_ids) * n_per_task.
+    n_per_task: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1"), default=1,
+    )
 
 
 class Workflow(Base):
@@ -207,6 +212,12 @@ class Workflow(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
+    # Plan 23: n-sampling. Copied onto Campaign.n_per_task at launch
+    # so edits to the workflow don't retroactively change historical
+    # runs. Default 1 preserves single-sample behavior.
+    n_per_task: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1"), default=1,
+    )
 
 
 class Trial(Base):
@@ -243,6 +254,13 @@ class Trial(Base):
         nullable=True,
     )
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Plan 23: which sample within (campaign_id, task_id) this trial is.
+    # Pairs with campaign.n_per_task to support n-sampling fan-out.
+    # 0 for hand-submitted trials and the only sample of a 1-per-task
+    # campaign — preserves pre-migration semantics.
+    sample_idx: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0,
+    )
 
 
 class Token(Base):

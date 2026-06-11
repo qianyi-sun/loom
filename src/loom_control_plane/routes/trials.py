@@ -126,6 +126,9 @@ async def submit_trial(
         # the same campaign row before the SELECT-skip-locked is held)
         # doesn't produce duplicate trial rows. `campaign_id` was
         # already FK-validated upstream.
+        # Plan 23: sample_idx is the n-sampling index. Defaults to 0 so
+        # hand-submitted trials and pre-migration callers Just Work.
+        sample_idx = int(payload.get("sample_idx") or 0)
         insert_values: dict[str, Any] = {
             "id": trial_id, "team_id": ctx.team_id, "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
@@ -134,6 +137,7 @@ async def submit_trial(
             "submit_priority": trial_config.submit_priority,
             "campaign_id": campaign_id,
             "idempotency_key": idempotency_key,
+            "sample_idx": sample_idx,
         }
         if idempotency_key is not None:
             # The partial unique index is `WHERE idempotency_key IS NOT

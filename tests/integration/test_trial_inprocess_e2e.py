@@ -22,10 +22,10 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
-from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
+from tests._trial_config_defaults import stub_trial_config
 
 
 class _AlwaysPassVerifier:
@@ -69,7 +69,7 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
         agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),
@@ -120,7 +120,7 @@ async def test_trial_run_driver_start_failure_classified(
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=_BoomDriver(),
         agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),
@@ -157,7 +157,7 @@ async def test_trial_run_state_patch_failure_doesnt_kill_trial(
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
         agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),
@@ -206,7 +206,7 @@ async def test_trial_run_cancellation_stashes_result(
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(),
         agent=_SlowAgent(),  # type: ignore[arg-type]
         verifier=_AlwaysPassVerifier(),
@@ -248,7 +248,7 @@ async def test_trial_run_agent_error_marks_failed(hello_task: Path, tmp_path: Pa
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
         agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),

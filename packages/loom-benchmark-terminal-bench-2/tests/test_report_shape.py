@@ -9,7 +9,16 @@ from loom_benchmark_terminal_bench_2.report import to_tb2_report
 
 from loom.models.result import AgentInfo, StepResult, TrialResult, TrialState
 from loom.models.trial import TrialConfig
+from loom.models.types import ModelSpec
 from loom.models.verifier import CheckResult, VerifierResult
+
+# Plan 23: TrialConfig requires agent_name + agent_model. Sibling
+# packages don't import from the main repo's tests/, so we inline a
+# stub here rather than share the test helper.
+_STUB_CONFIG = TrialConfig(
+    agent_name="claude-code",
+    agent_model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+)
 
 
 def _make_trial(
@@ -22,7 +31,7 @@ def _make_trial(
         task_checksum="sha256:abc",
         team_id=uuid4(),
         agent=AgentInfo(name="claude-code", version="1.0", mode="out-of-box"),
-        config=TrialConfig(),
+        config=_STUB_CONFIG,
         state=TrialState.SUCCEEDED if resolved else TrialState.FAILED,
         started_at=datetime(2026, 6, 8, tzinfo=UTC),
         finished_at=datetime(2026, 6, 8, 0, 1, tzinfo=UTC),

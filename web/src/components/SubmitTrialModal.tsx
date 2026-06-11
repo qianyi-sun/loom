@@ -40,7 +40,15 @@ export function SubmitTrialModal({
     setError(null);
     setSubmitting(true);
     try {
-      const result = await api.submitTrial({ task_id: taskId, config: {} });
+      // Plan 23: TrialConfig requires agent_name + agent_model. This
+      // modal currently submits the "run with task's oracle agent and
+      // no LLM" preset; the upcoming PR F replaces the modal with a
+      // picker that lets the user choose both. Until then, the literal
+      // "oracle" + null model matches the canary hello-world task.
+      const result = await api.submitTrial({
+        task_id: taskId,
+        config: { agent_name: "oracle", agent_model: null },
+      });
       onClose();
       navigate(`/trials/${result.trial_id}`);
     } catch (e) {

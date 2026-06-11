@@ -22,10 +22,10 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
-from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom_worker.trial_runner import LocalTrialRunner
+from tests._trial_config_defaults import stub_trial_config
 
 
 class _AlwaysPassVerifier:
@@ -84,7 +84,7 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
         trial_id=trial_id, team_id=uuid4(),
         task_config=_task_config(), task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
         agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
@@ -125,7 +125,7 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
         trial_id=trial_id, team_id=uuid4(),
         task_config=_task_config(), task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
         agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
@@ -159,7 +159,7 @@ async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
         trial_id=trial_id, team_id=uuid4(),
         task_config=_task_config(), task_checksum="0" * 64,
         task_dir=hello_task,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver_factory=_driver_factory(handler),
         agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
@@ -174,3 +174,53 @@ async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
     with caplog.at_level(logging.WARNING, logger="loom_worker.trial_runner"):
         await runner.run()
     assert any("state_patch_fenced" in m for m in caplog.messages)
+
+
+async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[no-untyped-def]
+    hello_task, tmp_path: Path,
+):
+    """Plan 23: TrialConfig.agent_name + agent_model are required and
+    used directly. The worker NEVER falls back to TaskConfig.agent.*
+    for service-mode trials — every submission carries explicit
+    agent + model identity."""
+    from loom.models.types import ModelSpec
+
+    captured: dict[str, Any] = {}
+
+    def capture_factory(task_dir, _gw, model, name):  # type: ignore[no-untyped-def]
+        captured["name"] = name
+        captured["model"] = model
+        return OracleAgent(task_dir=task_dir, trial_id=uuid4())
+
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    explicit_model = ModelSpec(provider="anthropic", name="claude-opus-4-7")
+
+    async def noop_patch(state: str, _fr: str | None) -> bool:
+        return True
+
+    # Task says oracle/None; TrialConfig says claude-code-inbox/claude-opus-4-7
+    # — the factory MUST see the TrialConfig values, not the task's.
+    runner = LocalTrialRunner(
+        trial_id=uuid4(), team_id=uuid4(),
+        task_config=_task_config(), task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(
+            agent_name="claude-code-inbox",
+            agent_model=explicit_model,
+        ),
+        driver_factory=_driver_factory(handler),
+        agent_factory=capture_factory,
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=noop_patch,
+    )
+    await runner.run()
+    assert captured["name"] == "claude-code-inbox"
+    assert captured["model"] == explicit_model

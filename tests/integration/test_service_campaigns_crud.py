@@ -117,6 +117,52 @@ async def test_post_campaign_materializes_count(
     UUID(body["campaign_id"])  # parseable
 
 
+async def test_post_campaign_with_n_per_task_multiplies_count(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """Plan 23: expected_trial_count = len(matched_tasks) * n_per_task."""
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/campaigns",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "MIT-x3",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "n_per_task": 3,
+            },
+        )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["expected_trial_count"] == 9
+    assert body["n_per_task"] == 3
+
+
+async def test_post_campaign_rejects_n_per_task_out_of_range(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/campaigns",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "bad-n",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "n_per_task": 0,
+            },
+        )
+    assert r.status_code == 422
+
+
 async def test_post_rejects_unknown_filter_key(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:

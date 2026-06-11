@@ -13,6 +13,7 @@ import pytest
 from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -110,6 +111,7 @@ async def wf_setup(
             checksum="0" * 64,
             config={},
             source="huggingface://openai/openai_humaneval",
+            benchmark_id="humaneval",
         ))
         s.commit()
     try:
@@ -281,6 +283,69 @@ async def test_team_can_launch_creates_campaign_with_back_reference(
     assert body["workflow_id"] == wf_id
     assert body["expected_trial_count"] >= 1
     assert body["state"] == "submitted"
+
+
+async def test_workflow_n_per_task_freezes_onto_campaign_at_launch(
+    wf_setup: tuple[FastAPI, str, str, str],
+) -> None:
+    """Plan 23: workflow.n_per_task is copied onto Campaign.n_per_task
+    at launch so a later admin edit to the workflow doesn't change a
+    historical run. expected_trial_count reflects the fan-out."""
+    app, admin_raw, team_raw, _ = wf_setup
+    async with _ac(app) as ac:
+        cr = await ac.post(
+            "/api/v1/workflows",
+            headers={"Authorization": f"Bearer {admin_raw}"},
+            json=_wf_body(n_per_task=4),
+        )
+        assert cr.status_code == 201, cr.text
+        assert cr.json()["n_per_task"] == 4
+        wf_id = cr.json()["id"]
+        lr = await ac.post(
+            f"/api/v1/workflows/{wf_id}/launch",
+            headers={"Authorization": f"Bearer {team_raw}"},
+            json={},
+        )
+    assert lr.status_code == 201
+    body = lr.json()
+    # 1 humaneval task in the fixture set × n_per_task=4 = 4 expected.
+    assert body["expected_trial_count"] == 4
+
+
+async def test_launch_injects_agent_name_and_model_into_trial_config(
+    wf_setup: tuple[FastAPI, str, str, str],
+    postgres_url: str,
+) -> None:
+    """Plan 23: TrialConfig requires agent_name + agent_model. The
+    workflow's pinned identity columns get injected into the frozen
+    Campaign.trial_config so the runner's POST /trials carries valid
+    TrialConfig payloads."""
+    app, admin_raw, team_raw, _ = wf_setup
+    async with _ac(app) as ac:
+        cr = await ac.post(
+            "/api/v1/workflows",
+            headers={"Authorization": f"Bearer {admin_raw}"},
+            json=_wf_body(),
+        )
+        wf_id = cr.json()["id"]
+        lr = await ac.post(
+            f"/api/v1/workflows/{wf_id}/launch",
+            headers={"Authorization": f"Bearer {team_raw}"},
+            json={},
+        )
+    assert lr.status_code == 201
+    campaign_id = lr.json()["campaign_id"]
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        c = s.execute(
+            sa_select(Campaign).where(Campaign.id == campaign_id),
+        ).scalar_one()
+    sync_engine.dispose()
+    assert c.trial_config["agent_name"] == "claude-code"
+    assert c.trial_config["agent_model"] == {
+        "provider": "anthropic", "name": "claude-opus-4-7",
+    }
 
 
 async def test_launch_uses_optional_name_override(

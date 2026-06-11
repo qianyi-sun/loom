@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
 from loom.models.skill import SkillRef
-from loom.models.types import VerifierEnvMode
+from loom.models.types import ModelSpec, VerifierEnvMode
 
 
 class RetryReason(StrEnum):
@@ -65,3 +65,12 @@ class TrialConfig(BaseModel):
     extra_mcp_servers: list[MCPConnection] = []
     extra_skills: list[SkillRef] = []
     baseline_network_policy_override: NetworkPolicy | None = None
+
+    # Plan 23: agent + model are REQUIRED at submission, no fallback
+    # to TaskConfig. Every trial must explicitly state which agent
+    # runs and which model it talks to. `agent_model` is required
+    # but its value MAY be null for agents that don't call an LLM
+    # (oracle, in-box runtimes) — the field must still appear in
+    # the payload, just as a literal null.
+    agent_name: str = Field(min_length=1)
+    agent_model: ModelSpec | None

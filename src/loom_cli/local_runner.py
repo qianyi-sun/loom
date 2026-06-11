@@ -55,7 +55,15 @@ class LocalRunner:
     trial_config: TrialConfig | None = None
 
     async def run(self) -> TrialResult:
-        cfg = self.trial_config or TrialConfig()
+        # Plan 23: TrialConfig requires agent_name + agent_model. In CLI
+        # mode (no API submission), the task.toml is the source of truth
+        # — we copy the task's agent identity onto a fresh TrialConfig so
+        # `loom run X` keeps working without the user having to pass
+        # --agent / --model when the task already specifies them.
+        cfg = self.trial_config or TrialConfig(
+            agent_name=self.task_config.agent.name,
+            agent_model=self.task_config.agent.model,
+        )
         gateway = UpstreamDirectGatewayClient(
             anthropic_client=self.anthropic_client,
             openai_client=self.openai_client,

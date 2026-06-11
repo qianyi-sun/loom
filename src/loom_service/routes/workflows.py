@@ -64,6 +64,7 @@ def _serialize(w: Workflow) -> dict[str, Any]:
         "model_name": w.model_name,
         "backend": w.backend,
         "concurrency": w.concurrency,
+        "n_per_task": w.n_per_task,
         "task_filter": dict(w.task_filter),
         "trial_config": dict(w.trial_config),
         "created_at": w.created_at.isoformat(),
@@ -84,6 +85,7 @@ class _WorkflowPayload(BaseModel):
     model_name: str = Field(min_length=1, max_length=200)
     backend: str = "docker"
     concurrency: int = Field(default=1, ge=1, le=64)
+    n_per_task: int = Field(default=1, ge=1, le=100)
     task_filter: dict[str, Any] = Field(default_factory=dict)
     trial_config: dict[str, Any] = Field(default_factory=dict)
 
@@ -191,6 +193,7 @@ async def create_workflow(
             model_name=payload.model_name,
             backend=payload.backend,
             concurrency=payload.concurrency,
+            n_per_task=payload.n_per_task,
             task_filter=payload.task_filter,
             trial_config=payload.trial_config,
             created_by_token_prefix=_token_prefix(ctx),
@@ -269,6 +272,7 @@ async def update_workflow(
         w.model_name = payload.model_name
         w.backend = payload.backend
         w.concurrency = payload.concurrency
+        w.n_per_task = payload.n_per_task
         w.task_filter = payload.task_filter
         w.trial_config = payload.trial_config
         w.updated_at = datetime.now(UTC)
@@ -342,6 +346,15 @@ async def launch_workflow(
             "benchmark_id": w.benchmark_id,
         }
         frozen_config: dict[str, Any] = copy.deepcopy(w.trial_config)
+        # Plan 23: TrialConfig requires agent_name + agent_model. Inject
+        # them from the workflow's pinned columns so the campaign runner
+        # can submit valid trial configs without each Workflow author
+        # having to repeat agent/model inside trial_config too.
+        frozen_config["agent_name"] = w.agent_name
+        frozen_config["agent_model"] = {
+            "provider": w.model_provider,
+            "name": w.model_name,
+        }
 
         task_ids = await _resolve_task_filter(s, frozen_filter)
         if not task_ids:
@@ -357,6 +370,11 @@ async def launch_workflow(
             f"{w.name} — {datetime.now(UTC).isoformat(timespec='seconds')}"
         )
         token_prefix = _token_prefix(ctx)
+        # Plan 23: n_per_task is frozen onto the Campaign at launch
+        # (same reasoning as task_filter + trial_config — historical
+        # runs don't move under a later admin edit). expected_trial_count
+        # is the total trial fan-out, not the matched-task count.
+        expected = len(task_ids) * w.n_per_task
         c = Campaign(
             team_id=ctx.team_id,
             name=name,
@@ -365,7 +383,8 @@ async def launch_workflow(
             trial_config=frozen_config,
             state="submitted",
             created_by_token_prefix=token_prefix,
-            expected_trial_count=len(task_ids),
+            expected_trial_count=expected,
+            n_per_task=w.n_per_task,
             workflow_id=w.id,
         )
         s.add(c)
@@ -374,7 +393,7 @@ async def launch_workflow(
         return {
             "campaign_id": str(c.id),
             "workflow_id": str(w.id),
-            "expected_trial_count": len(task_ids),
+            "expected_trial_count": expected,
             "state": c.state,
             "created_at": c.created_at.isoformat(),
         }

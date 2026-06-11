@@ -67,10 +67,14 @@ class LocalTrialRunner:
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
-        model = self.task_config.agent.model
+        # Plan 23: agent + model live on TrialConfig and are required.
+        # TaskConfig.agent.* is no longer consulted for service-mode
+        # trials — every submission specifies which agent + model run.
         agent = self.agent_factory(
-            self.task_dir, self.gateway_client, model,
-            self.task_config.agent.name,
+            self.task_dir,
+            self.gateway_client,
+            self.trial_config.agent_model,
+            self.trial_config.agent_name,
         )
         verifier = self.verifier_factory()
 

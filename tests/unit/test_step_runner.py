@@ -18,13 +18,13 @@ from loom.models.task import (
     VerifierDefaults,
 )
 from loom.models.trajectory import EventKind
-from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.step_runner import run_step
 from loom.trial.trial import TrialContext
+from tests._trial_config_defaults import stub_trial_config
 
 
 class _AlwaysPassVerifier:
@@ -65,7 +65,7 @@ async def context(tmp_path: Path) -> TrialContext:
         task_config=task,
         task_checksum="0" * 64,
         task_dir=tmp_path,
-        trial_config=TrialConfig(),
+        trial_config=stub_trial_config(),
         driver=driver,
         agent=OracleAgent(task_dir=tmp_path, trial_id=trial_id),
         verifier=_AlwaysPassVerifier(),
@@ -167,7 +167,7 @@ async def test_run_step_records_verifier_exception(context: TrialContext):
 
 async def test_run_step_skip_verifier(context: TrialContext):
     """trial_config.skip_verifier=True omits the verifier phase entirely."""
-    context.trial_config = TrialConfig(skip_verifier=True)
+    context.trial_config = stub_trial_config(skip_verifier=True)
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,
         store=context.object_store,

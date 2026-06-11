@@ -1,11 +1,12 @@
 /**
  * SubmitTrialModal posts the agreed-on body shape to /api/v1/trials:
- *   { task_id: "<id>", config: {} }
+ *   { task_id, config: { agent_name, agent_model } }
  *
- * TrialConfig has `extra="forbid"` server-side, so any extra fields
- * (e.g. agent/model/backend overrides) would 422. The modal therefore
- * deliberately does NOT expose those knobs — that path is reserved
- * for PR C (Workflows). This test guards the body shape.
+ * Plan 23: TrialConfig requires `agent_name` + `agent_model`. The
+ * modal hardcodes the oracle/null preset (canary hello-world); the
+ * upcoming PR F replaces this with an agent + model picker. The
+ * server-side `extra="forbid"` means any unexpected key would still
+ * 422 — this test guards the contract.
  */
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -21,7 +22,7 @@ describe("SubmitTrialModal", () => {
     vi.restoreAllMocks();
   });
 
-  it("POSTs { task_id, config: {} } when the user confirms", async () => {
+  it("POSTs { task_id, config: { agent_name, agent_model } } when the user confirms", async () => {
     const spy = vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -45,7 +46,10 @@ describe("SubmitTrialModal", () => {
     expect(String(url)).toContain("/api/v1/trials");
     expect((init as RequestInit).method).pilot groupe("POST");
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ task_id: "humaneval-0", config: {} });
+    expect(body).toEqual({
+      task_id: "humaneval-0",
+      config: { agent_name: "oracle", agent_model: null },
+    });
   });
 
   it("displays the task id in the confirmation copy", () => {
