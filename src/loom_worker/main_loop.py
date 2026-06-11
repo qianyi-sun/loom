@@ -202,6 +202,7 @@ async def _spawn_trial(
     # operator runbook documents the volume-mount / git-clone alternatives.
     task_dir = await _materialize_task_dir(
         bundle=bundle, object_store=object_store, trial_id=trial_id,
+        fixtures_root=settings.fixtures_root,
     )
 
     async def _state_patch(state: str, fr: str | None) -> bool:
@@ -252,15 +253,20 @@ async def _materialize_task_dir(
     bundle: dict[str, Any],
     object_store: ObjectStore,
     trial_id: UUID,
+    fixtures_root: Path | None = None,
 ) -> Path:
     """Plan 13 Task 3: create a fresh tempdir and populate it from
     `bundle["source"]`.
 
     - `s3://bucket/prefix/` — pull every object via download_prefix.
       Benchmark-imported tasks follow this shape.
-    - None / `git+...` / `fixture://...` — leave the dir empty. The
-      operator runbook documents the volume-mount alternative; hand-
-      authored tasks rely on it.
+    - `fixture://<task_id>` — when `fixtures_root` is set, copy from
+      `<fixtures_root>/<task_id>/` (dev compose mounts the repo's
+      tests/fixtures/tasks into the worker so the canary hello-world
+      trial runs end-to-end). When `fixtures_root` is None, leave the
+      dir empty — production rejects fixture:// in favor of s3://.
+    - None / `git+...` — leave the dir empty. The operator runbook
+      documents the volume-mount alternative.
     - `s3://bucket` or `s3://bucket/` with no prefix is REJECTED with
       an empty dir + warning — without a prefix, download_prefix would
       drain the entire bucket into one trial's workspace.
@@ -270,6 +276,35 @@ async def _materialize_task_dir(
     """
     task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
     source = bundle.get("source")
+    if isinstance(source, str) and source.startswith("fixture://"):
+        task_id = source[len("fixture://"):]
+        if fixtures_root is None:
+            logger.warning(
+                "materialize_task_dir trial=%s fixture:// source %r but "
+                "fixtures_root unset; leaving dir empty",
+                trial_id, source,
+            )
+            return task_dir
+        src = fixtures_root / task_id
+        if not src.is_dir():
+            logger.warning(
+                "materialize_task_dir trial=%s fixture %r not found at %s; "
+                "leaving dir empty",
+                trial_id, task_id, src,
+            )
+            return task_dir
+        try:
+            # copytree into the already-created tempdir. Using
+            # dirs_exist_ok=True because mkdtemp() pre-created task_dir.
+            shutil.copytree(src, task_dir, dirs_exist_ok=True)
+        except BaseException:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            raise
+        logger.info(
+            "materialized_task_dir trial=%s fixture=%s from=%s",
+            trial_id, task_id, src,
+        )
+        return task_dir
     if isinstance(source, str) and source.startswith("s3://"):
         without_scheme = source[len("s3://"):]
         if "/" not in without_scheme:

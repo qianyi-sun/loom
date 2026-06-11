@@ -32,5 +32,12 @@ class WorkerSettings(BaseSettings):
     trajectory_cache_dir: Path = Path("/var/lib/loom/trajectories")
     docker_socket: Path = Path("/var/run/docker.sock")
 
+    # Root the worker scans for `fixture://<task_id>` sources. The
+    # dev compose mounts the repo's tests/fixtures/tasks here so the
+    # canary hello-world trial can run end-to-end without a bundle
+    # upload. Production leaves it unset and rejects fixture:// in
+    # favor of s3://bundles/<sha>/.
+    fixtures_root: Path | None = None
+
     log_level: LogLevel = "info"
     metrics_port: int = 9090

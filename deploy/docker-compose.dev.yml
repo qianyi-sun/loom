@@ -170,8 +170,14 @@ services:
       LOOM_WORKER_MINIO_ACCESS_KEY: loomdev
       LOOM_WORKER_MINIO_SECRET_KEY: loomdev123
       LOOM_WORKER_LOG_LEVEL: debug
+      # Where the worker resolves `fixture://<task_id>` sources to —
+      # paired with the bind-mount below so the canary hello-world
+      # task in tests/fixtures/tasks/ runs end-to-end without a bundle
+      # upload to MinIO.
+      LOOM_WORKER_FIXTURES_ROOT: /app/tests/fixtures/tasks
     volumes:
       - ../src:/app/src
+      - ../tests/fixtures:/app/tests/fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - worker_trajectories:/var/lib/loom/trajectories
     depends_on:
