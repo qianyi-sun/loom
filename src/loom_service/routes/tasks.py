@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Task
@@ -67,15 +67,22 @@ async def list_tasks(
     async with request.app.state.session_factory() as s:
         ctx = await verify_bearer_token(s, authorization)
         require_human_or_admin(ctx)
-        stmt = select(Task).order_by(Task.id)
+        # Shared where clauses so the page query and the count query
+        # touch the same predicate (count gets a clean COUNT(*) plan
+        # rather than COUNT over an ordered subquery).
+        conds: list[Any] = []
         if benchmark_id is not None:
-            stmt = stmt.where(Task.benchmark_id == benchmark_id)
+            conds.append(Task.benchmark_id == benchmark_id)
         if q:
             # `ilike` with explicit '%' wrapping. Postgres LIKE
             # patterns treat `%` and `_` as metacharacters, but a
             # query that happens to contain them just matches more
             # broadly — no injection risk through the SQL boundary.
-            stmt = stmt.where(Task.id.ilike(f"%{q}%"))
+            conds.append(Task.id.ilike(f"%{q}%"))
+        total = (await s.execute(
+            select(func.count()).select_from(Task).where(*conds),
+        )).scalar_one()
+        stmt = select(Task).where(*conds).order_by(Task.id)
         if cursor:
             stmt = stmt.where(Task.id > cursor)
         stmt = stmt.limit(limit + 1)
@@ -89,6 +96,7 @@ async def list_tasks(
     return {
         "items": [_task_row(r) for r in rows],
         "next_cursor": next_cursor,
+        "total": int(total),
     }
 
 

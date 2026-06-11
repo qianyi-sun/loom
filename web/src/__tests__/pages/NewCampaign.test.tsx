@@ -1,9 +1,10 @@
 /**
  * NewCampaign builds the trial_config from the AgentModelPicker (fed
- * by /agents + /models catalogs) plus the structured n_per_task /
- * task_filter inputs. Pin the body shape so a refactor that drops
- * or renames a field gets caught BEFORE CI runs the campaign route's
- * `extra="forbid"` and 422s.
+ * by /agents + /models catalogs) plus the structured task picker
+ * (benchmark + id substring with live "N tasks match" preview).
+ * Pin the body shape so a refactor that drops or renames a field
+ * gets caught BEFORE CI runs the campaign route's `extra="forbid"`
+ * and 422s.
  */
 
 import { fireEvent, screen } from "@testing-library/react";
@@ -37,6 +38,22 @@ const MODELS_RESPONSE = {
   ],
 };
 
+const BENCHMARKS_RESPONSE = {
+  items: [
+    { id: "humaneval", display_name: "HumanEval" },
+    { id: "mbpp", display_name: "MBPP" },
+  ],
+  next_cursor: null,
+};
+
+function tasksResponse(total: number) {
+  return {
+    items: [],
+    next_cursor: null,
+    total,
+  };
+}
+
 const CAMPAIGN_RESPONSE = {
   campaign_id: "00000000-0000-0000-0000-000000000001",
   expected_trial_count: 3,
@@ -45,32 +62,25 @@ const CAMPAIGN_RESPONSE = {
   created_at: "2026-06-08T00:00:00Z",
 };
 
-function mockEndpoints(): ReturnType<typeof vi.spyOn> {
+function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
+  typeof vi.spyOn
+> {
+  const matching = opts.matchingTasks ?? 3;
   return vi
     .spyOn(global, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
-      if (url.includes("/api/v1/agents")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(AGENTS_RESPONSE), {
-            status: 200, headers: { "Content-Type": "application/json" },
+      const json = (b: unknown, status = 200) =>
+        Promise.resolve(
+          new Response(JSON.stringify(b), {
+            status, headers: { "Content-Type": "application/json" },
           }),
         );
-      }
-      if (url.includes("/api/v1/models")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(MODELS_RESPONSE), {
-            status: 200, headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (url.includes("/api/v1/campaigns")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(CAMPAIGN_RESPONSE), {
-            status: 201, headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
+      if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
+      if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
+      if (url.includes("/api/v1/benchmarks")) return json(BENCHMARKS_RESPONSE);
+      if (url.includes("/api/v1/tasks")) return json(tasksResponse(matching));
+      if (url.includes("/api/v1/campaigns")) return json(CAMPAIGN_RESPONSE, 201);
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
 }
@@ -88,14 +98,6 @@ function campaignCall(
   };
 }
 
-function setTextarea(matcher: RegExp, value: string): void {
-  const el = screen.getAllByRole("textbox").find(
-    (e) => e.tagName === "TEXTAREA" && matcher.test((e as HTMLTextAreaElement).value),
-  ) as HTMLTextAreaElement | undefined;
-  if (!el) throw new Error("textarea not found");
-  fireEvent.change(el, { target: { value } });
-}
-
 describe("NewCampaign", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -103,31 +105,49 @@ describe("NewCampaign", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows a local error when task_filter JSON is malformed", async () => {
-    mockEndpoints();
+  it("shows '<N> tasks match' once the count loads for the chosen benchmark", async () => {
+    mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewCampaign />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(screen.getByPlaceholderText(/MIT slate/i), "x");
-    setTextarea(/license/, "{not json");
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    expect(
-      await screen.findByText(/task_filter:/i),
-    ).pilot groupeInTheDocument();
+    const benchmark = (await screen.findAllByRole("combobox"))[0];
+    await user.selectOptions(benchmark, "humaneval");
+    expect(await screen.findByText(/12 tasks match/i)).pilot groupeInTheDocument();
   });
 
-  it("POSTs oracle/null + n_per_task=1 by default", async () => {
-    const spy = mockEndpoints();
+  it("refuses to submit when zero tasks match", async () => {
+    const spy = mockEndpoints({ matchingTasks: 0 });
     const user = userEvent.setup();
     renderWithProviders(<NewCampaign />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(screen.getByPlaceholderText(/MIT slate/i), "my-camp");
+    await user.type(screen.getByPlaceholderText(/e\.g\. MIT slate/i), "x");
+    const benchmark = (await screen.findAllByRole("combobox"))[0];
+    await user.selectOptions(benchmark, "humaneval");
+    await screen.findByText(/No tasks match/i);
     await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    expect(
+      await screen.findByText(/No tasks match the current filter/i),
+    ).pilot groupeInTheDocument();
+    expect(campaignCall(spy)).pilot groupeNull();
+  });
 
+  it("POSTs oracle/null + n_per_task=1 with the picked benchmark", async () => {
+    const spy = mockEndpoints({ matchingTasks: 3 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewCampaign />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(
+      screen.getByPlaceholderText(/e\.g\. MIT slate/i),
+      "my-camp",
+    );
+    const benchmark = (await screen.findAllByRole("combobox"))[0];
+    await user.selectOptions(benchmark, "humaneval");
+    await screen.findByText(/3 tasks match/i);
+    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
     await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
     const call = campaignCall(spy)!;
     expect(call.body.name).pilot groupe("my-camp");
-    expect(call.body.task_filter.license).pilot groupe("MIT");
+    expect(call.body.task_filter).toEqual({ benchmark_id: "humaneval" });
     expect(call.body.trial_config).toEqual({
       agent_name: "oracle",
       agent_model: null,
@@ -135,53 +155,97 @@ describe("NewCampaign", () => {
     expect(call.body.n_per_task).pilot groupe(1);
   });
 
-  it("sends {provider,name} when a needs-model agent is picked + model chosen", async () => {
-    const spy = mockEndpoints();
+  it("blocks submit when neither benchmark nor search is set", async () => {
+    const spy = mockEndpoints({ matchingTasks: 99 });
     const user = userEvent.setup();
     renderWithProviders(<NewCampaign />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(screen.getByPlaceholderText(/MIT slate/i), "claude-camp");
-    const dropdowns = await screen.findAllByRole("combobox");
-    // Agent is the first combobox in the picker.
-    await user.selectOptions(dropdowns[0], "claude-code-inbox");
-    const modelCombo = (await screen.findAllByRole("combobox"))[1];
-    await user.selectOptions(modelCombo, "anthropic|claude-opus-4-7");
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    expect(campaignCall(spy)!.body.trial_config).toEqual({
-      agent_name: "claude-code-inbox",
-      agent_model: { provider: "anthropic", name: "claude-opus-4-7" },
-    });
-  });
-
-  it("rejects when a needs-model agent is picked but no model is selected", async () => {
-    const spy = mockEndpoints();
-    const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(screen.getByPlaceholderText(/MIT slate/i), "x");
-    const dropdowns = await screen.findAllByRole("combobox");
-    await user.selectOptions(dropdowns[0], "claude-code-inbox");
+    await user.type(screen.getByPlaceholderText(/e\.g\. MIT slate/i), "wide");
     await user.click(screen.getByRole("button", { name: /Create campaign/i }));
     expect(
-      await screen.findByText(/needs a model/i),
+      await screen.findByText(/Pick a benchmark or type at least one character/i),
     ).pilot groupeInTheDocument();
     expect(campaignCall(spy)).pilot groupeNull();
   });
 
-  it("rejects n_per_task outside 1..100", async () => {
-    mockEndpoints();
+  it("requires confirmation when matched_count * n_per_task exceeds the threshold", async () => {
+    const spy = mockEndpoints({ matchingTasks: 250 });
     const user = userEvent.setup();
     renderWithProviders(<NewCampaign />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(screen.getByPlaceholderText(/MIT slate/i), "x");
+    await user.type(
+      screen.getByPlaceholderText(/e\.g\. MIT slate/i),
+      "big-camp",
+    );
+    const benchmark = (await screen.findAllByRole("combobox"))[0];
+    await user.selectOptions(benchmark, "humaneval");
+    await screen.findByText(/250 tasks match/i);
+    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    // Confirm checkbox appears + submit is blocked the first time.
+    expect(
+      await screen.findByText(/I understand this campaign will launch 250 trials/i),
+    ).pilot groupeInTheDocument();
+    expect(campaignCall(spy)).pilot groupeNull();
+    // Tick the box and submit again — now it goes through.
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /I understand this campaign will launch 250 trials/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
+  });
+
+  it("flows advanced fields into trial_config when ticked", async () => {
+    const spy = mockEndpoints({ matchingTasks: 3 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewCampaign />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(
+      screen.getByPlaceholderText(/e\.g\. MIT slate/i),
+      "adv-camp",
+    );
+    const benchmark = (await screen.findAllByRole("combobox"))[0];
+    await user.selectOptions(benchmark, "humaneval");
+    await screen.findByText(/3 tasks match/i);
+    await user.click(screen.getByText(/Advanced options/i));
+    await user.click(
+      screen.getByRole("checkbox", { name: /Skip verifier/i }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: /Retry on transient errors/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
+    const tc = campaignCall(spy)!.body.trial_config as Record<string, unknown>;
+    expect(tc.skip_verifier).pilot groupe(true);
+    expect(tc.retry).toEqual({
+      max_attempts: 3,
+      retry_on: ["worker_crash", "env_start_failure"],
+    });
+  });
+
+  it("clamps n_per_task above 100 down to 100 on blur", async () => {
+    mockEndpoints({ matchingTasks: 1 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewCampaign />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    const nField = screen.getByLabelText(/Samples per task/i);
+    await user.clear(nField);
+    await user.type(nField, "9999");
+    fireEvent.blur(nField);
+    expect((nField as HTMLInputElement).value).pilot groupe("100");
+  });
+
+  it("clamps n_per_task below 1 up to 1 on blur", async () => {
+    mockEndpoints({ matchingTasks: 1 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewCampaign />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
     const nField = screen.getByLabelText(/Samples per task/i);
     await user.clear(nField);
     await user.type(nField, "0");
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    expect(
-      await screen.findByText(/integer between 1 and 100/i),
-    ).pilot groupeInTheDocument();
+    fireEvent.blur(nField);
+    expect((nField as HTMLInputElement).value).pilot groupe("1");
   });
 });
