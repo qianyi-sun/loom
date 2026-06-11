@@ -165,7 +165,11 @@ def main() -> None:
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_admin.encode()).digest(),
             type="admin",
-            scopes=["admin:tokens", "admin:rate_cards"],
+            scopes=[
+                "admin:tokens",
+                "admin:rate_cards",
+                "admin:workflows",
+            ],
             team_id=None,
             issued_at=now, expires_at=None,
         ))

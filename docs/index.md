@@ -61,6 +61,9 @@ Start with the overview, drill into the area you care about:
 - **[architecture/cost-and-rate-cards.md](architecture/cost-and-rate-cards.md)**
   — usage frozen, cost derived; rate-card shape; CLI vs. service
   storage; re-pricing history
+- **[architecture/workflows.md](architecture/workflows.md)** —
+  global saved recipes (admin-creates, all-teams-launch);
+  fully-pinned config; frozen-at-launch Campaign snapshot
 
 ## I want to know how Loom compares to Harbor
 

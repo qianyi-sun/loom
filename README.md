@@ -31,6 +31,13 @@ scheduling (DRF), per-`(team, trial, step)` cost attribution, license
 allowlists, and a `/api/v1/usage` dashboard make it usable for a
 research org, not just one user.
 
+**Workflows** — admins publish global saved-recipes that pin every
+config field (benchmark, agent + version, model, backend,
+concurrency, task filter, trial config). Any team launches them as
+a Campaign with one click; the launch deep-copies the workflow at
+submit time so subsequent edits don't retroactively change history.
+See [`docs/architecture/workflows.md`](docs/architecture/workflows.md).
+
 Two ways to consume:
 
 - **`loom` CLI** — `uv sync` and run benchmarks against agents on

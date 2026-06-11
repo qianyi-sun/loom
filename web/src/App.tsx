@@ -5,6 +5,7 @@ import Benchmarks from "./pages/Benchmarks";
 import CampaignDetail from "./pages/CampaignDetail";
 import CampaignsList from "./pages/CampaignsList";
 import NewCampaign from "./pages/NewCampaign";
+import NewWorkflow from "./pages/NewWorkflow";
 import NotFound from "./pages/NotFound";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
 import Settings from "./pages/Settings";
@@ -13,6 +14,8 @@ import TrialCompare from "./pages/TrialCompare";
 import TrialDetail from "./pages/TrialDetail";
 import TrialsList from "./pages/TrialsList";
 import UsageDashboard from "./pages/UsageDashboard";
+import WorkflowDetail from "./pages/WorkflowDetail";
+import Workflows from "./pages/Workflows";
 
 export default function App(): JSX.Element {
   return (
@@ -25,6 +28,9 @@ export default function App(): JSX.Element {
         <Route path="campaigns" element={<CampaignsList />} />
         <Route path="campaigns/new" element={<NewCampaign />} />
         <Route path="campaigns/:campaignId" element={<CampaignDetail />} />
+        <Route path="workflows" element={<Workflows />} />
+        <Route path="workflows/new" element={<NewWorkflow />} />
+        <Route path="workflows/:workflowId" element={<WorkflowDetail />} />
         <Route path="tasks" element={<Tasks />} />
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />
