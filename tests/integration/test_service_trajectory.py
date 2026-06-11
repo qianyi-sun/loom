@@ -59,12 +59,13 @@ async def test_trajectory_unknown_trial_404(
     assert r.status_code == 404
 
 
-async def test_trajectory_object_missing_404(
+async def test_trajectory_object_missing_returns_empty_page(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
     postgres_url: str,
 ) -> None:
     """A trial row exists but the trajectory object was never written
-    (e.g. crashed before first event); we 404 rather than 500."""
+    (queued/just-claimed, or crashed pre-first-event); we return an
+    empty page so the SPA shows "no events yet" rather than a 404."""
     app, raw, team_id, _trial_id = traj_setup
     bare_trial = uuid4()
     sync_engine = create_engine(postgres_url)
@@ -88,7 +89,8 @@ async def test_trajectory_object_missing_404(
             f"/api/v1/trials/{bare_trial}/trajectory",
             headers={"Authorization": f"Bearer {raw}"},
         )
-    assert r.status_code == 404
+    assert r.status_code == 200
+    assert r.json() == {"events": [], "next_cursor": None}
 
 
 async def test_trajectory_download_302(

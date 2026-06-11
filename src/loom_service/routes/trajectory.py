@@ -67,9 +67,16 @@ async def list_events(
             Key=_key(trial.team_id, trial.id),
         )
     except ClientError as exc:
-        raise HTTPException(
-            status_code=404, detail="trajectory not found",
-        ) from exc
+        # A missing object means the trial hasn't written a first event
+        # yet (queued/just-claimed) OR the worker crashed pre-first-event.
+        # Either way we return an empty page rather than 404 — the trial
+        # row exists (we already validated), so the UI's polling loop
+        # should show "no events yet" not a scary 404. Other S3 errors
+        # (perms, bucket missing) keep propagating.
+        code = exc.response.get("Error", {}).get("Code")
+        if code in ("NoSuchKey", "404"):
+            return {"events": [], "next_cursor": None}
+        raise
     # Stream-decode the JSONL line by line instead of materializing
     # the whole object into memory — a 100k-event trial would otherwise
     # cost ~200 MB raw + ~400 MB after split. `iter_lines()` lets us

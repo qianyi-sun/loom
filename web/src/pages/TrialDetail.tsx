@@ -173,18 +173,25 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
         {page.isPending && pages.length === 0 ? <LoadingState /> : null}
         {page.isError ? <ErrorState error={page.error} /> : null}
         <EventTimeline events={flat} />
-        {!done ? (
+        {page.isError ? (
+          <Button
+            onClick={() => page.refetch()}
+            disabled={page.isFetching}
+          >
+            {page.isFetching ? "Retrying…" : "Retry"}
+          </Button>
+        ) : !done ? (
           <Button
             onClick={() => page.refetch()}
             disabled={page.isFetching}
           >
             {page.isFetching ? "Loading…" : "Load more"}
           </Button>
-        ) : (
+        ) : flat.length > 0 ? (
           <p className="pt-1 text-center text-xs text-slate-400">
             End of trajectory.
           </p>
-        )}
+        ) : null}
       </Card.Body>
     </Card>
   );
