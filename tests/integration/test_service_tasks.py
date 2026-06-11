@@ -71,13 +71,25 @@ async def tasks_setup(
             license_url="https://example/license",
             splits=["test"],
         ))
-        for i, (tid, lic, bench) in enumerate((
-            ("humaneval/HumanEval/0", "MIT", "humaneval"),
-            ("humaneval/HumanEval/1", "MIT", "humaneval"),
-            ("local/hand-written", "Apache-2.0", None),
+        # Realistic config so the list route can surface name +
+        # description + agent + verifier + step_count from the JSON.
+        def _config(name: str, desc: str) -> dict:
+            return {
+                "task": {"id": name, "name": name, "description": desc},
+                "agent": {"name": "oracle"},
+                "verifier": {"name": "pytest"},
+                "steps": [{"name": "main"}, {"name": "checkpoint"}],
+            }
+        for i, (tid, lic, bench, name, desc) in enumerate((
+            ("humaneval/HumanEval/0", "MIT", "humaneval",
+                "Two-sum", "Return indices of two numbers that sum to a target."),
+            ("humaneval/HumanEval/1", "MIT", "humaneval",
+                "Balanced parens", "Validate a balanced-parens expression."),
+            ("local/hand-written", "Apache-2.0", None,
+                "Hello world", "Smallest possible Loom task."),
         )):
             s.execute(insert(Task).values(
-                id=tid, checksum="x" * 64, config={},
+                id=tid, checksum="x" * 64, config=_config(name, desc),
                 source="local", license=lic, benchmark_id=bench,
             ))
             del i
@@ -114,7 +126,71 @@ async def test_list_tasks(tasks_setup: tuple[FastAPI, str]) -> None:
     assert items[0]["id"] == "humaneval/HumanEval/0"
 
 
-async def test_filter_by_license(tasks_setup: tuple[FastAPI, str]) -> None:
+async def test_list_surfaces_name_description_agent_verifier_step_count(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """Plan 24: each list row carries the fields the SPA browse view
+    needs to decide whether to submit a trial — name, description,
+    agent, verifier, step_count — extracted from config JSON."""
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/tasks?benchmark_id=humaneval",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    items = r.json()["items"]
+    first = next(i for i in items if i["id"] == "humaneval/HumanEval/0")
+    assert first["name"] == "Two-sum"
+    assert first["description"].startswith("Return indices")
+    assert first["agent_name"] == "oracle"
+    assert first["verifier_name"] == "pytest"
+    assert first["step_count"] == 2
+
+
+async def test_q_substring_matches_task_id(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """Plan 24: substring search on task id replaces the dropped
+    license filter — users locate tasks by typing a fragment."""
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/tasks?q=hand",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == "local/hand-written"
+
+
+async def test_q_is_case_insensitive(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/tasks?q=HUMANEVAL",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    items = r.json()["items"]
+    assert len(items) == 2
+
+
+async def test_license_query_param_no_longer_filters(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """Plan 24: the legacy `license=` filter is gone. FastAPI silently
+    ignores unknown query params, so the request still 200s — assert
+    every row comes back rather than just MIT rows."""
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -125,8 +201,8 @@ async def test_filter_by_license(tasks_setup: tuple[FastAPI, str]) -> None:
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200
-    assert all(it["license"] == "MIT" for it in r.json()["items"])
-    assert len(r.json()["items"]) == 2
+    # All three tasks come back — the license param is now a no-op.
+    assert len(r.json()["items"]) == 3
 
 
 async def test_filter_by_benchmark_id(tasks_setup: tuple[FastAPI, str]) -> None:

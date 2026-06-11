@@ -1,11 +1,17 @@
 /**
- * Tasks list — registered task instances with filter controls + an
- * inline "Submit trial" action per row. Clicking submit opens a
- * modal-form that POSTs to /api/v1/trials and redirects to the new
- * trial's detail page on success.
+ * Tasks browse. Plan 24 redesign:
+ *
+ *   - Each row surfaces the fields a user needs to decide whether
+ *     to run this task: name + description, agent, verifier, step
+ *     count. Just the bare id wasn't enough to tell tasks apart.
+ *   - Benchmark filter is a dropdown populated from /benchmarks
+ *     (was a freeform text input).
+ *   - License filter is gone — operators rarely browse by SPDX tag,
+ *     and the few who do can hit the API directly.
+ *   - Free-text search matches a substring of the task id.
  */
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import { Button } from "../components/Button";
@@ -21,23 +27,81 @@ import Pagination, {
   type PageState,
 } from "../components/Pagination";
 import { SubmitTrialModal } from "../components/SubmitTrialModal";
+import { cn } from "../lib/cn";
+
+// The /api/v1/tasks shape includes fields not yet exposed in the
+// generated schema (name, description, agent_name, verifier_name,
+// step_count). Hand-rolled until the next openapi-typescript run.
+interface TaskRow {
+  id: string;
+  name: string | null;
+  description: string | null;
+  agent_name: string | null;
+  verifier_name: string | null;
+  step_count: number;
+  benchmark_id: string | null;
+  source: string | null;
+}
+
+interface TaskListResponse {
+  items: TaskRow[];
+  next_cursor: string | null;
+}
+
+function Badge({
+  children,
+  tone = "slate",
+}: {
+  children: React.ReactNode;
+  tone?: "slate" | "indigo" | "emerald" | "amber";
+}): JSX.Element {
+  const palette: Record<string, string> = {
+    slate: "bg-slate-100 text-slate-700 border-slate-200",
+    indigo: "bg-indigo-50 text-indigo-700 border-indigo-100",
+    emerald: "bg-emerald-50 text-emerald-700 border-emerald-100",
+    amber: "bg-amber-50 text-amber-700 border-amber-100",
+  };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+        palette[tone],
+      )}
+    >
+      {children}
+    </span>
+  );
+}
 
 export default function Tasks(): JSX.Element {
   const [benchmark, setBenchmark] = useState("");
-  const [license, setLicense] = useState("");
+  const [search, setSearch] = useState("");
   const [page, setPage] = useState<PageState>(initialPage);
   const [submitTaskId, setSubmitTaskId] = useState<string | null>(null);
 
+  const benchmarks = useQuery({
+    queryKey: ["benchmarks"],
+    queryFn: () => api.listBenchmarks({ limit: "200" }),
+  });
+
   const query = useQuery({
-    queryKey: ["tasks", benchmark, license, page.current],
+    queryKey: ["tasks", benchmark, search, page.current],
     queryFn: () =>
       api.listTasks({
         benchmark_id: benchmark || undefined,
-        license: license || undefined,
+        q: search.trim() || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
-      }),
+      }) as Promise<TaskListResponse>,
   });
+
+  const benchmarkOptions = useMemo(() => {
+    if (!benchmarks.data) return [];
+    return benchmarks.data.items.map((b: { id: string; display_name?: string }) => ({
+      id: b.id,
+      label: b.display_name ?? b.id,
+    }));
+  }, [benchmarks.data]);
 
   const body = (() => {
     if (query.isPending) return <LoadingState />;
@@ -53,52 +117,58 @@ export default function Tasks(): JSX.Element {
       return (
         <EmptyState
           label="No tasks match this filter."
-          hint="Try clearing the benchmark or license filter."
+          hint="Try clearing the benchmark filter or the search term."
         />
       );
     }
     return (
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-slate-200 text-sm">
-          <thead>
-            <tr className="bg-slate-50/50">
-              {["ID", "Benchmark", "License", "Source", ""].map((h) => (
-                <th
-                  key={h}
-                  className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {query.data.items.map((t) => (
-              <tr key={t.id} className="hover:bg-slate-50">
-                <td className="px-4 py-3 font-mono text-xs text-slate-700">
+      <ul className="divide-y divide-slate-100">
+        {query.data.items.map((t) => (
+          <li
+            key={t.id}
+            className="flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-slate-50/60 sm:flex-row sm:items-start sm:justify-between"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <h3 className="truncate text-sm font-semibold text-slate-900">
+                  {t.name ?? t.id}
+                </h3>
+                <code className="break-all rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600">
                   {t.id}
-                </td>
-                <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                  {t.benchmark_id ?? "—"}
-                </td>
-                <td className="px-4 py-3 text-slate-700">{t.license ?? "—"}</td>
-                <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                  {t.source ?? "—"}
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    onClick={() => setSubmitTaskId(t.id)}
-                  >
-                    Submit trial
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                </code>
+              </div>
+              {t.description ? (
+                <p className="mt-1 line-clamp-2 text-sm text-slate-500">
+                  {t.description}
+                </p>
+              ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                {t.benchmark_id ? (
+                  <Badge tone="indigo">benchmark: {t.benchmark_id}</Badge>
+                ) : null}
+                {t.agent_name ? (
+                  <Badge tone="emerald">agent: {t.agent_name}</Badge>
+                ) : null}
+                {t.verifier_name ? (
+                  <Badge tone="amber">verifier: {t.verifier_name}</Badge>
+                ) : null}
+                <Badge>
+                  {t.step_count} step{t.step_count === 1 ? "" : "s"}
+                </Badge>
+              </div>
+            </div>
+            <div className="shrink-0 self-start">
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => setSubmitTaskId(t.id)}
+              >
+                Submit trial
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
     );
   })();
 
@@ -107,30 +177,47 @@ export default function Tasks(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Tasks</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Browse registered task instances. Click `Submit trial` on a row
-          to run that task against an agent + model.
+          Browse registered tasks. Each card shows the agent + verifier
+          and step count so you know what you're running before you
+          submit.
         </p>
       </header>
 
       <div className="flex flex-wrap items-center gap-3">
-        <Input
-          placeholder="benchmark id (e.g. humaneval)"
-          value={benchmark}
-          onChange={(e) => {
-            setBenchmark(e.target.value);
-            setPage(initialPage);
-          }}
-          className="max-w-xs"
-        />
-        <Input
-          placeholder="license SPDX (e.g. MIT)"
-          value={license}
-          onChange={(e) => {
-            setLicense(e.target.value);
-            setPage(initialPage);
-          }}
-          className="max-w-xs"
-        />
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+            Benchmark
+          </span>
+          <select
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+            value={benchmark}
+            onChange={(e) => {
+              setBenchmark(e.target.value);
+              setPage(initialPage);
+            }}
+          >
+            <option value="">All benchmarks</option>
+            {benchmarkOptions.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+            Search by id
+          </span>
+          <Input
+            placeholder="e.g. humaneval/0"
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(initialPage);
+            }}
+            className="min-w-[14rem]"
+          />
+        </label>
       </div>
 
       <Card>

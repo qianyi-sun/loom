@@ -21,8 +21,22 @@ router = APIRouter()
 
 
 def _task_row(t: Task) -> dict[str, Any]:
+    """List/detail shape. Surfaces the fields the SPA browse view
+    needs (name, description, agent/verifier/step counts) without
+    requiring a per-row config fetch — the JSON path lookups are
+    cheap and we already loaded the row."""
+    cfg = t.config or {}
+    task_meta = cfg.get("task") or {}
+    agent = cfg.get("agent") or {}
+    verifier = cfg.get("verifier") or {}
+    steps = cfg.get("steps") or []
     return {
         "id": t.id,
+        "name": task_meta.get("name"),
+        "description": task_meta.get("description"),
+        "agent_name": agent.get("name"),
+        "verifier_name": verifier.get("name"),
+        "step_count": len(steps) if isinstance(steps, list) else 0,
         "checksum": t.checksum,
         "source": t.source,
         "license": t.license,
@@ -35,9 +49,16 @@ def _task_row(t: Task) -> dict[str, Any]:
 async def list_tasks(
     request: Request,
     benchmark_id: Annotated[str | None, Query()] = None,
-    license_spdx: Annotated[
+    # Plan 24: drop the license-spdx filter from the SPA browse path
+    # (operators almost never search by SPDX tag) and add an
+    # id-substring search so users can locate a task by typing part
+    # of its id. Bounded length so the LIKE pattern can't be abused.
+    q: Annotated[
         str | None,
-        Query(alias="license"),
+        Query(
+            description="substring match against task id",
+            max_length=200,
+        ),
     ] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
@@ -47,10 +68,14 @@ async def list_tasks(
         ctx = await verify_bearer_token(s, authorization)
         require_human_or_admin(ctx)
         stmt = select(Task).order_by(Task.id)
-        if license_spdx:
-            stmt = stmt.where(Task.license == license_spdx)
         if benchmark_id is not None:
             stmt = stmt.where(Task.benchmark_id == benchmark_id)
+        if q:
+            # `ilike` with explicit '%' wrapping. Postgres LIKE
+            # patterns treat `%` and `_` as metacharacters, but a
+            # query that happens to contain them just matches more
+            # broadly — no injection risk through the SQL boundary.
+            stmt = stmt.where(Task.id.ilike(f"%{q}%"))
         if cursor:
             stmt = stmt.where(Task.id > cursor)
         stmt = stmt.limit(limit + 1)
