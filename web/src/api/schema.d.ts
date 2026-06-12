@@ -147,8 +147,11 @@ export interface paths {
           "application/json": {
             name: string;
             description?: string;
+            backend?: string;
             task_filter: Record<string, unknown>;
             trial_config: Record<string, unknown>;
+            n_per_task?: number;
+            combinations?: components["schemas"]["Combination"][];
           };
         };
       };
@@ -160,6 +163,19 @@ export interface paths {
               expected_trial_count: number;
               state: string;
               created_at: string;
+            };
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/backends": {
+    get: {
+      responses: {
+        200: {
+          content: {
+            "application/json": {
+              items: { name: string; description: string }[];
             };
           };
         };
@@ -315,11 +331,20 @@ export interface components {
       description: string | null;
       task_filter: Record<string, unknown>;
       trial_config: Record<string, unknown>;
+      backend: string;
+      combinations: components["schemas"]["Combination"][];
       state: string;
+      result_status: string | null;
       created_at: string;
       finished_at: string | null;
       created_by_token_prefix: string;
       expected_trial_count: number;
+    };
+    Combination: {
+      label?: string;
+      agent_name: string;
+      agent_model: { provider: string; name: string } | null;
+      n_per_task: number;
     };
     BatchList: {
       items: components["schemas"]["Batch"][];

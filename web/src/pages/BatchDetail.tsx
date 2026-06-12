@@ -7,7 +7,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Combination } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
@@ -70,11 +69,7 @@ export default function BatchDetail(): JSX.Element {
   if (query.isPending) return <LoadingState />;
   if (query.isError) return <ErrorState error={query.error} />;
   if (!query.data) return <ErrorState error={new Error("no data")} />;
-  const c = query.data as typeof query.data & {
-    backend?: string;
-    combinations?: Combination[];
-    result_status?: string | null;
-  };
+  const c = query.data;
 
   return (
     <div className="space-y-6">

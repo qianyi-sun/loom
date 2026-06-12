@@ -1,6 +1,6 @@
 # Loom SPA v3 — trial-centric simplification
 
-**Status:** design (not yet shipped)
+**Status:** shipped 2026-06-12 (PRs #314 + #316 + #317 + #318 + this PR)
 
 **Date:** 2026-06-11
 
