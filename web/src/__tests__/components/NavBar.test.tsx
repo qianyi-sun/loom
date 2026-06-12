@@ -15,11 +15,8 @@ function renderNav(isAdmin: boolean) {
 describe("NavBar", () => {
   it("renders the team nav items", () => {
     renderNav(false);
-    expect(screen.getByRole("link", { name: "Trials" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Batches" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Tasks" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Benchmarks" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Usage" })).pilot groupeInTheDocument();
+    expect(screen.getByRole("link", { name: "New batch" })).pilot groupeInTheDocument();
+    expect(screen.getByRole("link", { name: "Monitor" })).pilot groupeInTheDocument();
     expect(screen.getByRole("link", { name: "Settings" })).pilot groupeInTheDocument();
   });
 

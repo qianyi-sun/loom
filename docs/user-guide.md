@@ -350,6 +350,48 @@ to add or override entries (e.g. for a self-hosted model or a
 provider Loom doesn't ship a default for). Cost is computed locally
 from these rates plus the token counts returned by the provider SDK.
 
+<a id="pasting-task-ids"></a>
+
+## Pasting task ids
+
+The SPA's New batch form has an "Explicit task ids" subset mode
+that accepts a paste box. The parser handles every format users
+tend to paste from — notebooks, spreadsheets, chat messages, URLs,
+ranges, JSON arrays. All of the following paste cleanly:
+
+- **One per line** —
+  ```
+  HumanEval/0
+  HumanEval/1
+  HumanEval/2
+  ```
+- **Comma / semicolon / pipe / tab / 2+-space separated** —
+  `HumanEval/0, HumanEval/1, HumanEval/2`
+- **JSON array** (single or double quotes) —
+  `["HumanEval/0", "HumanEval/1"]`
+- **Python list literal** (trailing commas OK) —
+  `['HumanEval/0', 'HumanEval/1',]`
+- **Range shorthand** — `HumanEval/0-4` expands to 0..4.
+- **Prefix shorthand** — `HumanEval/0,1,2,3` expands to 0..3.
+- **Mixed range + list** — `HumanEval/0-2, HumanEval/3, HumanEval/4`.
+- **Markdown bullets** — `-`, `*`, `•`, `→`, `>`, numbered `1.` /
+  `2.`.
+- **Markdown single-column table** — header + separator + rows.
+- **CSV with header** — first column wins, sibling columns dropped.
+- **Triple-backtick code fences** — `` ``` `` lines are stripped,
+  contents kept.
+- **`#` comments** — everything after `#` on a line is dropped.
+- **URL prefixes** — `/api/v1/tasks/` and `/tasks/` are stripped.
+
+After parsing, the result is sorted + deduplicated. The preview
+line below the textarea shows `Parsed N ids` (or a red error
+naming the first offending segment).
+
+The "Validate against catalog" button does a single
+`GET /api/v1/tasks?task_ids=...` roundtrip and surfaces any
+unknown ids inline; submission itself validates server-side, so
+the catalog check is purely a UX prefetch.
+
 ## Troubleshooting
 
 **`HfUriError: Repository id must be 'namespace/name'`** — older

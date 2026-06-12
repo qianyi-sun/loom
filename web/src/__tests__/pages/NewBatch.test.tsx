@@ -1,10 +1,13 @@
 /**
- * NewBatch tests — every TrialConfig knob the form exposes flows
- * into the POST /batches body via structured fields, with proper
- * client-side validation (empty filter blocked, fan-out cap,
- * clamping). Pin the body shape so a refactor that drops or renames
- * a field gets caught BEFORE the batch route's `extra="forbid"`
- * 422s.
+ * NewBatch tests — Plan 28 PR-4 redesign.
+ *
+ * The submit body now always includes `backend` + `combinations`
+ * (a 1-element list for single-combo batches), and `task_filter`
+ * carries a `subset_kind` discriminator. The agent / model /
+ * n_per_task fields moved OUT of trial_config and into each
+ * Combination row. These tests pin that shape so a refactor that
+ * drops or renames a field gets caught BEFORE the route's strict
+ * Pydantic 422s.
  */
 
 import { fireEvent, screen } from "@testing-library/react";
@@ -46,6 +49,13 @@ const BENCHMARKS_RESPONSE = {
   next_cursor: null,
 };
 
+const BACKENDS_RESPONSE = {
+  items: [
+    { name: "docker", description: "Local docker on the worker host." },
+    { name: "fake", description: "In-memory driver." },
+  ],
+};
+
 function tasksResponse(
   total: number,
   ids: string[] = Array.from({ length: total }, (_, i) => `humaneval/HumanEval/${i}`),
@@ -57,7 +67,7 @@ function tasksResponse(
   };
 }
 
-const CAMPAIGN_RESPONSE = {
+const BATCH_RESPONSE = {
   batch_id: "00000000-0000-0000-0000-000000000001",
   expected_trial_count: 3,
   n_per_task: 1,
@@ -70,20 +80,22 @@ function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
 > {
   const matching = opts.matchingTasks ?? 3;
   return vi
-    .spyOn(global, "fetch")
+    .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
       const json = (b: unknown, status = 200) =>
         Promise.resolve(
           new Response(JSON.stringify(b), {
-            status, headers: { "Content-Type": "application/json" },
+            status,
+            headers: { "Content-Type": "application/json" },
           }),
         );
       if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
       if (url.includes("/api/v1/benchmarks")) return json(BENCHMARKS_RESPONSE);
+      if (url.includes("/api/v1/backends")) return json(BACKENDS_RESPONSE);
       if (url.includes("/api/v1/tasks")) return json(tasksResponse(matching));
-      if (url.includes("/api/v1/batches")) return json(CAMPAIGN_RESPONSE, 201);
+      if (url.includes("/api/v1/batches")) return json(BATCH_RESPONSE, 201);
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
 }
@@ -91,8 +103,8 @@ function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
 function batchCall(
   spy: ReturnType<typeof vi.spyOn>,
 ): { url: string; body: Record<string, unknown> } | null {
-  const found = spy.mock.calls.find(([u]) =>
-    String(u).includes("/api/v1/batches"),
+  const found = spy.mock.calls.find((c) =>
+    String(c[0]).includes("/api/v1/batches") && (c[1] as RequestInit | undefined)?.method === "POST",
   );
   if (!found) return null;
   return {
@@ -101,11 +113,17 @@ function batchCall(
   };
 }
 
+async function pickBackend(): Promise<void> {
+  const user = userEvent.setup();
+  await user.selectOptions(screen.getByLabelText(/^Backend$/i), "docker");
+}
+
 async function pickBenchmark(): Promise<void> {
   const user = userEvent.setup();
-  const benchmark = (await screen.findAllByRole("combobox"))[0];
-  await user.selectOptions(benchmark, "humaneval");
+  await user.selectOptions(screen.getByLabelText(/^Benchmark$/i), "humaneval");
 }
+
+const SUBMIT_BTN = /Submit (\d+ trials?|batch)/i;
 
 describe("NewBatch", () => {
   beforeEach(() => {
@@ -114,18 +132,26 @@ describe("NewBatch", () => {
     vi.restoreAllMocks();
   });
 
+  it("blocks submit when backend isn't picked", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "x");
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    expect(await screen.findByText(/Pick a backend\./i)).pilot groupeInTheDocument();
+    expect(batchCall(spy)).pilot groupeNull();
+  });
+
   it("blocks submit when benchmark isn't picked", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
-    // Local error banner shows "Pick a benchmark." — disambiguate
-    // from the helper text "Pick a benchmark to count matching tasks."
-    expect(
-      await screen.findByText(/^Pick a benchmark\.$/i),
-    ).pilot groupeInTheDocument();
+    await pickBackend();
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    expect(await screen.findByText(/Pick a benchmark\./i)).pilot groupeInTheDocument();
     expect(batchCall(spy)).pilot groupeNull();
   });
 
@@ -143,38 +169,42 @@ describe("NewBatch", () => {
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/No tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/No tasks match the current benchmark/i),
     ).pilot groupeInTheDocument();
     expect(batchCall(spy)).pilot groupeNull();
   });
 
-  it("POSTs the minimal body when only required fields are set", async () => {
+  it("POSTs the minimal body (backend + single-combo) when only required fields are set", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "my-camp",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "my-batch");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
     const call = batchCall(spy)!;
-    expect(call.body.name).pilot groupe("my-camp");
-    expect(call.body.task_filter).toEqual({ benchmark_id: "humaneval" });
-    expect(call.body.n_per_task).pilot groupe(1);
-    // Only required TrialConfig fields. Advanced defaults must NOT be
-    // emitted (`delete_env: true` is the default; we drop it).
-    expect(call.body.trial_config).toEqual({
-      agent_name: "oracle",
-      agent_model: null,
+    expect(call.body.name).pilot groupe("my-batch");
+    expect(call.body.backend).pilot groupe("docker");
+    expect(call.body.task_filter).toEqual({
+      subset_kind: "all",
+      benchmark_id: "humaneval",
     });
+    expect(call.body.trial_config).toEqual({});
+    expect(call.body.combinations).toEqual([
+      {
+        agent_name: "oracle",
+        agent_model: null,
+        n_per_task: 1,
+      },
+    ]);
   });
 
   it("requires confirmation when matched_count * n_per_task exceeds the threshold", async () => {
@@ -182,13 +212,11 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "big-camp",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "big-batch");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/250 tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/I understand this batch will launch 250 trials/i),
     ).pilot groupeInTheDocument();
@@ -198,7 +226,7 @@ describe("NewBatch", () => {
         name: /I understand this batch will launch 250 trials/i,
       }),
     );
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
   });
 
@@ -207,7 +235,9 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    const nField = screen.getByLabelText(/Samples per task/i);
+    const nField = screen.getByLabelText(
+      /Samples per task \(combination 1\)/i,
+    );
     await user.clear(nField);
     await user.type(nField, "9999");
     fireEvent.blur(nField);
@@ -219,10 +249,8 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "retry-camp",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "retry-batch");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
@@ -234,7 +262,7 @@ describe("NewBatch", () => {
     await user.click(
       screen.getByRole("checkbox", { name: /Agent timeout/i }),
     );
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).toEqual({
@@ -254,10 +282,8 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "env-camp",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "env-batch");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
     await user.click(
@@ -266,7 +292,7 @@ describe("NewBatch", () => {
     await user.click(
       screen.getByRole("checkbox", { name: /Skip verifier/i }),
     );
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.force_build).pilot groupe(true);
@@ -278,70 +304,35 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "prio-camp",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "prio-batch");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
     const prio = screen.getByLabelText(/Submit priority/i);
     await user.clear(prio);
     await user.type(prio, "300");
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.submit_priority).pilot groupe(300);
   });
 
-  it("materialises q → task_ids at submit time so the search actually narrows", async () => {
-    // Critic X1: previously the search input updated the count
-    // preview but was dropped on submit (batch ran the whole
-    // benchmark). The form now passes task_filter.task_ids.
-    const spy = vi
-      .spyOn(global, "fetch")
-      .mockImplementation((input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : String(input);
-        const json = (b: unknown, status = 200) =>
-          Promise.resolve(
-            new Response(JSON.stringify(b), {
-              status, headers: { "Content-Type": "application/json" },
-            }),
-          );
-        if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
-        if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
-        if (url.includes("/api/v1/benchmarks")) return json(BENCHMARKS_RESPONSE);
-        if (url.includes("/api/v1/tasks")) {
-          return json(
-            tasksResponse(2, [
-              "humaneval/HumanEval/0",
-              "humaneval/HumanEval/10",
-            ]),
-          );
-        }
-        if (url.includes("/api/v1/batches")) return json(CAMPAIGN_RESPONSE, 201);
-        return Promise.reject(new Error(`unexpected fetch ${url}`));
-      });
+  it("submits an explicit task_ids slate from the smart paste parser", async () => {
+    const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "narrow-camp",
-    );
-    await pickBenchmark();
-    await screen.findByText(/2 tasks match/i);
-    // Type into the task-id search so q goes non-empty.
-    await user.type(
-      screen.getByPlaceholderText(/substring/i),
-      "HumanEval/",
-    );
-    await screen.findByText(/2 tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.type(screen.getByPlaceholderText(/run 7/i), "explicit-batch");
+    await pickBackend();
+    await user.click(screen.getByRole("radio", { name: /Explicit task ids/i }));
+    const textarea = screen.getByPlaceholderText(/HumanEval\/0/i);
+    await user.type(textarea, "HumanEval/0{Enter}HumanEval/1");
+    await screen.findByText(/Parsed 2 ids/i);
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
-    const call = batchCall(spy)!;
-    expect(call.body.task_filter).toEqual({
-      benchmark_id: "humaneval",
-      task_ids: ["humaneval/HumanEval/0", "humaneval/HumanEval/10"],
+    expect(batchCall(spy)!.body.task_filter).toEqual({
+      subset_kind: "explicit",
+      task_ids: ["HumanEval/0", "HumanEval/1"],
     });
   });
 
@@ -350,19 +341,15 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "noisy-camp",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "noisy-batch");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
-    // Open Advanced so the retry field is rendered.
     await user.click(screen.getByText(/Advanced options/i));
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "5");
-    // Deliberately tick NO retry reasons.
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).pilot groupeUndefined();
@@ -377,14 +364,14 @@ describe("NewBatch", () => {
       screen.getByPlaceholderText(/run 7/i),
       "single-attempt",
     );
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
     await user.click(screen.getByText(/Advanced options/i));
-    // Leave max_attempts at default "1" and only tick a reason.
     await user.click(
       screen.getByRole("checkbox", { name: /Worker crash/i }),
     );
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).pilot groupeUndefined();
@@ -395,13 +382,10 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "bad-backoff",
-    );
+    await user.type(screen.getByPlaceholderText(/run 7/i), "bad-backoff");
+    await pickBackend();
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
-    // Enable retry (otherwise the backoff block isn't even emitted).
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "3");
@@ -411,7 +395,7 @@ describe("NewBatch", () => {
     const base = screen.getByLabelText(/Backoff base/i);
     await user.clear(base);
     await user.type(base, "1000");
-    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/Backoff max seconds must be ≥/i),
     ).pilot groupeInTheDocument();

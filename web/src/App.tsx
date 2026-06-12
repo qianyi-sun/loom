@@ -1,9 +1,9 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 
 import Layout from "./components/Layout";
 import Benchmarks from "./pages/Benchmarks";
 import BatchDetail from "./pages/BatchDetail";
-import BatchesList from "./pages/BatchesList";
+import Monitor from "./pages/Monitor";
 import NewBatch from "./pages/NewBatch";
 import NotFound from "./pages/NotFound";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
@@ -11,20 +11,23 @@ import Settings from "./pages/Settings";
 import Tasks from "./pages/Tasks";
 import TrialCompare from "./pages/TrialCompare";
 import TrialDetail from "./pages/TrialDetail";
-import TrialsList from "./pages/TrialsList";
 import UsageDashboard from "./pages/UsageDashboard";
 
 export default function App(): JSX.Element {
   return (
     <Routes>
       <Route path="/" element={<Layout />}>
-        <Route index element={<TrialsList />} />
-        <Route path="trials" element={<TrialsList />} />
+        <Route index element={<Navigate to="/monitor" replace />} />
+        <Route path="monitor" element={<Monitor />} />
+        {/* Legacy redirects — preserve old links from external docs / chats. */}
+        <Route path="trials" element={<Navigate to="/monitor?view=trials" replace />} />
+        <Route path="batches" element={<Navigate to="/monitor?view=batches" replace />} />
         <Route path="trials/compare" element={<TrialCompare />} />
         <Route path="trials/:trialId" element={<TrialDetail />} />
-        <Route path="batches" element={<BatchesList />} />
         <Route path="batches/new" element={<NewBatch />} />
         <Route path="batches/:batchId" element={<BatchDetail />} />
+        {/* Tasks / Benchmarks / Usage routes still resolve so power-user
+            URLs don't 404 mid-redesign; they're absent from nav per PR-4. */}
         <Route path="tasks" element={<Tasks />} />
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />

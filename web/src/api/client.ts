@@ -87,6 +87,43 @@ type Team =
   paths["/api/v1/teams/{team_id}"]["get"]["responses"][200]["content"]["application/json"];
 type TokenList = paths["/api/v1/tokens"]["get"]["responses"][200]["content"]["application/json"];
 
+/** Plan 28 PR-3: backend catalog entry returned by GET /api/v1/backends.
+ * Driven by the union of `capabilities.backend` reported by active workers. */
+export interface Backend {
+  name: string;
+  description: string;
+}
+
+/** Plan 28 PR-3: one (agent, model, n_per_task) tuple within a Batch.
+ * The submit form always sends a list of these (even single-combo
+ * batches send a 1-element list) so the back-end uses one code path. */
+export interface Combination {
+  label?: string | null;
+  agent_name: string;
+  agent_model: { provider: string; name: string } | null;
+  n_per_task: number;
+}
+
+/** Plan 28 PR-3: structured task_filter discriminated by subset_kind. */
+export interface TaskFilter {
+  benchmark_id?: string;
+  task_ids?: string[];
+  license?: string;
+  subset_kind?: "all" | "first_n" | "last_n" | "random_n" | "explicit";
+  n?: number;
+  seed?: number;
+}
+
+export interface CreateBatchBody {
+  name: string;
+  description?: string;
+  backend: string;
+  task_filter: TaskFilter;
+  trial_config: Record<string, unknown>;
+  combinations?: Combination[];
+  n_per_task?: number;
+}
+
 function qs(params: Record<string, string | number | undefined>): string {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
@@ -144,17 +181,13 @@ export const api = {
     apiFetch<BatchList>(`/api/v1/batches${qs(q)}`),
   getBatch: (id: string) =>
     apiFetch<BatchDetail>(`/api/v1/batches/${id}`),
-  createBatch: (body: {
-    name: string;
-    description?: string;
-    task_filter: Record<string, unknown>;
-    trial_config: Record<string, unknown>;
-    n_per_task?: number;
-  }) =>
+  createBatch: (body: CreateBatchBody) =>
     apiFetch<BatchCreate>("/api/v1/batches", {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  listBackends: () =>
+    apiFetch<{ items: Backend[] }>("/api/v1/backends"),
   cancelBatch: (id: string) =>
     apiFetch<{ batch_id: string; state: string }>(
       `/api/v1/batches/${id}/cancel`,

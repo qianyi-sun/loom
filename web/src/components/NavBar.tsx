@@ -13,11 +13,8 @@ import { NavLink } from "react-router-dom";
 import { cn } from "../lib/cn";
 
 const NAV_ITEMS = [
-  { to: "/trials", label: "Trials" },
-  { to: "/batches", label: "Batches" },
-  { to: "/tasks", label: "Tasks" },
-  { to: "/benchmarks", label: "Benchmarks" },
-  { to: "/usage", label: "Usage" },
+  { to: "/batches/new", label: "New batch" },
+  { to: "/monitor", label: "Monitor" },
 ];
 
 const ADMIN_NAV_ITEMS = [

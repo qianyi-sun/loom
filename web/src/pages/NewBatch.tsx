@@ -1,40 +1,32 @@
 /**
- * Create a new batch. Plan 27 redesign — full TrialConfig
- * surface, every knob the API accepts is reachable from the form
- * with inline help text. Highlights:
+ * Create a new batch — Plan 28 PR-4 redesign.
  *
- *   - Benchmark is REQUIRED. The previous "All benchmarks" default
- *     was a footgun (one click ran on the whole catalog).
- *   - Task-id substring search narrows further within the chosen
- *     benchmark. Live "N tasks match" preview is debounced.
- *     At submit time, when the search is non-empty we materialize
- *     the matching task ids into the `task_ids` filter so the
- *     batch actually narrows (was previously dropped on the
- *     floor — the visible count and the submitted filter
- *     disagreed).
- *   - Agent dropdown is one flat sorted list (the built-in vs
- *     loom-launcher distinction is implementation detail; at
- *     runtime they're peers). Model dropdown still groups by
- *     provider because billing differs across providers.
- *   - Advanced fields wrap in a collapsed `<details>` so the form
- *     fits one viewport for the 95% who want defaults. Every
- *     TrialConfig knob lives there grouped by topic (Environment,
- *     Timeouts, Retry, Scheduling) with inline help. No "use the
- *     API directly" hand-wave; the form IS the documentation.
- *   - Retry payload only emits when BOTH `max_attempts > 1` AND
- *     `retry_on` non-empty (was emitting misleading no-op blocks
- *     when only one of the two conditions held).
+ * Two-column layout (Harbor-style) on xl screens:
+ *   - LEFT: identity + backend + which tasks (benchmark dropdown +
+ *     subset radio: all / first_n / last_n / random_n / explicit).
+ *     For explicit, a paste textarea drives the smart parser and
+ *     materialises ids into task_filter.task_ids at submit.
+ *   - RIGHT (slate-50 surface): one-or-more Combinations. Each row
+ *     is (agent, model, n_per_task, label). Cap at 16.
  *
- *   Multi-benchmark / multi-agent comparison batches are deferred —
- *   they need a Batch.variants column + runner fan-out changes,
- *   not just a UI tweak.
+ * The Advanced disclosure preserves every TrialConfig knob from the
+ * pre-redesign form (timeouts, retry, scheduling) verbatim; only
+ * agent_name / agent_model / n_per_task have been LIFTED out of
+ * trial_config and into the combinations array. Every submit (even
+ * single-combo) sends a 1-element `combinations` list — the route
+ * has one shape now and the SPA matches it.
+ *
+ * Submit-button label is dynamic: `Submit N trial(s)`. A
+ * confirmation banner above submit lists per-combination chips +
+ * total fan-out (= matched_tasks × Σ n_per_task) and blocks submit
+ * over the FAN_OUT_CONFIRM_THRESHOLD until the user ticks confirm.
  */
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, type Combination, type CreateBatchBody } from "../api/client";
 import {
   AgentModelPicker,
   buildAgentModel,
@@ -43,8 +35,8 @@ import {
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
-import { Input } from "../components/Input";
-import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { Input, Textarea } from "../components/Input";
+import { parseTaskIds } from "../lib/parseTaskIds";
 
 interface BenchmarkItem {
   id: string;
@@ -52,6 +44,7 @@ interface BenchmarkItem {
 }
 
 const FAN_OUT_CONFIRM_THRESHOLD = 200;
+const MAX_COMBINATIONS = 16;
 
 const RETRY_REASONS = [
   { value: "worker_crash", label: "Worker crash" },
@@ -62,6 +55,8 @@ const RETRY_REASONS = [
 ] as const;
 
 type RetryReason = (typeof RETRY_REASONS)[number]["value"];
+
+type SubsetKind = "all" | "first_n" | "last_n" | "random_n" | "explicit";
 
 function clampInt(raw: string, min: number, max: number): string {
   if (raw === "") return raw;
@@ -78,7 +73,7 @@ function clampFloat(raw: string, min: number, max?: number): string {
   if (!Number.isFinite(n)) return String(min);
   if (n < min) return String(min);
   if (max !== undefined && n > max) return String(max);
-  return raw; // preserve the user's text (e.g. "1.5"), only clamp on out-of-range
+  return raw;
 }
 
 const INITIAL_PICKER: AgentModelValue = {
@@ -87,27 +82,33 @@ const INITIAL_PICKER: AgentModelValue = {
   modelName: "",
 };
 
+interface ComboRow {
+  picker: AgentModelValue;
+  nPerTask: string;
+  label: string;
+}
+
+function newRow(): ComboRow {
+  return { picker: { ...INITIAL_PICKER }, nPerTask: "1", label: "" };
+}
+
 interface AdvancedState {
-  // Environment
   forceBuild: boolean;
   deleteEnv: boolean;
   verifierEnvMode: "" | "shared" | "separate";
   skipVerifier: boolean;
-  // Timeouts: overrides + multipliers. Empty string = unset.
   overrideAgentTimeoutSec: string;
   agentTimeoutMultiplier: string;
   overrideVerifierTimeoutSec: string;
   verifierTimeoutMultiplier: string;
   overrideEnvBuildTimeoutSec: string;
   envBuildTimeoutMultiplier: string;
-  // Retry
   maxAttempts: string;
   retryOn: Set<RetryReason>;
   backoffBaseSec: string;
   backoffMaxSec: string;
   backoffMultiplier: string;
   backoffJitter: string;
-  // Scheduling
   submitPriority: string;
 }
 
@@ -136,11 +137,13 @@ function buildAdvancedConfig(
 ): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
   const out: Record<string, unknown> = {};
   if (s.forceBuild) out.force_build = true;
-  if (!s.deleteEnv) out.delete_env = false; // default is true, only emit when off
+  if (!s.deleteEnv) out.delete_env = false;
   if (s.skipVerifier) out.skip_verifier = true;
   if (s.verifierEnvMode) out.verifier_env_mode = s.verifierEnvMode;
   const numOrErr = (
-    raw: string, name: string, opts: { min: number; max?: number; allowEmpty?: boolean } = { min: 0 },
+    raw: string,
+    name: string,
+    opts: { min: number; max?: number; allowEmpty?: boolean } = { min: 0 },
   ): number | undefined | string => {
     if (raw === "") {
       return opts.allowEmpty ? undefined : `${name} is required.`;
@@ -155,11 +158,9 @@ function buildAdvancedConfig(
   };
   const opt = (raw: string, name: string, min: number) => {
     if (raw === "") return undefined;
-    const v = numOrErr(raw, name, { min });
-    return v;
+    return numOrErr(raw, name, { min });
   };
 
-  // Timeouts
   const overrideAgent = opt(s.overrideAgentTimeoutSec, "Override agent timeout", 0.001);
   if (typeof overrideAgent === "string") return { ok: false, error: overrideAgent };
   if (overrideAgent !== undefined) out.override_agent_timeout_sec = overrideAgent;
@@ -181,14 +182,9 @@ function buildAdvancedConfig(
   if (typeof buildMult === "string") return { ok: false, error: buildMult };
   if (buildMult !== 1) out.env_build_timeout_multiplier = buildMult;
 
-  // Retry — only emit when BOTH `max_attempts > 1` AND `retry_on` is
-  // non-empty. Either alone is a no-op (the runner needs both a reason
-  // to retry on AND a budget to spend), so emitting a half-config in
-  // those cases would look like "I configured retry" in the saved
-  // batch while doing nothing.
   const maxAttempts = numOrErr(s.maxAttempts, "Max attempts", { min: 1, max: 20 });
   if (typeof maxAttempts === "string") return { ok: false, error: maxAttempts };
-  const wantsRetry = maxAttempts > 1 && s.retryOn.size > 0;
+  const wantsRetry = (maxAttempts as number) > 1 && s.retryOn.size > 0;
   if (wantsRetry) {
     const base = numOrErr(s.backoffBaseSec, "Backoff base seconds", { min: 0.001 });
     if (typeof base === "string") return { ok: false, error: base };
@@ -198,7 +194,7 @@ function buildAdvancedConfig(
     if (typeof mult === "string") return { ok: false, error: mult };
     const jitter = numOrErr(s.backoffJitter, "Backoff jitter", { min: 0, max: 1 });
     if (typeof jitter === "string") return { ok: false, error: jitter };
-    if (max < base) {
+    if ((max as number) < (base as number)) {
       return {
         ok: false,
         error: "Backoff max seconds must be ≥ backoff base seconds.",
@@ -216,7 +212,6 @@ function buildAdvancedConfig(
     };
   }
 
-  // Scheduling
   const prio = numOrErr(s.submitPriority, "Submit priority", { min: 0, max: 1000 });
   if (typeof prio === "string") return { ok: false, error: prio };
   if (prio !== 100) out.submit_priority = prio;
@@ -245,14 +240,22 @@ function FieldLabel({
   );
 }
 
+function freshSeed(): number {
+  // 32-bit unsigned seed — Math.random() over 2**31 gives the route's
+  // validation a value it'll always accept.
+  return Math.floor(Math.random() * 2 ** 31);
+}
+
 export default function NewBatch(): JSX.Element {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [backend, setBackend] = useState("");
   const [benchmark, setBenchmark] = useState("");
-  const [taskQuery, setTaskQuery] = useState("");
-  const debouncedTaskQuery = useDebouncedValue(taskQuery, 250);
-  const [picker, setPicker] = useState<AgentModelValue>(INITIAL_PICKER);
-  const [nPerTask, setNPerTask] = useState("1");
+  const [subsetKind, setSubsetKind] = useState<SubsetKind>("all");
+  const [subsetN, setSubsetN] = useState("10");
+  const [subsetSeed, setSubsetSeed] = useState<string>(() => String(freshSeed()));
+  const [explicitText, setExplicitText] = useState("");
+  const [rows, setRows] = useState<ComboRow[]>(() => [newRow()]);
   const [advanced, setAdvanced] = useState<AdvancedState>(INITIAL_ADVANCED);
   const [confirmedLargeFanOut, setConfirmedLargeFanOut] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -269,33 +272,41 @@ export default function NewBatch(): JSX.Element {
     queryFn: () => api.listAgents(),
     staleTime: 5 * 60 * 1000,
   });
+  const backends = useQuery({
+    queryKey: ["backends"],
+    queryFn: () => api.listBackends(),
+    staleTime: 5 * 60 * 1000,
+  });
 
-  // Materialize matching task ids alongside the count: when the user
-  // narrows with `q`, we need the actual id list at submit time to
-  // pass via task_filter.task_ids — otherwise the search is theatre.
-  // limit=200 matches the fan-out cap; if the user's filter matches
-  // more than that, the search is too broad to materialise and the
-  // form errors instead of silently dropping the q on the floor.
-  const MAX_MATERIALIZABLE = 200;
-  const matchedTasks = useQuery({
-    queryKey: ["tasks-count", benchmark, debouncedTaskQuery],
+  // Parse the explicit textarea continuously so we can show the
+  // "Parsed N ids" preview as the user types.
+  const parsed = useMemo(() => parseTaskIds(explicitText), [explicitText]);
+
+  // For the "all / first / last / random" modes we ask the backend
+  // how many tasks match — this drives the confirmation banner and
+  // the "Submit N trials" button text. For explicit, the count is
+  // the parsed-ids length.
+  const matchedTasksQuery = useQuery({
+    queryKey: ["tasks-count", benchmark],
     queryFn: () =>
       api.listTasks({
         benchmark_id: benchmark || undefined,
-        q: debouncedTaskQuery.trim() || undefined,
-        limit: String(MAX_MATERIALIZABLE),
-      }) as Promise<{ items: { id: string }[]; total: number }>,
-    enabled: Boolean(benchmark),
+        limit: "1",
+      }) as unknown as Promise<{ items: { id: string }[]; total: number }>,
+    enabled: subsetKind !== "explicit" && Boolean(benchmark),
   });
 
+  const matchedTaskCount: number | undefined = (() => {
+    if (subsetKind === "explicit") return parsed.ids.length;
+    if (subsetKind === "all") return matchedTasksQuery.data?.total;
+    const total = matchedTasksQuery.data?.total;
+    const n = Number.parseInt(subsetN, 10);
+    if (total === undefined || !Number.isFinite(n)) return undefined;
+    return Math.min(total, Math.max(0, n));
+  })();
+
   const create = useMutation({
-    mutationFn: (body: {
-      name: string;
-      description?: string;
-      task_filter: Record<string, unknown>;
-      trial_config: Record<string, unknown>;
-      n_per_task: number;
-    }) => api.createBatch(body),
+    mutationFn: (body: CreateBatchBody) => api.createBatch(body),
     onSuccess: (res) => {
       navigate(`/batches/${res.batch_id}`);
     },
@@ -316,115 +327,189 @@ export default function NewBatch(): JSX.Element {
     });
   };
 
+  const updateRow = (i: number, patch: Partial<ComboRow>): void => {
+    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  };
+  const addRow = (): void => {
+    setRows((rs) =>
+      rs.length >= MAX_COMBINATIONS ? rs : [...rs, newRow()],
+    );
+  };
+  const removeRow = (i: number): void => {
+    setRows((rs) => (rs.length <= 1 ? rs : rs.filter((_, idx) => idx !== i)));
+  };
+
+  const sumNPerTask = rows.reduce((acc, r) => {
+    const n = Number.parseInt(r.nPerTask, 10);
+    return acc + (Number.isFinite(n) && n > 0 ? n : 0);
+  }, 0);
+
+  const totalTrials =
+    matchedTaskCount !== undefined && sumNPerTask > 0
+      ? matchedTaskCount * sumNPerTask
+      : undefined;
+  const showLargeFanOutConfirm =
+    totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD;
+
+  function buildCombinations(): { ok: true; value: Combination[] } | { ok: false; error: string } {
+    const labels = new Set<string>();
+    const out: Combination[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const selectedAgent = agents.data?.items.find(
+        (a) => a.name === r.picker.agentName,
+      );
+      if (!selectedAgent) {
+        return { ok: false, error: `Combination ${i + 1}: pick an agent.` };
+      }
+      const agentModel = buildAgentModel(r.picker, selectedAgent.needs_model);
+      if (selectedAgent.needs_model && agentModel === null) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: ${selectedAgent.name} needs a model — pick one from the dropdown or use the custom-model fields.`,
+        };
+      }
+      const n = Number.parseInt(r.nPerTask, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 100) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: samples per task must be between 1 and 100.`,
+        };
+      }
+      const label = r.label.trim();
+      if (label) {
+        if (labels.has(label)) {
+          return { ok: false, error: `Combination labels must be unique — "${label}" is repeated.` };
+        }
+        labels.add(label);
+      }
+      const combo: Combination = {
+        agent_name: selectedAgent.name,
+        agent_model: agentModel,
+        n_per_task: n,
+      };
+      if (label) combo.label = label;
+      out.push(combo);
+    }
+    return { ok: true, value: out };
+  }
+
   const submit = (): void => {
     setLocalError(null);
     if (!name.trim()) {
       setLocalError("Name is required.");
       return;
     }
-    if (!benchmark) {
-      setLocalError("Pick a benchmark.");
+    if (!backend) {
+      setLocalError("Pick a backend.");
       return;
     }
-    if (matchedTasks.isError) {
+    if (subsetKind === "explicit") {
+      if (parsed.error || parsed.ids.length === 0) {
+        setLocalError("Paste at least one task id.");
+        return;
+      }
+    } else {
+      if (!benchmark) {
+        setLocalError("Pick a benchmark.");
+        return;
+      }
+      if (subsetKind !== "all") {
+        const n = Number.parseInt(subsetN, 10);
+        if (!Number.isFinite(n) || n < 1) {
+          setLocalError("Subset N must be a positive integer.");
+          return;
+        }
+      }
+      if (subsetKind === "random_n") {
+        const seedN = Number.parseInt(subsetSeed, 10);
+        if (!Number.isFinite(seedN) || seedN < 0 || seedN > 2 ** 31 - 1) {
+          setLocalError("Seed must be a non-negative 32-bit integer.");
+          return;
+        }
+      }
+      if (matchedTasksQuery.isError) {
+        setLocalError(
+          "Couldn't count matching tasks. Fix the filter or retry before submitting.",
+        );
+        return;
+      }
+      if (matchedTaskCount === undefined) {
+        setLocalError("Still counting matching tasks — try again in a moment.");
+        return;
+      }
+      if (matchedTaskCount === 0) {
+        setLocalError("No tasks match the current benchmark + subset.");
+        return;
+      }
+    }
+
+    const combos = buildCombinations();
+    if (!combos.ok) {
+      setLocalError(combos.error);
+      return;
+    }
+
+    if (totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD && !confirmedLargeFanOut) {
       setLocalError(
-        "Couldn't count matching tasks. Fix the filter or retry before submitting.",
+        `This will launch ${totalTrials} trials. Tick the confirm box below, then submit again.`,
       );
       return;
     }
-    const matchedCount = matchedTasks.data?.total;
-    if (matchedCount === undefined) {
-      setLocalError("Still counting matching tasks — try again in a moment.");
-      return;
-    }
-    if (matchedCount === 0) {
-      setLocalError(
-        "No tasks match the current benchmark + search. Adjust the search before submitting.",
-      );
-      return;
-    }
-    const selectedAgent = agents.data?.items.find(
-      (a) => a.name === picker.agentName,
-    );
-    if (!selectedAgent) {
-      setLocalError("Pick an agent before submitting.");
-      return;
-    }
-    const agentModel = buildAgentModel(picker, selectedAgent.needs_model);
-    if (selectedAgent.needs_model && agentModel === null) {
-      setLocalError(
-        `${selectedAgent.name} needs a model — pick one from the dropdown or fill the Custom model fields.`,
-      );
-      return;
-    }
-    const n = Number.parseInt(nPerTask, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 100) {
-      setLocalError("Samples per task must be between 1 and 100.");
-      return;
-    }
-    const totalTrials = matchedCount * n;
-    if (totalTrials > FAN_OUT_CONFIRM_THRESHOLD && !confirmedLargeFanOut) {
-      setLocalError(
-        `This will launch ${totalTrials} trials (${matchedCount} tasks × ${n} samples). Tick the confirm box below if that's intended, then submit again.`,
-      );
-      return;
-    }
+
     const adv = buildAdvancedConfig(advanced);
     if (!adv.ok) {
       setLocalError(`Advanced options: ${adv.error}`);
       return;
     }
-    const trial_config: Record<string, unknown> = {
-      ...adv.value,
-      agent_name: selectedAgent.name,
-      agent_model: agentModel,
+
+    const trial_config: Record<string, unknown> = { ...adv.value };
+    const task_filter: CreateBatchBody["task_filter"] = {
+      subset_kind: subsetKind,
     };
-    const task_filter: Record<string, unknown> = { benchmark_id: benchmark };
-    // When the user has narrowed with a task-id search, materialise
-    // matching ids into `task_filter.task_ids`. The backend filter
-    // accepts {license, task_ids, benchmark_id} — there's no server
-    // side `q` knob — so without this the search would be theatre
-    // and the batch would fan out to the whole benchmark.
-    if (debouncedTaskQuery.trim()) {
-      const items = matchedTasks.data?.items ?? [];
-      if (matchedCount! > items.length) {
-        setLocalError(
-          `Task-id search matches ${matchedCount} tasks but only the first ${items.length} can be materialised. Narrow the search to ≤ ${MAX_MATERIALIZABLE} before submitting.`,
-        );
-        return;
+    if (subsetKind === "explicit") {
+      task_filter.task_ids = parsed.ids;
+    } else {
+      task_filter.benchmark_id = benchmark;
+      if (subsetKind !== "all") {
+        task_filter.n = Number.parseInt(subsetN, 10);
       }
-      task_filter.task_ids = items.map((t) => t.id);
+      if (subsetKind === "random_n") {
+        task_filter.seed = Number.parseInt(subsetSeed, 10);
+      }
     }
+
     create.mutate({
       name: name.trim(),
       description: description.trim() || undefined,
+      backend,
       task_filter,
       trial_config,
-      n_per_task: n,
+      combinations: combos.value,
     });
   };
 
-  const matchedCount = matchedTasks.data?.total;
-  const totalTrials =
-    matchedCount !== undefined
-      ? matchedCount * (Number.parseInt(nPerTask, 10) || 0)
-      : undefined;
-  const showLargeFanOutConfirm =
-    totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD;
+  const submitButtonLabel = (() => {
+    if (create.isPending) return "Submitting…";
+    if (totalTrials === undefined) {
+      return "Submit batch";
+    }
+    return `Submit ${totalTrials} trial${totalTrials === 1 ? "" : "s"}`;
+  })();
 
   let countSummary = "";
-  if (!benchmark) {
-    countSummary = "Pick a benchmark to count matching tasks.";
-  } else if (matchedTasks.isError) {
-    countSummary = "Couldn't load the task count.";
-  } else if (debouncedTaskQuery !== taskQuery || matchedTasks.isPending) {
-    countSummary = "Counting matching tasks…";
-  } else if (matchedCount === undefined) {
+  if (subsetKind === "explicit") {
     countSummary = "";
-  } else if (matchedCount === 0) {
+  } else if (!benchmark) {
+    countSummary = "Pick a benchmark to count matching tasks.";
+  } else if (matchedTasksQuery.isError) {
+    countSummary = "Couldn't load the task count.";
+  } else if (matchedTasksQuery.isPending) {
+    countSummary = "Counting matching tasks…";
+  } else if (matchedTaskCount === 0) {
     countSummary = "No tasks match this filter.";
-  } else {
-    countSummary = `${matchedCount} task${matchedCount === 1 ? "" : "s"} match.`;
+  } else if (matchedTaskCount !== undefined) {
+    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match.`;
   }
 
   return (
@@ -432,362 +517,595 @@ export default function NewBatch(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">New batch</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Run a benchmark slate with one (agent, model) combination.
-          Multi-agent / multi-model comparison runs aren't supported
-          by the data model yet.
+          Pick a backend + task slate + one-or-more (agent, model)
+          combinations. Each combination fans out across the slate.
         </p>
       </header>
 
-      <Card>
-        <Card.Header title="Identity" />
-        <Card.Body className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <label className="block">
-            <FieldLabel>Name</FieldLabel>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. humaneval — claude-opus-4-7 — run 7"
-            />
-          </label>
-          <label className="block">
-            <FieldLabel hint="optional">Description</FieldLabel>
-            <Input
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="What's this batch testing?"
-            />
-          </label>
-        </Card.Body>
-      </Card>
-
-      <Card>
-        <Card.Header
-          title="Which tasks to run"
-          description="Pick a benchmark; narrow further with a task-id search if needed."
-        />
-        <Card.Body className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <label className="block">
-              <FieldLabel hint="required">Benchmark</FieldLabel>
-              <select
-                className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
-                value={benchmark}
-                onChange={(e) => setBenchmark(e.target.value)}
-                disabled={benchmarks.isPending}
-              >
-                <option value="">Choose a benchmark…</option>
-                {(benchmarks.data?.items ?? []).map((b: BenchmarkItem) => (
-                  <option key={b.id} value={b.id}>
-                    {b.display_name ?? b.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              <FieldLabel hint="optional">Task-id search</FieldLabel>
-              <Input
-                value={taskQuery}
-                onChange={(e) => setTaskQuery(e.target.value)}
-                placeholder="substring, e.g. HumanEval/0"
-                disabled={!benchmark}
-              />
-            </label>
-          </div>
-          <p
-            className="text-xs text-slate-500"
-            role="status"
-            aria-live="polite"
-            aria-busy={Boolean(benchmark) && matchedTasks.isPending}
-          >
-            {countSummary}
-          </p>
-        </Card.Body>
-      </Card>
-
-      <Card>
-        <Card.Header title="How to run each task" />
-        <Card.Body className="space-y-5">
-          <div className="max-w-md">
-            <AgentModelPicker
-              value={picker}
-              onChange={setPicker}
-              disabled={create.isPending}
-            />
-          </div>
-          <label className="block max-w-xs">
-            <FieldLabel hint="1 – 100">Samples per task</FieldLabel>
-            <Input
-              type="number"
-              min={1}
-              max={100}
-              step={1}
-              value={nPerTask}
-              onChange={(e) => setNPerTask(clampInt(e.target.value, 1, 100))}
-              onBlur={() => setNPerTask((v) => clampInt(v, 1, 100) || "1")}
-            />
-            <Help>
-              The runner submits this many trials per matched task.
-              {totalTrials !== undefined ? (
-                <span className="mt-0.5 block font-medium text-slate-600">
-                  Total trials = {totalTrials}.
-                </span>
-              ) : null}
-            </Help>
-          </label>
-        </Card.Body>
-      </Card>
-
-      <Card>
-        <details className="group">
-          <summary className="flex cursor-pointer items-start gap-2 px-6 py-4 text-sm font-semibold text-slate-900">
-            <span className="flex-1">
-              Advanced options
-              <span className="ml-2 text-xs font-normal text-slate-500">
-                (click to expand — defaults are sensible)
-              </span>
-            </span>
-            <span className="text-slate-400 transition-transform group-open:rotate-90">
-              ›
-            </span>
-          </summary>
-          <div className="space-y-6 px-6 pb-6">
-          {/* Environment */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-semibold text-slate-700">
-              Environment
-            </legend>
-            <label className="flex items-start gap-2 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={advanced.forceBuild}
-                onChange={(e) => setAdv("forceBuild", e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-300"
-              />
-              <span>
-                Force rebuild env image
-                <Help>
-                  Default: off. When on, the worker rebuilds the task's docker image even if a
-                  cached layer exists. Useful when the task's Dockerfile changed but the
-                  checksum didn't.
-                </Help>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={!advanced.deleteEnv}
-                onChange={(e) => setAdv("deleteEnv", !e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-300"
-              />
-              <span>
-                Keep env container after the trial finishes
-                <Help>
-                  Default: off (env is deleted). Turn on for post-mortem
-                  inspection — you'll need to clean up the container by
-                  hand.
-                </Help>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={advanced.skipVerifier}
-                onChange={(e) => setAdv("skipVerifier", e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-300"
-              />
-              <span>
-                Skip verifier
-                <Help>
-                  Default: off. When on, the agent runs but no grading
-                  happens. Use for trajectory-capture-only runs.
-                </Help>
-              </span>
-            </label>
-            <label className="block max-w-sm">
-              <FieldLabel hint="default: task setting">Verifier env mode</FieldLabel>
-              <select
-                className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
-                value={advanced.verifierEnvMode}
-                onChange={(e) =>
-                  setAdv("verifierEnvMode", e.target.value as AdvancedState["verifierEnvMode"])
-                }
-              >
-                <option value="">Use task default</option>
-                <option value="shared">shared (verifier runs in the same env as the agent)</option>
-                <option value="separate">separate (verifier runs in a fresh env)</option>
-              </select>
-            </label>
-          </fieldset>
-
-          {/* Timeouts */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-semibold text-slate-700">
-              Timeouts
-            </legend>
-            <p className="text-xs text-slate-500">
-              Each row has an absolute override (in seconds — leave blank to use the task's default)
-              and a multiplier that scales the resolved value (1 = no change).
-            </p>
-            {[
-              { label: "Agent", override: "overrideAgentTimeoutSec" as const, mult: "agentTimeoutMultiplier" as const },
-              { label: "Verifier", override: "overrideVerifierTimeoutSec" as const, mult: "verifierTimeoutMultiplier" as const },
-              { label: "Env build", override: "overrideEnvBuildTimeoutSec" as const, mult: "envBuildTimeoutMultiplier" as const },
-            ].map((row) => (
-              <div key={row.label} className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                <label className="block">
-                  <FieldLabel>{row.label} timeout override (s)</FieldLabel>
-                  <Input
-                    type="number"
-                    min={0.001}
-                    step={1}
-                    value={advanced[row.override]}
-                    onChange={(e) => setAdv(row.override, e.target.value)}
-                    placeholder="task default"
-                  />
-                </label>
-                <label className="block">
-                  <FieldLabel>{row.label} timeout multiplier</FieldLabel>
-                  <Input
-                    type="number"
-                    min={0.001}
-                    step={0.1}
-                    value={advanced[row.mult]}
-                    onChange={(e) => setAdv(row.mult, e.target.value)}
-                    onBlur={() =>
-                      setAdv(
-                        row.mult,
-                        clampFloat(advanced[row.mult], 0.001) || "1",
-                      )
-                    }
-                  />
-                </label>
-              </div>
-            ))}
-          </fieldset>
-
-          {/* Retry */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-semibold text-slate-700">
-              Retry on transient errors
-            </legend>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+        {/* LEFT column */}
+        <div className="space-y-6">
+          <Card>
+            <Card.Header title="Identity" />
+            <Card.Body className="space-y-4">
               <label className="block">
-                <FieldLabel hint="1 – 20">Max attempts</FieldLabel>
+                <FieldLabel>Name</FieldLabel>
                 <Input
-                  type="number"
-                  min={1}
-                  max={20}
-                  step={1}
-                  value={advanced.maxAttempts}
-                  onChange={(e) => setAdv("maxAttempts", clampInt(e.target.value, 1, 20))}
-                  onBlur={() =>
-                    setAdv("maxAttempts", clampInt(advanced.maxAttempts, 1, 20) || "1")
-                  }
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. humaneval — claude-opus-4-7 — run 7"
                 />
-                <Help>
-                  Total attempts including the first. 1 = no retry.
-                </Help>
               </label>
-              <div>
-                <FieldLabel hint="pick zero or more">Retry on</FieldLabel>
-                <div className="space-y-1">
-                  {RETRY_REASONS.map((r) => (
-                    <label key={r.value} className="flex items-center gap-2 text-sm text-slate-700">
-                      <input
-                        type="checkbox"
-                        checked={advanced.retryOn.has(r.value)}
-                        onChange={() => toggleRetryReason(r.value)}
-                        className="h-4 w-4 rounded border-slate-300"
-                      />
-                      <span>{r.label}</span>
-                    </label>
+              <label className="block">
+                <FieldLabel hint="optional">Description</FieldLabel>
+                <Input
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="What's this batch testing?"
+                />
+              </label>
+              <label className="block max-w-sm">
+                <FieldLabel hint="required">Backend</FieldLabel>
+                <select
+                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                  value={backend}
+                  onChange={(e) => setBackend(e.target.value)}
+                  disabled={backends.isPending}
+                  aria-label="Backend"
+                >
+                  <option value="">Choose a backend…</option>
+                  {(backends.data?.items ?? []).map((b) => (
+                    <option key={b.name} value={b.name}>
+                      {b.name}
+                    </option>
                   ))}
-                </div>
-                <Help>
-                  No boxes ticked = no retry (even if max attempts &gt; 1).
-                </Help>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <label className="block">
-                <FieldLabel>Backoff base (s)</FieldLabel>
-                <Input
-                  type="number"
-                  min={0.001}
-                  step={1}
-                  value={advanced.backoffBaseSec}
-                  onChange={(e) => setAdv("backoffBaseSec", e.target.value)}
-                />
+                </select>
+                {backend ? (
+                  <Help>
+                    {backends.data?.items.find((b) => b.name === backend)
+                      ?.description ?? null}
+                  </Help>
+                ) : (
+                  <Help>
+                    The sandbox provider that runs each trial. Catalog comes
+                    from live workers.
+                  </Help>
+                )}
               </label>
-              <label className="block">
-                <FieldLabel>Backoff max (s)</FieldLabel>
-                <Input
-                  type="number"
-                  min={0.001}
-                  step={1}
-                  value={advanced.backoffMaxSec}
-                  onChange={(e) => setAdv("backoffMaxSec", e.target.value)}
-                />
-              </label>
-              <label className="block">
-                <FieldLabel>Backoff multiplier</FieldLabel>
-                <Input
-                  type="number"
-                  min={0.001}
-                  step={0.1}
-                  value={advanced.backoffMultiplier}
-                  onChange={(e) => setAdv("backoffMultiplier", e.target.value)}
-                />
-              </label>
-              <label className="block">
-                <FieldLabel hint="0 – 1">Backoff jitter</FieldLabel>
-                <Input
-                  type="number"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={advanced.backoffJitter}
-                  onChange={(e) => setAdv("backoffJitter", e.target.value)}
-                />
-              </label>
-            </div>
-            <Help>
-              Sleep before each retry is min(base × multiplier<sup>attempt</sup>, max), randomised by jitter.
-            </Help>
-          </fieldset>
+            </Card.Body>
+          </Card>
 
-          {/* Scheduling */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-semibold text-slate-700">
-              Scheduling
-            </legend>
-            <label className="block max-w-xs">
-              <FieldLabel hint="0 – 1000">Submit priority</FieldLabel>
-              <Input
-                type="number"
-                min={0}
-                max={1000}
-                step={1}
-                value={advanced.submitPriority}
-                onChange={(e) =>
-                  setAdv("submitPriority", clampInt(e.target.value, 0, 1000))
-                }
-                onBlur={() =>
-                  setAdv(
-                    "submitPriority",
-                    clampInt(advanced.submitPriority, 0, 1000) || "100",
-                  )
-                }
-              />
-              <Help>
-                Higher = scheduled first. Default 100. The DRF tie-break uses
-                this when two trials compete for the same slot.
-              </Help>
-            </label>
-          </fieldset>
+          <Card>
+            <Card.Header
+              title="Which tasks"
+              description="Pick a benchmark + a subset rule, or paste explicit ids."
+            />
+            <Card.Body className="space-y-4">
+              <label className="block">
+                <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "required"}>
+                  Benchmark
+                </FieldLabel>
+                <select
+                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:opacity-50"
+                  value={benchmark}
+                  onChange={(e) => setBenchmark(e.target.value)}
+                  disabled={benchmarks.isPending || subsetKind === "explicit"}
+                  aria-label="Benchmark"
+                >
+                  <option value="">Choose a benchmark…</option>
+                  {(benchmarks.data?.items ?? []).map((b: BenchmarkItem) => (
+                    <option key={b.id} value={b.id}>
+                      {b.display_name ?? b.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <fieldset className="space-y-2">
+                <legend className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                  Subset
+                </legend>
+                {(
+                  [
+                    ["all", "All tasks in the benchmark"],
+                    ["first_n", "First N by id"],
+                    ["last_n", "Last N by id"],
+                    ["random_n", "Random N (seeded)"],
+                    ["explicit", "Explicit task ids (paste)"],
+                  ] as Array<[SubsetKind, string]>
+                ).map(([value, label]) => (
+                  <label
+                    key={value}
+                    className="flex items-center gap-2 text-sm text-slate-700"
+                  >
+                    <input
+                      type="radio"
+                      name="subset"
+                      value={value}
+                      checked={subsetKind === value}
+                      onChange={() => setSubsetKind(value)}
+                      className="h-4 w-4 border-slate-300"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </fieldset>
+
+              {subsetKind === "first_n" ||
+              subsetKind === "last_n" ||
+              subsetKind === "random_n" ? (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <label className="block max-w-xs">
+                    <FieldLabel>N</FieldLabel>
+                    <Input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={subsetN}
+                      onChange={(e) =>
+                        setSubsetN(clampInt(e.target.value, 1, 1_000_000))
+                      }
+                      aria-label="Subset N"
+                    />
+                  </label>
+                  {subsetKind === "random_n" ? (
+                    <label className="block max-w-xs">
+                      <FieldLabel hint="0 – 2^31 - 1">Seed</FieldLabel>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={subsetSeed}
+                          onChange={(e) => setSubsetSeed(e.target.value)}
+                          aria-label="Seed"
+                        />
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => setSubsetSeed(String(freshSeed()))}
+                        >
+                          Reroll
+                        </Button>
+                      </div>
+                    </label>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {subsetKind === "explicit" ? (
+                <div className="space-y-2">
+                  <label className="block">
+                    <FieldLabel hint="one per line or any accepted format">
+                      Explicit task ids
+                    </FieldLabel>
+                    <Textarea
+                      value={explicitText}
+                      onChange={(e) => setExplicitText(e.target.value)}
+                      rows={8}
+                      placeholder={"HumanEval/0\nHumanEval/1\nHumanEval/2"}
+                      aria-label="Explicit task ids"
+                    />
+                  </label>
+                  <p className="text-xs">
+                    {parsed.error ? (
+                      <span className="text-red-700">{parsed.error}</span>
+                    ) : parsed.ids.length === 0 ? (
+                      <span className="text-slate-500">
+                        Paste ids above to preview.
+                      </span>
+                    ) : (
+                      <span className="text-slate-600">
+                        Parsed {parsed.ids.length} id
+                        {parsed.ids.length === 1 ? "" : "s"}.
+                      </span>
+                    )}
+                  </p>
+                  <details className="text-xs text-slate-600">
+                    <summary className="cursor-pointer font-medium text-slate-700">
+                      Accepted formats
+                    </summary>
+                    <ul className="ml-4 mt-2 list-disc space-y-0.5">
+                      <li>One id per line</li>
+                      <li>Comma / semicolon / pipe / tab / 2+ space separated</li>
+                      <li>JSON array (single or double quotes)</li>
+                      <li>Range shorthand: <code>HumanEval/0-4</code></li>
+                      <li>Prefix shorthand: <code>HumanEval/0,1,2,3</code></li>
+                      <li>Markdown bullets / numbered lists / single-col tables</li>
+                      <li>CSV with header (first column wins)</li>
+                      <li>Triple-backtick code fences (stripped)</li>
+                      <li><code>#</code> comments (rest-of-line stripped)</li>
+                      <li>URL prefixes <code>/api/v1/tasks/</code> + <code>/tasks/</code></li>
+                    </ul>
+                    <p className="mt-2">
+                      Full rules: <code>docs/user-guide.md#pasting-task-ids</code>.
+                    </p>
+                  </details>
+                </div>
+              ) : null}
+
+              {subsetKind !== "explicit" ? (
+                <p
+                  className="text-xs text-slate-500"
+                  role="status"
+                  aria-live="polite"
+                  aria-busy={Boolean(benchmark) && matchedTasksQuery.isPending}
+                >
+                  {countSummary}
+                </p>
+              ) : null}
+            </Card.Body>
+          </Card>
+
+          <Card>
+            <details className="group">
+              <summary className="flex cursor-pointer items-start gap-2 px-6 py-4 text-sm font-semibold text-slate-900">
+                <span className="flex-1">
+                  Advanced options
+                  <span className="ml-2 text-xs font-normal text-slate-500">
+                    (defaults are sensible)
+                  </span>
+                </span>
+                <span className="text-slate-400 transition-transform group-open:rotate-90">
+                  ›
+                </span>
+              </summary>
+              <div className="space-y-6 px-6 pb-6">
+                <fieldset className="space-y-3">
+                  <legend className="text-sm font-semibold text-slate-700">
+                    Environment
+                  </legend>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={advanced.forceBuild}
+                      onChange={(e) => setAdv("forceBuild", e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300"
+                    />
+                    <span>
+                      Force rebuild env image
+                      <Help>
+                        Default: off. When on, the worker rebuilds the task's docker image even if a
+                        cached layer exists.
+                      </Help>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={!advanced.deleteEnv}
+                      onChange={(e) => setAdv("deleteEnv", !e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300"
+                    />
+                    <span>
+                      Keep env container after the trial finishes
+                      <Help>
+                        Default: off (env is deleted). Turn on for post-mortem inspection.
+                      </Help>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={advanced.skipVerifier}
+                      onChange={(e) => setAdv("skipVerifier", e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300"
+                    />
+                    <span>
+                      Skip verifier
+                      <Help>
+                        Default: off. When on, no grading happens.
+                      </Help>
+                    </span>
+                  </label>
+                  <label className="block max-w-sm">
+                    <FieldLabel hint="default: task setting">Verifier env mode</FieldLabel>
+                    <select
+                      className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                      value={advanced.verifierEnvMode}
+                      onChange={(e) =>
+                        setAdv(
+                          "verifierEnvMode",
+                          e.target.value as AdvancedState["verifierEnvMode"],
+                        )
+                      }
+                    >
+                      <option value="">Use task default</option>
+                      <option value="shared">shared</option>
+                      <option value="separate">separate</option>
+                    </select>
+                  </label>
+                </fieldset>
+
+                <fieldset className="space-y-3">
+                  <legend className="text-sm font-semibold text-slate-700">
+                    Timeouts
+                  </legend>
+                  <p className="text-xs text-slate-500">
+                    Override = absolute seconds (blank = use task default). Multiplier scales it
+                    (1 = no change).
+                  </p>
+                  {[
+                    { label: "Agent", override: "overrideAgentTimeoutSec" as const, mult: "agentTimeoutMultiplier" as const },
+                    { label: "Verifier", override: "overrideVerifierTimeoutSec" as const, mult: "verifierTimeoutMultiplier" as const },
+                    { label: "Env build", override: "overrideEnvBuildTimeoutSec" as const, mult: "envBuildTimeoutMultiplier" as const },
+                  ].map((row) => (
+                    <div key={row.label} className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                      <label className="block">
+                        <FieldLabel>{row.label} timeout override (s)</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0.001}
+                          step={1}
+                          value={advanced[row.override]}
+                          onChange={(e) => setAdv(row.override, e.target.value)}
+                          placeholder="task default"
+                        />
+                      </label>
+                      <label className="block">
+                        <FieldLabel>{row.label} timeout multiplier</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0.001}
+                          step={0.1}
+                          value={advanced[row.mult]}
+                          onChange={(e) => setAdv(row.mult, e.target.value)}
+                          onBlur={() =>
+                            setAdv(
+                              row.mult,
+                              clampFloat(advanced[row.mult], 0.001) || "1",
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                  ))}
+                </fieldset>
+
+                <fieldset className="space-y-3">
+                  <legend className="text-sm font-semibold text-slate-700">
+                    Retry on transient errors
+                  </legend>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <label className="block">
+                      <FieldLabel hint="1 – 20">Max attempts</FieldLabel>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={20}
+                        step={1}
+                        value={advanced.maxAttempts}
+                        onChange={(e) => setAdv("maxAttempts", clampInt(e.target.value, 1, 20))}
+                        onBlur={() =>
+                          setAdv("maxAttempts", clampInt(advanced.maxAttempts, 1, 20) || "1")
+                        }
+                      />
+                      <Help>Total attempts including the first. 1 = no retry.</Help>
+                    </label>
+                    <div>
+                      <FieldLabel hint="pick zero or more">Retry on</FieldLabel>
+                      <div className="space-y-1">
+                        {RETRY_REASONS.map((r) => (
+                          <label key={r.value} className="flex items-center gap-2 text-sm text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={advanced.retryOn.has(r.value)}
+                              onChange={() => toggleRetryReason(r.value)}
+                              className="h-4 w-4 rounded border-slate-300"
+                            />
+                            <span>{r.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <Help>
+                        No boxes ticked = no retry (even if max attempts &gt; 1).
+                      </Help>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <label className="block">
+                      <FieldLabel>Backoff base (s)</FieldLabel>
+                      <Input
+                        type="number"
+                        min={0.001}
+                        step={1}
+                        value={advanced.backoffBaseSec}
+                        onChange={(e) => setAdv("backoffBaseSec", e.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <FieldLabel>Backoff max (s)</FieldLabel>
+                      <Input
+                        type="number"
+                        min={0.001}
+                        step={1}
+                        value={advanced.backoffMaxSec}
+                        onChange={(e) => setAdv("backoffMaxSec", e.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <FieldLabel>Backoff multiplier</FieldLabel>
+                      <Input
+                        type="number"
+                        min={0.001}
+                        step={0.1}
+                        value={advanced.backoffMultiplier}
+                        onChange={(e) => setAdv("backoffMultiplier", e.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <FieldLabel hint="0 – 1">Backoff jitter</FieldLabel>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={advanced.backoffJitter}
+                        onChange={(e) => setAdv("backoffJitter", e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </fieldset>
+
+                <fieldset className="space-y-3">
+                  <legend className="text-sm font-semibold text-slate-700">
+                    Scheduling
+                  </legend>
+                  <label className="block max-w-xs">
+                    <FieldLabel hint="0 – 1000">Submit priority</FieldLabel>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      step={1}
+                      value={advanced.submitPriority}
+                      onChange={(e) =>
+                        setAdv("submitPriority", clampInt(e.target.value, 0, 1000))
+                      }
+                      onBlur={() =>
+                        setAdv(
+                          "submitPriority",
+                          clampInt(advanced.submitPriority, 0, 1000) || "100",
+                        )
+                      }
+                    />
+                    <Help>Higher = scheduled first. Default 100.</Help>
+                  </label>
+                </fieldset>
+              </div>
+            </details>
+          </Card>
+        </div>
+
+        {/* RIGHT column */}
+        <div className="space-y-6">
+          <div className="rounded-2xl bg-slate-50 p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-800">
+                  Combinations
+                </h2>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Each combination fans out across the task slate.
+                </p>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={addRow}
+                disabled={rows.length >= MAX_COMBINATIONS}
+              >
+                + Add combination
+              </Button>
+            </div>
+            <div className="space-y-4">
+              {rows.map((r, i) => (
+                <div
+                  key={i}
+                  className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      Combination {i + 1}
+                    </span>
+                    {rows.length > 1 ? (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => removeRow(i)}
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                  <AgentModelPicker
+                    value={r.picker}
+                    onChange={(v) => updateRow(i, { picker: v })}
+                    disabled={create.isPending}
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="block">
+                      <FieldLabel hint="1 – 100">Samples per task</FieldLabel>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={1}
+                        value={r.nPerTask}
+                        onChange={(e) =>
+                          updateRow(i, {
+                            nPerTask: clampInt(e.target.value, 1, 100),
+                          })
+                        }
+                        onBlur={() =>
+                          updateRow(i, {
+                            nPerTask: clampInt(r.nPerTask, 1, 100) || "1",
+                          })
+                        }
+                        aria-label={`Samples per task (combination ${i + 1})`}
+                      />
+                    </label>
+                    <label className="block">
+                      <FieldLabel hint="optional">Label</FieldLabel>
+                      <Input
+                        value={r.label}
+                        onChange={(e) => updateRow(i, { label: e.target.value })}
+                        placeholder="auto"
+                        aria-label={`Label (combination ${i + 1})`}
+                      />
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {rows.length >= MAX_COMBINATIONS ? (
+              <p className="mt-3 text-xs text-amber-700">
+                Cap is {MAX_COMBINATIONS} combinations per batch.
+              </p>
+            ) : null}
           </div>
-        </details>
-      </Card>
+        </div>
+      </div>
+
+      {/* Confirmation banner */}
+      {totalTrials !== undefined ? (
+        <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
+          <p className="text-slate-700">
+            Will launch{" "}
+            <span className="font-semibold text-slate-900">
+              {totalTrials} trial{totalTrials === 1 ? "" : "s"}
+            </span>{" "}
+            (matched {matchedTaskCount ?? 0} task
+            {matchedTaskCount === 1 ? "" : "s"} × Σ n_per_task ={" "}
+            {sumNPerTask}).
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {rows.map((r, i) => {
+              const sel = agents.data?.items.find(
+                (a) => a.name === r.picker.agentName,
+              );
+              const modelTxt =
+                sel && !sel.needs_model
+                  ? "(no model)"
+                  : r.picker.modelProvider && r.picker.modelName
+                    ? `${r.picker.modelProvider}/${r.picker.modelName}`
+                    : "(no model)";
+              const lbl = r.label.trim() || `combo${i + 1}`;
+              return (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
+                >
+                  <span className="font-semibold">{lbl}</span>
+                  <span className="text-slate-500">
+                    {sel?.name ?? "?"} · {modelTxt} · n={r.nPerTask}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       {showLargeFanOutConfirm ? (
         <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -811,12 +1129,8 @@ export default function NewBatch(): JSX.Element {
       {create.isError ? <ErrorState error={create.error} /> : null}
 
       <div className="flex items-center justify-end">
-        <Button
-          variant="primary"
-          onClick={submit}
-          disabled={create.isPending}
-        >
-          {create.isPending ? "Creating…" : "Create batch"}
+        <Button variant="primary" onClick={submit} disabled={create.isPending}>
+          {submitButtonLabel}
         </Button>
       </div>
     </div>
