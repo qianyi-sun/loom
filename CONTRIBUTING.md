@@ -1,13 +1,13 @@
 # Contributing
 
-> **Current state (2026-06-12):** Loom is preparing for public
-> repository visibility. Normal changes should land through PRs into
-> `dev`; `main` remains reserved for release promotion from `dev`.
-> CI runs the required `repository-checks` gate on pushes and PRs, while
-> the Docker-backed integration tier is opt-in on PRs via the
-> `ci:integration` label and automatic on protected branch pushes.
-> Workflows that need publish or deployment secrets must use protected
-> GitHub Environments and must not expose secrets to pull request code.
+> **Current state (2026-06-12):** Loom is public-readiness hardened
+> and is operated as an internal-development-first project. Normal
+> changes land through PRs into `dev`; `main` remains reserved for
+> release promotion from `dev`. `dev` does not currently require human
+> review because the project owner is the only active maintainer, but CI
+> remains required. External pull requests are not accepted yet. Workflows
+> that need publish or deployment secrets must use protected GitHub
+> Environments and must not expose secrets to pull request code.
 
 ## Active Workflow
 
@@ -97,11 +97,14 @@ for release promotion PRs from `dev`.
 - Link to a GitHub issue with acceptance criteria
 - Keep one concern per PR
 - Use the PR template
-- Wait for CI green and required review before merge
+- Wait for CI green before merge; human review is required only on
+  branches or environments whose protection rules demand it
 - Squash-merge to keep `dev` linear
 - Do not add credentials, private endpoints, local environment files, or
   generated run artifacts
 - Do not expect publish/deploy secrets to be available in PR workflows
+- Do not open external PRs yet; use issues for discussion until the
+  external contribution policy is explicitly opened
 
 ## Release Flow
 

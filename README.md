@@ -280,8 +280,9 @@ permissions. Workflows that publish benchmark bundles or deploy
 infrastructure use protected GitHub Environments so secrets are not
 available to pull request code.
 
-The repository is being prepared for public visibility in
-[#330](https://github.com/carinrc/loom/issues/330). Before the final
-visibility change, maintainers should post a full Git-history secret
-scan result, confirm GitHub security settings, and validate the public
-workflow once as a private repo.
+Repository public-readiness is tracked in
+[#330](https://github.com/carinrc/loom/issues/330). Maintainers should
+keep branch protection, read-only default workflow tokens, selected
+Actions sources, protected publish/deploy environments, and secret
+scanning enabled. External pull requests are not accepted yet; use
+issues for discussion until the contribution policy is opened.

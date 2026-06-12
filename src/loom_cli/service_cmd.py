@@ -108,10 +108,11 @@ def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     on its own line as `<label>: <token>`. Register progress is streamed
     to stderr so the user sees per-benchmark status."""
     env = os.environ.copy()
-    # MinIO defaults for the --local-import opt-in path.
+    # Local-only MinIO defaults for the --local-import opt-in path. Keep these
+    # in sync with deploy/docker-compose.dev.yml; production uses secrets.
     env.setdefault("LOOM_MINIO_ENDPOINT", "http://localhost:9000")
     env.setdefault("LOOM_MINIO_ACCESS_KEY", "loomdev")
-    env.setdefault("LOOM_MINIO_SECRET_KEY", "loomdev")
+    env.setdefault("LOOM_MINIO_SECRET_KEY", "loomdev123")
     # HF defaults: org pre-set so register works without explicit flag.
     env.setdefault("LOOM_HF_ORG", "PRHW")
     extra_args = []

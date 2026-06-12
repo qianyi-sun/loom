@@ -1,0 +1,52 @@
+name: Stakeholder Requirement
+description: Capture a user, team, or benchmark requirement without internal org details
+title: "[Requirement] "
+labels: ["workstream:requirements", "type:task"]
+body:
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source
+      options:
+        - Research user
+        - Platform operator
+        - Benchmark maintainer
+        - Product / program stakeholder
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What generation, evaluation, or reporting workflow needs platform support?
+    validations:
+      required: true
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Inputs
+      description: Models, agents, benchmarks, tasks, datasets, sandboxes, or secrets needed.
+    validations:
+      required: true
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Outputs
+      description: Artifacts, trajectory data, metrics, evaluator feedback, or dashboard views expected.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: What proves this requirement is supported end to end?
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy / Security Notes
+      description: Sensitive data, private endpoints, credentials, licensing limits, or publication constraints.
+    validations:
+      required: false

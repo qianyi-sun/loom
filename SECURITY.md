@@ -26,17 +26,20 @@ issue.
   use protected GitHub Environments with branch restrictions and maintainer
   approval before secrets are exposed.
 
-## Public Repository Readiness
+## Public Repository Operations
 
-Before switching repository visibility to public:
+For public repository operation:
 
-- Run a full Git-history secret scan and rotate any credential that ever appears
-  in history, even if it has since been removed.
-- Confirm GitHub Secret Scanning and Push Protection are enabled.
-- Confirm non-GitHub Actions are explicitly allowed by policy instead of relying
-  on unrestricted workflow sources.
-- Confirm environment secrets such as `HF_TOKEN` are scoped to protected
-  environments, not broad repository secrets.
+- Run full Git-history secret scans before visibility or release-boundary
+  changes and rotate any credential that ever appears in history, even if it has
+  since been removed.
+- Keep GitHub Secret Scanning and Push Protection enabled.
+- Keep non-GitHub Actions explicitly allowed by policy instead of relying on
+  unrestricted workflow sources.
+- Scope environment secrets such as `HF_TOKEN` to protected environments, not
+  broad repository secrets.
+- Keep external pull request workflows untrusted: no deployment, publishing,
+  model-provider, or infrastructure secrets may be exposed to PR code.
 
 ## Platform Security Topics To Resolve
 
