@@ -75,7 +75,13 @@ export interface paths {
   };
   "/api/v1/benchmarks": {
     get: {
-      parameters: { query?: { cursor?: string; limit?: number } };
+      parameters: {
+        query?: {
+          cursor?: string;
+          limit?: number;
+          include_empty?: boolean;
+        };
+      };
       responses: {
         200: {
           content: {
@@ -313,6 +319,7 @@ export interface components {
       splits: string[];
       imported_at: string;
       imported_by: string | null;
+      task_count: number;
     };
     BenchmarkList: {
       items: components["schemas"]["Benchmark"][];

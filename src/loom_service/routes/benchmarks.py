@@ -13,16 +13,16 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from loom.auth import verify_bearer_token
-from loom.db.schema import Benchmark
+from loom.db.schema import Benchmark, Task
 from loom_service.auth_guards import require_human_or_admin
 
 router = APIRouter()
 
 
-def _bench_row(b: Benchmark) -> dict[str, Any]:
+def _bench_row(b: Benchmark, task_count: int = 0) -> dict[str, Any]:
     return {
         "id": b.id,
         "display_name": b.display_name,
@@ -34,6 +34,11 @@ def _bench_row(b: Benchmark) -> dict[str, Any]:
         "splits": list(b.splits),
         "imported_at": b.imported_at.isoformat(),
         "imported_by": b.imported_by,
+        # Plan 28: surface the imported-task count so the SPA can
+        # distinguish "ready to submit" benchmarks from metadata-only
+        # rows. Empty benchmarks are excluded from the default listing
+        # (see `include_empty` below).
+        "task_count": task_count,
     }
 
 
@@ -42,23 +47,39 @@ async def list_benchmarks(
     request: Request,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
+    # By default the SPA-facing listing hides benchmarks with zero
+    # imported tasks — "registered" on its own (metadata-only seeding)
+    # would otherwise show benchmarks in the dropdown that produce a
+    # confusing "0 tasks match" when picked. Operators can pass
+    # `?include_empty=true` to see every registered benchmark (e.g.
+    # admin tools that drive imports).
+    include_empty: Annotated[bool, Query()] = False,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:
         ctx = await verify_bearer_token(s, authorization)
         require_human_or_admin(ctx)
-        stmt = select(Benchmark).order_by(Benchmark.display_name)
+        # LEFT JOIN tasks for the count so empty benchmarks still show
+        # up when include_empty=True. GROUP BY on the PK is safe.
+        stmt = (
+            select(Benchmark, func.count(Task.id).label("task_count"))
+            .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
+            .group_by(Benchmark.id)
+            .order_by(Benchmark.display_name)
+        )
         if cursor:
             stmt = stmt.where(Benchmark.display_name > cursor)
+        if not include_empty:
+            stmt = stmt.having(func.count(Task.id) > 0)
         stmt = stmt.limit(limit + 1)
-        rows = list((await s.execute(stmt)).scalars().all())
+        rows = list((await s.execute(stmt)).all())
     if len(rows) > limit:
         rows = rows[:limit]
-        next_cursor: str | None = rows[-1].display_name
+        next_cursor: str | None = rows[-1][0].display_name
     else:
         next_cursor = None
     return {
-        "items": [_bench_row(r) for r in rows],
+        "items": [_bench_row(b, int(c)) for b, c in rows],
         "next_cursor": next_cursor,
     }
 
@@ -72,11 +93,15 @@ async def get_benchmark(
     async with request.app.state.session_factory() as s:
         ctx = await verify_bearer_token(s, authorization)
         require_human_or_admin(ctx)
-        b = (await s.execute(
-            select(Benchmark).where(Benchmark.id == benchmark_id),
-        )).scalar_one_or_none()
-        if b is None:
+        row = (await s.execute(
+            select(Benchmark, func.count(Task.id).label("task_count"))
+            .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
+            .where(Benchmark.id == benchmark_id)
+            .group_by(Benchmark.id),
+        )).one_or_none()
+        if row is None:
             raise HTTPException(
                 status_code=404, detail="benchmark not found",
             )
-        return _bench_row(b)
+        b, count = row
+        return _bench_row(b, int(count))

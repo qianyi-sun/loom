@@ -41,6 +41,7 @@ import { parseTaskIds } from "../lib/parseTaskIds";
 interface BenchmarkItem {
   id: string;
   display_name?: string;
+  task_count?: number;
 }
 
 const FAN_OUT_CONFIRM_THRESHOLD = 200;
@@ -614,12 +615,30 @@ export default function NewBatch(): JSX.Element {
                   aria-label="Benchmark"
                 >
                   <option value="">Choose a benchmark…</option>
-                  {(benchmarks.data?.items ?? []).map((b: BenchmarkItem) => (
-                    <option key={b.id} value={b.id}>
-                      {b.display_name ?? b.id}
-                    </option>
-                  ))}
+                  {(benchmarks.data?.items ?? []).map((b: BenchmarkItem) => {
+                    const label = b.display_name ?? b.id;
+                    const count = b.task_count;
+                    const suffix =
+                      count !== undefined
+                        ? ` — ${count} task${count === 1 ? "" : "s"}`
+                        : "";
+                    return (
+                      <option key={b.id} value={b.id}>
+                        {label}{suffix}
+                      </option>
+                    );
+                  })}
                 </select>
+                {!benchmarks.isPending &&
+                (benchmarks.data?.items.length ?? 0) === 0 ? (
+                  <Help>
+                    No benchmarks have tasks imported yet. Run{" "}
+                    <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">
+                      python -m loom_benchmark_tool import &lt;benchmark&gt;
+                    </code>{" "}
+                    to populate one.
+                  </Help>
+                ) : null}
               </label>
 
               <fieldset className="space-y-2">
