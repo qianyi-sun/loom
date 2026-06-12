@@ -92,19 +92,34 @@ def _alembic_upgrade(db_url: str) -> int:
 
 def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     """Run seed_test_data.py with `--mode dev --print all`. Dev mode
-    registers the benchmark slate so the SPA's Benchmarks page is
-    populated out of the box and SKIPS the hello-world Task + card-e2e
-    RateCard placeholders that test mode keeps for system tests.
+    registers the benchmark slate AND auto-imports a small slice of each
+    so the SPA dropdown is populated + submittable out of the box. Skips
+    the hello-world Task + card-e2e RateCard test fixtures.
+
+    Auto-import needs MinIO; passes through `LOOM_MINIO_*` if set in the
+    parent env (`loom service up` exports these from the compose env).
 
     Returns (exit_code, {label: token}); the script prints each token
-    on its own line as `<label>: <token>`."""
+    on its own line as `<label>: <token>`. Auto-import progress is
+    streamed to stderr so the user sees per-benchmark status."""
+    # Stream stderr live so `seed: humaneval: ok converted=20` lines
+    # appear as each benchmark finishes — auto-import takes a couple
+    # of minutes on a fresh cache and a silent subprocess looks like
+    # `loom service up` has hung.
+    env = os.environ.copy()
+    env.setdefault("LOOM_MINIO_ENDPOINT", "http://localhost:9000")
+    env.setdefault("LOOM_MINIO_ACCESS_KEY", "loomdev")
+    env.setdefault("LOOM_MINIO_SECRET_KEY", "loomdev")
     r = subprocess.run(
         [sys.executable, "scripts/seed_test_data.py",
          "--db-url", db_url, "--mode", "dev", "--print", "all"],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=env,
     )
-    if r.returncode != 0:
+    # Always echo seed stderr so auto-import status (per-benchmark
+    # ok/error lines) is visible even on success.
+    if r.stderr:
         sys.stderr.write(r.stderr)
+    if r.returncode != 0:
         return r.returncode, {}
     tokens: dict[str, str] = {}
     for line in r.stdout.strip().splitlines():

@@ -4,10 +4,19 @@ Two modes:
 
 - `--mode test` (default) — system-test fixture: hello-world Task,
   card-e2e RateCard, + tokens. Existing tests rely on these rows.
-- `--mode dev` — what `loom service up` calls: tokens only by default,
-  plus all 14 shipped benchmark adapters registered as Benchmark rows
-  so the SPA's Benchmarks page isn't empty out of the box. Skips the
-  hello-world Task and the card-e2e RateCard — no placeholders.
+- `--mode dev` — what `loom service up` calls: tokens + every shipped
+  benchmark adapter registered AND auto-imported (small slice) so the
+  SPA dropdown is populated and submittable out of the box. Skips the
+  hello-world Task + card-e2e RateCard.
+
+Auto-import: dev mode walks every adapter in `loom_benchmarks.REGISTRY`
+and runs `loom_benchmark_tool.import_cmd.run_import(limit=N)` for each,
+fetching the upstream + materialising N tasks into MinIO + the `tasks`
+table. Failures (network, missing MinIO config, upstream change) are
+logged per-benchmark and don't abort seeding. Pass `--no-auto-import`
+to skip — the registered benchmarks then won't show up in the SPA
+dropdown (`/api/v1/benchmarks` defaults to filtering empty rows) until
+an operator runs `python -m loom_benchmark_tool import <bench>`.
 
 Prints tokens to stdout (system tests capture them as the bearer for
 their submit calls; the SPA login screen accepts them as paste-ins).
@@ -83,6 +92,75 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
     return inserted
 
 
+def _auto_import_benchmarks(
+    db_url: str, limit: int,
+    minio_endpoint: str, minio_access_key: str, minio_secret_key: str,
+    bucket: str, cache_dir: Path,
+) -> dict[str, str]:
+    """Import a small slice of every registered benchmark so the SPA
+    dropdown is populated + submittable on first boot.
+
+    Returns {benchmark_id: status} where status is "ok N" / "skip reason"
+    / "error <msg>"; printed to stderr by the caller for visibility.
+    """
+    import asyncio
+
+    from loom_benchmarks.registry import REGISTRY
+
+    from loom.trajectory.storage import MinioObjectStore
+    from loom_benchmark_tool.import_cmd import run_import
+
+    store = MinioObjectStore(
+        endpoint_url=minio_endpoint,
+        access_key=minio_access_key,
+        secret_key=minio_secret_key,
+    )
+    # Ensure the target bucket exists. `run_import` writes objects but
+    # doesn't bootstrap the bucket; on a fresh MinIO that's a NoSuchBucket
+    # ClientError that fails every benchmark before the first task lands.
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=minio_endpoint,
+        aws_access_key_id=minio_access_key,
+        aws_secret_access_key=minio_secret_key,
+        config=Config(signature_version="s3v4"),
+        region_name="us-east-1",
+    )
+    try:
+        s3.head_bucket(Bucket=bucket)
+    except ClientError:
+        try:
+            s3.create_bucket(Bucket=bucket)
+            sys.stderr.write(f"seed: created MinIO bucket {bucket!r}\n")
+        except ClientError as exc:
+            sys.stderr.write(
+                f"seed: warning — couldn't create bucket {bucket!r}: {exc}. "
+                "Auto-import will likely fail; create the bucket manually.\n",
+            )
+
+    results: dict[str, str] = {}
+    for slug in sorted(REGISTRY):
+        try:
+            stats = asyncio.run(run_import(
+                benchmark=slug,
+                db_url=db_url,
+                object_store=store,
+                bucket=bucket,
+                cache_dir=cache_dir,
+                limit=limit,
+                imported_by="seed_test_data.py:auto_import",
+            ))
+            results[slug] = f"ok converted={stats['converted']}"
+        except Exception as exc:
+            # Common causes: no network, upstream removed/renamed,
+            # MinIO not ready yet. The dev stack should still come up.
+            results[slug] = f"error {type(exc).__name__}: {exc}"
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -110,6 +188,47 @@ def main() -> None:
             "Which token to print to stdout (default: team). "
             "`admin` is dev-only — see issue #295."
         ),
+    )
+    parser.add_argument(
+        "--auto-import", dest="auto_import",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=(
+            "Dev mode only: after registering benchmarks, also import "
+            "a slice of each (`run_import` with --limit). Default: on. "
+            "Pass --no-auto-import to skip — benchmarks then need the "
+            "`python -m loom_benchmark_tool import` CLI to populate."
+        ),
+    )
+    parser.add_argument(
+        "--auto-import-limit", type=int, default=20,
+        help="Tasks per benchmark when auto-importing (default 20).",
+    )
+    parser.add_argument(
+        "--minio-endpoint",
+        default=os.environ.get("LOOM_MINIO_ENDPOINT", ""),
+        help="MinIO URL for auto-import (env: LOOM_MINIO_ENDPOINT).",
+    )
+    parser.add_argument(
+        "--minio-access-key",
+        default=os.environ.get("LOOM_MINIO_ACCESS_KEY", ""),
+        help="MinIO access key (env: LOOM_MINIO_ACCESS_KEY).",
+    )
+    parser.add_argument(
+        "--minio-secret-key",
+        default=os.environ.get("LOOM_MINIO_SECRET_KEY", ""),
+        help="MinIO secret key (env: LOOM_MINIO_SECRET_KEY).",
+    )
+    parser.add_argument(
+        "--bucket", default=os.environ.get("LOOM_TASK_BUCKET", "loom-tasks"),
+        help="MinIO bucket for task uploads (default: loom-tasks).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=os.environ.get(
+            "LOOM_BENCHMARK_CACHE",
+            str(Path.home() / ".cache" / "loom-benchmarks"),
+        ),
+        help="Local upstream-fetch cache (default: ~/.cache/loom-benchmarks).",
     )
     args = parser.parse_args()
 
@@ -215,6 +334,41 @@ def main() -> None:
 
         s.commit()
     engine.dispose()
+
+    # Auto-import after the metadata commit: run_import opens its own
+    # async session per benchmark, so we don't share the sync session.
+    if args.mode == "dev" and args.auto_import:
+        missing_minio = [
+            f for f, v in (
+                ("--minio-endpoint", args.minio_endpoint),
+                ("--minio-access-key", args.minio_access_key),
+                ("--minio-secret-key", args.minio_secret_key),
+            ) if not v
+        ]
+        if missing_minio:
+            sys.stderr.write(
+                "seed: skipping benchmark auto-import — missing "
+                f"{', '.join(missing_minio)}. Set LOOM_MINIO_* env vars "
+                "or pass the flags directly. Benchmarks remain registered "
+                "but the SPA dropdown will be empty until tasks are "
+                "imported.\n",
+            )
+        else:
+            sys.stderr.write(
+                f"seed: auto-importing benchmarks "
+                f"(limit={args.auto_import_limit} per benchmark)…\n",
+            )
+            results = _auto_import_benchmarks(
+                db_url=args.db_url,
+                limit=args.auto_import_limit,
+                minio_endpoint=args.minio_endpoint,
+                minio_access_key=args.minio_access_key,
+                minio_secret_key=args.minio_secret_key,
+                bucket=args.bucket,
+                cache_dir=Path(args.cache_dir),
+            )
+            for slug, status in sorted(results.items()):
+                sys.stderr.write(f"seed:   {slug}: {status}\n")
 
     if args.print == "team":
         print(raw_team)
