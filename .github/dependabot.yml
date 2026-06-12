@@ -8,7 +8,9 @@ updates:
       time: "09:00"
       timezone: Asia/Shanghai
     target-branch: dev
-    open-pull-requests-limit: 5
+    # Paused while the public repository is internal-development-first and
+    # external/dependency PR intake is not open yet.
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "deps"
       include: scope
