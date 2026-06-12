@@ -1,0 +1,128 @@
+# Auto-publish benchmark bundles to HuggingFace Hub.
+#
+# Triggers:
+#   - push to dev/main when any adapter file under
+#     packages/loom-benchmarks/loom_benchmarks/adapters/ changed.
+#     The workflow detects which adapters changed and runs `publish`
+#     for each.
+#   - workflow_dispatch (manual): publish a single benchmark by slug,
+#     or "all" to re-publish every adapter in REGISTRY.
+#
+# Requires repo secret HF_TOKEN with write access to the
+# {HF_ORG}/loom-benchmark-* dataset repos. Default org = PRHW; override
+# by setting repo variable HF_ORG.
+#
+# The publish itself is a side effect — failing to publish doesn't
+# break the source tree, so this workflow is intentionally non-blocking
+# (continue-on-error per benchmark). The summary surfaces which
+# benchmarks succeeded/failed so adapter authors can see at a glance.
+
+name: Publish benchmarks to HF Hub
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - "packages/loom-benchmarks/loom_benchmarks/adapters/**.py"
+      - "src/loom_benchmark_tool/publish_cmd.py"
+      - ".github/workflows/publish-benchmarks.yml"
+  workflow_dispatch:
+    inputs:
+      benchmark:
+        description: 'Benchmark slug (e.g. "humaneval"), or "all" for every adapter.'
+        required: true
+        default: "all"
+      limit:
+        description: "Per-benchmark task cap (blank = full set)."
+        required: false
+        default: ""
+
+jobs:
+  detect:
+    name: Detect changed adapters
+    runs-on: ubuntu-latest
+    outputs:
+      benchmarks: ${{ steps.list.outputs.benchmarks }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - id: list
+        name: Compute benchmark list (JSON for matrix)
+        run: |
+          set -euo pipefail
+          INPUT="${{ github.event.inputs.benchmark || '' }}"
+          python3 <<'PY' > /tmp/list.json
+          import json, os, pathlib, subprocess, sys
+          adapter_dir = pathlib.Path(
+              "packages/loom-benchmarks/loom_benchmarks/adapters",
+          )
+          all_slugs = sorted(
+              p.stem.replace("_", "-")
+              for p in adapter_dir.glob("*.py")
+              if p.stem != "__init__"
+          )
+          ev_input = os.environ.get("EV_INPUT", "")
+          if ev_input == "all":
+              slugs = all_slugs
+          elif ev_input:
+              slugs = [ev_input]
+          else:
+              # push event: changed adapter files between HEAD^ and HEAD.
+              diff = subprocess.run(
+                  ["git", "diff", "--name-only", "HEAD^", "HEAD"],
+                  capture_output=True, text=True, check=False,
+              )
+              changed = {
+                  line.split("/")[-1].removesuffix(".py").replace("_", "-")
+                  for line in diff.stdout.splitlines()
+                  if line.startswith(
+                      "packages/loom-benchmarks/loom_benchmarks/adapters/",
+                  ) and line.endswith(".py") and not line.endswith(
+                      "/__init__.py",
+                  )
+              }
+              slugs = sorted(changed)
+          print(json.dumps(slugs))
+          PY
+          BENCHMARKS=$(cat /tmp/list.json)
+          echo "Detected: $BENCHMARKS"
+          echo "benchmarks=$BENCHMARKS" >> $GITHUB_OUTPUT
+        env:
+          EV_INPUT: ${{ github.event.inputs.benchmark || '' }}
+
+  publish:
+    name: Publish ${{ matrix.benchmark }}
+    needs: detect
+    if: needs.detect.outputs.benchmarks != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        # Fan out so each benchmark publishes in its own job — one
+        # adapter's upstream failure doesn't drag the rest down.
+        benchmark: ${{ fromJson(needs.detect.outputs.benchmarks) }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install Python + deps
+        run: |
+          uv venv .venv --python 3.11
+          uv pip install -e .
+          uv pip install -e packages/loom-benchmarks
+      - name: Publish ${{ matrix.benchmark }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          LOOM_HF_ORG: ${{ vars.HF_ORG || 'PRHW' }}
+        continue-on-error: true
+        run: |
+          LIMIT_FLAG=""
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            LIMIT_FLAG="--limit ${{ github.event.inputs.limit }}"
+          fi
+          .venv/bin/python -m loom_benchmark_tool publish \
+            "${{ matrix.benchmark }}" \
+            --hf-org "$LOOM_HF_ORG" \
+            $LIMIT_FLAG
