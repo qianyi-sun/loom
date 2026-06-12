@@ -203,6 +203,7 @@ async def _spawn_trial(
     task_dir = await _materialize_task_dir(
         bundle=bundle, object_store=object_store, trial_id=trial_id,
         fixtures_root=settings.fixtures_root,
+        benchmark_cache=settings.benchmark_cache,
     )
 
     async def _state_patch(state: str, fr: str | None) -> bool:
@@ -248,12 +249,94 @@ async def _spawn_trial(
     await pool.spawn(_run_and_cleanup())
 
 
+def _parse_hf_source(source: str) -> tuple[str, str, str]:
+    """Parse `hf://{org}/{repo}@{rev}/{path}` into
+    (repo_id, revision, path). Revision defaults to "main" if absent.
+
+    Raises ValueError on malformed input — the caller logs + skips."""
+    if not source.startswith("hf://"):
+        raise ValueError(f"not an hf:// URL: {source!r}")
+    without_scheme = source[len("hf://"):]
+    # `org/repo@rev/path` — split on first / to separate org, then
+    # split on @ to peel the revision off the repo segment, then the
+    # remainder of the string is the path. HF org + repo names don't
+    # contain `/` or `@`, so this is unambiguous.
+    if "/" not in without_scheme:
+        raise ValueError(f"hf:// URL missing repo: {source!r}")
+    org, rest = without_scheme.split("/", 1)
+    # rest is e.g. "loom-benchmark-aime@main/HumanEval_0/"
+    if "@" in rest:
+        repo, after_at = rest.split("@", 1)
+        revision, _, path = after_at.partition("/")
+    else:
+        repo, _, path = rest.partition("/")
+        revision = "main"
+    if not org or not repo:
+        raise ValueError(f"hf:// URL missing org or repo: {source!r}")
+    return f"{org}/{repo}", revision, path
+
+
+async def _materialize_hf_dir(
+    *, source: str, task_dir: Path, cache_dir: Path | None,
+    trial_id: UUID,
+) -> Path:
+    """Pull a `hf://{repo}@{rev}/{path}` bundle into `task_dir`.
+
+    Uses `huggingface_hub.snapshot_download` with `allow_patterns` so
+    only the one bundle's files transfer, not the entire repo. The
+    HF library handles its own cache + atomic writes; if `cache_dir`
+    is set, snapshots live there (persisted across worker restarts)
+    instead of the default `~/.cache/huggingface/`.
+
+    snapshot_download writes the bundle at `{snapshot_root}/{path}/...`
+    so the worker shifts files up one level into `task_dir` to match
+    the layout `Trial.run` expects (task.toml at the root).
+    """
+    from huggingface_hub import snapshot_download
+
+    repo_id, revision, path = _parse_hf_source(source)
+    if not path:
+        raise ValueError(
+            f"hf:// URL missing bundle path: {source!r}",
+        )
+    # snapshot_download patterns are gitignore-style; `path*` matches
+    # the bundle dir + every file under it.
+    pattern_root = path.rstrip("/")
+    snapshot = await asyncio.to_thread(
+        snapshot_download,
+        repo_id=repo_id,
+        revision=revision,
+        repo_type="dataset",
+        allow_patterns=[f"{pattern_root}/*"],
+        cache_dir=str(cache_dir) if cache_dir is not None else None,
+    )
+    bundle_dir = Path(snapshot) / pattern_root
+    if not bundle_dir.is_dir():
+        raise FileNotFoundError(
+            f"hf:// bundle dir not found after snapshot: {bundle_dir}",
+        )
+    # Mirror the s3:// dispatcher's layout: bundle contents at the
+    # root of task_dir, not nested under the instance-id segment.
+    for src_path in bundle_dir.iterdir():
+        dst = task_dir / src_path.name
+        if src_path.is_dir():
+            shutil.copytree(src_path, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src_path, dst)
+    logger.info(
+        "materialized_task_dir trial=%s hf=%s repo=%s path=%s",
+        trial_id, source, repo_id, path,
+    )
+    return task_dir
+
+
 async def _materialize_task_dir(
     *,
     bundle: dict[str, Any],
     object_store: ObjectStore,
     trial_id: UUID,
     fixtures_root: Path | None = None,
+    benchmark_cache: Path | None = None,
 ) -> Path:
     """Plan 13 Task 3: create a fresh tempdir and populate it from
     `bundle["source"]`.
@@ -276,6 +359,15 @@ async def _materialize_task_dir(
     """
     task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
     source = bundle.get("source")
+    if isinstance(source, str) and source.startswith("hf://"):
+        try:
+            return await _materialize_hf_dir(
+                source=source, task_dir=task_dir,
+                cache_dir=benchmark_cache, trial_id=trial_id,
+            )
+        except BaseException:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            raise
     if isinstance(source, str) and source.startswith("fixture://"):
         task_id = source[len("fixture://"):]
         if fixtures_root is None:

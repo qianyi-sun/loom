@@ -11,6 +11,7 @@ from loom.trajectory.storage import MinioObjectStore
 from loom_benchmark_tool.import_cmd import run_import
 from loom_benchmark_tool.list_cmd import run_list
 from loom_benchmark_tool.publish_cmd import run_publish
+from loom_benchmark_tool.register_cmd import run_register
 from loom_benchmark_tool.verify_cmd import run_verify
 
 
@@ -83,6 +84,34 @@ def main() -> None:
     )
     p_publish.add_argument("--refresh", action="store_true")
 
+    p_register = sub.add_parser(
+        "register",
+        help=(
+            "Read a benchmark's manifest from HF Hub and upsert task "
+            "rows pointing at hf:// URLs. Per-deploy operation — runs "
+            "in ~1s per benchmark, no upstream fetch, no MinIO upload."
+        ),
+    )
+    p_register.add_argument("benchmark")
+    p_register.add_argument(
+        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+    )
+    p_register.add_argument(
+        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        help="HF read token (optional for public datasets).",
+    )
+    p_register.add_argument(
+        "--db-url", default=os.environ.get("LOOM_DB_URL"),
+    )
+    p_register.add_argument(
+        "--revision", default="main",
+        help="HF dataset revision (default: main).",
+    )
+    p_register.add_argument(
+        "--registered-by", default=None,
+        help="Label written to benchmarks.imported_by for audit.",
+    )
+
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("benchmark")
     p_verify.add_argument("--limit", type=int, default=10)
@@ -151,6 +180,25 @@ def main() -> None:
             f"warnings={result['warnings']} "
             f"repo={result['repo_id']} "
             f"rev={result['revision']}",
+        )
+        return
+    if args.cmd == "register":
+        if not args.db_url:
+            p.error("register requires --db-url / env LOOM_DB_URL")
+        result_reg = asyncio.run(run_register(
+            benchmark=args.benchmark,
+            hf_org=args.hf_org,
+            hf_token=args.hf_token,
+            db_url=args.db_url,
+            revision=args.revision,
+            registered_by=args.registered_by,
+        ))
+        print(
+            f"register {args.benchmark}: "
+            f"registered={result_reg['registered']} "
+            f"skipped={result_reg['skipped']} "
+            f"repo={result_reg['repo_id']} "
+            f"rev={result_reg['revision']}",
         )
         return
     if args.cmd == "verify":

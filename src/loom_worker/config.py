@@ -39,5 +39,14 @@ class WorkerSettings(BaseSettings):
     # favor of s3://bundles/<sha>/.
     fixtures_root: Path | None = None
 
+    # Directory the worker caches HF-fetched benchmark bundles in. When
+    # set, `snapshot_download` writes to this dir so re-claims of the
+    # same task hit local disk instead of re-fetching from HF. When
+    # unset, HF Hub's default cache (~/.cache/huggingface/) is used —
+    # fine for single-host dev, less so for ephemeral worker pods.
+    # Default unset; dev compose mounts /var/lib/loom/benchmarks for
+    # persistence across container restarts.
+    benchmark_cache: Path | None = None
+
     log_level: LogLevel = "info"
     metrics_port: int = 9090
