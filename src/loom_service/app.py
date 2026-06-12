@@ -24,6 +24,7 @@ from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
     agents,
     atif,
+    backends,
     batches,
     benchmarks,
     health,
@@ -163,4 +164,5 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(usage.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(models.router, prefix="/api/v1")
+    app.include_router(backends.router, prefix="/api/v1")
     return app

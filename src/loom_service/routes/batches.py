@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Batch, Task, Trial
+from loom.models.batch import Combination
 from loom_service.agent_catalog import known_names
 from loom_service.auth_guards import (
     is_admin,
@@ -42,15 +43,30 @@ class _CreateBatch(BaseModel):
     description: str | None = None
     task_filter: dict[str, Any]
     trial_config: dict[str, Any]
-    # Plan 23: n-sampling. >1 fans out N trials per matched task.
-    # Upper bound is a soft guardrail against typos (n=10000 by accident).
+    # Plan 23: n-sampling for single-combination batches. Ignored
+    # when `combinations` is non-empty (each Combination carries
+    # its own n_per_task).
     n_per_task: int = Field(default=1, ge=1, le=100)
+    # Plan 28 PR-3: backend selection at the batch level. Optional;
+    # defaults to "docker" so single-backend deployments don't have
+    # to send it.
+    backend: str = "docker"
+    # Plan 28 PR-3: multi-(agent, model) combinations. Empty list
+    # ⇒ single-combination behavior (agent + model come from
+    # trial_config).
+    combinations: list[Combination] = Field(default_factory=list)
 
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
+# Plan 28 PR-3 adds the subset_kind / n / seed keys for richer task
+# selection (all / first_n / last_n / random_n / explicit).
 _FILTER_KEYS: frozenset[str] = frozenset(
-    {"license", "task_ids", "benchmark_id"},
+    {"license", "task_ids", "benchmark_id", "subset_kind", "n", "seed"},
+)
+
+_SUBSET_KINDS: frozenset[str] = frozenset(
+    {"all", "first_n", "last_n", "random_n", "explicit"},
 )
 
 
@@ -58,6 +74,18 @@ async def _resolve_task_filter(
     session: AsyncSession, task_filter: Mapping[str, Any],
 ) -> list[str]:
     """Materialize a task_filter into a list of Task.id strings.
+
+    Honors `subset_kind` (Plan 28 PR-3):
+    - `"all"` (default): every matching task.
+    - `"first_n"`: first N task ids sorted ascending.
+    - `"last_n"`: last N task ids sorted ascending.
+    - `"random_n"`: N randomly-chosen task ids. Requires `seed`
+      so the same call reproduces the same selection. Random
+      uses Python's seeded `random.sample` on the materialized
+      candidate list — same id set produces the same answer
+      for the same seed.
+    - `"explicit"`: returns `task_ids` verbatim (after the
+      existence check below).
 
     Note: in the real v0.7 schema Task.id is a string (e.g.
     `humaneval/HumanEval/0`), not a UUID — the plan-doc drift.
@@ -68,7 +96,20 @@ async def _resolve_task_filter(
             status_code=400,
             detail=f"unknown task_filter keys: {sorted(unknown)}",
         )
-    stmt = select(Task.id)
+    subset_kind = task_filter.get("subset_kind", "all")
+    if subset_kind not in _SUBSET_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown subset_kind {subset_kind!r}. valid: "
+                f"{sorted(_SUBSET_KINDS)}"
+            ),
+        )
+
+    # Build the candidate query using the predicate keys
+    # (license / task_ids / benchmark_id). subset_kind / n / seed
+    # are then applied to the candidate set in Python.
+    stmt = select(Task.id).order_by(Task.id.asc())
     if "license" in task_filter:
         stmt = stmt.where(Task.license == task_filter["license"])
     if "task_ids" in task_filter:
@@ -76,7 +117,59 @@ async def _resolve_task_filter(
         stmt = stmt.where(Task.id.in_(ids))
     if "benchmark_id" in task_filter:
         stmt = stmt.where(Task.benchmark_id == task_filter["benchmark_id"])
-    return [row[0] for row in (await session.execute(stmt)).all()]
+    candidates: list[str] = [
+        row[0] for row in (await session.execute(stmt)).all()
+    ]
+
+    if subset_kind == "all":
+        return candidates
+    if subset_kind == "explicit":
+        # Explicit mode REQUIRES `task_ids` to be supplied AND the
+        # existence check above runs via the `Task.id.in_(ids)`
+        # predicate. The returned `candidates` is the intersection
+        # of the supplied list and the live tasks table; any
+        # supplied id not present in the table is silently dropped
+        # (the higher route layer checks for empty-result).
+        return candidates
+
+    n_raw = task_filter.get("n")
+    try:
+        n = int(n_raw) if n_raw is not None else None
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail="task_filter.n must be an integer",
+        ) from exc
+    if n is None or n < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"task_filter.n is required and must be ≥ 1 when "
+                f"subset_kind={subset_kind!r}"
+            ),
+        )
+
+    if subset_kind == "first_n":
+        return candidates[:n]
+    if subset_kind == "last_n":
+        return candidates[-n:] if n <= len(candidates) else candidates
+    # random_n
+    seed_raw = task_filter.get("seed")
+    if seed_raw is None:
+        raise HTTPException(
+            status_code=400,
+            detail="task_filter.seed is required when subset_kind='random_n'",
+        )
+    try:
+        seed = int(seed_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail="task_filter.seed must be an integer",
+        ) from exc
+    import random as _random
+    rng = _random.Random(seed)
+    if n >= len(candidates):
+        return candidates
+    return sorted(rng.sample(candidates, n))
 
 
 def _serialize(
@@ -94,6 +187,7 @@ def _serialize(
         "task_filter": b.task_filter,
         "trial_config": b.trial_config,
         "state": b.state,
+        "result_status": b.result_status,
         "created_at": b.created_at.isoformat(),
         "finished_at": (
             b.finished_at.isoformat() if b.finished_at else None
@@ -101,6 +195,8 @@ def _serialize(
         "created_by_token_prefix": b.created_by_token_prefix,
         "expected_trial_count": b.expected_trial_count,
         "n_per_task": b.n_per_task,
+        "backend": b.backend,
+        "combinations": b.combinations,
     }
     if summary is not None:
         out["trial_summary"] = summary
@@ -126,37 +222,89 @@ async def create_batch(
                        "use the service's per-team admin token",
             )
 
-        # Plan 25: catalog-membership check on the agent_name embedded
-        # in trial_config. Mirrors POST /trials so a batch that
-        # would 422 every fan-out is rejected up front.
-        agent_name = payload.trial_config.get("agent_name")
-        if isinstance(agent_name, str) and agent_name:
-            if agent_name not in known_names():
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"unknown agent_name {agent_name!r} in "
-                        "trial_config. GET /api/v1/agents for the catalog."
-                    ),
-                )
+        catalog = known_names()
+
+        if payload.combinations:
+            # Multi-combination batch. trial_config MUST NOT carry
+            # agent_name / agent_model / n_per_task in this shape —
+            # those live on each Combination.
+            for forbidden in ("agent_name", "agent_model"):
+                if forbidden in payload.trial_config:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"trial_config.{forbidden} must be absent when "
+                            "`combinations` is supplied — each combination "
+                            "carries its own agent/model"
+                        ),
+                    )
+            # Catalog membership per Combination.
+            for i, combo in enumerate(payload.combinations):
+                if combo.agent_name not in catalog:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"combinations[{i}].agent_name "
+                            f"{combo.agent_name!r} is not in the agent "
+                            "catalog. GET /api/v1/agents."
+                        ),
+                    )
+            # Labels unique within the batch (after computing the
+            # derived label for those without one).
+            seen_labels: set[str] = set()
+            for i, combo in enumerate(payload.combinations):
+                label = combo.label or _derive_combination_label(combo)
+                if label in seen_labels:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"combinations[{i}] label {label!r} is "
+                            "duplicated within the batch"
+                        ),
+                    )
+                seen_labels.add(label)
+        else:
+            # Single-combination batch. Catalog check on the agent
+            # embedded in trial_config (same as before this PR).
+            agent_name = payload.trial_config.get("agent_name")
+            if isinstance(agent_name, str) and agent_name:
+                if agent_name not in catalog:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"unknown agent_name {agent_name!r} in "
+                            "trial_config. GET /api/v1/agents."
+                        ),
+                    )
+
         task_ids = await _resolve_task_filter(s, payload.task_filter)
-        # Audit M2: a filter materializing to zero tasks (empty
-        # `task_ids`, or a license/benchmark that matches no row)
-        # creates a batch stuck in `submitted` forever —
-        # `next_batch_state` only transitions on `expected > 0`.
-        # Reject up front so the operator gets immediate feedback.
+        # Audit M2: a filter materializing to zero tasks creates a
+        # batch stuck in `submitted` forever — reject up front.
         if not task_ids:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"task_filter {payload.task_filter} matched zero "
-                    f"tasks; refusing to create empty batch"
+                    "tasks; refusing to create empty batch"
                 ),
             )
+
         token_prefix = (
             ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
         )
-        expected = len(task_ids) * payload.n_per_task
+
+        # expected_trial_count = sum over combinations × tasks.
+        if payload.combinations:
+            expected = sum(
+                len(task_ids) * c.n_per_task for c in payload.combinations
+            )
+            combinations_jsonb = [
+                c.model_dump(mode="json") for c in payload.combinations
+            ]
+        else:
+            expected = len(task_ids) * payload.n_per_task
+            combinations_jsonb = []
+
         b = Batch(
             team_id=ctx.team_id,
             name=payload.name,
@@ -167,6 +315,8 @@ async def create_batch(
             created_by_token_prefix=token_prefix,
             expected_trial_count=expected,
             n_per_task=payload.n_per_task,
+            backend=payload.backend,
+            combinations=combinations_jsonb,
         )
         s.add(b)
         await s.commit()
@@ -175,9 +325,22 @@ async def create_batch(
             "batch_id": str(b.id),
             "expected_trial_count": expected,
             "n_per_task": b.n_per_task,
+            "backend": b.backend,
+            "combinations": b.combinations,
             "state": b.state,
             "created_at": b.created_at.isoformat(),
         }
+
+
+def _derive_combination_label(combo: Combination) -> str:
+    """Default label `"{agent_name}"` or
+    `"{agent_name}/{provider}/{name}"` when a model is set."""
+    if combo.agent_model is None:
+        return combo.agent_name
+    return (
+        f"{combo.agent_name}/{combo.agent_model.provider}/"
+        f"{combo.agent_model.name}"
+    )
 
 
 @router.get("/batches")

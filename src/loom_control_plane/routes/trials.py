@@ -129,6 +129,10 @@ async def submit_trial(
         # Plan 23: sample_idx is the n-sampling index. Defaults to 0 so
         # hand-submitted trials and pre-migration callers Just Work.
         sample_idx = int(payload.get("sample_idx") or 0)
+        # Plan 28 PR-3: combination_idx is the multi-combination index.
+        # Defaults to 0 (single-combination batches + hand-submitted
+        # trials).
+        combination_idx = int(payload.get("combination_idx") or 0)
         insert_values: dict[str, Any] = {
             "id": trial_id, "team_id": ctx.team_id, "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
@@ -138,6 +142,7 @@ async def submit_trial(
             "batch_id": batch_id,
             "idempotency_key": idempotency_key,
             "sample_idx": sample_idx,
+            "combination_idx": combination_idx,
         }
         if idempotency_key is not None:
             # The partial unique index is `WHERE idempotency_key IS NOT

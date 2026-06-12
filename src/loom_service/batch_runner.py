@@ -94,16 +94,42 @@ async def _resolve_task_filter(
 
 
 def _idempotency_key(
-    batch_id: UUID, task_id: str, sample_idx: int,
+    batch_id: UUID,
+    task_id: str,
+    sample_idx: int,
+    combination_idx: int | None = None,
 ) -> str:
     """Stable, inspectable key — operators can grep for it in logs.
 
-    Format changed in Plan 23 to include the sample index. The old
-    `{batch}::{task}` keys are obsolete; any batch that predates
-    the migration is already finished (its idempotency keys never need
-    to be derived again).
+    Plan 28 PR-3 grew the key when the batch has Combinations:
+    single-combination batches keep the 3-segment
+    `{batch}::{task}::{sample}` shape (preserves in-flight keys);
+    multi-combination batches use 4 segments,
+    `{batch}::{task}::{combination}::{sample}`.
     """
-    return f"{batch_id}::{task_id}::{sample_idx}"
+    if combination_idx is None:
+        return f"{batch_id}::{task_id}::{sample_idx}"
+    return f"{batch_id}::{task_id}::{combination_idx}::{sample_idx}"
+
+
+def _materialize_trial_config(
+    shared: dict[str, Any], combination: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the per-trial config for one Combination.
+
+    Shared trial_config supplies the common knobs (timeouts, retry,
+    skip_verifier, etc.); the Combination supplies agent_name +
+    agent_model. The merge clobbers `agent_name` / `agent_model` on
+    the shared config (route forbids them when combinations is
+    non-empty, but defense in depth).
+    """
+    if combination is None:
+        return shared
+    import copy as _copy
+    out: dict[str, Any] = _copy.deepcopy(shared)
+    out["agent_name"] = combination["agent_name"]
+    out["agent_model"] = combination.get("agent_model")
+    return out
 
 
 async def _submit_one(
@@ -114,22 +140,20 @@ async def _submit_one(
     task_id: str,
     sample_idx: int,
     trial_config: dict[str, Any],
+    combination_idx: int | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "task_id": task_id,
         "config": trial_config,
-        # The CP route still accepts the legacy `campaign_id` key for
-        # now (it's the column name on its end too until migration
-        # 0011 lands in the CP's schema view). Pass batch_id under
-        # that key so the rename is purely service-side here; the CP
-        # rename happens in lockstep with this PR via the shared
-        # schema module.
         "batch_id": str(batch_id),
         "sample_idx": sample_idx,
         "idempotency_key": _idempotency_key(
             batch_id, task_id, sample_idx,
+            combination_idx=combination_idx,
         ),
     }
+    if combination_idx is not None:
+        payload["combination_idx"] = combination_idx
     headers: dict[str, str] = {}
     if authorization:
         headers["Authorization"] = authorization
@@ -150,28 +174,74 @@ async def _submit_one(
         )
 
 
+def _compute_result_status(
+    rewards: list[float | None],
+) -> str:
+    """Outcome classifier for a finished batch.
+
+    Per the spec: succeeded / partial_failed / all_failed.
+    Cancelled is set elsewhere (lifecycle override).
+
+    Heuristic: a trial "succeeded" if its `aggregate_reward` is
+    strictly > 0; "failed" otherwise (including None). Apply the
+    classification across the rewards list:
+    - all succeeded → succeeded
+    - all failed → all_failed
+    - mix → partial_failed
+    """
+    succeeded = sum(1 for r in rewards if r is not None and r > 0)
+    failed = len(rewards) - succeeded
+    if failed == 0 and succeeded > 0:
+        return "succeeded"
+    if succeeded == 0:
+        return "all_failed"
+    return "partial_failed"
+
+
 async def _advance_batch_state(
     session: AsyncSession, batch: Batch,
 ) -> None:
-    rows = (await session.execute(
+    state_rows = (await session.execute(
         select(Trial.state).where(Trial.batch_id == batch.id),
     )).scalars().all()
     counts: dict[str, int] = {}
-    for st in rows:
+    for st in state_rows:
         counts[str(st)] = counts.get(str(st), 0) + 1
     new_state = next_batch_state(
         current=batch.state,
         expected=batch.expected_trial_count,
         counts=counts,
     )
+
+    values: dict[str, Any] = {}
     if new_state != batch.state:
-        finished_at = (
-            datetime.now(UTC) if new_state == "finished" else None
-        )
+        values["state"] = new_state
+        if new_state in ("finished", "cancelled"):
+            values["finished_at"] = datetime.now(UTC)
+        if new_state == "cancelled":
+            values["result_status"] = "cancelled"
+        elif new_state == "finished":
+            # Compute outcome from finished trials' rewards.
+            result_rows = (await session.execute(
+                select(Trial.result).where(Trial.batch_id == batch.id),
+            )).scalars().all()
+            rewards: list[float | None] = []
+            for r in result_rows:
+                if not r:
+                    rewards.append(None)
+                    continue
+                val = r.get("aggregate_reward")
+                if val is None:
+                    val = r.get("reward")
+                try:
+                    rewards.append(float(val) if val is not None else None)
+                except (TypeError, ValueError):
+                    rewards.append(None)
+            values["result_status"] = _compute_result_status(rewards)
+
+    if values:
         await session.execute(
-            update(Batch)
-            .where(Batch.id == batch.id)
-            .values(state=new_state, finished_at=finished_at),
+            update(Batch).where(Batch.id == batch.id).values(**values),
         )
 
 
@@ -210,11 +280,16 @@ async def run_once(
     delay = 1.0 / max(submit_rate_per_sec, 1)
 
     # Phase 1: pick + materialize work, then release the lock.
-    # Pending unit is (task_id, sample_idx) — n_per_task > 1 fans out
-    # multiple samples per matched task. Existing (task_id, sample_idx)
-    # pairs are subtracted so a re-tick never re-submits a sample the
-    # CP already accepted.
-    work: list[tuple[UUID, dict[str, Any], list[tuple[str, int]]]] = []
+    # Pending unit is (task_id, combination_idx, sample_idx). For
+    # single-combination batches combination_idx is None — the
+    # idempotency key shape matches the 3-segment form that already
+    # exists in the DB. For multi-combination, combination_idx is
+    # 0..len(combinations)-1.
+    #
+    # Each work item is (batch_id, [(task_id, combination_or_None,
+    # trial_config, sample_idx), ...]).
+    PendingUnit = tuple[str, int | None, dict[str, Any], int]  # noqa: N806
+    work: list[tuple[UUID, list[PendingUnit]]] = []
     async with session_factory() as s:
         batches_to_process = (await s.execute(
             select(Batch)
@@ -223,40 +298,75 @@ async def run_once(
         )).scalars().all()
         for b in batches_to_process:
             task_ids = await _resolve_task_filter(s, b.task_filter)
-            existing = {
-                (row[0], row[1])
-                for row in (await s.execute(
-                    select(Trial.task_id, Trial.sample_idx).where(
-                        Trial.batch_id == b.id,
-                    ),
-                )).all()
-            }
-            pending: list[tuple[str, int]] = []
-            for t in task_ids:
-                for s_idx in range(b.n_per_task):
-                    if (t, s_idx) not in existing:
-                        pending.append((t, s_idx))
-            work.append((b.id, dict(b.trial_config), pending))
+            if b.combinations:
+                # Multi-combination: existing key is
+                # (task_id, combination_idx, sample_idx).
+                existing_multi = {
+                    (row[0], row[1], row[2])
+                    for row in (await s.execute(
+                        select(
+                            Trial.task_id,
+                            Trial.combination_idx,
+                            Trial.sample_idx,
+                        ).where(Trial.batch_id == b.id),
+                    )).all()
+                }
+                pending_units: list[PendingUnit] = []
+                shared_config = dict(b.trial_config)
+                for c_idx, combo in enumerate(b.combinations):
+                    combo_config = _materialize_trial_config(
+                        shared_config, combo,
+                    )
+                    n = int(combo.get("n_per_task", 1))
+                    for t in task_ids:
+                        for s_idx in range(n):
+                            if (t, c_idx, s_idx) in existing_multi:
+                                continue
+                            pending_units.append(
+                                (t, c_idx, combo_config, s_idx),
+                            )
+                work.append((b.id, pending_units))
+            else:
+                # Single-combination: keep the 2-tuple key shape and
+                # the None combination_idx so the resulting
+                # idempotency_key uses the 3-segment format.
+                existing_single = {
+                    (row[0], row[1])
+                    for row in (await s.execute(
+                        select(Trial.task_id, Trial.sample_idx).where(
+                            Trial.batch_id == b.id,
+                        ),
+                    )).all()
+                }
+                pending_units = []
+                cfg = dict(b.trial_config)
+                for t in task_ids:
+                    for s_idx in range(b.n_per_task):
+                        if (t, s_idx) in existing_single:
+                            continue
+                        pending_units.append((t, None, cfg, s_idx))
+                work.append((b.id, pending_units))
         await s.commit()
 
     # Phase 2: HTTP fanout. No DB locks.
-    for batch_id, trial_config, pending in work:
-        for chunk_start in range(0, len(pending), batch_size):
-            chunk = pending[chunk_start:chunk_start + batch_size]
-            for tid, s_idx in chunk:
+    for batch_id, pending_units in work:
+        for chunk_start in range(0, len(pending_units), batch_size):
+            chunk = pending_units[chunk_start:chunk_start + batch_size]
+            for tid, combo_idx, cfg, s_idx in chunk:
                 await _submit_one(
                     http_client,
                     authorization=cp_authorization,
                     batch_id=batch_id,
                     task_id=tid,
                     sample_idx=s_idx,
-                    trial_config=trial_config,
+                    trial_config=cfg,
+                    combination_idx=combo_idx,
                 )
                 await asyncio.sleep(delay)
 
     # Phase 3: advance state for the batches we processed.
     async with session_factory() as s:
-        for batch_id, _, _ in work:
+        for batch_id, _ in work:
             row = (await s.execute(
                 select(Batch).where(Batch.id == batch_id),
             )).scalar_one_or_none()

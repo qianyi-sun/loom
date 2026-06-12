@@ -153,8 +153,30 @@ class Batch(Base):
     )
     # Plan 23: n-sampling. Runner submits n_per_task trials per matched
     # task; expected_trial_count = len(task_ids) * n_per_task.
+    # When `combinations` is non-empty, this `n_per_task` is ignored —
+    # each Combination carries its own n_per_task.
     n_per_task: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1,
+    )
+    # Plan 28 PR-3: backend selection at the batch level. Catalog
+    # lives at `/api/v1/backends` (derived from worker capabilities).
+    backend: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'docker'"), default="docker",
+    )
+    # Plan 28 PR-3: multi-(agent, model) combinations. Each entry is
+    # `{agent_name, agent_model, n_per_task, label?}`. Empty list ⇒
+    # single-combination behaviour (agent + model + n_per_task live
+    # on trial_config / Batch.n_per_task as before).
+    combinations: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        default=list,
+    )
+    # Plan 28 PR-3: outcome separate from lifecycle `status`. NULL
+    # until terminal. Computed by the batch_runner when transitioning
+    # to a terminal lifecycle state. Values: succeeded /
+    # partial_failed / all_failed / cancelled.
+    result_status: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
     )
 
 
@@ -197,6 +219,12 @@ class Trial(Base):
     # 0 for hand-submitted trials and the only sample of a 1-per-task
     # batch — preserves pre-migration semantics.
     sample_idx: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0,
+    )
+    # Plan 28 PR-3: which Combination this trial belongs to within
+    # its parent Batch. 0 for single-combination batches (matches
+    # the pre-migration behaviour exactly).
+    combination_idx: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0,
     )
 
