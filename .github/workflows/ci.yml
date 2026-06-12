@@ -7,6 +7,15 @@ on:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
     types: [opened, synchronize, reopened, labeled]
+    # Skip CI on changes that can't break the build — docs, gitignore,
+    # editor configs. PRs touching only these get an instant green
+    # status check instead of paying minutes for ruff/mypy/pytest.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".gitignore"
+      - "LICENSE"
+      - ".editorconfig"
   workflow_dispatch:
     inputs:
       integration:
@@ -33,6 +42,13 @@ jobs:
     name: repository-checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Skip on push to dev: every squash-merge to dev carries the same
+    # content the PR CI just validated, so re-running burns minutes
+    # for no signal. Push to main still runs (release-branch safety
+    # net). All PRs still run.
+    if: >-
+      github.event_name != 'push' ||
+      github.ref != 'refs/heads/dev'
     steps:
       - uses: actions/checkout@v5
 
