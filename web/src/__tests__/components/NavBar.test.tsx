@@ -17,7 +17,6 @@ describe("NavBar", () => {
     renderNav(false);
     expect(screen.getByRole("link", { name: "Trials" })).pilot groupeInTheDocument();
     expect(screen.getByRole("link", { name: "Batches" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Workflows" })).pilot groupeInTheDocument();
     expect(screen.getByRole("link", { name: "Tasks" })).pilot groupeInTheDocument();
     expect(screen.getByRole("link", { name: "Benchmarks" })).pilot groupeInTheDocument();
     expect(screen.getByRole("link", { name: "Usage" })).pilot groupeInTheDocument();

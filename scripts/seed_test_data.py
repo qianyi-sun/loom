@@ -168,7 +168,6 @@ def main() -> None:
             scopes=[
                 "admin:tokens",
                 "admin:rate_cards",
-                "admin:workflows",
             ],
             team_id=None,
             issued_at=now, expires_at=None,

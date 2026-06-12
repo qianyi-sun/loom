@@ -151,75 +151,8 @@ class Batch(Base):
     expected_trial_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0,
     )
-    # Plan 22: when a Batch was launched from a Workflow, the
-    # workflow id is recorded for traceability. NULL for hand-submitted
-    # batches. (Workflow is scheduled for removal in PR-2 / migration
-    # 0012; this column goes with it then.)
-    workflow_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True),
-        ForeignKey("workflows.id"),
-        nullable=True,
-    )
     # Plan 23: n-sampling. Runner submits n_per_task trials per matched
     # task; expected_trial_count = len(task_ids) * n_per_task.
-    n_per_task: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("1"), default=1,
-    )
-
-
-class Workflow(Base):
-    """One row per global saved-recipe (Plan 22).
-
-    Workflows are admin-managed (`admin:workflows` scope for write
-    routes); reads are open to any team user. Launching a Workflow
-    creates a Batch whose task_filter + trial_config are
-    deep-copied from the workflow at launch time so subsequent edits
-    don't retroactively change the historical run. Batch.workflow_id
-    is the back-link for traceability.
-
-    All knobs are pinned for reproducibility: benchmark + agent +
-    agent_version + model + backend + concurrency + task_filter +
-    trial_config. No `*_latest` defaults — the workflow is an immutable
-    contract once launched, mutable only by an admin re-saving it.
-    """
-    __tablename__ = "workflows"
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
-    )
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    benchmark_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("benchmarks.id"), nullable=False,
-    )
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_version: Mapped[str] = mapped_column(Text, nullable=False)
-    model_provider: Mapped[str] = mapped_column(Text, nullable=False)
-    model_name: Mapped[str] = mapped_column(Text, nullable=False)
-    backend: Mapped[str] = mapped_column(Text, nullable=False)
-    concurrency: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=1,
-    )
-    task_filter: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict,
-    )
-    trial_config: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
-    )
-    created_by_token_prefix: Mapped[str] = mapped_column(
-        Text, nullable=False,
-    )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
-    )
-    # Plan 23: n-sampling. Copied onto Batch.n_per_task at launch
-    # so edits to the workflow don't retroactively change historical
-    # runs. Default 1 preserves single-sample behavior.
     n_per_task: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1,
     )

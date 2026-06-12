@@ -35,7 +35,6 @@ from loom_service.routes import (
     trajectory,
     trials,
     usage,
-    workflows,
 )
 
 
@@ -162,7 +161,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
     app.include_router(usage.router, prefix="/api/v1")
-    app.include_router(workflows.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(models.router, prefix="/api/v1")
     return app
