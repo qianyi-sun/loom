@@ -31,6 +31,8 @@ from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.pytest_verifier import PytestVerifier
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 def docker_available() -> bool:

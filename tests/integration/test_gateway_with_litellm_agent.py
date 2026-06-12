@@ -29,6 +29,8 @@ from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
 
+pytestmark = pytest.mark.docker
+
 
 async def test_e2e_litellm_agent_via_gateway(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path,

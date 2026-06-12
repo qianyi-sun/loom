@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import PurePosixPath
 
+import pytest
+
 from loom.driver.docker import DockerDriver
+
+pytestmark = pytest.mark.docker
 
 
 async def test_docker_exec_streaming_echo() -> None:

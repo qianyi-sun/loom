@@ -23,6 +23,8 @@ from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom_worker.control_plane_client import HttpControlPlaneClient
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 def mocked_cp_client() -> tuple[HttpControlPlaneClient, httpx.AsyncClient]:

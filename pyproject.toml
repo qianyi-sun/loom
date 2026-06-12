@@ -147,4 +147,5 @@ norecursedirs = [
 addopts = "--ignore=tests/system"
 markers = [
   "swe_bench_smoke: SWE-Bench Verified end-to-end smoke; pulls ~5GB per-instance images. Opt-in via LOOM_RUN_SWE_BENCH_SMOKE=1.",
+  "docker: integration tests that spin up real Docker containers via the host daemon (DockerDriver, network-policy, trial-e2e, subprocess-agent). Excluded from the default integration CI tier; run via the `integration-docker` workflow job or `pytest -m docker` locally.",
 ]

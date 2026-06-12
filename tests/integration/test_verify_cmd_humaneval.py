@@ -21,6 +21,8 @@ from loom_benchmark_tool.import_cmd import run_import
 from loom_benchmark_tool.oracle_runner import OracleResult
 from loom_benchmark_tool.verify_cmd import run_verify
 
+pytestmark = pytest.mark.docker
+
 _FIXTURE = (
     Path(__file__).resolve().parents[2]
     / "packages/loom-benchmarks/tests/fixtures/humaneval/sample.json"

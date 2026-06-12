@@ -9,6 +9,8 @@ from loom.driver.base import StartOptions
 from loom.errors import DriverError
 from loom.models.healthcheck import HealthcheckSpec
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def docker_driver() -> AsyncGenerator[object, None]:

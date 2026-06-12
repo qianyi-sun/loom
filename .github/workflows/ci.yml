@@ -19,7 +19,12 @@ on:
   workflow_dispatch:
     inputs:
       integration:
-        description: "Run Docker/testcontainers integration tier"
+        description: "Run fast integration tier (testcontainers, no real Docker driver)"
+        required: false
+        type: boolean
+        default: false
+      integration_docker:
+        description: "Run docker-heavy integration tier (DockerDriver, trial-e2e, ~30 min)"
         required: false
         type: boolean
         default: false
@@ -129,14 +134,16 @@ jobs:
       - name: Coverage gate (fast tier)
         run: uv run coverage report --fail-under=70
 
-  # Integration suite needs Docker (testcontainers spins up Postgres +
-  # MinIO). It is deliberately opt-in while #7 tunes/splits the slow tier:
-  # use the `ci:integration` PR label or manual workflow_dispatch input.
+  # Fast integration tier — testcontainers Postgres + MinIO only.
+  # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
+  # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
+  # Issue #7: split into fast + docker tiers so the fast tier fits in
+  # ~10 min and the docker tier opts in.
   integration:
     name: integration
     runs-on: ubuntu-latest
     needs: repository-checks
-    timeout-minutes: 30
+    timeout-minutes: 20
     if: >-
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'ci:integration')) ||
@@ -171,9 +178,11 @@ jobs:
           uv pip install -e packages/loom-launcher
           uv pip install -e packages/loom-benchmarks
 
-      - name: Pytest — integration (testcontainers)
+      - name: Pytest — integration (fast tier, no docker)
         run: |
           uv run pytest tests/integration \
+            -m "not docker" \
+            --durations=15 \
             --cov=src --cov=packages --cov-report=term
 
       # Binary .coverage data file consumed by coverage-summary to
@@ -187,6 +196,55 @@ jobs:
           path: .coverage
           include-hidden-files: true
           if-no-files-found: warn
+
+  # Docker-heavy tier: real DockerDriver / network-policy / trial-e2e /
+  # subprocess-agent / gateway-with-litellm. Cost ~15-25 min and
+  # spins up dozens of containers, so this is opt-in via the
+  # `ci:integration-docker` label or a workflow_dispatch input.
+  integration-docker:
+    name: integration-docker
+    runs-on: ubuntu-latest
+    needs: repository-checks
+    timeout-minutes: 40
+    if: >-
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'ci:integration-docker')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.integration_docker)
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            packages/*/pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Cache .venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
+
+      - name: Install project + dev deps + sibling packages
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+          uv pip install -e packages/loom-launcher
+          uv pip install -e packages/loom-benchmarks
+
+      - name: Pytest — integration (docker tier)
+        run: |
+          uv run pytest tests/integration \
+            -m "docker" \
+            --durations=15
 
   # Combines fast-tier + integration-tier coverage (when the
   # integration job ran) and writes the summary to the workflow

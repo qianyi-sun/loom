@@ -10,6 +10,8 @@ import pytest
 from loom.driver.base import StartOptions
 from loom.errors import DriverAlreadyStartedError, DriverNotStartedError
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 def docker_available() -> bool:

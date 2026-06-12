@@ -10,6 +10,8 @@ import pytest
 
 from loom.driver.base import MAX_EXEC_STREAM_BYTES, StartOptions
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def docker_driver() -> AsyncGenerator[object, None]:

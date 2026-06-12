@@ -27,6 +27,8 @@ from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
 from tests._trial_config_defaults import stub_trial_config
 
+pytestmark = pytest.mark.docker
+
 
 class _AlwaysPassVerifier:
     name = "pass"

@@ -12,6 +12,8 @@ import pytest
 from loom.driver.base import StartOptions
 from loom.models.networking import Allowlist, NoNetwork, Public
 
+pytestmark = pytest.mark.docker
+
 
 @pytest.fixture
 async def docker_driver_with_iptables() -> AsyncGenerator[object, None]:
