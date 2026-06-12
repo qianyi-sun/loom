@@ -121,8 +121,8 @@ remote service surface is described in
 | livecodebench | CC-BY-NC-4.0 | HF `livecodebench/code_generation_lite` |
 | mbpp | CC-BY-4.0 | HF `google-research-datasets/mbpp` (subset `sanitized`) |
 | osworld | Apache-2.0 | git `OSWorld` |
-| skillflow | Apache-2.0 | git `carin-ai/skillflow` |
-| skilllearnbench | Apache-2.0 | git `carin-ai/skilllearnbench` |
+| skillflow | NOASSERTION | git `ZhangZi-a/SkillFlow` |
+| skilllearnbench | Apache-2.0 | git `cxcscmu/SkillLearnBench` |
 | swe-bench | MIT | HF `princeton-nlp/SWE-bench` |
 | swe-bench-multimodal | MIT | HF `princeton-nlp/SWE-bench_Multimodal` |
 | swe-bench-verified | MIT | HF `princeton-nlp/SWE-bench_Verified` |

@@ -15,9 +15,9 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
     display_name = "SkillLearnBench"
     upstream_source = UpstreamSource(
         kind="git",
-        locator="https://github.com/carin-ai/skilllearnbench.git",
+        locator="https://github.com/cxcscmu/SkillLearnBench.git",
         revision="main",
     )
     license_url = (
-        "https://github.com/carin-ai/skilllearnbench/blob/main/LICENSE"
+        "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"
     )

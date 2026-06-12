@@ -1,11 +1,10 @@
-"""SkillFlow — CARIN-internal benchmark (Harbor parity). Spec §5.2 row 12.
+"""SkillFlow benchmark adapter. Spec §5.2 row 12.
 
-The upstream repo stores each instance as a directory of files already
-in the Loom layout (task.toml + instruction.md + solution/ + tests/).
-We discover instances via per-instance `manifest.json` files and copy
-the bundled files verbatim, then re-stamp `task.toml`'s `id` to the
-namespaced form `skillflow/<instance_id>` (in case the upstream bundle
-used a bare id).
+The current converter expects a fetched task bundle where each instance
+is represented by a per-instance `manifest.json` whose files are already
+in Loom layout (task.toml + instruction.md + solution/ + tests/). Direct
+conversion from the original public upstream repository may require an
+additional source-shape parser before this passthrough conversion step.
 """
 
 from __future__ import annotations
@@ -28,11 +27,11 @@ class SkillFlowAdapter:
     display_name = "SkillFlow"
     upstream_source = UpstreamSource(
         kind="git",
-        locator="https://github.com/carin-ai/skillflow.git",
+        locator="https://github.com/ZhangZi-a/SkillFlow.git",
         revision="main",
     )
-    license_spdx = "Apache-2.0"
-    license_url = "https://github.com/carin-ai/skillflow/blob/main/LICENSE"
+    license_spdx = "NOASSERTION"
+    license_url = "https://github.com/ZhangZi-a/SkillFlow"
     splits = ("test",)
 
     def list_instances(

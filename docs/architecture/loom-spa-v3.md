@@ -112,12 +112,11 @@ don't drift. Docs that need touch-up:
 
 PR-1 of the rollout includes this docs sweep.
 
-## Patterns inherited from Harbor's frontend
+## Patterns inherited from the reference frontend
 
-The user direction is "learn from Huawei's frontend for how they
-monitor the trials and submit trials". A read of
-`/home/hongjian/coder-harbor-cloud/frontend/src/pages/` yielded
-concrete patterns we adopt:
+The user direction was to learn from the reference frontend's trial
+monitoring and submission flows. A read of the reference
+`frontend/src/pages/` yielded concrete patterns we adopt:
 
 ### Monitor patterns
 
