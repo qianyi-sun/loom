@@ -143,9 +143,9 @@ services:
       LOOM_SVC_GATEWAY_URL: http://llm-gateway:9100/
       LOOM_SVC_LOG_LEVEL: debug
       LOOM_SVC_DEV_RELOAD: "1"
-      # LOOM_SVC_CAMPAIGN_RUNNER_CP_TOKEN unset → runner skips its tick
+      # LOOM_SVC_BATCH_RUNNER_CP_TOKEN unset → runner skips its tick
       # with a warning. Set it after seeding a submit-scoped token if
-      # you want to exercise the campaign-runner locally.
+      # you want to exercise the batch-runner locally.
     volumes:
       - ../src:/app/src
     depends_on:

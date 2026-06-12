@@ -128,7 +128,7 @@ export default function Workflows(): JSX.Element {
           <h1 className="text-2xl font-bold text-slate-900">Workflows</h1>
           <p className="mt-1 text-sm text-slate-500">
             Global saved recipes. Admins author them; any team can
-            launch them as a campaign.
+            launch them as a batch.
           </p>
         </div>
         {isAdmin ? (

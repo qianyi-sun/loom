@@ -1,5 +1,10 @@
-"""Migration 0007 — campaigns table + trials.campaign_id + idempotency_key
-(Plan 19 Task 1)."""
+"""Migrations 0007 + 0011 — campaigns table created in 0007,
+renamed to batches in 0011 (Plan 19 Task 1 + Plan 28 rename).
+
+These tests pin BOTH revisions of the schema so a future
+contributor who collapses the two migrations into one breaks the
+historical-step expectation explicitly.
+"""
 
 from __future__ import annotations
 
@@ -39,9 +44,12 @@ def at_revision_0006(
         command.upgrade(cfg, "head")
 
 
-def test_upgrade_creates_table(
+def test_0007_creates_campaigns_table(
     postgres_url: str, at_revision_0006: None,
 ) -> None:
+    """Migration 0007 historically created the `campaigns` table
+    (pre-rename). It's a historical fact pinned here so we can
+    detect anyone who edits 0007 to short-circuit the rename."""
     cfg = _cfg(postgres_url)
     command.upgrade(cfg, "0007")
     engine = create_engine(postgres_url)
@@ -53,7 +61,6 @@ def test_upgrade_creates_table(
     indexes = {i["name"] for i in insp.get_indexes("trials")}
     assert "trials_campaign_idx" in indexes
     assert "trials_idempotency_key_uidx" in indexes
-    # Partial unique on idempotency_key
     uniq = [
         i for i in insp.get_indexes("trials")
         if i["name"] == "trials_idempotency_key_uidx"
@@ -62,7 +69,7 @@ def test_upgrade_creates_table(
     engine.dispose()
 
 
-def test_downgrade_drops_table(
+def test_0007_downgrade_drops_campaigns_table(
     postgres_url: str, at_revision_0006: None,
 ) -> None:
     cfg = _cfg(postgres_url)
@@ -74,4 +81,43 @@ def test_downgrade_drops_table(
     trial_cols = {c["name"] for c in insp.get_columns("trials")}
     assert "campaign_id" not in trial_cols
     assert "idempotency_key" not in trial_cols
+    engine.dispose()
+
+
+def test_0011_renames_campaigns_to_batches(
+    postgres_url: str, at_revision_0006: None,
+) -> None:
+    """Migration 0011 is the rename. After it runs, the schema
+    speaks Batch (table + trials.batch_id + indexes named with
+    `batches_` / `trials_batch_`)."""
+    cfg = _cfg(postgres_url)
+    command.upgrade(cfg, "0011")
+    engine = create_engine(postgres_url)
+    insp = inspect(engine)
+    tables = insp.get_table_names()
+    assert "batches" in tables
+    assert "campaigns" not in tables
+    trial_cols = {c["name"] for c in insp.get_columns("trials")}
+    assert "batch_id" in trial_cols
+    assert "campaign_id" not in trial_cols
+    indexes = {i["name"] for i in insp.get_indexes("trials")}
+    assert "trials_batch_idx" in indexes
+    assert "trials_campaign_idx" not in indexes
+    engine.dispose()
+
+
+def test_0011_downgrade_reverts_to_campaigns(
+    postgres_url: str, at_revision_0006: None,
+) -> None:
+    cfg = _cfg(postgres_url)
+    command.upgrade(cfg, "0011")
+    command.downgrade(cfg, "0010")
+    engine = create_engine(postgres_url)
+    insp = inspect(engine)
+    tables = insp.get_table_names()
+    assert "campaigns" in tables
+    assert "batches" not in tables
+    trial_cols = {c["name"] for c in insp.get_columns("trials")}
+    assert "campaign_id" in trial_cols
+    assert "batch_id" not in trial_cols
     engine.dispose()

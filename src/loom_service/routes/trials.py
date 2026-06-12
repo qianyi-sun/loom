@@ -9,7 +9,7 @@ Write forwarders (Task 8):
 - POST /api/v1/trials/{id}/cancel — proxies to Control Plane /trials/{id}/cancel
 
 Field extraction notes: the v0.7 `trials` table does NOT carry
-`aggregate_reward`, `cost_usd`, or `campaign_id` columns. Reward + cost
+`aggregate_reward`, `cost_usd`, or `batch_id` columns. Reward + cost
 are extracted from `Trial.result` (the JSONB the worker writes at
 finalize). Agent name + model are pulled from `Trial.config["agent"]`.
 """

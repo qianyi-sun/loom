@@ -75,12 +75,12 @@ type TrajectoryPage =
 type TaskList = paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
 type BenchmarkList =
   paths["/api/v1/benchmarks"]["get"]["responses"][200]["content"]["application/json"];
-type CampaignList =
-  paths["/api/v1/campaigns"]["get"]["responses"][200]["content"]["application/json"];
-type CampaignDetail =
-  paths["/api/v1/campaigns/{id}"]["get"]["responses"][200]["content"]["application/json"];
-type CampaignCreate =
-  paths["/api/v1/campaigns"]["post"]["responses"][201]["content"]["application/json"];
+type BatchList =
+  paths["/api/v1/batches"]["get"]["responses"][200]["content"]["application/json"];
+type BatchDetail =
+  paths["/api/v1/batches/{id}"]["get"]["responses"][200]["content"]["application/json"];
+type BatchCreate =
+  paths["/api/v1/batches"]["post"]["responses"][201]["content"]["application/json"];
 type Usage =
   paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
 type Team =
@@ -140,29 +140,29 @@ export const api = {
     ),
   revokeToken: (prefix: string) =>
     apiFetch<void>(`/api/v1/tokens/${prefix}`, { method: "DELETE" }),
-  listCampaigns: (q: Record<string, string | undefined> = {}) =>
-    apiFetch<CampaignList>(`/api/v1/campaigns${qs(q)}`),
-  getCampaign: (id: string) =>
-    apiFetch<CampaignDetail>(`/api/v1/campaigns/${id}`),
-  createCampaign: (body: {
+  listBatches: (q: Record<string, string | undefined> = {}) =>
+    apiFetch<BatchList>(`/api/v1/batches${qs(q)}`),
+  getBatch: (id: string) =>
+    apiFetch<BatchDetail>(`/api/v1/batches/${id}`),
+  createBatch: (body: {
     name: string;
     description?: string;
     task_filter: Record<string, unknown>;
     trial_config: Record<string, unknown>;
     n_per_task?: number;
   }) =>
-    apiFetch<CampaignCreate>("/api/v1/campaigns", {
+    apiFetch<BatchCreate>("/api/v1/batches", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  cancelCampaign: (id: string) =>
-    apiFetch<{ campaign_id: string; state: string }>(
-      `/api/v1/campaigns/${id}/cancel`,
+  cancelBatch: (id: string) =>
+    apiFetch<{ batch_id: string; state: string }>(
+      `/api/v1/batches/${id}/cancel`,
       { method: "POST" },
     ),
   // Workflows (Plan 22): global saved-recipes. Reads open to any
   // team user; mutation routes require `admin:workflows`. Launching
-  // creates a Campaign with the workflow's frozen config.
+  // creates a Batch with the workflow's frozen config.
   listWorkflows: (q: Record<string, string | undefined> = {}) =>
     apiFetch<{
       items: Array<{
@@ -221,7 +221,7 @@ export const api = {
     }),
   launchWorkflow: (id: string, body: { name?: string } = {}) =>
     apiFetch<{
-      campaign_id: string;
+      batch_id: string;
       workflow_id: string;
       expected_trial_count: number;
       state: string;

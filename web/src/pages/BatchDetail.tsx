@@ -1,7 +1,7 @@
 /**
- * Campaign detail — one campaign's aggregate stats + per-state trial
+ * Batch detail — one batch's aggregate stats + per-state trial
  * counts + the original filter/config that submitted it. Live-polls
- * while the campaign is active, stops once terminal.
+ * while the batch is active, stops once terminal.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
@@ -15,12 +15,12 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
-import { campaignStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 
 const ACTIVE_STATES = new Set(["submitted", "running"]);
 
-export default function CampaignDetail(): JSX.Element {
-  const { campaignId } = useParams<{ campaignId: string }>();
+export default function BatchDetail(): JSX.Element {
+  const { batchId } = useParams<{ batchId: string }>();
   const queryClient = useQueryClient();
 
   const polling = useAdaptivePolling({
@@ -32,9 +32,9 @@ export default function CampaignDetail(): JSX.Element {
   });
 
   const query = useQuery({
-    queryKey: ["campaign", campaignId],
-    queryFn: () => api.getCampaign(campaignId!),
-    enabled: !!campaignId,
+    queryKey: ["batch", batchId],
+    queryFn: () => api.getBatch(batchId!),
+    enabled: !!batchId,
     refetchInterval: (q) => {
       const data = q.state.data as { state: string } | undefined;
       if (!data || !ACTIVE_STATES.has(data.state)) return false;
@@ -43,13 +43,13 @@ export default function CampaignDetail(): JSX.Element {
   });
 
   const cancel = useMutation({
-    mutationFn: () => api.cancelCampaign(campaignId!),
+    mutationFn: () => api.cancelBatch(batchId!),
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["campaign", campaignId] }),
+      queryClient.invalidateQueries({ queryKey: ["batch", batchId] }),
   });
 
-  if (!campaignId) {
-    return <ErrorState error={new Error("missing campaignId")} />;
+  if (!batchId) {
+    return <ErrorState error={new Error("missing batchId")} />;
   }
   if (query.isPending) return <LoadingState />;
   if (query.isError) return <ErrorState error={query.error} />;
@@ -60,10 +60,10 @@ export default function CampaignDetail(): JSX.Element {
     <div className="space-y-6">
       <div>
         <Link
-          to="/campaigns"
+          to="/batches"
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
-          ← All campaigns
+          ← All batches
         </Link>
       </div>
 
@@ -79,7 +79,7 @@ export default function CampaignDetail(): JSX.Element {
                 id = {c.id}
               </p>
             </div>
-            <StatusPill variant={campaignStateVariant(c.state)}>
+            <StatusPill variant={batchStateVariant(c.state)}>
               {c.state}
             </StatusPill>
           </div>
@@ -115,7 +115,7 @@ export default function CampaignDetail(): JSX.Element {
                 onClick={() => cancel.mutate()}
                 disabled={cancel.isPending}
               >
-                {cancel.isPending ? "Cancelling…" : "Cancel campaign"}
+                {cancel.isPending ? "Cancelling…" : "Cancel batch"}
               </Button>
               {cancel.isError ? <ErrorState error={cancel.error} /> : null}
             </div>

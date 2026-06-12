@@ -1,6 +1,6 @@
 /**
- * Campaigns list — paginated table with state filter and a "+ New
- * campaign" action that routes to the NewCampaign form.
+ * Batches list — paginated table with state filter and a "+ New
+ * batch" action that routes to the NewBatch form.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -20,14 +20,14 @@ import Pagination, {
 } from "../components/Pagination";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
-import { campaignStateVariant } from "../lib/statusVariant";
+import { batchStateVariant } from "../lib/statusVariant";
 
 const STATE_OPTIONS = ["submitted", "running", "finished", "cancelled"];
 
 const SELECT_CLASSES =
   "rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700";
 
-export default function CampaignsList(): JSX.Element {
+export default function BatchesList(): JSX.Element {
   const [state, setState] = useState("");
   const [page, setPage] = useState<PageState>(initialPage);
 
@@ -40,9 +40,9 @@ export default function CampaignsList(): JSX.Element {
   });
 
   const query = useQuery({
-    queryKey: ["campaigns", state, page.current],
+    queryKey: ["batches", state, page.current],
     queryFn: () =>
-      api.listCampaigns({
+      api.listBatches({
         state: state || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
@@ -63,11 +63,11 @@ export default function CampaignsList(): JSX.Element {
     if (query.data.items.length === 0) {
       return (
         <EmptyState
-          label="No campaigns yet."
+          label="No batches yet."
           hint={
             state
               ? `Try clearing the "${state}" filter.`
-              : "Click '+ New campaign' to submit one."
+              : "Click '+ New batch' to submit one."
           }
         />
       );
@@ -94,14 +94,14 @@ export default function CampaignsList(): JSX.Element {
               <tr key={c.id} className="hover:bg-slate-50">
                 <td className="px-4 py-3">
                   <Link
-                    to={`/campaigns/${c.id}`}
+                    to={`/batches/${c.id}`}
                     className="font-medium text-accent hover:text-accent-hover"
                   >
                     {c.name}
                   </Link>
                 </td>
                 <td className="px-4 py-3">
-                  <StatusPill variant={campaignStateVariant(c.state)}>
+                  <StatusPill variant={batchStateVariant(c.state)}>
                     {c.state}
                   </StatusPill>
                 </td>
@@ -126,9 +126,9 @@ export default function CampaignsList(): JSX.Element {
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Campaigns</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Batches</h1>
           <p className="mt-1 text-sm text-slate-500">
-            A campaign submits N trials in one batch — same task list,
+            A batch submits N trials in one batch — same task list,
             many trials.
           </p>
         </div>
@@ -144,7 +144,7 @@ export default function CampaignsList(): JSX.Element {
                 setPage(initialPage);
               }}
               className={SELECT_CLASSES}
-              aria-label="filter campaigns by state"
+              aria-label="filter batches by state"
             >
               <option value="">all</option>
               {STATE_OPTIONS.map((s) => (
@@ -154,8 +154,8 @@ export default function CampaignsList(): JSX.Element {
               ))}
             </select>
           </label>
-          <Link to="/campaigns/new">
-            <Button variant="primary">+ New campaign</Button>
+          <Link to="/batches/new">
+            <Button variant="primary">+ New batch</Button>
           </Link>
         </div>
       </header>

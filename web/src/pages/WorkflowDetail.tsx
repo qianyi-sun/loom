@@ -1,7 +1,7 @@
 /**
  * Workflow detail — pinned recipe + Launch action.
  *
- * Launch creates a Campaign that deep-copies the workflow's
+ * Launch creates a Batch that deep-copies the workflow's
  * task_filter + trial_config at submit time; subsequent workflow
  * edits do NOT retroactively change the historical run. Admin users
  * additionally see a Delete action (soft-delete on the server).
@@ -44,7 +44,7 @@ export default function WorkflowDetail(): JSX.Element {
     onSuccess: (result) => {
       setLaunchOpen(false);
       setLaunchError(null);
-      navigate(`/campaigns/${result.campaign_id}`);
+      navigate(`/batches/${result.batch_id}`);
     },
     onError: (err) => setLaunchError(err),
   });
@@ -130,7 +130,7 @@ export default function WorkflowDetail(): JSX.Element {
       <Card>
         <Card.Header
           title="Frozen config"
-          description="A launch deep-copies these into a Campaign. Edits to the workflow after launch do not change historical runs."
+          description="A launch deep-copies these into a Batch. Edits to the workflow after launch do not change historical runs."
         />
         <Card.Body className="space-y-4 lg:grid lg:grid-cols-2 lg:gap-4 lg:space-y-0">
           <div>
@@ -155,7 +155,7 @@ export default function WorkflowDetail(): JSX.Element {
           setLaunchError(null);
         }}
         title="Launch workflow"
-        description="A new Campaign is created in this team. You'll be redirected to the campaign detail page on success."
+        description="A new Batch is created in this team. You'll be redirected to the batch detail page on success."
         size="md"
         footer={
           <>
@@ -185,7 +185,7 @@ export default function WorkflowDetail(): JSX.Element {
           {launchError ? <ErrorState error={launchError} /> : null}
           <label className="block">
             <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Campaign name (optional)
+              Batch name (optional)
             </span>
             <Input
               value={launchName}
@@ -204,7 +204,7 @@ export default function WorkflowDetail(): JSX.Element {
         open={deleteConfirm}
         onClose={() => setDeleteConfirm(false)}
         title="Delete workflow?"
-        description="Soft-deletes the workflow. Historical campaigns launched from it are unaffected; new launches return 404."
+        description="Soft-deletes the workflow. Historical batches launched from it are unaffected; new launches return 404."
         size="sm"
         footer={
           <>
@@ -227,7 +227,7 @@ export default function WorkflowDetail(): JSX.Element {
       >
         <p className="text-sm text-slate-600">
           This soft-deletes <strong>{w.name}</strong>. The name is freed
-          for reuse and historical campaign back-references remain
+          for reuse and historical batch back-references remain
           valid.
         </p>
       </Modal>

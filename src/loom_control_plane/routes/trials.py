@@ -66,20 +66,20 @@ async def submit_trial(
     if task_row is None:
         raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
 
-    # Plan 19: validate campaign_id FK at request time. The schema FK
+    # Plan 19: validate batch_id FK at request time. The schema FK
     # would raise IntegrityError → 500; surface as a clean 400 so the
-    # campaign runner sees the misconfig in the response (audit C2).
-    campaign_id = payload.get("campaign_id")
-    if campaign_id is not None:
-        from loom.db.schema import Campaign
+    # batch runner sees the misconfig in the response (audit C2).
+    batch_id = payload.get("batch_id")
+    if batch_id is not None:
+        from loom.db.schema import Batch
         async with request.app.state.session_factory() as session:
             exists = (await session.execute(
-                select(Campaign.id).where(Campaign.id == campaign_id),
+                select(Batch.id).where(Batch.id == batch_id),
             )).scalar_one_or_none()
         if exists is None:
             raise HTTPException(
                 status_code=400,
-                detail=f"unknown campaign {campaign_id}",
+                detail=f"unknown batch {batch_id}",
             )
 
     task_config = normalize_steps(TaskConfig.model_validate(task_row.config))
@@ -120,11 +120,11 @@ async def submit_trial(
                         f"allowlist {sorted(quota.license_allowlist)}"
                     ),
                 )
-        # Plan 19: campaign_id + idempotency_key are optional. When
+        # Plan 19: batch_id + idempotency_key are optional. When
         # `idempotency_key` is set we use pg_insert + ON CONFLICT DO
         # NOTHING so a concurrent race (two runner instances picking
-        # the same campaign row before the SELECT-skip-locked is held)
-        # doesn't produce duplicate trial rows. `campaign_id` was
+        # the same batch row before the SELECT-skip-locked is held)
+        # doesn't produce duplicate trial rows. `batch_id` was
         # already FK-validated upstream.
         # Plan 23: sample_idx is the n-sampling index. Defaults to 0 so
         # hand-submitted trials and pre-migration callers Just Work.
@@ -135,7 +135,7 @@ async def submit_trial(
             "requires_caps": requires_caps.model_dump(mode="json"),
             "state": "queued",
             "submit_priority": trial_config.submit_priority,
-            "campaign_id": campaign_id,
+            "batch_id": batch_id,
             "idempotency_key": idempotency_key,
             "sample_idx": sample_idx,
         }

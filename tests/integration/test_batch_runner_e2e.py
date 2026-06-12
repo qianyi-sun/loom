@@ -1,10 +1,10 @@
-"""run_once fans a campaign into per-task trial submissions, with
-idempotency_key carrying the campaign+task identity (Plan 19 Task 5).
+"""run_once fans a batch into per-task trial submissions, with
+idempotency_key carrying the batch+task identity (Plan 19 Task 5).
 
 The Control Plane is mocked via httpx.MockTransport — the handler
 mirrors the real CP's INSERT into the trials table so the test
 exercises the round trip: service runner → /trials → DB row →
-service re-reads via Trial.campaign_id.
+service re-reads via Trial.batch_id.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Campaign, Task, Team, TeamQuota, Token, Trial
-from loom_service.campaign_runner import (
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
+from loom_service.batch_runner import (
     _idempotency_key,
-    next_campaign_state,
+    next_batch_state,
     run_once,
 )
 
@@ -98,9 +98,9 @@ async def runner_setup(
                     config=body["config"],
                     requires_caps={},
                     submitted_at=datetime.now(UTC),
-                    campaign_id=(
-                        UUID(body["campaign_id"])
-                        if body.get("campaign_id") else None
+                    batch_id=(
+                        UUID(body["batch_id"])
+                        if body.get("batch_id") else None
                     ),
                     idempotency_key=idem,
                     sample_idx=int(body.get("sample_idx") or 0),
@@ -132,7 +132,7 @@ async def runner_setup(
         with sl() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
-            s.execute(delete(Campaign))
+            s.execute(delete(Batch))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -146,7 +146,7 @@ async def test_runner_fans_out_5_trials(
 ) -> None:
     session_factory, http_client, team_id, task_ids = runner_setup
     async with session_factory() as s:
-        c = Campaign(
+        c = Batch(
             team_id=team_id, name="C",
             task_filter={"license": "MIT"},
             trial_config={"agent": {"name": "fake"}},
@@ -170,10 +170,10 @@ async def test_runner_fans_out_5_trials(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         trials = s.execute(
-            select(Trial).where(Trial.campaign_id == cid),
+            select(Trial).where(Trial.batch_id == cid),
         ).scalars().all()
-        campaign_row = s.execute(
-            select(Campaign).where(Campaign.id == cid),
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == cid),
         ).scalar_one()
     sync_engine.dispose()
 
@@ -186,7 +186,7 @@ async def test_runner_fans_out_5_trials(
     )
     assert all(t.sample_idx == 0 for t in trials)
     # State transitioned: submitted → running (trials in queued state).
-    assert campaign_row.state == "running"
+    assert batch_row.state == "running"
 
 
 async def test_runner_is_idempotent(
@@ -196,7 +196,7 @@ async def test_runner_is_idempotent(
     """Running the runner twice produces exactly 5 trials, not 10."""
     session_factory, http_client, team_id, _task_ids = runner_setup
     async with session_factory() as s:
-        c = Campaign(
+        c = Batch(
             team_id=team_id, name="C",
             task_filter={"license": "MIT"},
             trial_config={},
@@ -221,7 +221,7 @@ async def test_runner_is_idempotent(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         trials = s.execute(
-            select(Trial).where(Trial.campaign_id == cid),
+            select(Trial).where(Trial.batch_id == cid),
         ).scalars().all()
     sync_engine.dispose()
     assert len(trials) == 5
@@ -232,11 +232,11 @@ async def test_runner_advances_to_finished_when_all_terminal(
     postgres_url: str,
 ) -> None:
     """After the runner submits, externally mark every trial succeeded
-    and run again — the runner should transition the campaign to
+    and run again — the runner should transition the batch to
     finished."""
     session_factory, http_client, team_id, _task_ids = runner_setup
     async with session_factory() as s:
-        c = Campaign(
+        c = Batch(
             team_id=team_id, name="C",
             task_filter={"license": "MIT"},
             trial_config={},
@@ -261,7 +261,7 @@ async def test_runner_advances_to_finished_when_all_terminal(
     with sl() as s:
         s.execute(
             update(Trial)
-            .where(Trial.campaign_id == cid)
+            .where(Trial.batch_id == cid)
             .values(state="succeeded", finished_at=datetime.now(UTC)),
         )
         s.commit()
@@ -276,25 +276,25 @@ async def test_runner_advances_to_finished_when_all_terminal(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        campaign_row = s.execute(
-            select(Campaign).where(Campaign.id == cid),
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == cid),
         ).scalar_one()
     sync_engine.dispose()
-    assert campaign_row.state == "finished"
-    assert campaign_row.finished_at is not None
+    assert batch_row.state == "finished"
+    assert batch_row.finished_at is not None
 
 
 async def test_runner_fans_out_n_samples_per_task(
     runner_setup: tuple[async_sessionmaker, httpx.AsyncClient, UUID, list[str]],
     postgres_url: str,
 ) -> None:
-    """Plan 23: campaign.n_per_task=3 produces 3 trials per matched
+    """Plan 23: batch.n_per_task=3 produces 3 trials per matched
     task, each with a distinct sample_idx 0..2, each carrying the
     sample-aware idempotency key. Re-running the runner is still
     idempotent — no duplicates."""
     session_factory, http_client, team_id, task_ids = runner_setup
     async with session_factory() as s:
-        c = Campaign(
+        c = Batch(
             team_id=team_id, name="C",
             task_filter={"license": "MIT"},
             trial_config={},
@@ -318,7 +318,7 @@ async def test_runner_fans_out_n_samples_per_task(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         trials = s.execute(
-            select(Trial).where(Trial.campaign_id == cid),
+            select(Trial).where(Trial.batch_id == cid),
         ).scalars().all()
     sync_engine.dispose()
 
@@ -336,5 +336,5 @@ async def test_runner_fans_out_n_samples_per_task(
     )
 
 
-# Sanity import to keep `next_campaign_state` referenced.
-_ = next_campaign_state
+# Sanity import to keep `next_batch_state` referenced.
+_ = next_batch_state

@@ -86,7 +86,7 @@ def test_same_idempotency_key_returns_same_trial(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "task_id": "hello", "config": {},
+                "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
                 "idempotency_key": "abc-123",
             },
         )
@@ -94,7 +94,7 @@ def test_same_idempotency_key_returns_same_trial(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "task_id": "hello", "config": {},
+                "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
                 "idempotency_key": "abc-123",
             },
         )
@@ -113,7 +113,7 @@ def test_different_idempotency_keys_different_trials(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "task_id": "hello", "config": {},
+                "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
                 "idempotency_key": "k1",
             },
         )
@@ -121,7 +121,7 @@ def test_different_idempotency_keys_different_trials(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "task_id": "hello", "config": {},
+                "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
                 "idempotency_key": "k2",
             },
         )
@@ -140,21 +140,21 @@ def test_no_idempotency_key_creates_distinct_trials(
         r1 = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_id": "hello", "config": {}},
+            json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         r2 = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_id": "hello", "config": {}},
+            json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}},
         )
     assert r1.json()["trial_id"] != r2.json()["trial_id"]
 
 
-def test_unknown_campaign_id_returns_400(
+def test_unknown_batch_id_returns_400(
     app,  # type: ignore[no-untyped-def]
     seed_team: tuple[UUID, str],
 ) -> None:
-    """Audit C2: payload campaign_id that doesn't exist returns 400,
+    """Audit C2: payload batch_id that doesn't exist returns 400,
     not 500 from a downstream FK IntegrityError."""
     _, raw = seed_team
     with TestClient(app) as client:
@@ -163,12 +163,12 @@ def test_unknown_campaign_id_returns_400(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "task_id": "hello",
-                "config": {},
-                "campaign_id": str(uuid4()),
+                "config": {"agent_name": "oracle", "agent_model": None},
+                "batch_id": str(uuid4()),
             },
         )
     assert r.status_code == 400
-    assert "unknown campaign" in r.json()["detail"]
+    assert "unknown batch" in r.json()["detail"]
 
 
 def test_cross_team_idempotency_key_does_not_leak(
@@ -201,7 +201,7 @@ def test_cross_team_idempotency_key_does_not_leak(
                 "/trials",
                 headers={"Authorization": f"Bearer {raw_a}"},
                 json={
-                    "task_id": "hello", "config": {},
+                    "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
                     "idempotency_key": "shared-key",
                 },
             )
@@ -209,7 +209,7 @@ def test_cross_team_idempotency_key_does_not_leak(
                 "/trials",
                 headers={"Authorization": f"Bearer {raw_b}"},
                 json={
-                    "task_id": "hello", "config": {},
+                    "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
                     "idempotency_key": "shared-key",
                 },
             )
@@ -230,22 +230,22 @@ def test_cross_team_idempotency_key_does_not_leak(
         sync_engine.dispose()
 
 
-def test_campaign_id_stored_on_trial(
+def test_batch_id_stored_on_trial(
     app,  # type: ignore[no-untyped-def]
     seed_team: tuple[UUID, str],
     postgres_url: str,
 ) -> None:
-    """When `campaign_id` is present in the payload, it lands on the trial row."""
+    """When `batch_id` is present in the payload, it lands on the trial row."""
     _, raw = seed_team
-    # Seed a campaign so the FK is satisfied.
-    from loom.db.schema import Campaign
+    # Seed a batch so the FK is satisfied.
+    from loom.db.schema import Batch
     engine = create_engine(postgres_url)
     sl = sessionmaker(engine)
     team_id, _ = seed_team
-    campaign_id = uuid4()
+    batch_id = uuid4()
     with sl() as s:
-        s.add(Campaign(
-            id=campaign_id, team_id=team_id, name="c",
+        s.add(Batch(
+            id=batch_id, team_id=team_id, name="c",
             task_filter={}, trial_config={},
             state="submitted", created_by_token_prefix="abcdef12",
             expected_trial_count=1,
@@ -258,9 +258,9 @@ def test_campaign_id_stored_on_trial(
                 "/trials",
                 headers={"Authorization": f"Bearer {raw}"},
                 json={
-                    "task_id": "hello", "config": {},
-                    "campaign_id": str(campaign_id),
-                    "idempotency_key": f"{campaign_id}::hello",
+                    "task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None},
+                    "batch_id": str(batch_id),
+                    "idempotency_key": f"{batch_id}::hello",
                 },
             )
         assert r.status_code == 201, r.text
@@ -272,13 +272,13 @@ def test_campaign_id_stored_on_trial(
                 select(Trial).where(Trial.id == trial_id),
             ).scalar_one()
         engine.dispose()
-        assert trial.campaign_id == campaign_id
-        assert trial.idempotency_key == f"{campaign_id}::hello"
+        assert trial.batch_id == batch_id
+        assert trial.idempotency_key == f"{batch_id}::hello"
     finally:
         engine = create_engine(postgres_url)
         sl = sessionmaker(engine)
         with sl() as s:
             s.execute(delete(Trial))
-            s.execute(delete(Campaign))
+            s.execute(delete(Batch))
             s.commit()
         engine.dispose()

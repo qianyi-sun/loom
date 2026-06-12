@@ -115,14 +115,18 @@ class Worker(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class Campaign(Base):
-    """One row per submitted campaign (Plan 19).
+class Batch(Base):
+    """One row per submitted batch (Plan 19 + Plan 28 rename).
 
-    The runner fans out a campaign's `task_filter` into N trial
-    submissions and back-links each via `trials.campaign_id`. State
+    The runner fans out a batch's `task_filter` into N trial
+    submissions and back-links each via `trials.batch_id`. State
     transitions: submitted → running → finished | cancelled.
+
+    Renamed from `Campaign` (and table `campaigns`) in migration 0011
+    so the SPA, docs, and code all share Harbor's vocabulary
+    (Task / Trial / Batch / Benchmark) without per-layer translation.
     """
-    __tablename__ = "campaigns"
+    __tablename__ = "batches"
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), primary_key=True,
         server_default=text("gen_random_uuid()"),
@@ -147,9 +151,10 @@ class Campaign(Base):
     expected_trial_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0,
     )
-    # Plan 22: when a Campaign was launched from a Workflow, the
+    # Plan 22: when a Batch was launched from a Workflow, the
     # workflow id is recorded for traceability. NULL for hand-submitted
-    # campaigns.
+    # batches. (Workflow is scheduled for removal in PR-2 / migration
+    # 0012; this column goes with it then.)
     workflow_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("workflows.id"),
@@ -167,9 +172,9 @@ class Workflow(Base):
 
     Workflows are admin-managed (`admin:workflows` scope for write
     routes); reads are open to any team user. Launching a Workflow
-    creates a Campaign whose task_filter + trial_config are
+    creates a Batch whose task_filter + trial_config are
     deep-copied from the workflow at launch time so subsequent edits
-    don't retroactively change the historical run. Campaign.workflow_id
+    don't retroactively change the historical run. Batch.workflow_id
     is the back-link for traceability.
 
     All knobs are pinned for reproducibility: benchmark + agent +
@@ -212,7 +217,7 @@ class Workflow(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
-    # Plan 23: n-sampling. Copied onto Campaign.n_per_task at launch
+    # Plan 23: n-sampling. Copied onto Batch.n_per_task at launch
     # so edits to the workflow don't retroactively change historical
     # runs. Default 1 preserves single-sample behavior.
     n_per_task: Mapped[int] = mapped_column(
@@ -245,19 +250,19 @@ class Trial(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     trajectory_index: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    # Plan 19: campaign back-link + idempotency key. campaign_id is
+    # Plan 19: batch back-link + idempotency key. batch_id is
     # NULL for hand-submitted trials. idempotency_key uniqueness is
     # enforced via a partial unique index (`trials_idempotency_key_uidx`).
-    campaign_id: Mapped[UUID | None] = mapped_column(
+    batch_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
-        ForeignKey("campaigns.id", ondelete="SET NULL"),
+        ForeignKey("batches.id", ondelete="SET NULL"),
         nullable=True,
     )
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Plan 23: which sample within (campaign_id, task_id) this trial is.
-    # Pairs with campaign.n_per_task to support n-sampling fan-out.
+    # Plan 23: which sample within (batch_id, task_id) this trial is.
+    # Pairs with batch.n_per_task to support n-sampling fan-out.
     # 0 for hand-submitted trials and the only sample of a 1-per-task
-    # campaign — preserves pre-migration semantics.
+    # batch — preserves pre-migration semantics.
     sample_idx: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0,
     )

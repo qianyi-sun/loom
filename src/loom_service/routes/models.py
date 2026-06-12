@@ -4,7 +4,7 @@ Returns the distinct (provider, name) pairs the rate_cards table
 knows about. The LLM Gateway routes by these tuples, so they
 double as the catalog of "models the Gateway is configured for."
 The SPA uses the list to populate a model dropdown in
-SubmitTrialModal + NewCampaign.
+SubmitTrialModal + NewBatch.
 """
 
 from __future__ import annotations

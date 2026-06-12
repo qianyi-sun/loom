@@ -4,7 +4,7 @@ loom-launcher adapters that a service-mode trial may name.
 The SPA fetches this catalog via `GET /api/v1/agents` so users pick
 from a dropdown instead of typing a name into a text input. The same
 list backs request-time validation in routes/trials.py and
-routes/campaigns.py — a typo'd or hostile `agent_name` is rejected at
+routes/batches.py — a typo'd or hostile `agent_name` is rejected at
 the API boundary rather than blowing up the worker mid-trial.
 
 Adding a new builtin: append to `_BUILTIN`. Adding a new adapter: the

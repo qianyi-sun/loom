@@ -123,7 +123,7 @@ export interface paths {
       responses: { 204: { content: never } };
     };
   };
-  "/api/v1/campaigns": {
+  "/api/v1/batches": {
     get: {
       parameters: {
         query?: {
@@ -136,7 +136,7 @@ export interface paths {
       responses: {
         200: {
           content: {
-            "application/json": components["schemas"]["CampaignList"];
+            "application/json": components["schemas"]["BatchList"];
           };
         };
       };
@@ -156,7 +156,7 @@ export interface paths {
         201: {
           content: {
             "application/json": {
-              campaign_id: string;
+              batch_id: string;
               expected_trial_count: number;
               state: string;
               created_at: string;
@@ -166,25 +166,25 @@ export interface paths {
       };
     };
   };
-  "/api/v1/campaigns/{id}": {
+  "/api/v1/batches/{id}": {
     get: {
       parameters: { path: { id: string } };
       responses: {
         200: {
           content: {
-            "application/json": components["schemas"]["CampaignDetail"];
+            "application/json": components["schemas"]["BatchDetail"];
           };
         };
       };
     };
   };
-  "/api/v1/campaigns/{id}/cancel": {
+  "/api/v1/batches/{id}/cancel": {
     post: {
       parameters: { path: { id: string } };
       responses: {
         200: {
           content: {
-            "application/json": { campaign_id: string; state: string };
+            "application/json": { batch_id: string; state: string };
           };
         };
       };
@@ -308,7 +308,7 @@ export interface components {
       revoked_at: string | null;
     };
     TokenList: { items: components["schemas"]["Token"][] };
-    Campaign: {
+    Batch: {
       id: string;
       team_id: string;
       name: string;
@@ -321,11 +321,11 @@ export interface components {
       created_by_token_prefix: string;
       expected_trial_count: number;
     };
-    CampaignList: {
-      items: components["schemas"]["Campaign"][];
+    BatchList: {
+      items: components["schemas"]["Batch"][];
       next_cursor: string | null;
     };
-    CampaignDetail: components["schemas"]["Campaign"] & {
+    BatchDetail: components["schemas"]["Batch"] & {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
       total_cost_usd: number;

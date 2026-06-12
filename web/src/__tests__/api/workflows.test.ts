@@ -72,7 +72,7 @@ describe("workflows api client", () => {
     const spy = vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
-          campaign_id: "c-1",
+          batch_id: "c-1",
           workflow_id: "wf-1",
           expected_trial_count: 5,
           state: "submitted",

@@ -27,7 +27,7 @@ For operator-side admin curls, port-forward CP:
 ```
                         ┌──────────────────────────────────────┐
                         │     loom_service (REST + SPA)        │
-                        │  /api/v1/{trials, campaigns,         │
+                        │  /api/v1/{trials, batches,         │
                         │     benchmarks, tasks, tokens,       │
                         │     usage, rate-cards, teams,        │
                         │     trajectory, atif, health}        │
@@ -260,7 +260,7 @@ state before propagating:
 | `tasks` + `benchmarks` | Operator CLI | Cluster task catalog |
 | `team_quotas` | CP | DRF weights + license allowlists |
 | `tokens` | Service / CP | Bearer tokens (all 4 kinds) |
-| `campaigns` | Service | Campaign grouping + idempotency keys |
+| `batches` | Service | Batch grouping + idempotency keys |
 | `cloud_compute_records` | Cloud drivers | Per-sandbox lifetime + cost; `cloud_provider` column |
 
 Migrations: `migrations/versions/0001_initial_schema.py` through
@@ -276,9 +276,9 @@ Migrations: `migrations/versions/0001_initial_schema.py` through
 - **TrialDetail** — header + paginated trajectory viewer +
   EventTimeline (one row per kind, click-to-expand JSON) +
   ATIF download button
-- **CampaignsList** + **CampaignDetail** — `refetchInterval: 5000`
+- **BatchesList** + **BatchDetail** — `refetchInterval: 5000`
   while state ∈ {submitted, running}; stops on terminal
-- **NewCampaign** — textarea JSON parse for `task_filter` +
+- **NewBatch** — textarea JSON parse for `task_filter` +
   `trial_config` with local validation
 - **Tasks** — cluster task catalog
 - **Benchmarks** — registered adapters
@@ -318,7 +318,7 @@ For local dev: `cd web && npm run dev` runs Vite's dev server on
   `[MIT, Apache-2.0, BSD-3-Clause, CC-BY-4.0]`). `POST /trials`
   returns 403 if the task's adapter declares a license outside the
   allowlist.
-- **Idempotency** — campaigns + trials accept an `idempotency_key`;
+- **Idempotency** — batches + trials accept an `idempotency_key`;
   partial unique index `WHERE NOT NULL` on `trials.idempotency_key`.
   Cross-team collisions return 409.
 - **Worker shutdown ordering** — stop heartbeat thread first

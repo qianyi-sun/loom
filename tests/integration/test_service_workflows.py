@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    Batch,
     Benchmark,
-    Campaign,
     Task,
     Team,
     TeamQuota,
@@ -94,7 +94,7 @@ async def wf_setup(
         ))
         # A benchmark to anchor the workflow against, plus one task
         # belonging to it so the launch's task_filter materializes
-        # to a non-empty Campaign.
+        # to a non-empty Batch.
         s.execute(insert(Benchmark).values(
             id="humaneval",
             display_name="HumanEval",
@@ -121,7 +121,7 @@ async def wf_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
-            s.execute(delete(Campaign))
+            s.execute(delete(Batch))
             s.execute(delete(Workflow))
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
@@ -262,7 +262,7 @@ async def test_create_rejects_duplicate_active_name(
     assert r2.status_code == 409
 
 
-async def test_team_can_launch_creates_campaign_with_back_reference(
+async def test_team_can_launch_creates_batch_with_back_reference(
     wf_setup: tuple[FastAPI, str, str, str],
 ) -> None:
     app, admin_raw, team_raw, _ = wf_setup
@@ -285,10 +285,10 @@ async def test_team_can_launch_creates_campaign_with_back_reference(
     assert body["state"] == "submitted"
 
 
-async def test_workflow_n_per_task_freezes_onto_campaign_at_launch(
+async def test_workflow_n_per_task_freezes_onto_batch_at_launch(
     wf_setup: tuple[FastAPI, str, str, str],
 ) -> None:
-    """Plan 23: workflow.n_per_task is copied onto Campaign.n_per_task
+    """Plan 23: workflow.n_per_task is copied onto Batch.n_per_task
     at launch so a later admin edit to the workflow doesn't change a
     historical run. expected_trial_count reflects the fan-out."""
     app, admin_raw, team_raw, _ = wf_setup
@@ -318,7 +318,7 @@ async def test_launch_injects_agent_name_and_model_into_trial_config(
 ) -> None:
     """Plan 23: TrialConfig requires agent_name + agent_model. The
     workflow's pinned identity columns get injected into the frozen
-    Campaign.trial_config so the runner's POST /trials carries valid
+    Batch.trial_config so the runner's POST /trials carries valid
     TrialConfig payloads."""
     app, admin_raw, team_raw, _ = wf_setup
     async with _ac(app) as ac:
@@ -334,12 +334,12 @@ async def test_launch_injects_agent_name_and_model_into_trial_config(
             json={},
         )
     assert lr.status_code == 201
-    campaign_id = lr.json()["campaign_id"]
+    batch_id = lr.json()["batch_id"]
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         c = s.execute(
-            sa_select(Campaign).where(Campaign.id == campaign_id),
+            sa_select(Batch).where(Batch.id == batch_id),
         ).scalar_one()
     sync_engine.dispose()
     assert c.trial_config["agent_name"] == "claude-code"
@@ -362,7 +362,7 @@ async def test_launch_uses_optional_name_override(
         lr = await ac.post(
             f"/api/v1/workflows/{wf_id}/launch",
             headers={"Authorization": f"Bearer {team_raw}"},
-            json={"name": "my-explicit-campaign-name"},
+            json={"name": "my-explicit-batch-name"},
         )
     assert lr.status_code == 201
 
@@ -371,7 +371,7 @@ async def test_admin_token_cannot_launch_without_team(
     wf_setup: tuple[FastAPI, str, str, str],
 ) -> None:
     """Admin tokens have no team_id; launching would orphan the
-    Campaign. Reject explicitly so the operator switches to a team
+    Batch. Reject explicitly so the operator switches to a team
     token for the actual run."""
     app, admin_raw, _team_raw, _ = wf_setup
     async with _ac(app) as ac:

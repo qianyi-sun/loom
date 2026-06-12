@@ -2,9 +2,9 @@ import { Route, Routes } from "react-router-dom";
 
 import Layout from "./components/Layout";
 import Benchmarks from "./pages/Benchmarks";
-import CampaignDetail from "./pages/CampaignDetail";
-import CampaignsList from "./pages/CampaignsList";
-import NewCampaign from "./pages/NewCampaign";
+import BatchDetail from "./pages/BatchDetail";
+import BatchesList from "./pages/BatchesList";
+import NewBatch from "./pages/NewBatch";
 import NewWorkflow from "./pages/NewWorkflow";
 import NotFound from "./pages/NotFound";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
@@ -25,9 +25,9 @@ export default function App(): JSX.Element {
         <Route path="trials" element={<TrialsList />} />
         <Route path="trials/compare" element={<TrialCompare />} />
         <Route path="trials/:trialId" element={<TrialDetail />} />
-        <Route path="campaigns" element={<CampaignsList />} />
-        <Route path="campaigns/new" element={<NewCampaign />} />
-        <Route path="campaigns/:campaignId" element={<CampaignDetail />} />
+        <Route path="batches" element={<BatchesList />} />
+        <Route path="batches/new" element={<NewBatch />} />
+        <Route path="batches/:batchId" element={<BatchDetail />} />
         <Route path="workflows" element={<Workflows />} />
         <Route path="workflows/new" element={<NewWorkflow />} />
         <Route path="workflows/:workflowId" element={<WorkflowDetail />} />

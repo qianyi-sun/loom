@@ -30,7 +30,7 @@ def test_env_vars_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert str(s.control_plane_url).startswith("http://cp:8080")
     # Forward-compat defaults are stable.
     assert s.signed_url_expiry_sec == 3600
-    assert s.campaign_runner_batch_size == 50
+    assert s.batch_runner_batch_size == 50
     # Dev-reload defaults off so production never accidentally
     # ships with a file-watcher in each container.
     assert s.dev_reload is False

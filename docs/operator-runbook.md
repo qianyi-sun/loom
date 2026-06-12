@@ -71,20 +71,20 @@ top-level README + `deploy/docker-compose.dev.yml`.
    Update the `worker-token` key in `loom-secrets` with the returned
    raw token, then `kubectl rollout restart deploy/loom-worker`.
 
-6. **(Optional) Provision the campaign-runner CP token.** The
-   `loom_service` campaign-runner needs a `submit`-scoped team token
-   to fan out trials from campaigns. Without it, the runner skips
-   its tick with a warning — campaigns will not advance.
+6. **(Optional) Provision the batch-runner CP token.** The
+   `loom_service` batch-runner needs a `submit`-scoped team token
+   to fan out trials from batches. Without it, the runner skips
+   its tick with a warning — batches will not advance.
 
    CP's `POST /admin/worker-tokens` hardcodes `type=worker` /
    `scopes=[worker:*]` so it cannot mint a submit-scoped token. Mint
    instead via `loom_service`'s `POST /api/v1/tokens`, which DOES
    accept `type` + `scopes` + `team_id`. Port-forward `loom-service`
-   (NOT CP), pick the team that will own the campaigns, then patch
+   (NOT CP), pick the team that will own the batches, then patch
    the secret:
    ```bash
    kubectl port-forward deploy/loom-service 8090:8090 &
-   # SYSTEM_TEAM_UUID is the team_id you want campaigns to be
+   # SYSTEM_TEAM_UUID is the team_id you want batches to be
    # attributed to — typically a dedicated "system" team you
    # created via the SQL bootstrap (similar to step 5's admin
    # token), or any existing team.
@@ -94,7 +94,7 @@ top-level README + `deploy/docker-compose.dev.yml`.
           \"scopes\": [\"submit\"], \"expires_in_days\": 365}" \
      | jq -r .token)
    kubectl patch secret loom-secrets \
-     -p "{\"stringData\":{\"svc-campaign-runner-cp-token\":\"$RAW\"}}"
+     -p "{\"stringData\":{\"svc-batch-runner-cp-token\":\"$RAW\"}}"
    kubectl rollout restart deploy/loom-service
    ```
 

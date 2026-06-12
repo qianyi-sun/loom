@@ -221,7 +221,7 @@ async def test_forwarder_propagates_retry_after(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
 ) -> None:
     """Audit H3: upstream 429 with Retry-After must reach the client
-    so backoff works. Plan 19's rate-limited campaign submits depend
+    so backoff works. Plan 19's rate-limited batch submits depend
     on this."""
     app, raw, _team_id, _captured = fwd_setup
     # Re-wire the mock to return 429 with a Retry-After header.

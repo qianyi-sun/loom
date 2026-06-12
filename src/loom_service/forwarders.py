@@ -8,7 +8,7 @@ token intact. The CP applies its own auth as a defense-in-depth layer.
 `propagate` returns a `JSONResponse` so we can carry through the
 upstream's status_code AND a small allowlist of response headers
 (Retry-After, Location, X-RateLimit-*) — Plan 19's rate-limited
-campaign submits need Retry-After for client backoff to work.
+batch submits need Retry-After for client backoff to work.
 """
 
 from __future__ import annotations

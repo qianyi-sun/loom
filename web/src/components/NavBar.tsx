@@ -14,7 +14,7 @@ import { cn } from "../lib/cn";
 
 const NAV_ITEMS = [
   { to: "/trials", label: "Trials" },
-  { to: "/campaigns", label: "Campaigns" },
+  { to: "/batches", label: "Batches" },
   { to: "/workflows", label: "Workflows" },
   { to: "/tasks", label: "Tasks" },
   { to: "/benchmarks", label: "Benchmarks" },

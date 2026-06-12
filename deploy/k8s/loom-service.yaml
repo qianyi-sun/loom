@@ -37,7 +37,7 @@ spec:
             #     --from-literal=svc-campaign-runner-cp-token=$(./scripts/mint-submit-token.sh)
             # If absent, the runner skips its tick with a warning —
             # campaigns will not fan out until the operator sets this.
-            - name: LOOM_SVC_CAMPAIGN_RUNNER_CP_TOKEN
+            - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: loom-secrets

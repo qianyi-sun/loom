@@ -12,16 +12,16 @@ It pins every config field needed for reproducibility:
 - trial_config (the per-trial knobs sent to TrialConfig)
 
 Launching a workflow deep-copies its `task_filter` + `trial_config`
-into a Campaign with `workflow_id` set as the back-reference. The
-Campaign carries the FROZEN config — edits to the workflow after
+into a Batch with `workflow_id` set as the back-reference. The
+Batch carries the FROZEN config — edits to the workflow after
 launch don't retroactively change the run.
 
 Auth split:
 - GET routes: any signed-in team user can list / read.
 - POST / PATCH / DELETE / launch:
   - mutations require `admin:workflows`
-  - launch requires `submit` (same as POST /campaigns; the launcher's
-    team gets the new Campaign and is billed for it)
+  - launch requires `submit` (same as POST /batches; the launcher's
+    team gets the new Batch and is billed for it)
 """
 
 from __future__ import annotations
@@ -37,13 +37,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from loom.auth import verify_bearer_token
-from loom.db.schema import Benchmark, Campaign, Workflow
+from loom.db.schema import Batch, Benchmark, Workflow
 from loom_service.agent_catalog import known_names
 from loom_service.auth_guards import (
     require_human_or_admin,
     require_scope,
 )
-from loom_service.routes.campaigns import _resolve_task_filter
+from loom_service.routes.batches import _resolve_task_filter
 
 router = APIRouter()
 
@@ -322,10 +322,10 @@ async def launch_workflow(
     payload: _LaunchPayload,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
-    """Create a Campaign from the workflow's frozen config.
+    """Create a Batch from the workflow's frozen config.
 
-    The caller's team is debited for the Campaign; admin tokens
-    without a team_id are rejected because every Campaign must be
+    The caller's team is debited for the Batch; admin tokens
+    without a team_id are rejected because every Batch must be
     attributable. The launch deep-copies task_filter + trial_config
     from the workflow so subsequent edits don't retroactively change
     the historical run.
@@ -345,7 +345,7 @@ async def launch_workflow(
         if w is None or w.deleted_at is not None:
             raise HTTPException(status_code=404, detail="workflow not found")
 
-        # Deep-copy task_filter + trial_config so the Campaign carries
+        # Deep-copy task_filter + trial_config so the Batch carries
         # a snapshot wholly independent of the workflow row. Subsequent
         # admin edits to the workflow do NOT retroactively change the
         # historical run; nested mutation in either object is also
@@ -357,7 +357,7 @@ async def launch_workflow(
         }
         frozen_config: dict[str, Any] = copy.deepcopy(w.trial_config)
         # Plan 23: TrialConfig requires agent_name + agent_model. Inject
-        # them from the workflow's pinned columns so the campaign runner
+        # them from the workflow's pinned columns so the batch runner
         # can submit valid trial configs without each Workflow author
         # having to repeat agent/model inside trial_config too.
         frozen_config["agent_name"] = w.agent_name
@@ -372,7 +372,7 @@ async def launch_workflow(
                 status_code=400,
                 detail=(
                     f"workflow {w.name!r} task_filter {frozen_filter} "
-                    "matched zero tasks; refusing to launch empty campaign"
+                    "matched zero tasks; refusing to launch empty batch"
                 ),
             )
 
@@ -380,12 +380,12 @@ async def launch_workflow(
             f"{w.name} — {datetime.now(UTC).isoformat(timespec='seconds')}"
         )
         token_prefix = _token_prefix(ctx)
-        # Plan 23: n_per_task is frozen onto the Campaign at launch
+        # Plan 23: n_per_task is frozen onto the Batch at launch
         # (same reasoning as task_filter + trial_config — historical
         # runs don't move under a later admin edit). expected_trial_count
         # is the total trial fan-out, not the matched-task count.
         expected = len(task_ids) * w.n_per_task
-        c = Campaign(
+        c = Batch(
             team_id=ctx.team_id,
             name=name,
             description=f"Launched from workflow {w.name!r} ({w.id})",
@@ -401,7 +401,7 @@ async def launch_workflow(
         await s.commit()
         await s.refresh(c)
         return {
-            "campaign_id": str(c.id),
+            "batch_id": str(c.id),
             "workflow_id": str(w.id),
             "expected_trial_count": expected,
             "state": c.state,

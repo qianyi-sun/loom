@@ -62,8 +62,10 @@ Start with the overview, drill into the area you care about:
   — usage frozen, cost derived; rate-card shape; CLI vs. service
   storage; re-pricing history
 - **[architecture/workflows.md](architecture/workflows.md)** —
-  global saved recipes (admin-creates, all-teams-launch);
-  fully-pinned config; frozen-at-launch Campaign snapshot
+  *(targeted for deletion in loom-spa-v3 PR-2; doc preserved
+  until that PR lands)* global saved recipes (admin-creates,
+  all-teams-launch); fully-pinned config; frozen-at-launch
+  Batch snapshot
 - **[architecture/loom-spa-v3.md](architecture/loom-spa-v3.md)**
   — *(design, not yet shipped)* trial-centric SPA simplification;
   renames Campaign → Batch everywhere, drops Workflow entirely
@@ -71,10 +73,6 @@ Start with the overview, drill into the area you care about:
   Backend dropdown + 5 task subset modes (all / first_n / last_n /
   random_n with seed / explicit ids with smart paste parser);
   three-PR rollout (rename / drop / feature work)
-- **[architecture/workflows.md](architecture/workflows.md)** —
-  *(targeted for deletion in loom-spa-v3 PR-2; doc preserved
-  until that PR lands)* describes the Workflow saved-recipe
-  feature; data model + admin UI are scheduled for removal
 - **[architecture/campaign-variants.md](architecture/campaign-variants.md)**
   — *(superseded by loom-spa-v3)* multi-(agent, model) comparison
   campaigns spec; kept as reference if multi-variant returns

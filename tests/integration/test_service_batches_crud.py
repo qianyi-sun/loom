@@ -1,4 +1,4 @@
-"""Campaigns CRUD: POST creates with materialized expected count,
+"""Batches CRUD: POST creates with materialized expected count,
 GET lists + detail with rollup, cancel cascades (Plan 19 Task 3)."""
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Campaign, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -84,7 +84,7 @@ async def camp_setup(
         with sl() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
-            s.execute(delete(Campaign))
+            s.execute(delete(Batch))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -92,7 +92,7 @@ async def camp_setup(
         sync_engine.dispose()
 
 
-async def test_post_campaign_materializes_count(
+async def test_post_batch_materializes_count(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
     app, raw, _team_id = camp_setup
@@ -101,7 +101,7 @@ async def test_post_campaign_materializes_count(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "MIT slate",
@@ -114,10 +114,10 @@ async def test_post_campaign_materializes_count(
     body = r.json()
     assert body["expected_trial_count"] == 3
     assert body["state"] == "submitted"
-    UUID(body["campaign_id"])  # parseable
+    UUID(body["batch_id"])  # parseable
 
 
-async def test_post_campaign_with_n_per_task_multiplies_count(
+async def test_post_batch_with_n_per_task_multiplies_count(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
     """Plan 23: expected_trial_count = len(matched_tasks) * n_per_task."""
@@ -127,7 +127,7 @@ async def test_post_campaign_with_n_per_task_multiplies_count(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "MIT-x3",
@@ -142,7 +142,7 @@ async def test_post_campaign_with_n_per_task_multiplies_count(
     assert body["n_per_task"] == 3
 
 
-async def test_post_campaign_rejects_n_per_task_out_of_range(
+async def test_post_batch_rejects_n_per_task_out_of_range(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
     app, raw, _team_id = camp_setup
@@ -151,7 +151,7 @@ async def test_post_campaign_rejects_n_per_task_out_of_range(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "bad-n",
@@ -163,11 +163,11 @@ async def test_post_campaign_rejects_n_per_task_out_of_range(
     assert r.status_code == 422
 
 
-async def test_post_campaign_rejects_unknown_agent_name(
+async def test_post_batch_rejects_unknown_agent_name(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
-    """Plan 25: a campaign whose trial_config.agent_name isn't in the
-    catalog is rejected at the API boundary so the campaign runner
+    """Plan 25: a batch whose trial_config.agent_name isn't in the
+    catalog is rejected at the API boundary so the batch runner
     doesn't fan out trials that would all 422."""
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
@@ -175,7 +175,7 @@ async def test_post_campaign_rejects_unknown_agent_name(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "phantom-agent",
@@ -201,7 +201,7 @@ async def test_post_rejects_unknown_filter_key(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "broken",
@@ -217,15 +217,15 @@ async def test_post_rejects_empty_filter_match(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
     """Audit M2: a filter that materializes to zero tasks would
-    create a campaign stuck in `submitted` forever
-    (next_campaign_state needs `expected > 0`). Reject up front."""
+    create a batch stuck in `submitted` forever
+    (next_batch_state needs `expected > 0`). Reject up front."""
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "empty",
@@ -241,7 +241,7 @@ async def test_post_requires_submit_scope(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    """A read:own-only token cannot create campaigns."""
+    """A read:own-only token cannot create batches."""
     app, _raw, team_id = camp_setup
     no_submit_raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
@@ -259,7 +259,7 @@ async def test_post_requires_submit_scope(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {no_submit_raw}"},
             json={
                 "name": "X",
@@ -270,7 +270,7 @@ async def test_post_requires_submit_scope(
     assert r.status_code == 403
 
 
-async def test_list_campaigns(
+async def test_list_batches(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
     app, raw, _team_id = camp_setup
@@ -279,7 +279,7 @@ async def test_list_campaigns(
         transport=transport, base_url="http://svc",
     ) as ac:
         await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "C1",
@@ -288,7 +288,7 @@ async def test_list_campaigns(
             },
         )
         await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "C2",
@@ -297,7 +297,7 @@ async def test_list_campaigns(
             },
         )
         r = await ac.get(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200
@@ -307,7 +307,7 @@ async def test_list_campaigns(
     assert items[0]["name"] == "C2"
 
 
-async def test_get_campaign_detail_with_rollup(
+async def test_get_batch_detail_with_rollup(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
@@ -319,7 +319,7 @@ async def test_get_campaign_detail_with_rollup(
         transport=transport, base_url="http://svc",
     ) as ac:
         post = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "rollup-test",
@@ -327,9 +327,9 @@ async def test_get_campaign_detail_with_rollup(
                 "trial_config": {},
             },
         )
-        cid = UUID(post.json()["campaign_id"])
+        cid = UUID(post.json()["batch_id"])
 
-    # Seed 3 trial rows under this campaign: 2 succeeded with rewards,
+    # Seed 3 trial rows under this batch: 2 succeeded with rewards,
     # 1 still running.
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -347,7 +347,7 @@ async def test_get_campaign_detail_with_rollup(
                 config={},
                 requires_caps={},
                 submitted_at=datetime.now(UTC),
-                campaign_id=cid,
+                batch_id=cid,
                 result=result,
             ))
         s.commit()
@@ -357,7 +357,7 @@ async def test_get_campaign_detail_with_rollup(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            f"/api/v1/campaigns/{cid}",
+            f"/api/v1/batches/{cid}",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200
@@ -370,7 +370,7 @@ async def test_get_campaign_detail_with_rollup(
     assert body["total_cost_usd"] == pytest.approx(0.08)
 
 
-async def test_get_campaign_not_found(
+async def test_get_batch_not_found(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
     app, raw, _team_id = camp_setup
@@ -379,13 +379,13 @@ async def test_get_campaign_not_found(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            f"/api/v1/campaigns/{uuid4()}",
+            f"/api/v1/batches/{uuid4()}",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 404
 
 
-async def test_cancel_campaign_cascades_to_active_trials(
+async def test_cancel_batch_cascades_to_active_trials(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
@@ -395,7 +395,7 @@ async def test_cancel_campaign_cascades_to_active_trials(
         transport=transport, base_url="http://svc",
     ) as ac:
         post = await ac.post(
-            "/api/v1/campaigns",
+            "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "name": "to-cancel",
@@ -403,7 +403,7 @@ async def test_cancel_campaign_cascades_to_active_trials(
                 "trial_config": {},
             },
         )
-        cid = UUID(post.json()["campaign_id"])
+        cid = UUID(post.json()["batch_id"])
 
     # 1 queued, 1 succeeded — cancel should only touch the queued.
     sync_engine = create_engine(postgres_url)
@@ -414,12 +414,12 @@ async def test_cancel_campaign_cascades_to_active_trials(
         s.execute(insert(Trial).values(
             id=queued_id, task_id="local/mit-0", team_id=team_id,
             state="queued", config={}, requires_caps={},
-            submitted_at=datetime.now(UTC), campaign_id=cid,
+            submitted_at=datetime.now(UTC), batch_id=cid,
         ))
         s.execute(insert(Trial).values(
             id=succ_id, task_id="local/mit-1", team_id=team_id,
             state="succeeded", config={}, requires_caps={},
-            submitted_at=datetime.now(UTC), campaign_id=cid,
+            submitted_at=datetime.now(UTC), batch_id=cid,
             result={"aggregate_reward": 1.0},
         ))
         s.commit()
@@ -429,7 +429,7 @@ async def test_cancel_campaign_cascades_to_active_trials(
         transport=transport, base_url="http://svc",
     ) as ac:
         cancel = await ac.post(
-            f"/api/v1/campaigns/{cid}/cancel",
+            f"/api/v1/batches/{cid}/cancel",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert cancel.status_code == 200

@@ -1,14 +1,14 @@
-"""Campaigns CRUD (spec §5.3 / Plan 19).
+"""Batches CRUD (spec §5.3 / Plan 19, renamed in Plan 28).
 
 Routes:
-- POST /api/v1/campaigns          — create + immediately materialize
-                                    expected_trial_count from task_filter
-- GET  /api/v1/campaigns          — list with cursor pagination
-- GET  /api/v1/campaigns/{id}     — detail + trial roll-up (state summary,
-                                    aggregate reward, total cost) extracted
-                                    from Trial.result JSONB
-- POST /api/v1/campaigns/{id}/cancel — terminate the campaign + cascade-cancel
-                                    its still-active trials
+- POST /api/v1/batches          — create + immediately materialize
+                                  expected_trial_count from task_filter
+- GET  /api/v1/batches          — list with cursor pagination
+- GET  /api/v1/batches/{id}     — detail + trial roll-up (state summary,
+                                  aggregate reward, total cost) extracted
+                                  from Trial.result JSONB
+- POST /api/v1/batches/{id}/cancel — terminate the batch + cascade-cancel
+                                  its still-active trials
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
-from loom.db.schema import Campaign, Task, Trial
+from loom.db.schema import Batch, Task, Trial
 from loom_service.agent_catalog import known_names
 from loom_service.auth_guards import (
     is_admin,
@@ -37,7 +37,7 @@ from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 router = APIRouter()
 
 
-class _CreateCampaign(BaseModel):
+class _CreateBatch(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
     task_filter: dict[str, Any]
@@ -80,27 +80,27 @@ async def _resolve_task_filter(
 
 
 def _serialize(
-    c: Campaign,
+    b: Batch,
     *,
     summary: dict[str, int] | None = None,
     aggregate_reward: float | None = None,
     total_cost_usd: float = 0.0,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "id": str(c.id),
-        "team_id": str(c.team_id),
-        "name": c.name,
-        "description": c.description,
-        "task_filter": c.task_filter,
-        "trial_config": c.trial_config,
-        "state": c.state,
-        "created_at": c.created_at.isoformat(),
+        "id": str(b.id),
+        "team_id": str(b.team_id),
+        "name": b.name,
+        "description": b.description,
+        "task_filter": b.task_filter,
+        "trial_config": b.trial_config,
+        "state": b.state,
+        "created_at": b.created_at.isoformat(),
         "finished_at": (
-            c.finished_at.isoformat() if c.finished_at else None
+            b.finished_at.isoformat() if b.finished_at else None
         ),
-        "created_by_token_prefix": c.created_by_token_prefix,
-        "expected_trial_count": c.expected_trial_count,
-        "n_per_task": c.n_per_task,
+        "created_by_token_prefix": b.created_by_token_prefix,
+        "expected_trial_count": b.expected_trial_count,
+        "n_per_task": b.n_per_task,
     }
     if summary is not None:
         out["trial_summary"] = summary
@@ -109,10 +109,10 @@ def _serialize(
     return out
 
 
-@router.post("/campaigns", status_code=201)
-async def create_campaign(
+@router.post("/batches", status_code=201)
+async def create_batch(
     request: Request,
-    payload: _CreateCampaign,
+    payload: _CreateBatch,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:
@@ -122,12 +122,12 @@ async def create_campaign(
         if ctx.team_id is None:
             raise HTTPException(
                 status_code=400,
-                detail="admin tokens must scope campaigns to a team — "
+                detail="admin tokens must scope batches to a team — "
                        "use the service's per-team admin token",
             )
 
         # Plan 25: catalog-membership check on the agent_name embedded
-        # in trial_config. Mirrors POST /trials so a campaign that
+        # in trial_config. Mirrors POST /trials so a batch that
         # would 422 every fan-out is rejected up front.
         agent_name = payload.trial_config.get("agent_name")
         if isinstance(agent_name, str) and agent_name:
@@ -142,22 +142,22 @@ async def create_campaign(
         task_ids = await _resolve_task_filter(s, payload.task_filter)
         # Audit M2: a filter materializing to zero tasks (empty
         # `task_ids`, or a license/benchmark that matches no row)
-        # creates a campaign stuck in `submitted` forever —
-        # `next_campaign_state` only transitions on `expected > 0`.
+        # creates a batch stuck in `submitted` forever —
+        # `next_batch_state` only transitions on `expected > 0`.
         # Reject up front so the operator gets immediate feedback.
         if not task_ids:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"task_filter {payload.task_filter} matched zero "
-                    f"tasks; refusing to create empty campaign"
+                    f"tasks; refusing to create empty batch"
                 ),
             )
         token_prefix = (
             ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
         )
         expected = len(task_ids) * payload.n_per_task
-        c = Campaign(
+        b = Batch(
             team_id=ctx.team_id,
             name=payload.name,
             description=payload.description,
@@ -168,20 +168,20 @@ async def create_campaign(
             expected_trial_count=expected,
             n_per_task=payload.n_per_task,
         )
-        s.add(c)
+        s.add(b)
         await s.commit()
-        await s.refresh(c)
+        await s.refresh(b)
         return {
-            "campaign_id": str(c.id),
+            "batch_id": str(b.id),
             "expected_trial_count": expected,
-            "n_per_task": c.n_per_task,
-            "state": c.state,
-            "created_at": c.created_at.isoformat(),
+            "n_per_task": b.n_per_task,
+            "state": b.state,
+            "created_at": b.created_at.isoformat(),
         }
 
 
-@router.get("/campaigns")
-async def list_campaigns(
+@router.get("/batches")
+async def list_batches(
     request: Request,
     team_id: Annotated[UUID | None, Query()] = None,
     state: Annotated[
@@ -203,15 +203,15 @@ async def list_campaigns(
         elif not is_admin(ctx):
             target_team = ctx.team_id
 
-        stmt = select(Campaign).order_by(
-            Campaign.created_at.desc(), Campaign.id.desc(),
+        stmt = select(Batch).order_by(
+            Batch.created_at.desc(), Batch.id.desc(),
         )
         if target_team is not None:
-            stmt = stmt.where(Campaign.team_id == target_team)
+            stmt = stmt.where(Batch.team_id == target_team)
         if state:
             wanted = [x.strip() for x in state.split(",") if x.strip()]
             if wanted:
-                stmt = stmt.where(Campaign.state.in_(wanted))
+                stmt = stmt.where(Batch.state.in_(wanted))
         if cursor:
             try:
                 cur = decode_cursor(cursor)
@@ -221,15 +221,15 @@ async def list_campaigns(
                 ) from exc
             stmt = stmt.where(
                 or_(
-                    Campaign.created_at < cur.submitted_at,
+                    Batch.created_at < cur.submitted_at,
                     and_(
-                        Campaign.created_at == cur.submitted_at,
-                        Campaign.id < cur.id,
+                        Batch.created_at == cur.submitted_at,
+                        Batch.id < cur.id,
                     ),
                 ),
             )
         stmt = stmt.limit(limit + 1)
-        rows: Sequence[Campaign] = (
+        rows: Sequence[Batch] = (
             await s.execute(stmt)
         ).scalars().all()
 
@@ -269,29 +269,29 @@ def _rollup_from_result(result: dict[str, Any] | None) -> tuple[float | None, fl
     return reward_f, cost_f
 
 
-@router.get("/campaigns/{campaign_id}")
-async def get_campaign(
+@router.get("/batches/{batch_id}")
+async def get_batch(
     request: Request,
-    campaign_id: UUID,
+    batch_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:
         ctx = await verify_bearer_token(s, authorization)
         ctx = require_human_or_admin(ctx)
         require_scope(ctx, "read:own")
-        c = (await s.execute(
-            select(Campaign).where(Campaign.id == campaign_id),
+        b = (await s.execute(
+            select(Batch).where(Batch.id == batch_id),
         )).scalar_one_or_none()
-        if c is None:
+        if b is None:
             raise HTTPException(
-                status_code=404, detail="campaign not found",
+                status_code=404, detail="batch not found",
             )
-        require_team_or_admin(ctx, c.team_id)
+        require_team_or_admin(ctx, b.team_id)
 
         # Per-state counts come from a single GROUP BY query.
         state_counts = (await s.execute(
             select(Trial.state, func.count(Trial.id))
-            .where(Trial.campaign_id == campaign_id)
+            .where(Trial.batch_id == batch_id)
             .group_by(Trial.state),
         )).all()
         summary: dict[str, int] = {
@@ -306,11 +306,11 @@ async def get_campaign(
         # Reward + cost are inside Trial.result JSONB (no top-level
         # columns in v0.7). Pull every finished row's result and roll
         # up in Python — finished-trial count is bounded by
-        # expected_trial_count which the campaign already knows.
+        # expected_trial_count which the batch already knows.
         results = (await s.execute(
             select(Trial.result).where(
                 and_(
-                    Trial.campaign_id == campaign_id,
+                    Trial.batch_id == batch_id,
                     Trial.state.in_(["succeeded", "failed"]),
                 ),
             ),
@@ -327,38 +327,38 @@ async def get_campaign(
         avg_reward = (reward_sum / reward_n) if reward_n > 0 else None
 
     return _serialize(
-        c,
+        b,
         summary=summary,
         aggregate_reward=avg_reward,
         total_cost_usd=cost_total,
     )
 
 
-@router.post("/campaigns/{campaign_id}/cancel")
-async def cancel_campaign(
+@router.post("/batches/{batch_id}/cancel")
+async def cancel_batch(
     request: Request,
-    campaign_id: UUID,
+    batch_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as s:
         ctx = await verify_bearer_token(s, authorization)
         ctx = require_human_or_admin(ctx)
         require_scope(ctx, "submit")
-        c = (await s.execute(
-            select(Campaign).where(Campaign.id == campaign_id),
+        b = (await s.execute(
+            select(Batch).where(Batch.id == batch_id),
         )).scalar_one_or_none()
-        if c is None:
+        if b is None:
             raise HTTPException(
-                status_code=404, detail="campaign not found",
+                status_code=404, detail="batch not found",
             )
-        require_team_or_admin(ctx, c.team_id)
+        require_team_or_admin(ctx, b.team_id)
         now = datetime.now(UTC)
         await s.execute(
-            update(Campaign)
-            .where(Campaign.id == campaign_id)
+            update(Batch)
+            .where(Batch.id == batch_id)
             .values(state="cancelled", finished_at=now),
         )
-        # Cascade-cancel still-active trials in this campaign. We do
+        # Cascade-cancel still-active trials in this batch. We do
         # NOT cancel queued trials whose worker may already be partway
         # through claim; the CP's existing cancel endpoint (Plan 5)
         # handles graceful interruption when called per-trial. Here we
@@ -368,7 +368,7 @@ async def cancel_campaign(
             update(Trial)
             .where(
                 and_(
-                    Trial.campaign_id == campaign_id,
+                    Trial.batch_id == batch_id,
                     Trial.state.in_(["queued", "claimed", "running"]),
                 ),
             )
@@ -379,4 +379,4 @@ async def cancel_campaign(
             ),
         )
         await s.commit()
-    return {"campaign_id": str(campaign_id), "state": "cancelled"}
+    return {"batch_id": str(batch_id), "state": "cancelled"}

@@ -30,8 +30,8 @@ export function trialStateVariant(state: string): StatusVariant {
   }
 }
 
-/** Map a `campaign.state` from the Loom API to a `StatusPill` variant. */
-export function campaignStateVariant(state: string): StatusVariant {
+/** Map a `batch.state` from the Loom API to a `StatusPill` variant. */
+export function batchStateVariant(state: string): StatusVariant {
   switch (state) {
     case "finished":
       return "success";

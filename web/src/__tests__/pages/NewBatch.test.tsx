@@ -1,9 +1,9 @@
 /**
- * NewCampaign tests — every TrialConfig knob the form exposes flows
- * into the POST /campaigns body via structured fields, with proper
+ * NewBatch tests — every TrialConfig knob the form exposes flows
+ * into the POST /batches body via structured fields, with proper
  * client-side validation (empty filter blocked, fan-out cap,
  * clamping). Pin the body shape so a refactor that drops or renames
- * a field gets caught BEFORE the campaign route's `extra="forbid"`
+ * a field gets caught BEFORE the batch route's `extra="forbid"`
  * 422s.
  */
 
@@ -11,7 +11,7 @@ import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import NewCampaign from "../../pages/NewCampaign";
+import NewBatch from "../../pages/NewBatch";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const AGENTS_RESPONSE = {
@@ -58,7 +58,7 @@ function tasksResponse(
 }
 
 const CAMPAIGN_RESPONSE = {
-  campaign_id: "00000000-0000-0000-0000-000000000001",
+  batch_id: "00000000-0000-0000-0000-000000000001",
   expected_trial_count: 3,
   n_per_task: 1,
   state: "submitted",
@@ -83,16 +83,16 @@ function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
       if (url.includes("/api/v1/benchmarks")) return json(BENCHMARKS_RESPONSE);
       if (url.includes("/api/v1/tasks")) return json(tasksResponse(matching));
-      if (url.includes("/api/v1/campaigns")) return json(CAMPAIGN_RESPONSE, 201);
+      if (url.includes("/api/v1/batches")) return json(CAMPAIGN_RESPONSE, 201);
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
 }
 
-function campaignCall(
+function batchCall(
   spy: ReturnType<typeof vi.spyOn>,
 ): { url: string; body: Record<string, unknown> } | null {
   const found = spy.mock.calls.find(([u]) =>
-    String(u).includes("/api/v1/campaigns"),
+    String(u).includes("/api/v1/batches"),
   );
   if (!found) return null;
   return {
@@ -107,7 +107,7 @@ async function pickBenchmark(): Promise<void> {
   await user.selectOptions(benchmark, "humaneval");
 }
 
-describe("NewCampaign", () => {
+describe("NewBatch", () => {
   beforeEach(() => {
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");
@@ -117,21 +117,21 @@ describe("NewCampaign", () => {
   it("blocks submit when benchmark isn't picked", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
     // Local error banner shows "Pick a benchmark." — disambiguate
     // from the helper text "Pick a benchmark to count matching tasks."
     expect(
       await screen.findByText(/^Pick a benchmark\.$/i),
     ).pilot groupeInTheDocument();
-    expect(campaignCall(spy)).pilot groupeNull();
+    expect(batchCall(spy)).pilot groupeNull();
   });
 
   it("shows '<N> tasks match' once the count loads for the chosen benchmark", async () => {
     mockEndpoints({ matchingTasks: 12 });
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await pickBenchmark();
     expect(await screen.findByText(/12 tasks match/i)).pilot groupeInTheDocument();
@@ -140,22 +140,22 @@ describe("NewCampaign", () => {
   it("refuses to submit when zero tasks match", async () => {
     const spy = mockEndpoints({ matchingTasks: 0 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
     await pickBenchmark();
     await screen.findByText(/No tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
     expect(
       await screen.findByText(/No tasks match the current benchmark/i),
     ).pilot groupeInTheDocument();
-    expect(campaignCall(spy)).pilot groupeNull();
+    expect(batchCall(spy)).pilot groupeNull();
   });
 
   it("POSTs the minimal body when only required fields are set", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -163,9 +163,9 @@ describe("NewCampaign", () => {
     );
     await pickBenchmark();
     await screen.findByText(/3 tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const call = campaignCall(spy)!;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const call = batchCall(spy)!;
     expect(call.body.name).pilot groupe("my-camp");
     expect(call.body.task_filter).toEqual({ benchmark_id: "humaneval" });
     expect(call.body.n_per_task).pilot groupe(1);
@@ -180,7 +180,7 @@ describe("NewCampaign", () => {
   it("requires confirmation when matched_count * n_per_task exceeds the threshold", async () => {
     const spy = mockEndpoints({ matchingTasks: 250 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -188,24 +188,24 @@ describe("NewCampaign", () => {
     );
     await pickBenchmark();
     await screen.findByText(/250 tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
     expect(
-      await screen.findByText(/I understand this campaign will launch 250 trials/i),
+      await screen.findByText(/I understand this batch will launch 250 trials/i),
     ).pilot groupeInTheDocument();
-    expect(campaignCall(spy)).pilot groupeNull();
+    expect(batchCall(spy)).pilot groupeNull();
     await user.click(
       screen.getByRole("checkbox", {
-        name: /I understand this campaign will launch 250 trials/i,
+        name: /I understand this batch will launch 250 trials/i,
       }),
     );
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
   });
 
   it("clamps n_per_task above 100 down to 100 on blur", async () => {
     mockEndpoints({ matchingTasks: 1 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     const nField = screen.getByLabelText(/Samples per task/i);
     await user.clear(nField);
@@ -217,7 +217,7 @@ describe("NewCampaign", () => {
   it("emits a configurable retry block when max_attempts > 1 and a reason is ticked", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -234,9 +234,9 @@ describe("NewCampaign", () => {
     await user.click(
       screen.getByRole("checkbox", { name: /Agent timeout/i }),
     );
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const tc = campaignCall(spy)!.body.trial_config as Record<string, unknown>;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).toEqual({
       max_attempts: 5,
       retry_on: ["worker_crash", "agent_timeout"],
@@ -252,7 +252,7 @@ describe("NewCampaign", () => {
   it("emits skip_verifier + force_build when those toggles are on", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -266,9 +266,9 @@ describe("NewCampaign", () => {
     await user.click(
       screen.getByRole("checkbox", { name: /Skip verifier/i }),
     );
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const tc = campaignCall(spy)!.body.trial_config as Record<string, unknown>;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.force_build).pilot groupe(true);
     expect(tc.skip_verifier).pilot groupe(true);
   });
@@ -276,7 +276,7 @@ describe("NewCampaign", () => {
   it("emits submit_priority when changed from the default", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -287,15 +287,15 @@ describe("NewCampaign", () => {
     const prio = screen.getByLabelText(/Submit priority/i);
     await user.clear(prio);
     await user.type(prio, "300");
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const tc = campaignCall(spy)!.body.trial_config as Record<string, unknown>;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.submit_priority).pilot groupe(300);
   });
 
   it("materialises q → task_ids at submit time so the search actually narrows", async () => {
     // Critic X1: previously the search input updated the count
-    // preview but was dropped on submit (campaign ran the whole
+    // preview but was dropped on submit (batch ran the whole
     // benchmark). The form now passes task_filter.task_ids.
     const spy = vi
       .spyOn(global, "fetch")
@@ -318,11 +318,11 @@ describe("NewCampaign", () => {
             ]),
           );
         }
-        if (url.includes("/api/v1/campaigns")) return json(CAMPAIGN_RESPONSE, 201);
+        if (url.includes("/api/v1/batches")) return json(CAMPAIGN_RESPONSE, 201);
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -336,9 +336,9 @@ describe("NewCampaign", () => {
       "HumanEval/",
     );
     await screen.findByText(/2 tasks match/i);
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const call = campaignCall(spy)!;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const call = batchCall(spy)!;
     expect(call.body.task_filter).toEqual({
       benchmark_id: "humaneval",
       task_ids: ["humaneval/HumanEval/0", "humaneval/HumanEval/10"],
@@ -348,7 +348,7 @@ describe("NewCampaign", () => {
   it("emits NO retry block when only max_attempts is bumped (no reasons ticked)", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -362,16 +362,16 @@ describe("NewCampaign", () => {
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "5");
     // Deliberately tick NO retry reasons.
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const tc = campaignCall(spy)!.body.trial_config as Record<string, unknown>;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).pilot groupeUndefined();
   });
 
   it("emits NO retry block when reasons are ticked but max_attempts is still 1", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -384,16 +384,16 @@ describe("NewCampaign", () => {
     await user.click(
       screen.getByRole("checkbox", { name: /Worker crash/i }),
     );
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
-    await vi.waitFor(() => expect(campaignCall(spy)).not.pilot groupeNull());
-    const tc = campaignCall(spy)!.body.trial_config as Record<string, unknown>;
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).pilot groupeUndefined();
   });
 
   it("rejects when backoff max < backoff base", async () => {
     const spy = mockEndpoints({ matchingTasks: 3 });
     const user = userEvent.setup();
-    renderWithProviders(<NewCampaign />);
+    renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
@@ -411,10 +411,10 @@ describe("NewCampaign", () => {
     const base = screen.getByLabelText(/Backoff base/i);
     await user.clear(base);
     await user.type(base, "1000");
-    await user.click(screen.getByRole("button", { name: /Create campaign/i }));
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
     expect(
       await screen.findByText(/Backoff max seconds must be ≥/i),
     ).pilot groupeInTheDocument();
-    expect(campaignCall(spy)).pilot groupeNull();
+    expect(batchCall(spy)).pilot groupeNull();
   });
 });

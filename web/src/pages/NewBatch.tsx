@@ -1,5 +1,5 @@
 /**
- * Create a new campaign. Plan 27 redesign — full TrialConfig
+ * Create a new batch. Plan 27 redesign — full TrialConfig
  * surface, every knob the API accepts is reachable from the form
  * with inline help text. Highlights:
  *
@@ -9,7 +9,7 @@
  *     benchmark. Live "N tasks match" preview is debounced.
  *     At submit time, when the search is non-empty we materialize
  *     the matching task ids into the `task_ids` filter so the
- *     campaign actually narrows (was previously dropped on the
+ *     batch actually narrows (was previously dropped on the
  *     floor — the visible count and the submitted filter
  *     disagreed).
  *   - Agent dropdown is one flat sorted list (the built-in vs
@@ -25,8 +25,8 @@
  *     `retry_on` non-empty (was emitting misleading no-op blocks
  *     when only one of the two conditions held).
  *
- *   Multi-benchmark / multi-agent comparison campaigns are deferred —
- *   they need a Campaign.variants column + runner fan-out changes,
+ *   Multi-benchmark / multi-agent comparison batches are deferred —
+ *   they need a Batch.variants column + runner fan-out changes,
  *   not just a UI tweak.
  */
 
@@ -185,7 +185,7 @@ function buildAdvancedConfig(
   // non-empty. Either alone is a no-op (the runner needs both a reason
   // to retry on AND a budget to spend), so emitting a half-config in
   // those cases would look like "I configured retry" in the saved
-  // campaign while doing nothing.
+  // batch while doing nothing.
   const maxAttempts = numOrErr(s.maxAttempts, "Max attempts", { min: 1, max: 20 });
   if (typeof maxAttempts === "string") return { ok: false, error: maxAttempts };
   const wantsRetry = maxAttempts > 1 && s.retryOn.size > 0;
@@ -245,7 +245,7 @@ function FieldLabel({
   );
 }
 
-export default function NewCampaign(): JSX.Element {
+export default function NewBatch(): JSX.Element {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [benchmark, setBenchmark] = useState("");
@@ -295,9 +295,9 @@ export default function NewCampaign(): JSX.Element {
       task_filter: Record<string, unknown>;
       trial_config: Record<string, unknown>;
       n_per_task: number;
-    }) => api.createCampaign(body),
+    }) => api.createBatch(body),
     onSuccess: (res) => {
-      navigate(`/campaigns/${res.campaign_id}`);
+      navigate(`/batches/${res.batch_id}`);
     },
   });
 
@@ -384,7 +384,7 @@ export default function NewCampaign(): JSX.Element {
     // matching ids into `task_filter.task_ids`. The backend filter
     // accepts {license, task_ids, benchmark_id} — there's no server
     // side `q` knob — so without this the search would be theatre
-    // and the campaign would fan out to the whole benchmark.
+    // and the batch would fan out to the whole benchmark.
     if (debouncedTaskQuery.trim()) {
       const items = matchedTasks.data?.items ?? [];
       if (matchedCount! > items.length) {
@@ -430,7 +430,7 @@ export default function NewCampaign(): JSX.Element {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-slate-900">New campaign</h1>
+        <h1 className="text-2xl font-bold text-slate-900">New batch</h1>
         <p className="mt-1 text-sm text-slate-500">
           Run a benchmark slate with one (agent, model) combination.
           Multi-agent / multi-model comparison runs aren't supported
@@ -454,7 +454,7 @@ export default function NewCampaign(): JSX.Element {
             <Input
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What's this campaign testing?"
+              placeholder="What's this batch testing?"
             />
           </label>
         </Card.Body>
@@ -798,7 +798,7 @@ export default function NewCampaign(): JSX.Element {
             className="mt-0.5 h-4 w-4 rounded border-amber-300"
           />
           <span>
-            I understand this campaign will launch {totalTrials} trials.
+            I understand this batch will launch {totalTrials} trials.
           </span>
         </label>
       ) : null}
@@ -816,7 +816,7 @@ export default function NewCampaign(): JSX.Element {
           onClick={submit}
           disabled={create.isPending}
         >
-          {create.isPending ? "Creating…" : "Create campaign"}
+          {create.isPending ? "Creating…" : "Create batch"}
         </Button>
       </div>
     </div>

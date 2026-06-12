@@ -1,5 +1,5 @@
 /**
- * Agent + model picker shared by SubmitTrialModal + NewCampaign.
+ * Agent + model picker shared by SubmitTrialModal + NewBatch.
  *
  * Behavior:
  *   - Agents: one flat alphabetical dropdown. Built-in vs

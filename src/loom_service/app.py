@@ -19,13 +19,13 @@ from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom_service.campaign_runner import run_loop
+from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
     agents,
     atif,
+    batches,
     benchmarks,
-    campaigns,
     health,
     models,
     rate_cards,
@@ -83,16 +83,16 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
 
-        # Plan 19: campaign runner background task. Picks up
-        # submitted/running campaigns on each poll, fans out trial
+        # Plan 19: batch runner background task. Picks up
+        # submitted/running batches on each poll, fans out trial
         # submissions to Control Plane via the shared http_client.
         # The runner's CP token is read from settings — without it
         # every CP submit 401s, so the loop short-circuits with a
         # warning per tick and waits for the operator to provision
         # the secret.
         runner_token = (
-            settings.campaign_runner_cp_token.get_secret_value()
-            if settings.campaign_runner_cp_token is not None
+            settings.batch_runner_cp_token.get_secret_value()
+            if settings.batch_runner_cp_token is not None
             else None
         )
         runner_authorization = (
@@ -102,18 +102,18 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             run_loop(
                 session_factory=session_factory,
                 http_client=http_client,
-                batch_size=settings.campaign_runner_batch_size,
+                batch_size=settings.batch_runner_batch_size,
                 submit_rate_per_sec=(
-                    settings.campaign_runner_submit_rate_per_sec
+                    settings.batch_runner_submit_rate_per_sec
                 ),
                 poll_interval_sec=(
-                    settings.campaign_runner_poll_interval_sec
+                    settings.batch_runner_poll_interval_sec
                 ),
                 cp_authorization=runner_authorization,
             ),
-            name="loom-svc-campaign-runner",
+            name="loom-svc-batch-runner",
         )
-        app.state.campaign_runner_task = runner_task
+        app.state.batch_runner_task = runner_task
 
         try:
             yield
@@ -158,7 +158,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(atif.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(benchmarks.router, prefix="/api/v1")
-    app.include_router(campaigns.router, prefix="/api/v1")
+    app.include_router(batches.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
     app.include_router(usage.router, prefix="/api/v1")
