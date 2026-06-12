@@ -10,6 +10,7 @@ from pathlib import Path
 from loom.trajectory.storage import MinioObjectStore
 from loom_benchmark_tool.import_cmd import run_import
 from loom_benchmark_tool.list_cmd import run_list
+from loom_benchmark_tool.publish_cmd import run_publish
 from loom_benchmark_tool.verify_cmd import run_verify
 
 
@@ -46,6 +47,41 @@ def main() -> None:
     p_import.add_argument("--limit", type=int, default=None)
     p_import.add_argument("--imported-by", default=None)
     p_import.add_argument("--refresh", action="store_true")
+
+    p_publish = sub.add_parser(
+        "publish",
+        help=(
+            "Convert + push a benchmark's task bundles to a HuggingFace "
+            "dataset repo. Loom-team-side operation; run once per "
+            "benchmark per release."
+        ),
+    )
+    p_publish.add_argument("benchmark")
+    p_publish.add_argument(
+        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+        help=(
+            "HF namespace to publish under (default: env LOOM_HF_ORG, "
+            "falling back to 'PRHW')."
+        ),
+    )
+    p_publish.add_argument(
+        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        help="HF write token (env: HF_TOKEN). Required.",
+    )
+    p_publish.add_argument(
+        "--cache-dir", type=Path,
+        default=Path(
+            os.environ.get(
+                "LOOM_BENCHMARK_CACHE", "/tmp/loom-benchmark-cache",
+            ),
+        ),
+    )
+    p_publish.add_argument("--limit", type=int, default=None)
+    p_publish.add_argument(
+        "--private", action="store_true",
+        help="Make the HF dataset private (default: public).",
+    )
+    p_publish.add_argument("--refresh", action="store_true")
 
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("benchmark")
@@ -96,6 +132,26 @@ def main() -> None:
             refresh=args.refresh,
         ))
         print(f"converted={stats['converted']} warnings={stats['warnings']}")
+        return
+    if args.cmd == "publish":
+        if not args.hf_token:
+            p.error("publish requires --hf-token / env HF_TOKEN")
+        result = run_publish(
+            benchmark=args.benchmark,
+            hf_org=args.hf_org,
+            hf_token=args.hf_token,
+            cache_dir=args.cache_dir,
+            limit=args.limit,
+            private=args.private,
+            refresh=args.refresh,
+        )
+        print(
+            f"publish {args.benchmark}: "
+            f"published={result['published']} "
+            f"warnings={result['warnings']} "
+            f"repo={result['repo_id']} "
+            f"rev={result['revision']}",
+        )
         return
     if args.cmd == "verify":
         missing = [

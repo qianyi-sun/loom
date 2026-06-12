@@ -1,0 +1,241 @@
+"""`python -m loom_benchmark_tool publish <benchmark>` — convert + push
+the bundles to a HuggingFace dataset repo.
+
+This is the Loom-team-side operation. Run it ONCE per benchmark per
+release (or on adapter changes). It:
+
+1. Fetches the upstream source (cached locally).
+2. Walks every BenchmarkInstance, converts to a Loom task bundle.
+3. Stages the bundles in a single tempdir laid out as
+   `{instance_id}/<bundle files…>`.
+4. Computes a per-task `sha256` checksum.
+5. Writes `manifest.json` at the root.
+6. Pushes the whole tree to `{org}/loom-benchmark-{benchmark}` on HF
+   in one upload commit.
+
+Per-deploy seeding then calls `register` (separate subcommand) which
+just reads the manifest off HF and inserts task rows pointing at
+`hf://{org}/loom-benchmark-{benchmark}@<revision>/{instance_id}/`. No
+upstream conversion needed per-deploy.
+
+The manifest schema lives at the top of this file so the register
+command + worker can read it without reaching back into adapter code.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import tomllib
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from huggingface_hub import HfApi
+from loom_benchmarks.fetch import fetch_upstream
+from loom_benchmarks.registry import REGISTRY
+
+from loom_benchmark_tool.import_cmd import _validate_instance_id
+
+# Manifest schema version. Bump when the per-task field set changes in
+# a way the register/worker code needs to fork on. The shape:
+#
+# {
+#   "schema_version": int,
+#   "benchmark_id": str,
+#   "display_name": str,
+#   "license_spdx": str,
+#   "license_url": str,
+#   "upstream_kind": str,
+#   "upstream_locator": str,
+#   "upstream_revision": str,
+#   "loom_adapter_version": str | null,
+#   "published_at": str (ISO-8601 UTC),
+#   "splits": list[str],
+#   "task_count": int,
+#   "tasks": [
+#     {
+#       "task_id": str,            # the DB-level id (benchmark/instance)
+#       "instance_id": str,        # the adapter-level id
+#       "hf_path": str,            # path within the HF repo, ends in "/"
+#       "checksum": str,           # "sha256:..." over the bundle tree
+#       "license_spdx": str,
+#       "split": str,
+#     }
+#   ]
+# }
+MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_FILENAME = "manifest.json"
+
+
+def _safe_dirname(instance_id: str) -> str:
+    """Turn `HumanEval/0` into `HumanEval_0` so it's a single HF path
+    segment. The reverse mapping isn't needed by the worker — only the
+    manifest's `hf_path` field is consulted, and that's verbatim. The
+    `task_id` keeps the original slash form for the DB."""
+    return instance_id.replace("/", "_")
+
+
+def _bundle_checksum(bundle_dir: Path) -> str:
+    """Stable sha256 over every file in the bundle. Sorted by relative
+    path so independent re-builds produce the same digest if the
+    bundle contents match byte-for-byte. Same hashing scheme the
+    import command writes into `tasks.checksum`."""
+    h = hashlib.sha256()
+    for p in sorted(bundle_dir.rglob("*")):
+        if p.is_dir():
+            continue
+        rel = p.relative_to(bundle_dir).as_posix()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\0")
+    return f"sha256:{h.hexdigest()}"
+
+
+def repo_id_for(org: str, benchmark: str) -> str:
+    """`PRHW/loom-benchmark-humaneval`. Keep this in one place so the
+    register command + worker derive the same id from the manifest."""
+    return f"{org}/loom-benchmark-{benchmark}"
+
+
+def run_publish(
+    *,
+    benchmark: str,
+    hf_org: str,
+    hf_token: str,
+    cache_dir: Path,
+    limit: int | None = None,
+    private: bool = False,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Convert + push. Returns
+    `{"published": N, "warnings": M, "repo_id": str, "revision": str}`.
+
+    The HF dataset repo is created (idempotently) under the given org,
+    then every converted bundle is uploaded under
+    `{instance_id_safe}/` and `manifest.json` is written at the root.
+    A single `HfApi.upload_folder` call wraps the whole tree in one
+    commit, so partial failures don't leave half-published trees.
+
+    `private=True` makes the dataset private (gated by HF token). The
+    default is public — Loom-team-shipped benchmarks are all
+    redistributable per their upstream licenses; if you're publishing
+    a license-restricted benchmark, pass private=True and document the
+    access path separately.
+    """
+    adapter = REGISTRY[benchmark]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = fetch_upstream(
+        adapter.upstream_source, cache_root=cache_dir, refresh=refresh,
+    )
+
+    api = HfApi(token=hf_token)
+    repo_id = repo_id_for(hf_org, benchmark)
+    # `exist_ok=True` — first publish creates, subsequent re-publish
+    # under the same id just adds a commit.
+    api.create_repo(
+        repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True,
+    )
+
+    stats = {"published": 0, "warnings": 0}
+    task_entries: list[dict[str, Any]] = []
+
+    with tempfile.TemporaryDirectory() as staging:
+        staging_dir = Path(staging)
+
+        for split in adapter.splits:
+            count = 0
+            for inst in adapter.list_instances(
+                source_dir=source_dir, split=split,
+            ):
+                if limit is not None and count >= limit:
+                    break
+                count += 1
+                _validate_instance_id(inst.instance_id)
+                safe_name = _safe_dirname(inst.instance_id)
+                bundle_dir = staging_dir / safe_name
+                bundle_dir.mkdir(parents=True, exist_ok=True)
+                converted = adapter.convert_instance(inst, out_dir=bundle_dir)
+                checksum = _bundle_checksum(bundle_dir)
+                # Sanity-check the adapter's claimed checksum matches
+                # our recomputed one. Misalignment would mean the DB
+                # row's checksum (set at register time) won't match what
+                # the worker fetches. Fail loudly here rather than at
+                # claim time on a remote box.
+                if converted.checksum != checksum:
+                    stats["warnings"] += 1
+                task_entries.append({
+                    "task_id": converted.task_id,
+                    "instance_id": inst.instance_id,
+                    "hf_path": f"{safe_name}/",
+                    "checksum": checksum,
+                    "license_spdx": converted.license_spdx,
+                    "split": split,
+                })
+                # Sniff out task.toml so the manifest can echo a
+                # canonical step_count — convenient for the SPA.
+                toml_path = bundle_dir / "task.toml"
+                if toml_path.exists():
+                    try:
+                        tomllib.loads(toml_path.read_text())
+                    except tomllib.TOMLDecodeError:
+                        stats["warnings"] += 1
+                stats["published"] += 1
+
+        manifest = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "benchmark_id": adapter.name,
+            "display_name": adapter.display_name,
+            "license_spdx": adapter.license_spdx,
+            "license_url": adapter.license_url,
+            "upstream_kind": adapter.upstream_source.kind,
+            "upstream_locator": adapter.upstream_source.locator,
+            "upstream_revision": adapter.upstream_source.revision or "",
+            "loom_adapter_version": getattr(adapter, "version", None),
+            "published_at": datetime.now(UTC).isoformat(),
+            "splits": list(adapter.splits),
+            "task_count": len(task_entries),
+            "tasks": task_entries,
+        }
+        (staging_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        )
+
+        commit_info = api.upload_folder(
+            repo_id=repo_id,
+            repo_type="dataset",
+            folder_path=str(staging_dir),
+            commit_message=(
+                f"Publish {adapter.name}: {len(task_entries)} task(s) "
+                f"({adapter.upstream_source.locator})"
+            ),
+        )
+
+    return {
+        "published": stats["published"],
+        "warnings": stats["warnings"],
+        "repo_id": repo_id,
+        "revision": getattr(commit_info, "oid", "main"),
+    }
+
+
+def read_manifest_from_hf(
+    *, hf_org: str, benchmark: str, hf_token: str | None = None,
+    revision: str = "main",
+) -> dict[str, Any]:
+    """Download + parse manifest.json from the dataset repo. Used by
+    the register command and by tests that want to introspect a
+    published benchmark without re-running upstream conversion."""
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(
+        repo_id=repo_id_for(hf_org, benchmark),
+        filename=MANIFEST_FILENAME,
+        repo_type="dataset",
+        revision=revision,
+        token=hf_token,
+    )
+    data: dict[str, Any] = json.loads(Path(path).read_text())
+    return data
