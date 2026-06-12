@@ -114,13 +114,25 @@ for the speedup history.
 
 ## Workflow
 
-Single-owner direct-to-dev today; see [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
-for the commit/PR/DoD details and the GitHub-flow target state for
-when external contributors join (tracked at
-[`#254`](https://github.com/carinrc/loom/issues/254)).
+Use PRs into `dev` for normal development; `main` is release-only and
+receives promotion PRs from `dev`. See
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for commit style, PR
+requirements, and the definition of done. Public-readiness work is
+tracked at [`#330`](https://github.com/carinrc/loom/issues/330), and
+the broader GitHub-flow cleanup remains tracked at
+[`#254`](https://github.com/carinrc/loom/issues/254).
 
 Merge mechanics:
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks` is the only required status check
-- `enforce_admins: true` — admins go through the gate too
+- `enforce_admins: true` on `dev` - admins go through the gate too
+
+Secrets and side-effect workflows:
+- Pull request workflows use read-only `GITHUB_TOKEN` permissions and
+  must not receive publish or deployment secrets.
+- The benchmark publishing workflow uses the protected
+  `huggingface-publish` environment and should only expose `HF_TOKEN`
+  after branch restrictions and maintainer approval pass.
+- Deployment or publish workflow changes need platform-admin review
+  because they change the public-repository security boundary.

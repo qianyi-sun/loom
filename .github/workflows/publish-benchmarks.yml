@@ -8,9 +8,11 @@
 #   - workflow_dispatch (manual): publish a single benchmark by slug,
 #     or "all" to re-publish every adapter in REGISTRY.
 #
-# Requires repo secret HF_TOKEN with write access to the
-# {HF_ORG}/loom-benchmark-* dataset repos. Default org = PRHW; override
-# by setting repo variable HF_ORG.
+# Requires a GitHub Environment named `huggingface-publish` with:
+#   - secret HF_TOKEN - write-scope HF token for the configured org
+#   - optional variable HF_ORG - defaults to "PRHW"
+#   - deployment branches restricted to dev/main
+#   - a maintainer approval gate before the token is exposed
 #
 # The publish itself is a side effect — failing to publish doesn't
 # break the source tree, so this workflow is intentionally non-blocking
@@ -18,6 +20,9 @@
 # benchmarks succeeded/failed so adapter authors can see at a glance.
 
 name: Publish benchmarks to HF Hub
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -41,6 +46,7 @@ jobs:
   detect:
     name: Detect changed adapters
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       benchmarks: ${{ steps.list.outputs.benchmarks }}
     steps:
@@ -51,7 +57,6 @@ jobs:
         name: Compute benchmark list (JSON for matrix)
         run: |
           set -euo pipefail
-          INPUT="${{ github.event.inputs.benchmark || '' }}"
           python3 <<'PY' > /tmp/list.json
           import json, os, pathlib, subprocess, sys
           adapter_dir = pathlib.Path(
@@ -87,7 +92,7 @@ jobs:
           PY
           BENCHMARKS=$(cat /tmp/list.json)
           echo "Detected: $BENCHMARKS"
-          echo "benchmarks=$BENCHMARKS" >> $GITHUB_OUTPUT
+          echo "benchmarks=$BENCHMARKS" >> "$GITHUB_OUTPUT"
         env:
           EV_INPUT: ${{ github.event.inputs.benchmark || '' }}
 
@@ -96,6 +101,10 @@ jobs:
     needs: detect
     if: needs.detect.outputs.benchmarks != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: huggingface-publish
+      url: https://huggingface.co/datasets/${{ vars.HF_ORG || 'PRHW' }}/loom-benchmark-${{ matrix.benchmark }}
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -106,7 +115,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v8.2.0
       - name: Install Python + deps
         run: |
           uv venv .venv --python 3.11
@@ -114,15 +123,14 @@ jobs:
           uv pip install -e packages/loom-benchmarks
       - name: Publish ${{ matrix.benchmark }}
         env:
+          # Resolves from the `huggingface-publish` environment.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LOOM_HF_ORG: ${{ vars.HF_ORG || 'PRHW' }}
+          INPUT_LIMIT: ${{ github.event.inputs.limit || '' }}
         continue-on-error: true
         run: |
-          LIMIT_FLAG=""
-          if [ -n "${{ github.event.inputs.limit }}" ]; then
-            LIMIT_FLAG="--limit ${{ github.event.inputs.limit }}"
+          args=("${{ matrix.benchmark }}" --hf-org "$LOOM_HF_ORG")
+          if [ -n "$INPUT_LIMIT" ]; then
+            args+=(--limit "$INPUT_LIMIT")
           fi
-          .venv/bin/python -m loom_benchmark_tool publish \
-            "${{ matrix.benchmark }}" \
-            --hf-org "$LOOM_HF_ORG" \
-            $LIMIT_FLAG
+          .venv/bin/python -m loom_benchmark_tool publish "${args[@]}"

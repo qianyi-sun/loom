@@ -268,3 +268,20 @@ Drill down: [`docs/architecture/overview.md`](docs/architecture/overview.md).
 What shipped when: GitHub releases + `git log` (no separate
 CHANGELOG). [`CONTRIBUTING.md`](CONTRIBUTING.md) and
 [`SECURITY.md`](SECURITY.md) for the workflow + reporting policy.
+
+---
+
+## Repository governance
+
+Loom is licensed under Apache-2.0. Normal development uses PRs into
+`dev`; `main` is reserved for release promotion. The required
+`repository-checks` workflow runs with read-only default GitHub token
+permissions. Workflows that publish benchmark bundles or deploy
+infrastructure use protected GitHub Environments so secrets are not
+available to pull request code.
+
+The repository is being prepared for public visibility in
+[#330](https://github.com/carinrc/loom/issues/330). Before the final
+visibility change, maintainers should post a full Git-history secret
+scan result, confirm GitHub security settings, and validate the public
+workflow once as a private repo.

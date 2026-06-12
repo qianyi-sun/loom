@@ -41,7 +41,15 @@ jobs:
       - name: Set up Python 3.11
         run: uv python install 3.11
 
+      - name: Cache .venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
+
       - name: Install project + dev deps + sibling packages
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"
@@ -126,7 +134,15 @@ jobs:
       - name: Set up Python 3.11
         run: uv python install 3.11
 
+      - name: Cache .venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
+
       - name: Install project + dev deps + sibling packages
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"

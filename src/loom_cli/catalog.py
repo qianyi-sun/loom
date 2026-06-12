@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -89,7 +89,7 @@ def _fetch_payload(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme == "file":
         try:
-            return json.loads(Path(parsed.path).read_text())  # type: ignore[no-any-return]
+            return json.loads(Path(unquote(parsed.path)).read_text())  # type: ignore[no-any-return]
         except (OSError, json.JSONDecodeError) as exc:
             raise CatalogFetchError(f"failed to read {url}: {exc}") from exc
     cache = _cache_path(url)

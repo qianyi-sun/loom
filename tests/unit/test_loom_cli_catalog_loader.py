@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -46,6 +47,27 @@ def test_load_default_returns_non_builtin_entries(
     tb2 = next(e for e in entries if e.slug == "terminal-bench-2")
     assert tb2.source == "catalog"
     assert tb2.available_pip_spec == "loom-benchmark-terminal-bench-2"
+
+
+def test_file_catalog_url_decodes_escaped_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LOOM_CACHE_DIR", str(tmp_path / "cache"))
+    catalog_dir = tmp_path / "dir with spaces"
+    catalog_dir.mkdir()
+    catalog_file = catalog_dir / "catalog.json"
+    catalog_file.write_text(json.dumps({
+        "catalog_version": 1,
+        "entries": [{
+            "slug": "demo", "display_name": "Demo", "license_spdx": "MIT",
+            "license_url": "https://x.example", "task_count": 1,
+            "available": "loom-benchmark-demo",
+        }],
+    }))
+
+    entries = load_catalog_entries(url=catalog_file.as_uri())
+
+    assert [entry.slug for entry in entries] == ["demo"]
 
 
 def test_remote_fetch_is_cached_to_disk(

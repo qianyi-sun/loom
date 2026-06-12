@@ -1,16 +1,15 @@
 # Contributing
 
-> **Current state (2026-06-08):** Loom is single-owner local-development.
-> All work happens directly on `dev`; PRs are used as a CI-verification
-> vehicle (the squash-merge from PR is the merge mechanic since the repo
-> forbids merge-commits and non-linear history). CI runs on every push
-> and PR (`.github/workflows/ci.yml`: ruff + mypy --strict + the fast
-> pytest tier including sibling packages gate `dev`; the integration
-> suite is opt-in via the `ci:integration` PR label). There is no
-> external-contributor workflow in force; the "Future contributor
-> workflow" section at the bottom describes the GitHub-flow target.
+> **Current state (2026-06-12):** Loom is preparing for public
+> repository visibility. Normal changes should land through PRs into
+> `dev`; `main` remains reserved for release promotion from `dev`.
+> CI runs the required `repository-checks` gate on pushes and PRs, while
+> the Docker-backed integration tier is opt-in on PRs via the
+> `ci:integration` label and automatic on protected branch pushes.
+> Workflows that need publish or deployment secrets must use protected
+> GitHub Environments and must not expose secrets to pull request code.
 
-## Active Workflow (Single-Owner Mode)
+## Active Workflow
 
 ### 1. Per-task TDD commit granularity
 
@@ -23,9 +22,9 @@ fix(loom.driver): iptables guard for vanilla images
 ```
 
 The trail documents the build-test-fix progression for later audit.
-PR-mode merges squash the per-task commits (the repo forbids
-merge-commits + rebase-merges); the per-task history stays on the
-pre-merge branch and is recoverable via the PR's "commits" view.
+PR-mode merges squash the per-task commits. The repo forbids
+merge commits and rebase merges, so the per-task history stays on the
+pre-merge branch and remains recoverable via the PR's "commits" view.
 
 ### 2. Commit Style
 
@@ -60,8 +59,10 @@ Before declaring work shipped:
   the docker group)
 - `README.md` / relevant `docs/architecture/*.md` updated if the
   architectural surface changed
+- All affected Markdown docs were scanned and updated for code,
+  workflow, deployment, runtime, dependency, or contract changes
 - Post-ship self-audit pass (re-read each touched file once more for
-  regressions, edge cases, type drift) — separate commit if anything
+  regressions, edge cases, type drift) - separate commit if anything
   surfaces
 
 ## Owner-Local Files
@@ -80,12 +81,7 @@ Per-arc tracking lives in the arc-tagged epic
 Deferred long-horizon items use
 [`deferred:v1.5`](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
 
-## Future Contributor Workflow
-
-When Loom opens to external contributors, the workflow switches to a
-fuller GitHub flow. This section describes the intended target state.
-
-### Branching
+## Branching
 
 - `feature/<short-name>` for product or platform features
 - `infra/<short-name>` for deployment and infrastructure work
@@ -96,15 +92,18 @@ fuller GitHub flow. This section describes the intended target state.
 Feature branches cut from `dev`. PRs target `dev`. `main` is reserved
 for release promotion PRs from `dev`.
 
-### Pull Requests
+## Pull Requests
 
 - Link to a GitHub issue with acceptance criteria
 - Keep one concern per PR
 - Use the PR template
 - Wait for CI green and required review before merge
 - Squash-merge to keep `dev` linear
+- Do not add credentials, private endpoints, local environment files, or
+  generated run artifacts
+- Do not expect publish/deploy secrets to be available in PR workflows
 
-### Release Flow
+## Release Flow
 
 1. After dev validation passes for a planned release, open a release
    issue

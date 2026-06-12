@@ -74,7 +74,6 @@ Start with the overview, drill into the area you care about:
 
 ## Reference
 
-- `../CONTRIBUTING.md` — single-owner workflow, commit style,
-  Definition of Done
+- `../CONTRIBUTING.md` — PR workflow, commit style, Definition of Done
 - GitHub releases + `git log` — what shipped when (no separate
   CHANGELOG; release notes auto-generated from squash-merge PR titles)
