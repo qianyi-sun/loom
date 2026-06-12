@@ -95,9 +95,10 @@ LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI runs the fast
-tier on `ci:integration`-labeled PRs and both tiers on push to
-dev/main; see [`#259`](https://github.com/carinrc/loom/issues/259)
-for the speedup history.
+tier on every push/PR and runs the Docker/testcontainers integration
+tier only on `ci:integration`-labeled PRs or manual workflow dispatch;
+see [`#7`](https://github.com/carinrc/loom/issues/7) for the slow-tier
+tuning work.
 
 ## Coverage gates
 
@@ -106,9 +107,8 @@ for the speedup history.
   `repository-checks` for everyone.
 - **Combined fast + integration:** measured + posted to the GitHub
   Actions step summary (workflow run page) when integration ran
-  (i.e., `ci:integration` label or push). Not yet gated — see
-  [`#260`](https://github.com/carinrc/loom/issues/260) for the
-  staged rollout.
+  (i.e., `ci:integration` label or manual dispatch). Not yet gated;
+  keep changes aligned with [`#7`](https://github.com/carinrc/loom/issues/7).
 - Baseline at latest dev tip: ~72 % fast, ~85 % combined.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
@@ -117,10 +117,10 @@ for the speedup history.
 Use PRs into `dev` for normal development; `main` is release-only and
 receives promotion PRs from `dev`. See
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for commit style, PR
-requirements, and the definition of done. Public-readiness work is
-tracked at [`#330`](https://github.com/carinrc/loom/issues/330), and
+requirements, and the definition of done. Public-readiness work was
+completed in [`#12`](https://github.com/carinrc/loom/issues/12), and
 the broader GitHub-flow cleanup remains tracked at
-[`#254`](https://github.com/carinrc/loom/issues/254).
+[`#6`](https://github.com/carinrc/loom/issues/6).
 
 Merge mechanics:
 - Squash-only (no rebase merge, no merge commits)

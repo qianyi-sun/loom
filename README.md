@@ -280,8 +280,8 @@ permissions. Workflows that publish benchmark bundles or deploy
 infrastructure use protected GitHub Environments so secrets are not
 available to pull request code.
 
-Repository public-readiness is tracked in
-[#330](https://github.com/carinrc/loom/issues/330). Maintainers should
+Repository public-readiness was completed in
+[#12](https://github.com/carinrc/loom/issues/12). Maintainers should
 keep branch protection, read-only default workflow tokens, selected
 Actions sources, protected publish/deploy environments, and secret
 scanning enabled. External pull requests are not accepted yet; use

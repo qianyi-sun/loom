@@ -1,10 +1,6 @@
-# Auto-publish benchmark bundles to HuggingFace Hub.
+# Publish benchmark bundles to HuggingFace Hub.
 #
 # Triggers:
-#   - push to dev/main when any adapter file under
-#     packages/loom-benchmarks/loom_benchmarks/adapters/ changed.
-#     The workflow detects which adapters changed and runs `publish`
-#     for each.
 #   - workflow_dispatch (manual): publish a single benchmark by slug,
 #     or "all" to re-publish every adapter in REGISTRY.
 #
@@ -25,12 +21,6 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches: [dev, main]
-    paths:
-      - "packages/loom-benchmarks/loom_benchmarks/adapters/**.py"
-      - "src/loom_benchmark_tool/publish_cmd.py"
-      - ".github/workflows/publish-benchmarks.yml"
   workflow_dispatch:
     inputs:
       benchmark:
@@ -73,21 +63,7 @@ jobs:
           elif ev_input:
               slugs = [ev_input]
           else:
-              # push event: changed adapter files between HEAD^ and HEAD.
-              diff = subprocess.run(
-                  ["git", "diff", "--name-only", "HEAD^", "HEAD"],
-                  capture_output=True, text=True, check=False,
-              )
-              changed = {
-                  line.split("/")[-1].removesuffix(".py").replace("_", "-")
-                  for line in diff.stdout.splitlines()
-                  if line.startswith(
-                      "packages/loom-benchmarks/loom_benchmarks/adapters/",
-                  ) and line.endswith(".py") and not line.endswith(
-                      "/__init__.py",
-                  )
-              }
-              slugs = sorted(changed)
+              raise SystemExit("benchmark input is required")
           print(json.dumps(slugs))
           PY
           BENCHMARKS=$(cat /tmp/list.json)

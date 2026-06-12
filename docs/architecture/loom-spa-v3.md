@@ -1,6 +1,6 @@
 # Loom SPA v3 — trial-centric simplification
 
-**Status:** shipped 2026-06-12 (PRs #314 + #316 + #317 + #318 + this PR)
+**Status:** shipped 2026-06-12.
 
 **Date:** 2026-06-11
 
@@ -45,8 +45,8 @@ drop them."
   confusion.** Rename it to **Batch** everywhere — DB table, API
   path, code, docs, SPA. One word, one meaning, used identically
   across every surface.
-- **Workflow does not earn its keep** — landed yesterday (PR
-  #301), no curl-driven users yet, the saved-recipe value prop
+- **Workflow does not earn its keep** — landed recently, has no
+  curl-driven users yet, and the saved-recipe value prop is
   unvalidated. **Drop entirely:** table, route, code, tests, SPA
   pages. Net negative LOC. If saved recipes return later they get
   a cleaner design.

@@ -7,9 +7,16 @@ on:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
     types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      integration:
+        description: "Run Docker/testcontainers integration tier"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel in-flight PR runs when a newer push arrives. Pushes to dev/main
-# always run to completion (so the branch-protection gate has fresh status).
+# still run the required fast gate to completion.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -107,18 +114,17 @@ jobs:
         run: uv run coverage report --fail-under=70
 
   # Integration suite needs Docker (testcontainers spins up Postgres +
-  # MinIO). Runs on every push to dev/main; on PRs it's opt-in via the
-  # `ci:integration` label so contributors can iterate without paying the
-  # 5+ minute container-start cost on every push.
+  # MinIO). It is deliberately opt-in while #7 tunes/splits the slow tier:
+  # use the `ci:integration` PR label or manual workflow_dispatch input.
   integration:
     name: integration
     runs-on: ubuntu-latest
     needs: repository-checks
     timeout-minutes: 30
     if: >-
-      github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'ci:integration'))
+       contains(github.event.pull_request.labels.*.name, 'ci:integration')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.integration)
     steps:
       - uses: actions/checkout@v5
 

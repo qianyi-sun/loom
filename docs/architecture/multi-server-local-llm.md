@@ -47,7 +47,7 @@ Behavior:
 
 - Accepts the same model-spec shapes as `loom run --model …`:
   `hf:<id>`, `/path/`, `~/path/`, `./path/`, `../path/`.
-- Calls `launch_vllm(...)` from `vllm_runner.py` (reuses all of #288).
+- Calls `launch_vllm(...)` from `vllm_runner.py`.
 - Writes config:
   ```toml
   [local_providers.<name>]
@@ -94,8 +94,8 @@ Mutual exclusions:
   kinds) — OK, each launches its own vLLM in sequence.
 - `--local-server URL --model X --model Y` — OK, both run against
   the same server (URL doesn't change between models).
-- `--local-server URL --model hf:X` — REJECTED (existing #288
-  behavior).
+- `--local-server URL --model hf:X` — REJECTED, matching existing
+  single-server behavior.
 - `--parallel-models` with a single `--model` — warning + ignore.
 
 ## Internals
