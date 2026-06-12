@@ -92,27 +92,35 @@ def _alembic_upgrade(db_url: str) -> int:
 
 def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     """Run seed_test_data.py with `--mode dev --print all`. Dev mode
-    registers the benchmark slate AND auto-imports a small slice of each
-    so the SPA dropdown is populated + submittable out of the box. Skips
-    the hello-world Task + card-e2e RateCard test fixtures.
+    registers the benchmark slate from HF Hub so the SPA dropdown is
+    populated + submittable out of the box. Skips the hello-world Task
+    + card-e2e RateCard test fixtures.
 
-    Auto-import needs MinIO; passes through `LOOM_MINIO_*` if set in the
-    parent env (`loom service up` exports these from the compose env).
+    Default register path: reads manifests from `{HF_ORG}/loom-benchmark-*`
+    on HF Hub (a few seconds total). Works without HF_TOKEN for public
+    datasets; pass through HF_TOKEN if set for gated ones.
+
+    Air-gapped path: set `LOOM_LOCAL_IMPORT=1` and `loom service up`
+    will pass `--local-import` to seed, falling back to the slow
+    upstream-fetch + MinIO-upload flow. Requires `LOOM_MINIO_*`.
 
     Returns (exit_code, {label: token}); the script prints each token
-    on its own line as `<label>: <token>`. Auto-import progress is
-    streamed to stderr so the user sees per-benchmark status."""
-    # Stream stderr live so `seed: humaneval: ok converted=20` lines
-    # appear as each benchmark finishes — auto-import takes a couple
-    # of minutes on a fresh cache and a silent subprocess looks like
-    # `loom service up` has hung.
+    on its own line as `<label>: <token>`. Register progress is streamed
+    to stderr so the user sees per-benchmark status."""
     env = os.environ.copy()
+    # MinIO defaults for the --local-import opt-in path.
     env.setdefault("LOOM_MINIO_ENDPOINT", "http://localhost:9000")
     env.setdefault("LOOM_MINIO_ACCESS_KEY", "loomdev")
     env.setdefault("LOOM_MINIO_SECRET_KEY", "loomdev")
+    # HF defaults: org pre-set so register works without explicit flag.
+    env.setdefault("LOOM_HF_ORG", "PRHW")
+    extra_args = []
+    if os.environ.get("LOOM_LOCAL_IMPORT") in ("1", "true", "True"):
+        extra_args.append("--local-import")
     r = subprocess.run(
         [sys.executable, "scripts/seed_test_data.py",
-         "--db-url", db_url, "--mode", "dev", "--print", "all"],
+         "--db-url", db_url, "--mode", "dev", "--print", "all",
+         *extra_args],
         capture_output=True, text=True, check=False, env=env,
     )
     # Always echo seed stderr so auto-import status (per-benchmark

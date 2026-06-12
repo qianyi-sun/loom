@@ -5,18 +5,24 @@ Two modes:
 - `--mode test` (default) — system-test fixture: hello-world Task,
   card-e2e RateCard, + tokens. Existing tests rely on these rows.
 - `--mode dev` — what `loom service up` calls: tokens + every shipped
-  benchmark adapter registered AND auto-imported (small slice) so the
-  SPA dropdown is populated and submittable out of the box. Skips the
-  hello-world Task + card-e2e RateCard.
+  benchmark adapter registered from HF Hub so the SPA dropdown is
+  populated and submittable out of the box. Skips the hello-world Task
+  + card-e2e RateCard.
 
-Auto-import: dev mode walks every adapter in `loom_benchmarks.REGISTRY`
-and runs `loom_benchmark_tool.import_cmd.run_import(limit=N)` for each,
-fetching the upstream + materialising N tasks into MinIO + the `tasks`
-table. Failures (network, missing MinIO config, upstream change) are
-logged per-benchmark and don't abort seeding. Pass `--no-auto-import`
-to skip — the registered benchmarks then won't show up in the SPA
-dropdown (`/api/v1/benchmarks` defaults to filtering empty rows) until
-an operator runs `python -m loom_benchmark_tool import <bench>`.
+Default register path (`hf://`): dev mode walks every adapter in
+`loom_benchmarks.REGISTRY` and runs
+`loom_benchmark_tool.register_cmd.run_register` for each. Manifests
+(~tens of KB each) come from `{HF_ORG}/loom-benchmark-{slug}` on HF
+Hub; task rows land with `source = "hf://..."`. Workers pull bundle
+bytes on trial claim — no MinIO upload, no upstream conversion. This
+is "registered = instantly available". Per-benchmark errors (benchmark
+not yet published) are logged + skipped.
+
+Air-gapped / local-import path: pass `--local-import` to run the older
+`run_import` flow instead. That fetches each benchmark's upstream,
+converts in-process, uploads to local MinIO, and writes `s3://` source
+URLs. Slow on first boot (minutes), network-heavy, but works without
+HF Hub access.
 
 Prints tokens to stdout (system tests capture them as the bearer for
 their submit calls; the SPA login screen accepts them as paste-ins).
@@ -90,6 +96,41 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
         ))
         inserted += 1
     return inserted
+
+
+def _auto_register_benchmarks(
+    db_url: str, hf_org: str, hf_token: str | None,
+) -> dict[str, str]:
+    """Register every adapter in REGISTRY by reading its manifest from
+    HF Hub. Per-benchmark errors (most often: benchmark not yet
+    published) are logged + skipped so a missing publish doesn't block
+    the whole seed.
+
+    Returns {benchmark_id: status} for stderr logging by the caller.
+    """
+    import asyncio
+
+    from loom_benchmarks.registry import REGISTRY
+
+    from loom_benchmark_tool.register_cmd import run_register
+
+    results: dict[str, str] = {}
+    for slug in sorted(REGISTRY):
+        try:
+            stats = asyncio.run(run_register(
+                benchmark=slug,
+                hf_org=hf_org,
+                hf_token=hf_token,
+                db_url=db_url,
+                registered_by="seed_test_data.py:auto_register",
+            ))
+            results[slug] = f"ok registered={stats['registered']}"
+        except Exception as exc:
+            # Most likely: the benchmark hasn't been published to HF
+            # yet (loom-team operation). Re-run after publish to pick
+            # it up; the seed re-running is idempotent.
+            results[slug] = f"error {type(exc).__name__}: {exc}"
+    return results
 
 
 def _auto_import_benchmarks(
@@ -190,18 +231,41 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--auto-import", dest="auto_import",
+        "--auto-register", dest="auto_register",
         action=argparse.BooleanOptionalAction, default=True,
         help=(
-            "Dev mode only: after registering benchmarks, also import "
-            "a slice of each (`run_import` with --limit). Default: on. "
-            "Pass --no-auto-import to skip — benchmarks then need the "
-            "`python -m loom_benchmark_tool import` CLI to populate."
+            "Dev mode only: walk every adapter in REGISTRY and run "
+            "`register` against HF Hub. Default: on. Pass "
+            "--no-auto-register to skip — benchmarks then need a "
+            "manual `python -m loom_benchmark_tool register` to show "
+            "up in the SPA."
+        ),
+    )
+    parser.add_argument(
+        "--local-import", dest="local_import",
+        action="store_true", default=False,
+        help=(
+            "Dev mode only: in addition to (or instead of) registering "
+            "from HF, run the local-import path (`run_import`) for each "
+            "adapter. Slow + network-heavy + requires MinIO; use for "
+            "air-gapped deployments or to populate MinIO with bundles "
+            "before HF Hub has them. Default: off."
         ),
     )
     parser.add_argument(
         "--auto-import-limit", type=int, default=20,
-        help="Tasks per benchmark when auto-importing (default 20).",
+        help=(
+            "Tasks per benchmark for --local-import (default 20). "
+            "Ignored when --local-import is off."
+        ),
+    )
+    parser.add_argument(
+        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+        help="HF namespace to register from (env: LOOM_HF_ORG).",
+    )
+    parser.add_argument(
+        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        help="HF read token (optional for public datasets).",
     )
     parser.add_argument(
         "--minio-endpoint",
@@ -335,9 +399,24 @@ def main() -> None:
         s.commit()
     engine.dispose()
 
-    # Auto-import after the metadata commit: run_import opens its own
-    # async session per benchmark, so we don't share the sync session.
-    if args.mode == "dev" and args.auto_import:
+    # Default path: register from HF Hub. `run_register` opens its
+    # own async session per benchmark; no shared sync session.
+    if args.mode == "dev" and args.auto_register:
+        sys.stderr.write(
+            f"seed: registering benchmarks from HF "
+            f"(org={args.hf_org})…\n",
+        )
+        results = _auto_register_benchmarks(
+            db_url=args.db_url,
+            hf_org=args.hf_org,
+            hf_token=args.hf_token,
+        )
+        for slug, status in sorted(results.items()):
+            sys.stderr.write(f"seed:   {slug}: {status}\n")
+
+    # Opt-in: local-import path for air-gapped deploys. Slower + needs
+    # MinIO; only fires when explicitly requested.
+    if args.mode == "dev" and args.local_import:
         missing_minio = [
             f for f, v in (
                 ("--minio-endpoint", args.minio_endpoint),
@@ -347,15 +426,13 @@ def main() -> None:
         ]
         if missing_minio:
             sys.stderr.write(
-                "seed: skipping benchmark auto-import — missing "
-                f"{', '.join(missing_minio)}. Set LOOM_MINIO_* env vars "
-                "or pass the flags directly. Benchmarks remain registered "
-                "but the SPA dropdown will be empty until tasks are "
-                "imported.\n",
+                "seed: skipping local-import — missing "
+                f"{', '.join(missing_minio)}. Set LOOM_MINIO_* env "
+                "vars or pass the flags directly.\n",
             )
         else:
             sys.stderr.write(
-                f"seed: auto-importing benchmarks "
+                f"seed: local-importing benchmarks "
                 f"(limit={args.auto_import_limit} per benchmark)…\n",
             )
             results = _auto_import_benchmarks(
