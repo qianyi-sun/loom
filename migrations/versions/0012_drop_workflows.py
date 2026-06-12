@@ -4,11 +4,11 @@ Revision ID: 0012
 Revises: 0011
 Create Date: 2026-06-11
 
-Plan 28: workflows landed yesterday (PR #301), no curl-driven
-users yet, the saved-recipe value prop was unvalidated. Per the
-loom-spa-v3 spec, dropped entirely. The table goes; the
+Workflows landed shortly before this migration, had no curl-driven
+users yet, and the saved-recipe value prop was unvalidated. Per the
+loom-spa-v3 spec, they were dropped entirely. The table goes; the
 back-reference column on batches goes; the SPA pages, routes,
-tests, and architecture doc all go in the same PR.
+tests, and architecture doc all go in the same change.
 
 If saved recipes return later, they get a cleaner design.
 

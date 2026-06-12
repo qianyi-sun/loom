@@ -7,7 +7,7 @@ import react from "@vitejs/plugin-react";
 //   - On the developer's host (`cd web && npm run dev`):
 //       http://localhost:8090 — the published port from the
 //       loom-service compose service.
-//   - Inside the dev-compose `web` container (PR #294):
+//   - Inside the dev-compose `web` container:
 //       http://loom-service:8090 — the in-network DNS name.
 // Default matches the host case; docker-compose sets
 // VITE_API_PROXY_TARGET to override.
