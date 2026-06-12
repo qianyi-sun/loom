@@ -164,17 +164,16 @@ describe("NewBatch", () => {
 
   it("refuses to submit when zero tasks match", async () => {
     const spy = mockEndpoints({ matchingTasks: 0 });
-    const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
+    const user = userEvent.setup();
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
     await pickBackend();
     await pickBenchmark();
     await screen.findByText(/No tasks registered for this benchmark/i);
-    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    expect(
-      await screen.findByText(/No tasks match the current benchmark/i),
-    ).pilot groupeInTheDocument();
+    // Submit button is disabled when totalTrials === 0; click is a
+    // no-op. The inline countSummary above already explains why.
+    expect(screen.getByRole("button", { name: /Submit batch/i })).pilot groupeDisabled();
     expect(batchCall(spy)).pilot groupeNull();
   });
 

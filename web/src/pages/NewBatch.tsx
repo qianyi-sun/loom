@@ -503,7 +503,7 @@ export default function NewBatch(): JSX.Element {
 
   const submitButtonLabel = (() => {
     if (create.isPending) return "Submitting…";
-    if (totalTrials === undefined) {
+    if (totalTrials === undefined || totalTrials === 0) {
       return "Submit batch";
     }
     return `Submit ${totalTrials} trial${totalTrials === 1 ? "" : "s"}`;
@@ -520,7 +520,7 @@ export default function NewBatch(): JSX.Element {
     countSummary = "Counting matching tasks…";
   } else if (matchedTaskCount === 0) {
     countSummary =
-      "No tasks registered for this benchmark yet. Use `loom-benchmark-tool register` to populate, or pick a different benchmark.";
+      "No tasks registered for this benchmark yet. Run `python -m loom_benchmark_tool import <benchmark>` to populate, or pick a different benchmark.";
   } else if (matchedTaskCount !== undefined) {
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match.`;
   }
@@ -1124,8 +1124,11 @@ export default function NewBatch(): JSX.Element {
         </div>
       </div>
 
-      {/* Confirmation banner */}
-      {totalTrials !== undefined ? (
+      {/* Confirmation banner — hidden when totalTrials is 0 since the
+          inline countSummary above already explains why (no tasks
+          registered / no parsed ids), and a "Will launch 0 trials"
+          banner just adds noise to an already-actionable empty state. */}
+      {totalTrials !== undefined && totalTrials > 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
           <p className="text-slate-700">
             Will launch{" "}
@@ -1186,7 +1189,11 @@ export default function NewBatch(): JSX.Element {
       {create.isError ? <ErrorState error={create.error} /> : null}
 
       <div className="flex items-center justify-end">
-        <Button variant="primary" onClick={submit} disabled={create.isPending}>
+        <Button
+          variant="primary"
+          onClick={submit}
+          disabled={create.isPending || totalTrials === 0}
+        >
           {submitButtonLabel}
         </Button>
       </div>
