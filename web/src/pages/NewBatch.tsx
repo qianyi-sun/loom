@@ -23,7 +23,7 @@
  */
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api, type Combination, type CreateBatchBody } from "../api/client";
@@ -278,6 +278,18 @@ export default function NewBatch(): JSX.Element {
     staleTime: 5 * 60 * 1000,
   });
 
+  // Default-pick the backend once the catalog loads: docker if
+  // advertised, else the first `available` backend, else the first
+  // entry. Skips when the user has already picked one.
+  useEffect(() => {
+    if (backend || !backends.data) return;
+    const items = backends.data.items;
+    const docker = items.find((b) => b.name === "docker");
+    const firstLive = items.find((b) => b.available);
+    const pick = docker ?? firstLive ?? items[0];
+    if (pick) setBackend(pick.name);
+  }, [backend, backends.data]);
+
   // Parse the explicit textarea continuously so we can show the
   // "Parsed N ids" preview as the user types.
   const parsed = useMemo(() => parseTaskIds(explicitText), [explicitText]);
@@ -507,7 +519,8 @@ export default function NewBatch(): JSX.Element {
   } else if (matchedTasksQuery.isPending) {
     countSummary = "Counting matching tasks…";
   } else if (matchedTaskCount === 0) {
-    countSummary = "No tasks match this filter.";
+    countSummary =
+      "No tasks registered for this benchmark yet. Use `loom-benchmark-tool register` to populate, or pick a different benchmark.";
   } else if (matchedTaskCount !== undefined) {
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match.`;
   }
@@ -553,10 +566,9 @@ export default function NewBatch(): JSX.Element {
                   disabled={backends.isPending}
                   aria-label="Backend"
                 >
-                  <option value="">Choose a backend…</option>
                   {(backends.data?.items ?? []).map((b) => (
                     <option key={b.name} value={b.name}>
-                      {b.name}
+                      {b.name}{b.available ? "" : " (no live worker)"}
                     </option>
                   ))}
                 </select>
@@ -564,11 +576,20 @@ export default function NewBatch(): JSX.Element {
                   <Help>
                     {backends.data?.items.find((b) => b.name === backend)
                       ?.description ?? null}
+                    {backends.data?.items.find((b) => b.name === backend)
+                      ?.available === false ? (
+                      <span className="mt-0.5 block text-amber-700">
+                        No live worker advertises this backend right now —
+                        batches will queue until one comes online.
+                      </span>
+                    ) : null}
                   </Help>
                 ) : (
                   <Help>
-                    The sandbox provider that runs each trial. Catalog comes
-                    from live workers.
+                    The sandbox provider that runs each trial. Loom ships
+                    drivers for docker, daytona, modal, and fake; entries
+                    marked &quot;no live worker&quot; have a driver but no
+                    worker advertising them right now.
                   </Help>
                 )}
               </label>
@@ -883,7 +904,33 @@ export default function NewBatch(): JSX.Element {
                       <Help>Total attempts including the first. 1 = no retry.</Help>
                     </label>
                     <div>
-                      <FieldLabel hint="pick zero or more">Retry on</FieldLabel>
+                      <div className="mb-1 flex items-baseline justify-between gap-2">
+                        <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                          Retry on
+                        </span>
+                        <div className="flex gap-2 text-xs">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdv(
+                                "retryOn",
+                                new Set(RETRY_REASONS.map((r) => r.value)),
+                              )
+                            }
+                            className="font-medium text-accent hover:text-accent-hover"
+                          >
+                            Select all
+                          </button>
+                          <span className="text-slate-300">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setAdv("retryOn", new Set())}
+                            className="font-medium text-slate-500 hover:text-slate-700"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
                       <div className="space-y-1">
                         {RETRY_REASONS.map((r) => (
                           <label key={r.value} className="flex items-center gap-2 text-sm text-slate-700">
@@ -902,48 +949,58 @@ export default function NewBatch(): JSX.Element {
                       </Help>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                    <label className="block">
-                      <FieldLabel>Backoff base (s)</FieldLabel>
-                      <Input
-                        type="number"
-                        min={0.001}
-                        step={1}
-                        value={advanced.backoffBaseSec}
-                        onChange={(e) => setAdv("backoffBaseSec", e.target.value)}
-                      />
-                    </label>
-                    <label className="block">
-                      <FieldLabel>Backoff max (s)</FieldLabel>
-                      <Input
-                        type="number"
-                        min={0.001}
-                        step={1}
-                        value={advanced.backoffMaxSec}
-                        onChange={(e) => setAdv("backoffMaxSec", e.target.value)}
-                      />
-                    </label>
-                    <label className="block">
-                      <FieldLabel>Backoff multiplier</FieldLabel>
-                      <Input
-                        type="number"
-                        min={0.001}
-                        step={0.1}
-                        value={advanced.backoffMultiplier}
-                        onChange={(e) => setAdv("backoffMultiplier", e.target.value)}
-                      />
-                    </label>
-                    <label className="block">
-                      <FieldLabel hint="0 – 1">Backoff jitter</FieldLabel>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={advanced.backoffJitter}
-                        onChange={(e) => setAdv("backoffJitter", e.target.value)}
-                      />
-                    </label>
+                  <div className="space-y-2">
+                    <p className="text-xs text-slate-600">
+                      <span className="font-semibold text-slate-700">Backoff</span> is
+                      how long the runner waits before each retry. Sleep =
+                      min(base × multiplier<sup>attempt</sup>, max), then
+                      randomised by jitter (0 = exact, 1 = ±100%). Defaults
+                      (30s base, 2× per attempt, capped at 10min, 20% jitter)
+                      give 30s → 60s → 120s → 240s.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                      <label className="block">
+                        <FieldLabel>Backoff base (s)</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0.001}
+                          step={1}
+                          value={advanced.backoffBaseSec}
+                          onChange={(e) => setAdv("backoffBaseSec", e.target.value)}
+                        />
+                      </label>
+                      <label className="block">
+                        <FieldLabel>Backoff max (s)</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0.001}
+                          step={1}
+                          value={advanced.backoffMaxSec}
+                          onChange={(e) => setAdv("backoffMaxSec", e.target.value)}
+                        />
+                      </label>
+                      <label className="block">
+                        <FieldLabel>Backoff multiplier</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0.001}
+                          step={0.1}
+                          value={advanced.backoffMultiplier}
+                          onChange={(e) => setAdv("backoffMultiplier", e.target.value)}
+                        />
+                      </label>
+                      <label className="block">
+                        <FieldLabel hint="0 – 1">Backoff jitter</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={advanced.backoffJitter}
+                          onChange={(e) => setAdv("backoffJitter", e.target.value)}
+                        />
+                      </label>
+                    </div>
                   </div>
                 </fieldset>
 

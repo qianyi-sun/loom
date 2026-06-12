@@ -92,6 +92,11 @@ type TokenList = paths["/api/v1/tokens"]["get"]["responses"][200]["content"]["ap
 export interface Backend {
   name: string;
   description: string;
+  /** True when at least one live worker advertises this backend. The
+   * SPA renders unavailable backends as greyed-out so users see the
+   * full set of drivers Loom ships while understanding which can run
+   * a batch right now. */
+  available: boolean;
 }
 
 /** Plan 28 PR-3: one (agent, model, n_per_task) tuple within a Batch.

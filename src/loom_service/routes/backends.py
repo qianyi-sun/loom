@@ -32,6 +32,11 @@ _DESCRIPTIONS: dict[str, str] = {
     "fake": "In-memory driver. Tests + smoke only — no real env.",
 }
 
+# Backends Loom ships drivers for. Even when no live worker advertises
+# a given backend, we surface it as `available=false` so the dropdown
+# shows what's *possible* — better than a confusing empty list.
+_KNOWN_BACKENDS: tuple[str, ...] = ("docker", "daytona", "modal", "fake")
+
 
 @router.get("/backends")
 async def list_backends(
@@ -61,13 +66,18 @@ async def list_backends(
             if isinstance(backend_name, str):
                 seen.add(backend_name)
 
+    # Union of known + worker-advertised. Each entry marks `available`
+    # so the SPA can render greyed-out options for backends that have
+    # drivers but no live workers.
+    all_names = sorted(set(_KNOWN_BACKENDS) | seen)
     items = [
         {
             "name": name,
             "description": _DESCRIPTIONS.get(
                 name, f"Worker-reported backend {name!r}.",
             ),
+            "available": name in seen,
         }
-        for name in sorted(seen)
+        for name in all_names
     ]
     return {"items": items}

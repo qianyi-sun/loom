@@ -124,6 +124,14 @@ function BatchesView({
   const [page, setPage] = useState<PageState>(initialPage);
   const debouncedSearch = useDebouncedValue(search, 300);
 
+  const polling = useAdaptivePolling({
+    baseIntervalMs: 4_000,
+    minIntervalMs: 3_000,
+    maxIntervalMs: 60_000,
+    hiddenBehavior: "pause",
+    blurBehavior: "slow",
+  });
+
   const query = useQuery({
     queryKey: ["batches", stateFilter, debouncedSearch, page.current],
     queryFn: () =>
@@ -141,14 +149,6 @@ function BatchesView({
       );
       return allTerminal ? 60_000 : polling.refetchInterval;
     },
-  });
-
-  const polling = useAdaptivePolling({
-    baseIntervalMs: 4_000,
-    minIntervalMs: 3_000,
-    maxIntervalMs: 60_000,
-    hiddenBehavior: "pause",
-    blurBehavior: "slow",
   });
 
   // Filter client-side by search if backend doesn't support `q` on

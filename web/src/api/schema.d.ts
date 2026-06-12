@@ -175,7 +175,11 @@ export interface paths {
         200: {
           content: {
             "application/json": {
-              items: { name: string; description: string }[];
+              items: {
+                name: string;
+                description: string;
+                available: boolean;
+              }[];
             };
           };
         };

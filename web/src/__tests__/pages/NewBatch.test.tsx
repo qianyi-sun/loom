@@ -51,8 +51,8 @@ const BENCHMARKS_RESPONSE = {
 
 const BACKENDS_RESPONSE = {
   items: [
-    { name: "docker", description: "Local docker on the worker host." },
-    { name: "fake", description: "In-memory driver." },
+    { name: "docker", description: "Local docker on the worker host.", available: true },
+    { name: "fake", description: "In-memory driver.", available: true },
   ],
 };
 
@@ -132,15 +132,14 @@ describe("NewBatch", () => {
     vi.restoreAllMocks();
   });
 
-  it("blocks submit when backend isn't picked", async () => {
-    const spy = mockEndpoints({ matchingTasks: 12 });
-    const user = userEvent.setup();
+  it("defaults backend to docker once the catalog loads", async () => {
+    mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
-    await user.type(screen.getByPlaceholderText(/run 7/i), "x");
-    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    expect(await screen.findByText(/Pick a backend\./i)).pilot groupeInTheDocument();
-    expect(batchCall(spy)).pilot groupeNull();
+    const dropdown = (await screen.findByLabelText(
+      "Backend",
+    )) as HTMLSelectElement;
+    expect(dropdown.value).pilot groupe("docker");
   });
 
   it("blocks submit when benchmark isn't picked", async () => {
@@ -171,7 +170,7 @@ describe("NewBatch", () => {
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/No tasks match/i);
+    await screen.findByText(/No tasks registered for this benchmark/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/No tasks match the current benchmark/i),
