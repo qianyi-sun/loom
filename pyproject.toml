@@ -56,6 +56,7 @@ dev = [
   "pytest>=8.0,<9.0",
   "pytest-asyncio>=0.23,<1.0",
   "pytest-cov>=5.0,<7.0",
+  "pytest-timeout>=2.3,<3.0",
   "ruff>=0.5,<1.0",
   "testcontainers[minio,postgres]>=4.4,<5.0",
   "types-docker>=7.0,<8.0",
@@ -145,6 +146,18 @@ norecursedirs = [
 # tests/system require docker-compose + built service images and take
 # minutes to run; opt in explicitly with `pytest tests/system`.
 addopts = "--ignore=tests/system"
+# Per-test wall-clock cap from pytest-timeout. A single hanging test
+# (issue #7 observed `test_claim_endpoint::test_claim_rejects_unauth`
+# hang the whole CI for ~20 min) now becomes a single failed test,
+# letting the rest of the suite finish. Docker-tier tests can override
+# with `@pytest.mark.timeout(N)` on the test/class.
+timeout = 60
+# `signal` (SIGALRM) is more aggressive than `thread` — interrupts
+# the test even when it's blocked in a C-level extension. Required to
+# kill the hang in `test_claim_endpoint::test_claim_rejects_unauth`
+# (issue #7), which blocks on `starlette.TestClient.__exit__` →
+# `anyio` portal shutdown that the thread-method timer can't interrupt.
+timeout_method = "signal"
 markers = [
   "swe_bench_smoke: SWE-Bench Verified end-to-end smoke; pulls ~5GB per-instance images. Opt-in via LOOM_RUN_SWE_BENCH_SMOKE=1.",
   "docker: integration tests that spin up real Docker containers via the host daemon (DockerDriver, network-policy, trial-e2e, subprocess-agent). Excluded from the default integration CI tier; run via the `integration-docker` workflow job or `pytest -m docker` locally.",
