@@ -26,7 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.auth import verify_bearer_token
 from loom.db.schema import Batch, Task, Trial
 from loom.models.batch import Combination
-from loom_service.agent_catalog import known_names
+from loom.models.types import ModelSpec
+from loom_service.agent_catalog import (
+    known_names,
+    validate_agent_model_compat,
+)
 from loom_service.auth_guards import (
     is_admin,
     require_human_or_admin,
@@ -238,7 +242,8 @@ async def create_batch(
                             "carries its own agent/model"
                         ),
                     )
-            # Catalog membership per Combination.
+            # Catalog membership + agent⇄model compatibility per
+            # Combination.
             for i, combo in enumerate(payload.combinations):
                 if combo.agent_name not in catalog:
                     raise HTTPException(
@@ -248,6 +253,14 @@ async def create_batch(
                             f"{combo.agent_name!r} is not in the agent "
                             "catalog. GET /api/v1/agents."
                         ),
+                    )
+                err = validate_agent_model_compat(
+                    combo.agent_name, combo.agent_model,
+                )
+                if err is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"combinations[{i}]: {err}",
                     )
             # Labels unique within the batch (after computing the
             # derived label for those without one).
@@ -265,7 +278,7 @@ async def create_batch(
                 seen_labels.add(label)
         else:
             # Single-combination batch. Catalog check on the agent
-            # embedded in trial_config (same as before this PR).
+            # embedded in trial_config + agent⇄model compatibility.
             agent_name = payload.trial_config.get("agent_name")
             if isinstance(agent_name, str) and agent_name:
                 if agent_name not in catalog:
@@ -275,6 +288,27 @@ async def create_batch(
                             f"unknown agent_name {agent_name!r} in "
                             "trial_config. GET /api/v1/agents."
                         ),
+                    )
+                model_raw = payload.trial_config.get("agent_model")
+                model: ModelSpec | None
+                if model_raw is None:
+                    model = None
+                else:
+                    try:
+                        model = ModelSpec.model_validate(model_raw)
+                    except Exception as exc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "trial_config.agent_model failed to "
+                                f"validate: {exc}"
+                            ),
+                        ) from exc
+                err = validate_agent_model_compat(agent_name, model)
+                if err is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"trial_config: {err}",
                     )
 
         task_ids = await _resolve_task_filter(s, payload.task_filter)

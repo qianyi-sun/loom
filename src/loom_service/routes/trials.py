@@ -27,7 +27,11 @@ from sqlalchemy import and_, or_, select
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Trial
-from loom_service.agent_catalog import known_names
+from loom.models.types import ModelSpec
+from loom_service.agent_catalog import (
+    known_names,
+    validate_agent_model_compat,
+)
 from loom_service.auth_guards import (
     is_admin,
     require_human_or_admin,
@@ -255,6 +259,21 @@ def _validate_agent_name(config: dict[str, Any]) -> None:
                 "GET /api/v1/agents for the catalog."
             ),
         )
+    model_raw = config.get("agent_model")
+    model: ModelSpec | None
+    if model_raw is None:
+        model = None
+    else:
+        try:
+            model = ModelSpec.model_validate(model_raw)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"agent_model failed to validate: {exc}",
+            ) from exc
+    err = validate_agent_model_compat(agent_name, model)
+    if err is not None:
+        raise HTTPException(status_code=400, detail=err)
 
 
 @router.post("/trials", status_code=201)

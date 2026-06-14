@@ -29,13 +29,33 @@ NetworkPolicyKind = Literal["public", "no-network", "allowlist"]
 LogLevel = Literal["debug", "info", "warn", "error", "fatal"]
 
 
+ModelSource = Literal["api", "local-server", "hf"]
+HFExecution = Literal["local-vllm", "inference-api"]
+
+
 class ModelSpec(BaseModel):
-    """Identifies an LLM model the agent should call (spec §4.2)."""
+    """Identifies an LLM model the agent should call (spec §4.2).
+
+    `source` discriminates execution path (default "api" preserves the
+    existing catalog-backed-API path and keeps old rows valid):
+
+    - **api**: provider's hosted API (Anthropic/OpenAI/Google/HF Inference).
+      Routed through the LLM Gateway.
+    - **local-server**: pre-configured OpenAI-compatible local server
+      (ollama, lm-studio, llama.cpp, vLLM). `local_server` names the
+      operator's entry; the worker reads its base_url from config.
+    - **hf**: HuggingFace model. `hf_execution` picks how to run it —
+      "local-vllm" (default) spawns vLLM on a GPU worker;
+      "inference-api" calls HF Inference Endpoints (managed, metered).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: str
     name: str
+    source: ModelSource = "api"
+    local_server: str | None = None
+    hf_execution: HFExecution = "local-vllm"
     tier: str | None = None
     region: str | None = None
     max_input_tokens: int | None = None
