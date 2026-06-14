@@ -75,6 +75,26 @@ async def run_register(
             # default to None — `register` stays back-compat with already-
             # published benchmarks.
             series = manifest.get("series")
+            # ON CONFLICT update set. Critically `series` is included
+            # only when the manifest actually carries one — v1 manifests
+            # (pre-PR-1, e.g. the already-published swe-bench / osworld
+            # / humaneval) have no `series` field, so `manifest.get`
+            # returns None. If we wrote None into the SET clause we'd
+            # clobber a correct value previously written by the stub
+            # seed (which reads `series` straight off the adapter
+            # class). Skipping the key preserves the existing column.
+            update_set: dict[str, Any] = {
+                "display_name": manifest["display_name"],
+                "upstream_revision": manifest.get(
+                    "upstream_revision", "",
+                ),
+                "imported_by": (
+                    registered_by or
+                    "loom_benchmark_tool:register"
+                ),
+            }
+            if series is not None:
+                update_set["series"] = series
             await session.execute(
                 pg_insert(Benchmark).values(
                     id=manifest["benchmark_id"],
@@ -91,17 +111,7 @@ async def run_register(
                     imported_by=registered_by or "loom_benchmark_tool:register",
                 ).on_conflict_do_update(
                     index_elements=["id"],
-                    set_={
-                        "display_name": manifest["display_name"],
-                        "upstream_revision": manifest.get(
-                            "upstream_revision", "",
-                        ),
-                        "series": series,
-                        "imported_by": (
-                            registered_by or
-                            "loom_benchmark_tool:register"
-                        ),
-                    },
+                    set_=update_set,
                 ),
             )
             await session.commit()
