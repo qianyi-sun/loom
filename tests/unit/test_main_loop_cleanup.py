@@ -79,6 +79,7 @@ async def _drive_spawn(runner_target: object) -> Path:
             patch.object(ml, "LocalTrialRunner") as fake_runner_cls:
         fake_tempfile.mkdtemp.side_effect = capture_mkdtemp
         fake_runner_cls.return_value = runner_target
+        from loom_worker.vllm_registry import WorkerVLLMRegistry
         await ml._spawn_trial(
             pool=pool, settings=settings,  # type: ignore[arg-type]
             cp_client=cp,  # type: ignore[arg-type]
@@ -86,6 +87,7 @@ async def _drive_spawn(runner_target: object) -> Path:
             object_store=None,  # type: ignore[arg-type]
             worker_id=uuid4(),
             payload=payload,
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await pool.wait_all(timeout=2.0)
 
@@ -118,6 +120,8 @@ async def test_tempdir_cleaned_on_runner_exception() -> None:
 
 
 async def test_tempdir_cleaned_on_cancellation() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
     class _SlowRunner:
         async def run(self) -> None:
             await asyncio.sleep(10.0)
@@ -149,6 +153,7 @@ async def test_tempdir_cleaned_on_cancellation() -> None:
                 "task_id": "fake",
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
         )
         await asyncio.sleep(0.05)
         pool.cancel_all()

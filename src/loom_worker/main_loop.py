@@ -46,6 +46,7 @@ from loom_worker.orphan_cleanup import cleanup_orphan_trajectories
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
+from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,19 @@ async def run_worker(settings: WorkerSettings) -> None:
                 secret_key=settings.minio_secret_key.get_secret_value(),
                 region=settings.minio_region,
             )
+            # PR-E: per-worker vLLM registry. Opt-in via settings; the
+            # `enabled=False` path still constructs the object so the
+            # trial runner gets a deterministic AgentError instead of
+            # a None-dereference when a trial requests local-vllm.
+            vllm_registry = WorkerVLLMRegistry(
+                enabled=settings.enable_worker_vllm,
+                default_gpu_memory_utilization=(
+                    settings.vllm_gpu_memory_utilization
+                ),
+                default_tensor_parallel_size=(
+                    settings.vllm_tensor_parallel_size
+                ),
+            )
 
             while not state.shutting_down:
                 if pool.in_flight < settings.max_concurrent:
@@ -130,6 +144,7 @@ async def run_worker(settings: WorkerSettings) -> None:
                             object_store=object_store,
                             worker_id=worker_id,
                             payload=trial_payload,
+                            vllm_registry=vllm_registry,
                         )
                 await asyncio.sleep(settings.claim_poll_interval_sec)
 
@@ -149,6 +164,10 @@ async def run_worker(settings: WorkerSettings) -> None:
             hb.stop()
             hb.join(timeout=10.0)
             sync_http.close()
+            # PR-E: tear down any worker-spawned vLLMs on graceful
+            # drain. Hard-kill via signal handlers in vllm_runner
+            # covers crash paths.
+            await vllm_registry.shutdown()
 
 
 def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
@@ -188,6 +207,7 @@ async def _spawn_trial(
     object_store: ObjectStore,
     worker_id: UUID,
     payload: dict[str, Any],
+    vllm_registry: WorkerVLLMRegistry,
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
@@ -234,6 +254,10 @@ async def _spawn_trial(
         # project each into an LLMCallEvent. No-op for trials that
         # don't route through the Gateway (oracle, in-box runtimes).
         llm_calls_fetcher=cp_client.get_trial_llm_calls,
+        # PR-E: worker-spawned vLLM registry. Shared across trials
+        # claimed by this worker process so the 1-3 min vLLM startup
+        # is amortised across many same-model trials.
+        vllm_registry=vllm_registry,
     )
 
     async def _run_and_cleanup() -> None:

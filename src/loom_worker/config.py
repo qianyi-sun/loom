@@ -48,5 +48,18 @@ class WorkerSettings(BaseSettings):
     # persistence across container restarts.
     benchmark_cache: Path | None = None
 
+    # PR-E: worker-spawned vLLM. When True, the worker can serve
+    # trials that select `ModelSpec.source=hf, hf_execution=local-vllm`
+    # by spawning vLLM subprocesses against HF model ids. Requires the
+    # `vllm` extra (`pip install loom[vllm]`) and a GPU. Defaults False
+    # because spawning vLLM without GPUs / extras would 500 every
+    # trial; opt-in protects deployments that don't run local weights.
+    enable_worker_vllm: bool = False
+    # Knobs that the registry passes to every spawned vLLM. Match
+    # vLLM's own defaults except where Loom's expected workloads
+    # benefit from a fleet-wide override.
+    vllm_gpu_memory_utilization: float = 0.90
+    vllm_tensor_parallel_size: int = 1
+
     log_level: LogLevel = "info"
     metrics_port: int = 9090
