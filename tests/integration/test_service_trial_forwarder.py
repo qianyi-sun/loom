@@ -156,7 +156,7 @@ async def test_post_trial_no_scope_403(
         r = await ac.post(
             "/api/v1/trials",
             headers={"Authorization": f"Bearer {other}"},
-            json={"task_id": "local/task-1", "config": {}},
+            json={"task_id": "local/task-1", "config": {"agent_name": "oracle", "agent_model": None}},
         )
     assert r.status_code == 403
     assert all(
@@ -250,7 +250,7 @@ async def test_forwarder_propagates_retry_after(
         r = await ac.post(
             "/api/v1/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_id": "local/t", "config": {}},
+            json={"task_id": "local/t", "config": {"agent_name": "oracle", "agent_model": None}},
         )
     assert r.status_code == 429
     assert r.headers.get("retry-after") == "30"

@@ -74,7 +74,7 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_id": "hello", "config": {}},
+            json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 201, r.text
         body = r.json()
@@ -89,14 +89,14 @@ def test_submit_rejects_unknown_task(app, seed_team):  # type: ignore[no-untyped
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_id": "nope", "config": {}},
+            json={"task_id": "nope", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 404
 
 
 def test_submit_rejects_unauth(app, seed_team):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
-        r = client.post("/trials", json={"task_id": "hello", "config": {}})
+        r = client.post("/trials", json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}})
         assert r.status_code == 401
 
 
@@ -106,6 +106,6 @@ def test_submit_rejects_missing_task_id(app, seed_team):  # type: ignore[no-unty
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"config": {}},
+            json={"config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 400

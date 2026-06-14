@@ -50,7 +50,16 @@ def test_cli_list_includes_terminal_bench_2_from_default_catalog(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """End-to-end: with no remote service + default catalog, `list`
-    surfaces both installed builtins and the catalog-only TB-2 entry."""
+    surfaces both installed builtins and the catalog entry for TB-2.
+
+    Note: TB-2 now ships as a sibling package (`packages/
+    loom-benchmark-terminal-bench-2`) and registers via the
+    `loom.benchmarks` entry-point, so when installed it shows up as
+    `builtin` + `installed`. The catalog entry is masked by the
+    builtin per `default-catalog.json`'s `_note`. The "available"
+    column appears in the table header even when no entry is in
+    that state.
+    """
     monkeypatch.delenv("LOOM_SERVER_URL", raising=False)
     monkeypatch.delenv("LOOM_CATALOG_URL", raising=False)
 
@@ -63,4 +72,3 @@ def test_cli_list_includes_terminal_bench_2_from_default_catalog(
     assert "builtin" in out
     assert "installed" in out
     assert "terminal-bench-2" in out
-    assert "available" in out

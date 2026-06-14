@@ -120,7 +120,7 @@ def test_mit_task_accepted(app, seed):  # type: ignore[no-untyped-def]
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "mit-task", "config": {}},
+            json={"task_id": "mit-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 201, r.text
 
@@ -130,7 +130,7 @@ def test_gpl_task_rejected_with_403(app, seed):  # type: ignore[no-untyped-def]
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "gpl-task", "config": {}},
+            json={"task_id": "gpl-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 403
         assert "GPL-3.0-only" in r.json()["detail"]
@@ -143,7 +143,7 @@ def test_no_license_task_accepted(app, seed):  # type: ignore[no-untyped-def]
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "no-license-task", "config": {}},
+            json={"task_id": "no-license-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 201, r.text
 
@@ -156,7 +156,7 @@ def test_empty_string_license_rejected(app, seed):  # type: ignore[no-untyped-de
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "empty-license-task", "config": {}},
+            json={"task_id": "empty-license-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 403
 
@@ -177,7 +177,7 @@ def test_tightened_allowlist_rejects_mit(app, seed, postgres_url):  # type: igno
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "mit-task", "config": {}},
+            json={"task_id": "mit-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 403
         assert "MIT" in r.json()["detail"]

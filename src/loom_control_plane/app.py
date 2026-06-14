@@ -58,8 +58,16 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             yield
         finally:
             crash_detector_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await crash_detector_task
+            # Bound the await so a stuck task (e.g. mid-DB call when
+            # cancellation arrives, asyncpg connection takes a moment
+            # to release) doesn't block the entire lifespan shutdown —
+            # which then blocks `TestClient.__exit__`, which then
+            # blocks the test. Five seconds is generous for a task
+            # that should respond to cancel in microseconds.
+            with contextlib.suppress(
+                asyncio.CancelledError, asyncio.TimeoutError,
+            ):
+                await asyncio.wait_for(crash_detector_task, timeout=5.0)
             await engine.dispose()
 
     app = FastAPI(

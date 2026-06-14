@@ -131,7 +131,7 @@ async def test_humaneval_mit_clears_default_allowlist(
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "humaneval/HumanEval/0", "config": {}},
+            json={"task_id": "humaneval/HumanEval/0", "config": {"agent_name": "oracle", "agent_model": None}},
         )
     assert r.status_code == 201, r.text
     assert r.json()["state"] == "queued"
@@ -194,7 +194,7 @@ async def test_lcb_cc_by_nc_rejected_under_default_allowlist(
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "livecodebench/lcb-9001", "config": {}},
+            json={"task_id": "livecodebench/lcb-9001", "config": {"agent_name": "oracle", "agent_model": None}},
         )
     assert r.status_code == 403, r.text
     assert "CC-BY-NC-4.0" in r.json()["detail"]
