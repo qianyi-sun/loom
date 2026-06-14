@@ -16,7 +16,10 @@ def test_datasets_list_includes_humaneval(
     assert rc == 0
     out = capsys.readouterr().out
     assert "humaneval" in out
-    assert "swe-bench-verified" in out
+    # PR-1 (series/tags): swe-bench-verified is no longer a separate
+    # adapter — verified status is a tag on swe-bench. Use the parent
+    # slug for the presence check.
+    assert "swe-bench" in out
 
 
 def test_datasets_list_emits_header_columns(

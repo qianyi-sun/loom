@@ -74,6 +74,13 @@ class Task(Base):
     benchmark_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("benchmarks.id"), nullable=True,
     )
+    # PR-1 (benchmark series): open-ended key→value metadata. Adapters
+    # populate from upstream (year/exam/difficulty/topic/…). The SPA
+    # uses these for the tag filter UI; the backend exposes a
+    # discovery endpoint that walks distinct values per benchmark.
+    tags: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, server_default="{}",
+    )
     registered_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -90,6 +97,13 @@ class Benchmark(Base):
     license_spdx: Mapped[str] = mapped_column(Text, nullable=False)
     license_url: Mapped[str] = mapped_column(Text, nullable=False)
     splits: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    # PR-1 (benchmark series): groups related benchmarks for the SPA's
+    # multi-select dropdown. Convention: "aime", "swe-bench", …; NULL =
+    # standalone, not part of a series. Disjoint variants (AIME by year)
+    # are siblings under the same series so group-select unions cleanly.
+    series: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
     imported_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )

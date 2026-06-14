@@ -15,7 +15,7 @@ Each benchmark adapter declares its upstream source + license up-front
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -33,6 +33,11 @@ class BenchmarkInstance:
     instance_id: str
     split: str
     raw: dict[str, Any]
+    # Open-ended key→value metadata surfaced to the SPA's tag filter
+    # and the per-task `tags` column. Adapter convention: lowercase
+    # string keys, stringified values (year="2024", exam="I",
+    # verified="true"). Default empty so legacy adapters keep working.
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

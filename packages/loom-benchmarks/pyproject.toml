@@ -19,7 +19,12 @@ dependencies = [
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
 
 [project.entry-points."loom.benchmarks"]
-aime = "loom_benchmarks.adapters.aime:AIMEAdapter"
+# PR-1 (series): AIME split into peer benchmarks under series="aime".
+# Old `aime` slug renamed to `aime-aimo-validation` to make room for
+# year-specific siblings. The `swe-bench-verified` slug is dropped —
+# the verified flag is now a tag on the unified swe-bench benchmark.
+aime-aimo-validation = "loom_benchmarks.adapters.aime:AIMEAdapter"
+aime-2025 = "loom_benchmarks.adapters.aime_2025:AIME2025Adapter"
 bfcl = "loom_benchmarks.adapters.bfcl:BFCLAdapter"
 gaia = "loom_benchmarks.adapters.gaia:GAIAAdapter"
 humaneval = "loom_benchmarks.adapters.humaneval:HumanEvalAdapter"
@@ -30,7 +35,6 @@ skillflow = "loom_benchmarks.adapters.skillflow:SkillFlowAdapter"
 skilllearnbench = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchAdapter"
 swe-bench = "loom_benchmarks.adapters.swe_bench:SWEBenchAdapter"
 swe-bench-multimodal = "loom_benchmarks.adapters.swe_bench_multimodal:SWEBenchMultimodalAdapter"
-swe-bench-verified = "loom_benchmarks.adapters.swe_bench_verified:SWEBenchVerifiedAdapter"
 webarena = "loom_benchmarks.adapters.webarena:WebArenaAdapter"
 
 [tool.hatch.build.targets.wheel]

@@ -42,9 +42,10 @@ from loom_benchmark_tool.import_cmd import _validate_instance_id
 # a way the register/worker code needs to fork on. The shape:
 #
 # {
-#   "schema_version": int,
+#   "schema_version": int,       # 1 = legacy, 2 = adds series + tags
 #   "benchmark_id": str,
 #   "display_name": str,
+#   "series": str | null,        # v2+: grouping label ("aime", …)
 #   "license_spdx": str,
 #   "license_url": str,
 #   "upstream_kind": str,
@@ -62,10 +63,15 @@ from loom_benchmark_tool.import_cmd import _validate_instance_id
 #       "checksum": str,           # "sha256:..." over the bundle tree
 #       "license_spdx": str,
 #       "split": str,
+#       "tags": dict[str, str],    # v2+: open-ended task metadata
 #     }
 #   ]
 # }
-MANIFEST_SCHEMA_VERSION = 1
+#
+# Legacy v1 manifests have no `series` or `tags`; the register path
+# treats those as `series=None` and `tags={}` so the migration is
+# rolling.
+MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_FILENAME = "manifest.json"
 
 
@@ -173,6 +179,10 @@ def run_publish(
                     "checksum": checksum,
                     "license_spdx": converted.license_spdx,
                     "split": split,
+                    # PR-1 (series/tags): per-task metadata. Empty for
+                    # adapters that haven't been reworked yet — register
+                    # treats absent + {} identically.
+                    "tags": dict(inst.tags),
                 })
                 # Sniff out task.toml so the manifest can echo a
                 # canonical step_count — convenient for the SPA.
@@ -188,6 +198,9 @@ def run_publish(
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "benchmark_id": adapter.name,
             "display_name": adapter.display_name,
+            # PR-1: series grouping. Adapters declare `series = "aime"`
+            # (or similar) as a class attr; absence → standalone.
+            "series": getattr(adapter, "series", None),
             "license_spdx": adapter.license_spdx,
             "license_url": adapter.license_url,
             "upstream_kind": adapter.upstream_source.kind,

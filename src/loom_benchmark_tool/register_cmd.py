@@ -70,6 +70,11 @@ async def run_register(
             # Upsert the Benchmark row from manifest metadata. Same
             # ON CONFLICT shape as import_cmd so re-registering doesn't
             # double-write.
+            # PR-1: `series` is added to benchmarks; manifest v2 carries
+            # it as a top-level field. v1 manifests don't include it, so
+            # default to None — `register` stays back-compat with already-
+            # published benchmarks.
+            series = manifest.get("series")
             await session.execute(
                 pg_insert(Benchmark).values(
                     id=manifest["benchmark_id"],
@@ -82,6 +87,7 @@ async def run_register(
                     license_spdx=manifest["license_spdx"],
                     license_url=manifest.get("license_url", ""),
                     splits=manifest.get("splits", ["test"]),
+                    series=series,
                     imported_by=registered_by or "loom_benchmark_tool:register",
                 ).on_conflict_do_update(
                     index_elements=["id"],
@@ -90,6 +96,7 @@ async def run_register(
                         "upstream_revision": manifest.get(
                             "upstream_revision", "",
                         ),
+                        "series": series,
                         "imported_by": (
                             registered_by or
                             "loom_benchmark_tool:register"
@@ -109,6 +116,9 @@ async def run_register(
                     repo_id=repo_id, revision=revision,
                     hf_path=t["hf_path"],
                 )
+                # PR-1: per-task tags from manifest v2. v1 manifests
+                # omit `tags`; treat absent + {} identically.
+                tags = t.get("tags") or {}
                 await session.execute(
                     pg_insert(TaskRow).values(
                         id=t["task_id"],
@@ -119,6 +129,7 @@ async def run_register(
                             "license_spdx", manifest["license_spdx"],
                         ),
                         benchmark_id=manifest["benchmark_id"],
+                        tags=tags,
                     ).on_conflict_do_update(
                         index_elements=["id"],
                         set_={
@@ -128,6 +139,7 @@ async def run_register(
                                 "license_spdx", manifest["license_spdx"],
                             ),
                             "benchmark_id": manifest["benchmark_id"],
+                            "tags": tags,
                         },
                     ),
                 )

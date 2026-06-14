@@ -17,15 +17,42 @@ from loom.models.task import TaskConfig
 FIXTURE = Path(__file__).parent / "fixtures" / "aime" / "sample.json"
 
 
+def test_aime_url_parser_extracts_year_exam_problem() -> None:
+    """PR-1: instance_ids come from the upstream `url` field, not the
+    opaque AI-MO row id. Tags carry year/exam/problem so the SPA's
+    tag filter can slice the benchmark."""
+    from loom_benchmarks.adapters.aime import _parse_aime_url
+    assert _parse_aime_url(
+        "https://artofproblemsolving.com/wiki/index.php/2024_AIME_II_Problems/Problem_7",
+    ) == ("2024", "II", "7")
+    assert _parse_aime_url("") is None
+    assert _parse_aime_url("https://example.com/random") is None
+
+
+def test_aime_adapter_declares_series() -> None:
+    """SPA's dropdown groups benchmarks by series. PR-1 puts AIME
+    variants under series='aime' so AIME 2025 + AIME (AIMO validation)
+    appear together."""
+    assert AIMEAdapter.series == "aime"
+    assert AIMEAdapter.name == "aime-aimo-validation"
+
+
 def test_aime_emits_structured_integer_verifier(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
-    inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
+    # PR-1 (series/tags): the adapter now derives structured instance_ids
+    # from the upstream `url` ("2022-I/1"); the test constructs the
+    # BenchmarkInstance directly so the helper isn't exercised here, but
+    # the resulting `task.id` reflects the renamed adapter slug
+    # `aime-aimo-validation`.
+    inst = BenchmarkInstance(
+        instance_id="2022-I/1", split="train", raw=rec,
+    )
     AIMEAdapter().convert_instance(inst, out_dir=tmp_path)
     cfg = TaskConfig.model_validate(
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.verifier.name == "script"
-    assert cfg.task.id == "aime/2022-I-1"
+    assert cfg.task.id == "aime-aimo-validation/2022-I/1"
     assert (tmp_path / "expected_answer.txt").read_text() == "45"
     assert "ordered pairs" in (tmp_path / "instruction.md").read_text()
     assert "verifier/check.py" in (tmp_path / "verifier" / "run.sh").read_text()

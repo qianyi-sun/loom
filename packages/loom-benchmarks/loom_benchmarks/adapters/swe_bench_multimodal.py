@@ -19,6 +19,7 @@ from loom_benchmarks.util import embed_base64_image, sha256_of_dir
 class SWEBenchMultimodalAdapter(SWEBenchVerifiedAdapter):
     name = "swe-bench-multimodal"
     display_name = "SWE-Bench Multimodal"
+    series = "swe-bench"
     upstream_source = UpstreamSource(
         kind="huggingface",
         locator="princeton-nlp/SWE-bench_Multimodal",

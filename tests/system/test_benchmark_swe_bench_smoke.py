@@ -71,8 +71,14 @@ async def test_swe_bench_verified_three_instances(
     )
     minio_store._client.create_bucket(Bucket="loom-benchmarks")
 
+    # PR-1 (series): the `swe-bench-verified` adapter slug is gone —
+    # verified status is now a tag on the unified `swe-bench` benchmark.
+    # The smoke imports the parent so the same code path exercises
+    # the merged-tag list_instances + convert path. We don't filter by
+    # tag here because run_import doesn't filter — it converts the
+    # first `limit` rows regardless.
     stats = await run_import(
-        benchmark="swe-bench-verified",
+        benchmark="swe-bench",
         db_url=compose_stack["db_url"],
         object_store=minio_store,
         bucket="loom-benchmarks",

@@ -7,12 +7,18 @@ import pytest
 from loom_cli.builtin import load_builtin_entries
 
 
-def test_load_returns_all_thirteen_shipped_adapters() -> None:
+def test_load_returns_all_shipped_adapters() -> None:
+    """PR-1 (series): `aime` slug renamed to `aime-aimo-validation`
+    (with `aime-2025` as a sibling); `swe-bench-verified` slug dropped
+    (now a tag on `swe-bench`). Floor stays at 13 — we added AIME 2025
+    and removed swe-bench-verified."""
     entries = load_builtin_entries()
     slugs = {e.slug for e in entries}
     assert "humaneval" in slugs
-    assert "swe-bench-verified" in slugs
-    assert "aime" in slugs
+    assert "aime-aimo-validation" in slugs
+    assert "aime-2025" in slugs
+    assert "swe-bench-verified" not in slugs
+    assert "swe-bench" in slugs
     assert len(entries) >= 13
 
 
