@@ -3,21 +3,28 @@
  *
  * Behavior:
  *   - Agents: one flat alphabetical dropdown. Built-in vs
- *     loom-launcher adapter is implementation detail — they're
- *     peers at runtime, so the picker treats them the same and the
- *     UI doesn't expose the source. The selected agent's
- *     description renders below the select so users still see what
- *     they're picking.
- *   - Models: grouped by provider via <optgroup> because billing
- *     differs across providers and users browse by provider when
- *     hunting for a model. A "Custom model…" option at the bottom
- *     reveals a (provider, name) pair so users can target a model
- *     the rate-card catalog hasn't been imported for yet; typed
- *     custom values survive an agent toggle.
+ *     loom-launcher adapter is implementation detail — they're peers
+ *     at runtime, so the picker treats them the same and the UI
+ *     doesn't expose the source. The selected agent's description
+ *     renders below the select.
+ *   - Model source: PR-C adds a tab switcher between
+ *     **Catalog** / **HuggingFace** / **Local server**. Tabs are
+ *     filtered by the agent's `supported_model_sources` declared in
+ *     the catalog (PR-A). If only one source is supported, no tabs
+ *     render — the picker just shows that source's panel.
+ *     - Catalog: rate-card-backed dropdown grouped by provider,
+ *       with "Custom model…" for ad-hoc IDs the catalog hasn't
+ *       imported. Provider list further filtered by
+ *       `supported_providers` when not "*".
+ *     - HuggingFace: model-id text input + sub-toggle between
+ *       "Run via local vLLM" (default — worker spawns vLLM on a GPU
+ *       box) and "HF Inference Endpoints" (managed/metered).
+ *     - Local server: dropdown of operator-configured local servers
+ *       (`GET /api/v1/local-servers`) + a model-id input.
  *
  * The pair `(agent_name, agent_model)` is what TrialConfig requires.
- * `agent_model` is either `{provider, name}` or `null` depending on
- * the selected agent's `needs_model`.
+ * `agent_model` is either a ModelSpec or null depending on the
+ * selected agent's `needs_model`.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -26,10 +33,18 @@ import { api } from "../api/client";
 import { Button } from "./Button";
 import { Input } from "./Input";
 
+export type ModelSource = "api" | "local-server" | "hf";
+export type HFExecution = "local-vllm" | "inference-api";
+
 export interface AgentModelValue {
   agentName: string;
+  source: ModelSource;
   modelProvider: string;
   modelName: string;
+  /** Required when source = "local-server". Name of an operator-configured server. */
+  localServer?: string;
+  /** Required when source = "hf". local-vllm (default) spawns vLLM; inference-api hits HF. */
+  hfExecution?: HFExecution;
 }
 
 export interface AgentModelPickerProps {
@@ -42,10 +57,10 @@ export interface AgentModelPickerProps {
 interface AgentEntry {
   name: string;
   needs_model: boolean;
-  // The server reports kind ("builtin" vs "adapter") for completeness;
-  // the SPA intentionally doesn't surface it — at runtime they're peers.
   kind: "builtin" | "adapter";
   description: string;
+  supported_providers: string[];
+  supported_model_sources: string[];
 }
 
 interface ModelEntry {
@@ -53,13 +68,25 @@ interface ModelEntry {
   name: string;
 }
 
+interface LocalServerEntry {
+  name: string;
+  base_url: string;
+  kind: string | null;
+  description: string | null;
+}
+
 const SELECT_CLS =
   "block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:cursor-not-allowed disabled:opacity-60";
 
 const CUSTOM_MODEL_KEY = "__custom__";
+const ALL_SOURCES: ModelSource[] = ["api", "local-server", "hf"];
 
 function modelKey(m: ModelEntry): string {
   return `${m.provider}|${m.name}`;
+}
+
+function sourceLabel(s: ModelSource): string {
+  return s === "api" ? "Catalog" : s === "hf" ? "HuggingFace" : "Local server";
 }
 
 export function AgentModelPicker({
@@ -77,15 +104,19 @@ export function AgentModelPicker({
     queryFn: () => api.listModels(),
     staleTime: 5 * 60 * 1000,
   });
+  const localServers = useQuery({
+    queryKey: ["local-servers"],
+    queryFn: () => api.listLocalServers(),
+    staleTime: 5 * 60 * 1000,
+  });
 
   const selectedAgent: AgentEntry | undefined = useMemo(
     () => agents.data?.items.find((a) => a.name === value.agentName),
     [agents.data, value.agentName],
   );
 
-  // If the catalog resolves and the current `agentName` isn't in it,
-  // default to the first entry. Wrapped in an effect so we don't
-  // set state during render.
+  // Default to the first agent when the catalog resolves and the
+  // current `agentName` isn't in it.
   useEffect(() => {
     if (!agents.data) return;
     if (
@@ -96,17 +127,16 @@ export function AgentModelPicker({
     }
     const first = agents.data.items[0];
     if (!first) return;
+    const firstSource = (first.supported_model_sources[0] as ModelSource) ?? "api";
     onChange({
       agentName: first.name,
+      source: firstSource,
       modelProvider: "",
       modelName: "",
+      hfExecution: "local-vllm",
     });
   }, [agents.data, value.agentName, onChange]);
 
-  // Plan 27: flat alphabetical list. The builtin/adapter split is
-  // implementation detail (one is hardcoded in the worker, the other
-  // self-registers via loom-launcher) — at runtime they're peers, so
-  // the picker treats them the same.
   const agentList = useMemo(
     () =>
       [...(agents.data?.items ?? [])].sort((a, b) =>
@@ -115,10 +145,38 @@ export function AgentModelPicker({
     [agents.data],
   );
 
-  // Same shape for models — grouped by provider.
+  // Sources the SELECTED agent actually supports.
+  const availableSources: ModelSource[] = useMemo(() => {
+    if (!selectedAgent) return [];
+    const supported = new Set(selectedAgent.supported_model_sources);
+    return ALL_SOURCES.filter((s) => supported.has(s));
+  }, [selectedAgent]);
+
+  // When the agent switches, snap the source into the new agent's
+  // supported set. Avoids the picker rendering a tab the route would
+  // reject at submit time.
+  useEffect(() => {
+    if (!selectedAgent || !selectedAgent.needs_model) return;
+    if (availableSources.includes(value.source)) return;
+    const firstSrc = availableSources[0];
+    if (!firstSrc) return;
+    onChange({ ...value, source: firstSrc });
+  }, [selectedAgent, availableSources, value, onChange]);
+
+  // For the catalog tab: filter the model list by the agent's
+  // supported_providers (unless "*").
+  const filteredModels: ModelEntry[] = useMemo(() => {
+    const items = models.data?.items ?? [];
+    if (!selectedAgent || selectedAgent.supported_providers.includes("*")) {
+      return items;
+    }
+    const allowed = new Set(selectedAgent.supported_providers);
+    return items.filter((m) => allowed.has(m.provider));
+  }, [models.data, selectedAgent]);
+
   const modelGroups = useMemo(() => {
     const grouped: Record<string, ModelEntry[]> = {};
-    for (const m of models.data?.items ?? []) {
+    for (const m of filteredModels) {
       (grouped[m.provider] ??= []).push(m);
     }
     return Object.entries(grouped)
@@ -127,28 +185,20 @@ export function AgentModelPicker({
         entries: entries.sort((a, b) => a.name.localeCompare(b.name)),
       }))
       .sort((a, b) => a.provider.localeCompare(b.provider));
-  }, [models.data]);
+  }, [filteredModels]);
 
   const needsModel = selectedAgent?.needs_model ?? true;
 
-  // Is the currently-set (provider, name) in the catalog?
+  // Custom-catalog mode state (existing behavior preserved).
   const inCatalog = useMemo(() => {
     if (!models.data) return false;
-    return models.data.items.some(
+    return filteredModels.some(
       (m) =>
         m.provider === value.modelProvider && m.name === value.modelName,
     );
-  }, [models.data, value.modelProvider, value.modelName]);
+  }, [models.data, filteredModels, value.modelProvider, value.modelName]);
 
-  // Custom mode: the user picked the "Custom model…" option OR they're
-  // editing a (provider, name) pair that isn't (and never was) in the
-  // catalog. We persist this in local state so a transient empty
-  // catalog response doesn't auto-switch them back to "Choose a
-  // model…" while typing.
   const [customMode, setCustomMode] = useState(false);
-  // Cache the most-recently-typed custom (provider, name) so switching
-  // to a no-model agent (which clears value.modelProvider/Name) and
-  // back doesn't make the user retype.
   const customCacheRef = useRef<{ provider: string; name: string }>({
     provider: "",
     name: "",
@@ -162,11 +212,9 @@ export function AgentModelPicker({
     }
   }, [customMode, value.modelProvider, value.modelName]);
   useEffect(() => {
-    // Auto-enter custom mode if the current value is non-empty but not
-    // in the catalog (e.g. server replied with a model the catalog
-    // didn't list — defensive).
     if (
       needsModel &&
+      value.source === "api" &&
       value.modelProvider &&
       value.modelName &&
       models.data &&
@@ -174,12 +222,16 @@ export function AgentModelPicker({
     ) {
       setCustomMode(true);
     }
-  }, [needsModel, value.modelProvider, value.modelName, models.data, inCatalog]);
+  }, [needsModel, value.source, value.modelProvider, value.modelName, models.data, inCatalog]);
+
+  // Switching source always resets the model picker fields; cached
+  // catalog selections shouldn't leak across tabs.
+  useEffect(() => {
+    setCustomMode(false);
+  }, [value.source]);
 
   const enterCustomMode = (): void => {
     setCustomMode(true);
-    // If the user hasn't typed anything yet but had a previous custom
-    // value cached (from a prior session of the form), restore it.
     if (!value.modelProvider && !value.modelName) {
       const cached = customCacheRef.current;
       if (cached.provider || cached.name) {
@@ -194,8 +246,6 @@ export function AgentModelPicker({
 
   const leaveCustomMode = (): void => {
     setCustomMode(false);
-    // Clear so the catalog dropdown reads as "Choose a model…" rather
-    // than showing a stale (provider, name) that isn't in the catalog.
     onChange({ ...value, modelProvider: "", modelName: "" });
   };
 
@@ -204,6 +254,215 @@ export function AgentModelPicker({
     : value.modelProvider && value.modelName
       ? modelKey({ provider: value.modelProvider, name: value.modelName })
       : "";
+
+  const renderCatalogPanel = (): JSX.Element => (
+    <div className="space-y-2">
+      <label className="block">
+        <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+          Model
+        </span>
+        <select
+          className={SELECT_CLS}
+          value={selectedModelKey}
+          disabled={disabled || models.isPending}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === CUSTOM_MODEL_KEY) {
+              enterCustomMode();
+              return;
+            }
+            setCustomMode(false);
+            const [provider, name] = v.split("|");
+            onChange({
+              ...value,
+              modelProvider: provider ?? "",
+              modelName: name ?? "",
+            });
+          }}
+        >
+          <option value="">Choose a model…</option>
+          {modelGroups.map((g) => (
+            <optgroup key={g.provider} label={g.provider}>
+              {g.entries.map((m) => (
+                <option key={modelKey(m)} value={modelKey(m)}>
+                  {m.name}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+          <option value={CUSTOM_MODEL_KEY}>Custom model…</option>
+        </select>
+      </label>
+      {customMode ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                Provider
+              </span>
+              <Input
+                value={value.modelProvider}
+                onChange={(e) =>
+                  onChange({ ...value, modelProvider: e.target.value })
+                }
+                placeholder="anthropic"
+                disabled={disabled}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                Model name
+              </span>
+              <Input
+                value={value.modelName}
+                onChange={(e) =>
+                  onChange({ ...value, modelName: e.target.value })
+                }
+                placeholder="claude-opus-4-7"
+                disabled={disabled}
+              />
+            </label>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={leaveCustomMode}
+            disabled={disabled}
+          >
+            Back to catalog
+          </Button>
+        </div>
+      ) : null}
+      {filteredModels.length === 0 && !customMode ? (
+        <p className="text-xs text-amber-700">
+          No catalog models match this agent's supported providers.
+          Use &ldquo;Custom model…&rdquo; to point at any model the
+          Gateway accepts.
+        </p>
+      ) : null}
+    </div>
+  );
+
+  const renderHFPanel = (): JSX.Element => (
+    <div className="space-y-3">
+      <label className="block">
+        <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+          HuggingFace model id
+        </span>
+        <Input
+          value={value.modelName}
+          onChange={(e) =>
+            onChange({
+              ...value,
+              modelProvider: "hf",
+              modelName: e.target.value,
+            })
+          }
+          placeholder="meta-llama/Llama-3-8B-Instruct"
+          disabled={disabled}
+        />
+        <p className="mt-1 text-xs text-slate-500">
+          Any model id on HuggingFace Hub.
+        </p>
+      </label>
+      <fieldset className="space-y-2">
+        <legend className="text-xs font-medium uppercase tracking-wider text-slate-500">
+          Execution
+        </legend>
+        <label className="flex items-start gap-2 text-sm text-slate-700">
+          <input
+            type="radio"
+            checked={(value.hfExecution ?? "local-vllm") === "local-vllm"}
+            onChange={() =>
+              onChange({ ...value, hfExecution: "local-vllm" })
+            }
+            disabled={disabled}
+            className="mt-1"
+          />
+          <span>
+            <strong>Run via local vLLM</strong> (default) — worker spawns
+            vLLM on a GPU box and serves the model locally.
+          </span>
+        </label>
+        <label className="flex items-start gap-2 text-sm text-slate-700">
+          <input
+            type="radio"
+            checked={value.hfExecution === "inference-api"}
+            onChange={() =>
+              onChange({ ...value, hfExecution: "inference-api" })
+            }
+            disabled={disabled}
+            className="mt-1"
+          />
+          <span>
+            <strong>HuggingFace Inference Endpoints</strong> — managed by
+            HF, metered. Requires <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">HF_TOKEN</code> in the
+            gateway.
+          </span>
+        </label>
+      </fieldset>
+    </div>
+  );
+
+  const renderLocalServerPanel = (): JSX.Element => {
+    const items = localServers.data?.items ?? [];
+    return (
+      <div className="space-y-3">
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Local server
+          </span>
+          <select
+            className={SELECT_CLS}
+            value={value.localServer ?? ""}
+            disabled={disabled || localServers.isPending}
+            onChange={(e) =>
+              onChange({ ...value, localServer: e.target.value })
+            }
+          >
+            <option value="">Choose a server…</option>
+            {items.map((s: LocalServerEntry) => (
+              <option key={s.name} value={s.name}>
+                {s.name}
+                {s.kind ? ` (${s.kind})` : ""}
+              </option>
+            ))}
+          </select>
+          {items.length === 0 && !localServers.isPending ? (
+            <p className="mt-1 text-xs text-amber-700">
+              No local servers are configured. Operator sets{" "}
+              <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">
+                LOOM_SVC_LOCAL_SERVERS_JSON
+              </code>{" "}
+              to populate this list.
+            </p>
+          ) : null}
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Model id
+          </span>
+          <Input
+            value={value.modelName}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                modelProvider: "local",
+                modelName: e.target.value,
+              })
+            }
+            placeholder="llama3"
+            disabled={disabled}
+          />
+          <p className="mt-1 text-xs text-slate-500">
+            Model identifier the local server recognises (the
+            <code className="mx-1 rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">model</code>
+            field it expects in OpenAI-compatible requests).
+          </p>
+        </label>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -217,14 +476,21 @@ export function AgentModelPicker({
           disabled={disabled || agents.isPending}
           onChange={(e) => {
             const next = agents.data?.items.find((a) => a.name === e.target.value);
-            // Reset model fields when switching to a no-model agent;
-            // otherwise keep whatever the user had typed.
+            if (!next) {
+              onChange({ ...value, agentName: e.target.value });
+              return;
+            }
+            const nextSource =
+              (next.supported_model_sources[0] as ModelSource) ?? "api";
             onChange({
               agentName: e.target.value,
-              modelProvider: next?.needs_model ? value.modelProvider : "",
-              modelName: next?.needs_model ? value.modelName : "",
+              source: next.needs_model ? nextSource : value.source,
+              modelProvider: "",
+              modelName: "",
+              hfExecution: "local-vllm",
+              localServer: undefined,
             });
-            if (!next?.needs_model) setCustomMode(false);
+            setCustomMode(false);
           }}
         >
           {agents.isPending ? (
@@ -245,90 +511,39 @@ export function AgentModelPicker({
       </label>
 
       {needsModel ? (
-        <div className="space-y-2">
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Model
-            </span>
-            <select
-              className={SELECT_CLS}
-              value={selectedModelKey}
-              disabled={disabled || models.isPending}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === CUSTOM_MODEL_KEY) {
-                  enterCustomMode();
-                  return;
-                }
-                setCustomMode(false);
-                const [provider, name] = v.split("|");
-                onChange({
-                  ...value,
-                  modelProvider: provider ?? "",
-                  modelName: name ?? "",
-                });
-              }}
+        <div className="space-y-3">
+          {availableSources.length > 1 ? (
+            <div
+              role="tablist"
+              className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
             >
-              <option value="">Choose a model…</option>
-              {modelGroups.map((g) => (
-                <optgroup key={g.provider} label={g.provider}>
-                  {g.entries.map((m) => (
-                    <option key={modelKey(m)} value={modelKey(m)}>
-                      {m.name}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-              <option value={CUSTOM_MODEL_KEY}>Custom model…</option>
-            </select>
-          </label>
-          {customMode ? (
-            <div className="space-y-2">
-              <div className="grid grid-cols-2 gap-2">
-                <label className="block">
-                  <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                    Provider
-                  </span>
-                  <Input
-                    value={value.modelProvider}
-                    onChange={(e) =>
-                      onChange({ ...value, modelProvider: e.target.value })
-                    }
-                    placeholder="anthropic"
+              {availableSources.map((s) => {
+                const active = value.source === s;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => onChange({ ...value, source: s })}
                     disabled={disabled}
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                    Model name
-                  </span>
-                  <Input
-                    value={value.modelName}
-                    onChange={(e) =>
-                      onChange({ ...value, modelName: e.target.value })
+                    className={
+                      "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
+                      (active
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-600 hover:text-slate-900")
                     }
-                    placeholder="claude-opus-4-7"
-                    disabled={disabled}
-                  />
-                </label>
-              </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={leaveCustomMode}
-                disabled={disabled}
-              >
-                Back to catalog
-              </Button>
+                  >
+                    {sourceLabel(s)}
+                  </button>
+                );
+              })}
             </div>
           ) : null}
-          {models.data?.items.length === 0 && !customMode ? (
-            <p className="text-xs text-amber-700">
-              No models are registered in the rate-card catalog yet.
-              Use "Custom model…" to point at any model the Gateway
-              accepts, or ask an admin to import a rate card.
-            </p>
-          ) : null}
+
+          {value.source === "api" ? renderCatalogPanel() : null}
+          {value.source === "hf" ? renderHFPanel() : null}
+          {value.source === "local-server" ? renderLocalServerPanel() : null}
         </div>
       ) : (
         <p className="text-xs text-slate-500">
@@ -341,17 +556,44 @@ export function AgentModelPicker({
 }
 
 /** Build the TrialConfig.agent_model payload from the picker's value.
- * Returns `{provider, name}` when the agent needs a model AND both
- * fields are filled. Returns null otherwise. The caller is responsible
- * for surfacing a "model is required" error when needs_model is true
- * but the result is null. */
+ *
+ * Returns a ModelSpec-shaped object including the new source /
+ * local_server / hf_execution discriminator fields (PR-A). Returns
+ * null when the agent doesn't take a model or when required fields
+ * are blank (the caller surfaces the "model is required" error). */
 export function buildAgentModel(
   value: AgentModelValue,
   needsModel: boolean,
-): { provider: string; name: string } | null {
+): {
+  provider: string;
+  name: string;
+  source: ModelSource;
+  local_server?: string;
+  hf_execution?: HFExecution;
+} | null {
   if (!needsModel) return null;
-  const provider = value.modelProvider.trim();
   const name = value.modelName.trim();
-  if (!provider || !name) return null;
-  return { provider, name };
+  if (!name) return null;
+  if (value.source === "api") {
+    const provider = value.modelProvider.trim();
+    if (!provider) return null;
+    return { provider, name, source: "api" };
+  }
+  if (value.source === "hf") {
+    return {
+      provider: "hf",
+      name,
+      source: "hf",
+      hf_execution: value.hfExecution ?? "local-vllm",
+    };
+  }
+  // source === "local-server"
+  const ls = value.localServer?.trim();
+  if (!ls) return null;
+  return {
+    provider: value.modelProvider.trim() || "local",
+    name,
+    source: "local-server",
+    local_server: ls,
+  };
 }

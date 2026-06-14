@@ -28,8 +28,10 @@ export interface SubmitTrialModalProps {
 
 const INITIAL_VALUE: AgentModelValue = {
   agentName: "",
+  source: "api",
   modelProvider: "",
   modelName: "",
+  hfExecution: "local-vllm",
 };
 
 export function SubmitTrialModal({

@@ -79,8 +79,10 @@ function clampFloat(raw: string, min: number, max?: number): string {
 
 const INITIAL_PICKER: AgentModelValue = {
   agentName: "",
+  source: "api",
   modelProvider: "",
   modelName: "",
+  hfExecution: "local-vllm",
 };
 
 interface ComboRow {
