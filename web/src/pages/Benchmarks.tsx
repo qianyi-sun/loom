@@ -46,6 +46,12 @@ export default function Benchmarks(): JSX.Element {
       api.listBenchmarks({
         cursor: page.current ?? undefined,
         limit: "50",
+        // The /benchmarks listing defaults to hiding rows with zero
+        // imported tasks (so the NewBatch picker doesn't dangle empty
+        // entries). On this browse page the user wants to see the
+        // full adapter slate even before someone publishes manifests —
+        // empty rows show up with task_count=0 and a "—" task cell.
+        include_empty: "true",
       }),
   });
 
