@@ -50,18 +50,31 @@ def _make_driver_in_running_state(container: Any) -> DockerDriver:
     return d
 
 
-async def test_stop_still_removes_when_container_stop_raises():
-    """Regression for Bug 2: bundling stop+remove under one suppress meant
-    a stop() APIError would silently skip remove(), leaking the container
-    in the docker daemon."""
-    container = _FakeContainer(stop_raises=True)
+async def test_stop_delete_true_skips_graceful_stop_uses_force_remove():
+    """delete=True skips the slow `stop(timeout=10)` call entirely and
+    relies on `remove(force=True)` to SIGKILL+remove the container in
+    one step. Saves ~10s per test in the integration suite. The
+    original leak this test guarded against (stop's APIError skipping
+    remove) is now impossible because stop isn't called at all when
+    delete=True."""
+    container = _FakeContainer()
     d = _make_driver_in_running_state(container)
     await d.stop(delete=True)
-    assert container.stop_calls == 1
-    assert container.remove_calls == 1, (
-        "remove() must run even if stop() raised — otherwise the container "
-        "leaks as a stopped-but-not-removed shell"
+    assert container.stop_calls == 0, (
+        "stop() should not be called when delete=True — remove(force=True) "
+        "handles the SIGKILL"
     )
+    assert container.remove_calls == 1
+
+
+async def test_stop_delete_false_uses_graceful_stop():
+    """delete=False keeps the container around (operator may want to
+    inspect it). In that path we still call stop() to send SIGTERM."""
+    container = _FakeContainer()
+    d = _make_driver_in_running_state(container)
+    await d.stop(delete=False)
+    assert container.stop_calls == 1
+    assert container.remove_calls == 0
 
 
 async def test_stop_tolerates_remove_failure():

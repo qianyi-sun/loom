@@ -144,13 +144,21 @@ class DockerDriver:
         """Shared docker-resource cleanup used by stop() and start()'s failure
         path. Each step has its own suppress so a stop() error doesn't skip
         the remove() — the plan-shown stop() bundled them and leaked
-        stopped-but-not-removed containers when stop() raised."""
+        stopped-but-not-removed containers when stop() raised.
+
+        When delete=True we skip the graceful `stop(timeout=10)` because
+        `remove(force=True)` SIGKILLs running containers in one step. The
+        graceful stop is only meaningful when delete=False (operator
+        wants to keep the stopped container around for inspection).
+        Skipping it saves ~10s per test in the docker-tier suite.
+        """
         if self._container is not None:
-            with contextlib.suppress(APIError, NotFound):
-                await asyncio.to_thread(self._container.stop, timeout=10)
             if delete:
                 with contextlib.suppress(APIError, NotFound):
                     await asyncio.to_thread(self._container.remove, force=True)
+            else:
+                with contextlib.suppress(APIError, NotFound):
+                    await asyncio.to_thread(self._container.stop, timeout=10)
             self._container = None
         if self._client is not None:
             with contextlib.suppress(Exception):

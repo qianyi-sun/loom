@@ -93,7 +93,9 @@ async def test_e2e_oracle_pytest_docker(
         trial_id=trial_id, team_id=uuid4(),
         task_config=task, task_checksum="0" * 64,
         task_dir=self_contained_task,
-        trial_config=TrialConfig(force_build=False),
+        trial_config=TrialConfig(
+            agent_name="oracle", agent_model=None, force_build=False,
+        ),
         driver=driver,
         agent=OracleAgent(task_dir=self_contained_task, trial_id=trial_id),
         verifier=PytestVerifier(tests_dir=PurePosixPath("/workspace/tests")),

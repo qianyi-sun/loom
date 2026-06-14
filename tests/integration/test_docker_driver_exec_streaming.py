@@ -95,20 +95,22 @@ async def test_docker_exec_streaming_no_10mb_cap() -> None:
 
 async def test_docker_exec_streaming_kill_is_callable() -> None:
     """kill() is best-effort across docker's PID namespaces (see ExecHandle
-    docstring). We verify the public contract: kill() doesn't raise, and
-    a process that runs naturally to completion still resolves wait()
-    correctly."""
+    docstring). We verify the public contract: kill() doesn't raise on a
+    process that has already exited naturally, and wait() still resolves
+    to the natural exit code.
+
+    Order matters: wait first, THEN kill. Otherwise kill races with the
+    short-lived `exit 0` and the test flakes (137 vs 0)."""
     driver = DockerDriver(image="alpine:3.20")
     await driver.start()
     try:
-        # A short-lived process so wait() resolves on its own.
         handle = await driver.exec_streaming(
             ["sh", "-c", "exit 0"],
             env_vars={},
             cwd=PurePosixPath("/workspace"),
         )
-        await handle.kill()  # must not raise even if the process is gone
         rc = await asyncio.wait_for(handle.wait(), timeout=5.0)
         assert rc == 0
+        await handle.kill()  # must not raise even if the process is gone
     finally:
         await driver.stop()
