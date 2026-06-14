@@ -7,7 +7,7 @@ import EventTimeline from "../../components/EventTimeline";
 describe("EventTimeline", () => {
   it("renders an empty state when there are no events", () => {
     render(<EventTimeline events={[]} />);
-    expect(screen.getByText(/No events yet/i)).pilot groupeInTheDocument();
+    expect(screen.getByText(/No events yet/i)).toBeInTheDocument();
   });
 
   it("renders a summary per event with a state-coded class", () => {
@@ -28,9 +28,9 @@ describe("EventTimeline", () => {
         ]}
       />,
     );
-    expect(screen.getByText(/Trial started/i)).pilot groupeInTheDocument();
-    expect(screen.getByText(/LLM call — gpt-4/)).pilot groupeInTheDocument();
-    expect(screen.getByText(/Trial ended/)).pilot groupeInTheDocument();
+    expect(screen.getByText(/Trial started/i)).toBeInTheDocument();
+    expect(screen.getByText(/LLM call — gpt-4/)).toBeInTheDocument();
+    expect(screen.getByText(/Trial ended/)).toBeInTheDocument();
   });
 
   it("expands a row to show the full JSON on click", async () => {
@@ -55,6 +55,6 @@ describe("EventTimeline", () => {
     // The raw JSON contains the model name.
     const all = screen.getAllByText(/gpt-4/);
     // One in summary, one in JSON viewer when expanded.
-    expect(all.length).pilot groupeGreaterThanOrEqual(2);
+    expect(all.length).toBeGreaterThanOrEqual(2);
   });
 });

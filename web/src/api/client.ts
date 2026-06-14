@@ -109,14 +109,24 @@ export interface Combination {
   n_per_task: number;
 }
 
-/** Plan 28 PR-3: structured task_filter discriminated by subset_kind. */
+/** Plan 28 PR-3: structured task_filter discriminated by subset_kind.
+ * Series/tags PR-2 added `benchmark_ids` (multi-select union, takes
+ * precedence over singular `benchmark_id`) and `tag_filters`
+ * (per-key value-list, AND across keys, OR within each value list). */
 export interface TaskFilter {
   benchmark_id?: string;
+  benchmark_ids?: string[];
+  tag_filters?: Record<string, string[]>;
   task_ids?: string[];
   license?: string;
   subset_kind?: "all" | "first_n" | "last_n" | "random_n" | "explicit";
   n?: number;
   seed?: number;
+}
+
+/** Series/tags PR-2: `/benchmarks/{id}/tags` response. */
+export interface BenchmarkTagsResponse {
+  items: { key: string; values: string[] }[];
 }
 
 export interface CreateBatchBody {
@@ -156,6 +166,10 @@ export const api = {
     apiFetch<TaskList>(`/api/v1/tasks${qs(q)}`),
   listBenchmarks: (q: Record<string, string | undefined> = {}) =>
     apiFetch<BenchmarkList>(`/api/v1/benchmarks${qs(q)}`),
+  listBenchmarkTags: (id: string) =>
+    apiFetch<BenchmarkTagsResponse>(
+      `/api/v1/benchmarks/${encodeURIComponent(id)}/tags`,
+    ),
   listAgents: () =>
     apiFetch<{
       items: {

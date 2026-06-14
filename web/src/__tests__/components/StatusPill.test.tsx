@@ -7,7 +7,7 @@ import { trialStateVariant } from "../../lib/statusVariant";
 describe("StatusPill", () => {
   it("renders its children as the visible label", () => {
     render(<StatusPill variant="success">Done</StatusPill>);
-    expect(screen.getByText("Done")).pilot groupeInTheDocument();
+    expect(screen.getByText("Done")).toBeInTheDocument();
   });
 
   it("does NOT set a role — pills decorate cells, they shouldn't be live regions", () => {
@@ -15,8 +15,8 @@ describe("StatusPill", () => {
       <StatusPill variant="success">Done</StatusPill>,
     );
     const span = container.querySelector("span");
-    expect(span).not.pilot groupeNull();
-    expect(span!.getAttribute("role")).pilot groupeNull();
+    expect(span).not.toBeNull();
+    expect(span!.getAttribute("role")).toBeNull();
   });
 
   it("applies the variant's color classes", () => {
@@ -46,25 +46,25 @@ describe("StatusPill", () => {
       </StatusPill>,
     );
     const span = container.querySelector("span")!;
-    expect(span.getAttribute("aria-label")).pilot groupe("state: running");
-    expect(span.getAttribute("data-state")).pilot groupe("running");
+    expect(span.getAttribute("aria-label")).toBe("state: running");
+    expect(span.getAttribute("data-state")).toBe("running");
   });
 });
 
 describe("trialStateVariant", () => {
   it("maps known states to their visual variants", () => {
-    expect(trialStateVariant("succeeded")).pilot groupe("success");
-    expect(trialStateVariant("running")).pilot groupe("running");
-    expect(trialStateVariant("claimed")).pilot groupe("running");
-    expect(trialStateVariant("queued")).pilot groupe("queued");
-    expect(trialStateVariant("submitted")).pilot groupe("queued");
-    expect(trialStateVariant("failed")).pilot groupe("failed");
-    expect(trialStateVariant("failed_terminal")).pilot groupe("failed");
-    expect(trialStateVariant("cancelled")).pilot groupe("cancelled");
+    expect(trialStateVariant("succeeded")).toBe("success");
+    expect(trialStateVariant("running")).toBe("running");
+    expect(trialStateVariant("claimed")).toBe("running");
+    expect(trialStateVariant("queued")).toBe("queued");
+    expect(trialStateVariant("submitted")).toBe("queued");
+    expect(trialStateVariant("failed")).toBe("failed");
+    expect(trialStateVariant("failed_terminal")).toBe("failed");
+    expect(trialStateVariant("cancelled")).toBe("cancelled");
   });
 
   it("falls back to neutral for unknown states so a new server-side state doesn't crash the UI", () => {
-    expect(trialStateVariant("warp_drive")).pilot groupe("neutral");
-    expect(trialStateVariant("")).pilot groupe("neutral");
+    expect(trialStateVariant("warp_drive")).toBe("neutral");
+    expect(trialStateVariant("")).toBe("neutral");
   });
 });

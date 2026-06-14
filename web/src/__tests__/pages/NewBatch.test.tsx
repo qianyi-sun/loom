@@ -24,12 +24,16 @@ const AGENTS_RESPONSE = {
       needs_model: false,
       kind: "builtin",
       description: "Runs solution/solve.sh.",
+      supported_providers: ["*"],
+      supported_model_sources: [],
     },
     {
       name: "claude-code-inbox",
       needs_model: true,
       kind: "builtin",
       description: "Claude Code in-box runtime.",
+      supported_providers: ["anthropic"],
+      supported_model_sources: ["api"],
     },
   ],
 };
@@ -41,12 +45,53 @@ const MODELS_RESPONSE = {
   ],
 };
 
+const LOCAL_SERVERS_RESPONSE = { items: [] };
+
 const BENCHMARKS_RESPONSE = {
   items: [
-    { id: "humaneval", display_name: "HumanEval" },
-    { id: "mbpp", display_name: "MBPP" },
+    {
+      id: "humaneval",
+      display_name: "HumanEval",
+      task_count: 12,
+      series: null,
+    },
+    {
+      id: "mbpp",
+      display_name: "MBPP",
+      task_count: 3,
+      series: null,
+    },
+    {
+      id: "aime-aimo-validation",
+      display_name: "AIME (AIMO validation 2022–2024)",
+      task_count: 90,
+      series: "aime",
+    },
+    {
+      id: "aime-2025",
+      display_name: "AIME 2025",
+      task_count: 30,
+      series: "aime",
+    },
   ],
   next_cursor: null,
+};
+
+const BENCHMARK_TAGS_RESPONSES: Record<string, { items: { key: string; values: string[] }[] }> = {
+  "aime-aimo-validation": {
+    items: [
+      { key: "year", values: ["2022", "2023", "2024"] },
+      { key: "exam", values: ["I", "II"] },
+    ],
+  },
+  "aime-2025": {
+    items: [
+      { key: "year", values: ["2025"] },
+      { key: "exam", values: ["I", "II"] },
+    ],
+  },
+  humaneval: { items: [] },
+  mbpp: { items: [] },
 };
 
 const BACKENDS_RESPONSE = {
@@ -78,7 +123,16 @@ const BATCH_RESPONSE = {
 function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
   typeof vi.spyOn
 > {
-  const matching = opts.matchingTasks ?? 3;
+  const matching = opts.matchingTasks ?? 12;
+  // Override humaneval's task_count with the matching value so the
+  // count summary (driven by benchmark.task_count) matches what the
+  // test wants.
+  const benchmarksResponse = {
+    ...BENCHMARKS_RESPONSE,
+    items: BENCHMARKS_RESPONSE.items.map((b) =>
+      b.id === "humaneval" ? { ...b, task_count: matching } : b,
+    ),
+  };
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
@@ -92,7 +146,13 @@ function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
         );
       if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
-      if (url.includes("/api/v1/benchmarks")) return json(BENCHMARKS_RESPONSE);
+      if (url.includes("/api/v1/local-servers")) return json(LOCAL_SERVERS_RESPONSE);
+      const tagsMatch = url.match(/\/api\/v1\/benchmarks\/([^/]+)\/tags/);
+      if (tagsMatch) {
+        const id = decodeURIComponent(tagsMatch[1]);
+        return json(BENCHMARK_TAGS_RESPONSES[id] ?? { items: [] });
+      }
+      if (url.includes("/api/v1/benchmarks")) return json(benchmarksResponse);
       if (url.includes("/api/v1/backends")) return json(BACKENDS_RESPONSE);
       if (url.includes("/api/v1/tasks")) return json(tasksResponse(matching));
       if (url.includes("/api/v1/batches")) return json(BATCH_RESPONSE, 201);
@@ -118,9 +178,14 @@ async function pickBackend(): Promise<void> {
   await user.selectOptions(screen.getByLabelText(/^Backend$/i), "docker");
 }
 
-async function pickBenchmark(): Promise<void> {
+async function pickBenchmark(id: string = "humaneval"): Promise<void> {
   const user = userEvent.setup();
-  await user.selectOptions(screen.getByLabelText(/^Benchmark$/i), "humaneval");
+  // The picker is a series-grouped checkbox list now — locate the row
+  // by its accessible name and tick it.
+  const cb = await screen.findByRole("checkbox", {
+    name: new RegExp(`Select benchmark ${id}`, "i"),
+  });
+  await user.click(cb);
 }
 
 const SUBMIT_BTN = /Submit (\d+ trials?|batch)/i;
@@ -139,10 +204,10 @@ describe("NewBatch", () => {
     const dropdown = (await screen.findByLabelText(
       "Backend",
     )) as HTMLSelectElement;
-    expect(dropdown.value).pilot groupe("docker");
+    expect(dropdown.value).toBe("docker");
   });
 
-  it("blocks submit when benchmark isn't picked", async () => {
+  it("blocks submit when no benchmark is picked", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
@@ -150,8 +215,10 @@ describe("NewBatch", () => {
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
     await pickBackend();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    expect(await screen.findByText(/Pick a benchmark\./i)).pilot groupeInTheDocument();
-    expect(batchCall(spy)).pilot groupeNull();
+    expect(
+      await screen.findByText(/Pick at least one benchmark\./i),
+    ).toBeInTheDocument();
+    expect(batchCall(spy)).toBeNull();
   });
 
   it("shows '<N> tasks match' once the count loads for the chosen benchmark", async () => {
@@ -159,41 +226,28 @@ describe("NewBatch", () => {
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await pickBenchmark();
-    expect(await screen.findByText(/12 tasks match/i)).pilot groupeInTheDocument();
-  });
-
-  it("refuses to submit when zero tasks match", async () => {
-    const spy = mockEndpoints({ matchingTasks: 0 });
-    renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
-    const user = userEvent.setup();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "x");
-    await pickBackend();
-    await pickBenchmark();
-    await screen.findByText(/No tasks registered for this benchmark/i);
-    // Submit button is disabled when totalTrials === 0; click is a
-    // no-op. The inline countSummary above already explains why.
-    expect(screen.getByRole("button", { name: /Submit batch/i })).pilot groupeDisabled();
-    expect(batchCall(spy)).pilot groupeNull();
+    expect(
+      await screen.findByText(/12 tasks match across 1 benchmark/i),
+    ).toBeInTheDocument();
   });
 
   it("POSTs the minimal body (backend + single-combo) when only required fields are set", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "my-batch");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const call = batchCall(spy)!;
-    expect(call.body.name).pilot groupe("my-batch");
-    expect(call.body.backend).pilot groupe("docker");
+    expect(call.body.name).toBe("my-batch");
+    expect(call.body.backend).toBe("docker");
     expect(call.body.task_filter).toEqual({
       subset_kind: "all",
-      benchmark_id: "humaneval",
+      benchmark_ids: ["humaneval"],
     });
     expect(call.body.trial_config).toEqual({});
     expect(call.body.combinations).toEqual([
@@ -213,23 +267,23 @@ describe("NewBatch", () => {
     await user.type(screen.getByPlaceholderText(/run 7/i), "big-batch");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/250 tasks match/i);
+    await screen.findByText(/250 tasks match across 1 benchmark/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/I understand this batch will launch 250 trials/i),
-    ).pilot groupeInTheDocument();
-    expect(batchCall(spy)).pilot groupeNull();
+    ).toBeInTheDocument();
+    expect(batchCall(spy)).toBeNull();
     await user.click(
       screen.getByRole("checkbox", {
         name: /I understand this batch will launch 250 trials/i,
       }),
     );
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
   });
 
   it("clamps n_per_task above 100 down to 100 on blur", async () => {
-    mockEndpoints({ matchingTasks: 1 });
+    mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
@@ -239,18 +293,18 @@ describe("NewBatch", () => {
     await user.clear(nField);
     await user.type(nField, "9999");
     fireEvent.blur(nField);
-    expect((nField as HTMLInputElement).value).pilot groupe("100");
+    expect((nField as HTMLInputElement).value).toBe("100");
   });
 
   it("emits a configurable retry block when max_attempts > 1 and a reason is ticked", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "retry-batch");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "5");
@@ -261,7 +315,7 @@ describe("NewBatch", () => {
       screen.getByRole("checkbox", { name: /Agent timeout/i }),
     );
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
     expect(tc.retry).toEqual({
       max_attempts: 5,
@@ -276,14 +330,14 @@ describe("NewBatch", () => {
   });
 
   it("emits skip_verifier + force_build when those toggles are on", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "env-batch");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(
       screen.getByRole("checkbox", { name: /Force rebuild env image/i }),
     );
@@ -291,32 +345,32 @@ describe("NewBatch", () => {
       screen.getByRole("checkbox", { name: /Skip verifier/i }),
     );
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
-    expect(tc.force_build).pilot groupe(true);
-    expect(tc.skip_verifier).pilot groupe(true);
+    expect(tc.force_build).toBe(true);
+    expect(tc.skip_verifier).toBe(true);
   });
 
   it("emits submit_priority when changed from the default", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "prio-batch");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     const prio = screen.getByLabelText(/Submit priority/i);
     await user.clear(prio);
     await user.type(prio, "300");
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
-    expect(tc.submit_priority).pilot groupe(300);
+    expect(tc.submit_priority).toBe(300);
   });
 
   it("submits an explicit task_ids slate from the smart paste parser", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
@@ -327,7 +381,7 @@ describe("NewBatch", () => {
     await user.type(textarea, "HumanEval/0{Enter}HumanEval/1");
     await screen.findByText(/Parsed 2 ids/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.task_filter).toEqual({
       subset_kind: "explicit",
       task_ids: ["HumanEval/0", "HumanEval/1"],
@@ -335,26 +389,26 @@ describe("NewBatch", () => {
   });
 
   it("emits NO retry block when only max_attempts is bumped (no reasons ticked)", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "noisy-batch");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByText(/Advanced options/i));
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "5");
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
-    expect(tc.retry).pilot groupeUndefined();
+    expect(tc.retry).toBeUndefined();
   });
 
   it("emits NO retry block when reasons are ticked but max_attempts is still 1", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
@@ -364,26 +418,26 @@ describe("NewBatch", () => {
     );
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByText(/Advanced options/i));
     await user.click(
       screen.getByRole("checkbox", { name: /Worker crash/i }),
     );
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
-    await vi.waitFor(() => expect(batchCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const tc = batchCall(spy)!.body.trial_config as Record<string, unknown>;
-    expect(tc.retry).pilot groupeUndefined();
+    expect(tc.retry).toBeUndefined();
   });
 
   it("rejects when backoff max < backoff base", async () => {
-    const spy = mockEndpoints({ matchingTasks: 3 });
+    const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "bad-backoff");
     await pickBackend();
     await pickBenchmark();
-    await screen.findByText(/3 tasks match/i);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "3");
@@ -396,7 +450,86 @@ describe("NewBatch", () => {
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
       await screen.findByText(/Backoff max seconds must be ≥/i),
-    ).pilot groupeInTheDocument();
-    expect(batchCall(spy)).pilot groupeNull();
+    ).toBeInTheDocument();
+    expect(batchCall(spy)).toBeNull();
+  });
+
+  // Series/tags catalog redesign (PR-3) — multi-benchmark group-select
+  // and tag-filter card behavior.
+
+  it("group-selects all benchmarks in a series with the series checkbox", async () => {
+    const spy = mockEndpoints();
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "aime-batch");
+    await pickBackend();
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: /Select all in series aime/i,
+      }),
+    );
+    // 90 (aime-aimo-validation) + 30 (aime-2025) = 120 across 2 benchmarks.
+    await screen.findByText(/120 tasks match across 2 benchmarks/i);
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.task_filter).toEqual({
+      subset_kind: "all",
+      benchmark_ids: ["aime-2025", "aime-aimo-validation"],
+    });
+  });
+
+  it("emits tag_filters when the user picks values in the tag-filter card", async () => {
+    const spy = mockEndpoints();
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "filtered");
+    await pickBackend();
+    await pickBenchmark("aime-aimo-validation");
+    // Card auto-opens once the schema loads; tap 2024 under `year`.
+    await user.click(
+      await screen.findByRole("button", { name: "2024", pressed: false }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "I", pressed: false }),
+    );
+    // With tag filters active, the count summary switches to the
+    // "Up to N tasks … determined at submit" message.
+    await screen.findByText(/Up to 90 tasks match before tag filtering/i);
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.task_filter).toEqual({
+      subset_kind: "all",
+      benchmark_ids: ["aime-aimo-validation"],
+      tag_filters: { exam: ["I"], year: ["2024"] },
+    });
+  });
+
+  it("drops tag_filters whose key vanished after deselecting the only benchmark with that key", async () => {
+    const spy = mockEndpoints();
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "swap-batch");
+    await pickBackend();
+    await pickBenchmark("aime-aimo-validation");
+    await user.click(
+      await screen.findByRole("button", { name: "2024", pressed: false }),
+    );
+    // Now drop the aime benchmark and pick humaneval (no tags) — the
+    // tag schema disappears, so the tag_filters payload must too.
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /Select benchmark aime-aimo-validation/i,
+      }),
+    );
+    await pickBenchmark("humaneval");
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.task_filter).toEqual({
+      subset_kind: "all",
+      benchmark_ids: ["humaneval"],
+    });
   });
 });

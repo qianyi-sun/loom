@@ -53,7 +53,7 @@ export default function Benchmarks(): JSX.Element {
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">
-              {["ID", "Name", "License", "Source", "Imported"].map((h) => (
+              {["ID", "Name", "Series", "License", "Source", "Imported"].map((h) => (
                 <th
                   key={h}
                   className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
@@ -70,6 +70,9 @@ export default function Benchmarks(): JSX.Element {
                   {b.id}
                 </td>
                 <td className="px-4 py-3 text-slate-700">{b.display_name}</td>
+                <td className="px-4 py-3 text-xs text-slate-500">
+                  {b.series ?? <span className="text-slate-300">—</span>}
+                </td>
                 <td className="px-4 py-3 text-slate-700">{b.license_spdx}</td>
                 <td className="px-4 py-3 font-mono text-xs text-slate-500">
                   {b.upstream_kind}: {b.upstream_locator}

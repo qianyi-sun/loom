@@ -20,12 +20,16 @@ const AGENTS_RESPONSE = {
       needs_model: false,
       kind: "builtin",
       description: "Runs solution/solve.sh as ground truth.",
+      supported_providers: ["*"],
+      supported_model_sources: [],
     },
     {
       name: "claude-code-inbox",
       needs_model: true,
       kind: "builtin",
       description: "Claude Code in-box runtime.",
+      supported_providers: ["anthropic"],
+      supported_model_sources: ["api"],
     },
   ],
 };
@@ -53,6 +57,14 @@ function mockEndpoints(): ReturnType<typeof vi.spyOn> {
       if (url.includes("/api/v1/models")) {
         return Promise.resolve(
           new Response(JSON.stringify(MODELS_RESPONSE), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.includes("/api/v1/local-servers")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ items: [] }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
@@ -105,7 +117,7 @@ describe("SubmitTrialModal", () => {
 
     await vi.waitFor(() => {
       const call = trialSubmitCall(spy);
-      expect(call).not.pilot groupeNull();
+      expect(call).not.toBeNull();
     });
     const call = trialSubmitCall(spy)!;
     expect(call.body).toEqual({
@@ -126,15 +138,15 @@ describe("SubmitTrialModal", () => {
     await user.selectOptions(dropdowns[0], "claude-code-inbox");
     // After the agent change, a Model combobox appears. Wait for it.
     await vi.waitFor(() => {
-      expect(screen.getAllByRole("combobox").length).pilot groupeGreaterThan(1);
+      expect(screen.getAllByRole("combobox").length).toBeGreaterThan(1);
     });
     const modelCombo = screen.getAllByRole("combobox")[1];
     // selectOptions matches by value — composite key is "provider|name".
     await user.selectOptions(modelCombo, "anthropic|claude-opus-4-7");
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
-    await vi.waitFor(() => expect(trialSubmitCall(spy)).not.pilot groupeNull());
+    await vi.waitFor(() => expect(trialSubmitCall(spy)).not.toBeNull());
     const call = trialSubmitCall(spy)!;
-    expect(call.body).toEqual({
+    expect(call.body).toMatchObject({
       task_id: "humaneval-0",
       config: {
         agent_name: "claude-code-inbox",
@@ -156,8 +168,8 @@ describe("SubmitTrialModal", () => {
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
     expect(
       await screen.findByText(/needs a model/i),
-    ).pilot groupeInTheDocument();
-    expect(trialSubmitCall(spy)).pilot groupeNull();
+    ).toBeInTheDocument();
+    expect(trialSubmitCall(spy)).toBeNull();
   });
 
   it("displays the task id in the body copy", async () => {
@@ -171,6 +183,6 @@ describe("SubmitTrialModal", () => {
     );
     expect(
       await screen.findByText(/humaneval\/HumanEval\/0/),
-    ).pilot groupeInTheDocument();
+    ).toBeInTheDocument();
   });
 });

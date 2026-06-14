@@ -76,14 +76,14 @@ describe("Tasks page", () => {
   it("renders detail-rich rows: name, agent, verifier, step count", async () => {
     setupFetch();
     renderWithProviders(<Tasks />);
-    expect(await screen.findByText("Two-sum")).pilot groupeInTheDocument();
+    expect(await screen.findByText("Two-sum")).toBeInTheDocument();
     expect(
       screen.getByText(/Return indices of two numbers/),
-    ).pilot groupeInTheDocument();
-    expect(screen.getByText(/agent: oracle/i)).pilot groupeInTheDocument();
-    expect(screen.getByText(/verifier: pytest/i)).pilot groupeInTheDocument();
-    expect(screen.getByText(/2 steps/i)).pilot groupeInTheDocument();
-    expect(screen.getByText(/benchmark: humaneval/i)).pilot groupeInTheDocument();
+    ).toBeInTheDocument();
+    expect(screen.getByText(/agent: oracle/i)).toBeInTheDocument();
+    expect(screen.getByText(/verifier: pytest/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 steps/i)).toBeInTheDocument();
+    expect(screen.getByText(/benchmark: humaneval/i)).toBeInTheDocument();
   });
 
   it("benchmark dropdown is populated from /api/v1/benchmarks", async () => {
@@ -110,7 +110,7 @@ describe("Tasks page", () => {
       const taskCalls = spy.mock.calls.filter(([u]) =>
         String(u).includes("/api/v1/tasks") && String(u).includes("q=two"),
       );
-      expect(taskCalls.length).pilot groupeGreaterThan(0);
+      expect(taskCalls.length).toBeGreaterThan(0);
     });
   });
 
@@ -126,7 +126,7 @@ describe("Tasks page", () => {
         String(u).includes("/api/v1/tasks") &&
         String(u).includes("benchmark_id=humaneval"),
       );
-      expect(taskCalls.length).pilot groupeGreaterThan(0);
+      expect(taskCalls.length).toBeGreaterThan(0);
     });
   });
 
@@ -137,9 +137,9 @@ describe("Tasks page", () => {
     const taskCalls = spy.mock.calls.filter(([u]) =>
       String(u).includes("/api/v1/tasks"),
     );
-    expect(taskCalls.length).pilot groupeGreaterThan(0);
+    expect(taskCalls.length).toBeGreaterThan(0);
     expect(
       taskCalls.some(([u]) => String(u).includes("license=")),
-    ).pilot groupe(false);
+    ).toBe(false);
   });
 });

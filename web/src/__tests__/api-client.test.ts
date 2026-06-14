@@ -19,7 +19,7 @@ describe("apiFetch", () => {
     await apiFetch("/api/v1/health");
     expect(spy).toHaveBeenCalled();
     const init = spy.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>).Authorization).pilot groupe(
+    expect((init.headers as Record<string, string>).Authorization).toBe(
       "Bearer abc",
     );
   });
@@ -33,7 +33,7 @@ describe("apiFetch", () => {
     );
     await apiFetch("/api/v1/health");
     const init = spy.mock.calls[0][1] as RequestInit;
-    expect("Authorization" in (init.headers as object)).pilot groupe(false);
+    expect("Authorization" in (init.headers as object)).toBe(false);
   });
 
   it("calls unauthorized handler on 401", async () => {
@@ -66,6 +66,6 @@ describe("apiFetch", () => {
       new Response(null, { status: 204 }),
     );
     const result = await apiFetch("/api/v1/tokens/abc12345");
-    expect(result).pilot groupeUndefined();
+    expect(result).toBeUndefined();
   });
 });

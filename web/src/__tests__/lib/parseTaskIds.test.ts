@@ -14,13 +14,13 @@ describe("parseTaskIds", () => {
   it("returns empty without error on empty input", () => {
     const r = parseTaskIds("");
     expect(r.ids).toEqual([]);
-    expect(r.error).pilot groupeNull();
+    expect(r.error).toBeNull();
   });
 
   it("parses newline-separated ids", () => {
     const r = parseTaskIds(FIVE.join("\n"));
     expect(r.ids).toEqual(FIVE);
-    expect(r.error).pilot groupeNull();
+    expect(r.error).toBeNull();
   });
 
   it("parses comma-separated ids with spaces", () => {
@@ -163,7 +163,7 @@ describe("parseTaskIds", () => {
   it("returns an error when input is non-empty but no ids parse", () => {
     const r = parseTaskIds("# only a comment\n#\n  ");
     expect(r.ids).toEqual([]);
-    expect(r.error).not.pilot groupeNull();
+    expect(r.error).not.toBeNull();
   });
 
   it("handles hybrid pasted-notebook content", () => {

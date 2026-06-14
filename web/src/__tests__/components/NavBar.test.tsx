@@ -15,24 +15,24 @@ function renderNav(isAdmin: boolean) {
 describe("NavBar", () => {
   it("renders the team nav items", () => {
     renderNav(false);
-    expect(screen.getByRole("link", { name: "New batch" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Monitor" })).pilot groupeInTheDocument();
-    expect(screen.getByRole("link", { name: "Settings" })).pilot groupeInTheDocument();
+    expect(screen.getByRole("link", { name: "New batch" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Monitor" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
   });
 
   it("hides admin-only links from a team user", () => {
     renderNav(false);
     expect(
       screen.queryByRole("link", { name: "Rate cards" }),
-    ).not.pilot groupeInTheDocument();
-    expect(screen.queryByText("Admin")).not.pilot groupeInTheDocument();
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Admin")).not.toBeInTheDocument();
   });
 
   it("shows admin section for an admin token", () => {
     renderNav(true);
-    expect(screen.getByText("Admin")).pilot groupeInTheDocument();
+    expect(screen.getByText("Admin")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Rate cards" }),
-    ).pilot groupeInTheDocument();
+    ).toBeInTheDocument();
   });
 });

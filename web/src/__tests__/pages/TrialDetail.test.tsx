@@ -90,14 +90,14 @@ describe("TrialDetail trajectory section", () => {
       { route: `/trials/${TRIAL_ID}` },
     );
     await waitFor(() =>
-      expect(screen.getByText(/No events yet/i)).pilot groupeInTheDocument(),
+      expect(screen.getByText(/No events yet/i)).toBeInTheDocument(),
     );
     expect(
       screen.queryByRole("button", { name: /Load more/i }),
-    ).not.pilot groupeInTheDocument();
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Retry/i }),
-    ).not.pilot groupeInTheDocument();
+    ).not.toBeInTheDocument();
   });
 
   it("shows Retry instead of Load more on trajectory error", async () => {
@@ -111,10 +111,10 @@ describe("TrialDetail trajectory section", () => {
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: /Retry/i }),
-      ).pilot groupeInTheDocument(),
+      ).toBeInTheDocument(),
     );
     expect(
       screen.queryByRole("button", { name: /Load more/i }),
-    ).not.pilot groupeInTheDocument();
+    ).not.toBeInTheDocument();
   });
 });

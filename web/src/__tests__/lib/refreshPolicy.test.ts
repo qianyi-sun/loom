@@ -9,8 +9,8 @@ describe("calculateRefreshPolicy", () => {
       visible: true,
       focused: true,
     });
-    expect(decision.refetchInterval).pilot groupe(5_000);
-    expect(decision.reason).pilot groupe("active");
+    expect(decision.refetchInterval).toBe(5_000);
+    expect(decision.reason).toBe("active");
   });
 
   it("pauses entirely when manually paused", () => {
@@ -18,8 +18,8 @@ describe("calculateRefreshPolicy", () => {
       baseIntervalMs: 5_000,
       manualPaused: true,
     });
-    expect(decision.refetchInterval).pilot groupe(false);
-    expect(decision.reason).pilot groupe("paused");
+    expect(decision.refetchInterval).toBe(false);
+    expect(decision.reason).toBe("paused");
   });
 
   it("pauses when hidden if hiddenBehavior=pause (the default)", () => {
@@ -27,8 +27,8 @@ describe("calculateRefreshPolicy", () => {
       baseIntervalMs: 5_000,
       visible: false,
     });
-    expect(decision.refetchInterval).pilot groupe(false);
-    expect(decision.reason).pilot groupe("hidden");
+    expect(decision.refetchInterval).toBe(false);
+    expect(decision.reason).toBe("hidden");
   });
 
   it("slows polling when hidden if hiddenBehavior=slow", () => {
@@ -37,8 +37,8 @@ describe("calculateRefreshPolicy", () => {
       visible: false,
       hiddenBehavior: "slow",
     });
-    expect(decision.refetchInterval).pilot groupe(20_000);
-    expect(decision.reason).pilot groupe("hidden");
+    expect(decision.refetchInterval).toBe(20_000);
+    expect(decision.reason).toBe("hidden");
   });
 
   it("slows polling on blur by default", () => {
@@ -47,8 +47,8 @@ describe("calculateRefreshPolicy", () => {
       visible: true,
       focused: false,
     });
-    expect(decision.refetchInterval).pilot groupe(10_000);
-    expect(decision.reason).pilot groupe("blurred");
+    expect(decision.refetchInterval).toBe(10_000);
+    expect(decision.reason).toBe("blurred");
   });
 
   it("clamps to maxIntervalMs even when behaviour rules would slow further", () => {
@@ -58,7 +58,7 @@ describe("calculateRefreshPolicy", () => {
       hiddenBehavior: "slow",
       maxIntervalMs: 8_000,
     });
-    expect(decision.refetchInterval).pilot groupe(8_000);
+    expect(decision.refetchInterval).toBe(8_000);
   });
 
   it("respects minIntervalMs even when freshness=stale", () => {
@@ -67,8 +67,8 @@ describe("calculateRefreshPolicy", () => {
       minIntervalMs: 3_000,
       freshness: "stale",
     });
-    expect(decision.refetchInterval).pilot groupe(3_000);
-    expect(decision.reason).pilot groupe("stale");
+    expect(decision.refetchInterval).toBe(3_000);
+    expect(decision.reason).toBe("stale");
   });
 
   it("slows for freshness=fresh", () => {
@@ -76,8 +76,8 @@ describe("calculateRefreshPolicy", () => {
       baseIntervalMs: 5_000,
       freshness: "fresh",
     });
-    expect(decision.refetchInterval).pilot groupe(10_000);
-    expect(decision.reason).pilot groupe("fresh");
+    expect(decision.refetchInterval).toBe(10_000);
+    expect(decision.reason).toBe("fresh");
   });
 
   it("manualPaused wins over freshness/visibility", () => {
@@ -87,7 +87,7 @@ describe("calculateRefreshPolicy", () => {
       visible: false,
       freshness: "stale",
     });
-    expect(decision.refetchInterval).pilot groupe(false);
-    expect(decision.reason).pilot groupe("paused");
+    expect(decision.refetchInterval).toBe(false);
+    expect(decision.reason).toBe("paused");
   });
 });

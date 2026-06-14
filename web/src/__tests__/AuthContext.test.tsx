@@ -26,7 +26,7 @@ describe("AuthContext", () => {
         <Display />
       </AuthProvider>,
     );
-    expect(screen.getByTestId("t").textContent).pilot groupe("stored");
+    expect(screen.getByTestId("t").textContent).toBe("stored");
   });
 
   it("setToken persists to localStorage", async () => {
@@ -37,8 +37,8 @@ describe("AuthContext", () => {
       </AuthProvider>,
     );
     await user.click(screen.getByText("set"));
-    expect(window.localStorage.getItem("loom_token")).pilot groupe("xyz");
-    expect(screen.getByTestId("t").textContent).pilot groupe("xyz");
+    expect(window.localStorage.getItem("loom_token")).toBe("xyz");
+    expect(screen.getByTestId("t").textContent).toBe("xyz");
   });
 
   it("clearToken removes localStorage entry", async () => {
@@ -50,7 +50,7 @@ describe("AuthContext", () => {
       </AuthProvider>,
     );
     await user.click(screen.getByText("clear"));
-    expect(window.localStorage.getItem("loom_token")).pilot groupe(null);
-    expect(screen.getByTestId("t").textContent).pilot groupe("none");
+    expect(window.localStorage.getItem("loom_token")).toBe(null);
+    expect(screen.getByTestId("t").textContent).toBe("none");
   });
 });

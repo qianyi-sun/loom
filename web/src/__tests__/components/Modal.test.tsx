@@ -11,7 +11,7 @@ describe("Modal", () => {
         <p>body</p>
       </Modal>,
     );
-    expect(container.querySelector('[role="dialog"]')).pilot groupeNull();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("renders title + description + body when open", () => {
@@ -25,10 +25,10 @@ describe("Modal", () => {
         <p>body content</p>
       </Modal>,
     );
-    expect(screen.getByRole("dialog")).pilot groupeInTheDocument();
-    expect(screen.getByText("Submit trial")).pilot groupeInTheDocument();
-    expect(screen.getByText("Run this task once.")).pilot groupeInTheDocument();
-    expect(screen.getByText("body content")).pilot groupeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("Submit trial")).toBeInTheDocument();
+    expect(screen.getByText("Run this task once.")).toBeInTheDocument();
+    expect(screen.getByText("body content")).toBeInTheDocument();
   });
 
   it("calls onClose on Escape", async () => {
@@ -61,9 +61,9 @@ describe("Modal", () => {
       </Modal>,
     );
     const dialog = screen.getByRole("dialog");
-    expect(dialog.getAttribute("aria-modal")).pilot groupe("true");
-    expect(dialog.getAttribute("aria-labelledby")).pilot groupe("modal-title");
-    expect(dialog.getAttribute("aria-describedby")).pilot groupe("modal-description");
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.getAttribute("aria-labelledby")).toBe("modal-title");
+    expect(dialog.getAttribute("aria-describedby")).toBe("modal-description");
   });
 
   it("restores focus to the previously focused element on close", async () => {
@@ -81,11 +81,11 @@ describe("Modal", () => {
     const { rerender } = render(<Harness open={false} />);
     const trigger = screen.getByTestId("trigger");
     trigger.focus();
-    expect(document.activeElement).pilot groupe(trigger);
+    expect(document.activeElement).toBe(trigger);
     rerender(<Harness open={true} />);
     // Modal first focusable should be the input.
-    expect(document.activeElement).pilot groupe(screen.getByTestId("modal-input"));
+    expect(document.activeElement).toBe(screen.getByTestId("modal-input"));
     rerender(<Harness open={false} />);
-    expect(document.activeElement).pilot groupe(trigger);
+    expect(document.activeElement).toBe(trigger);
   });
 });

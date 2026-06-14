@@ -22,11 +22,16 @@
  * over the FAN_OUT_CONFIRM_THRESHOLD until the user ticks confirm.
  */
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { api, type Combination, type CreateBatchBody } from "../api/client";
+import {
+  api,
+  type BenchmarkTagsResponse,
+  type Combination,
+  type CreateBatchBody,
+} from "../api/client";
 import {
   AgentModelPicker,
   buildAgentModel,
@@ -42,6 +47,7 @@ interface BenchmarkItem {
   id: string;
   display_name?: string;
   task_count?: number;
+  series?: string | null;
 }
 
 const FAN_OUT_CONFIRM_THRESHOLD = 200;
@@ -243,6 +249,231 @@ function FieldLabel({
   );
 }
 
+/**
+ * Series-grouped benchmark multi-select.
+ *
+ * Groups rows by `series` (NULL → "Other" at the bottom). Each group
+ * has a "Select all" affordance — the SPA's group-select path the
+ * series catalog redesign was built for. The picker is purely
+ * controlled; selection state lives in the parent.
+ */
+function BenchmarkPicker({
+  items,
+  loading,
+  selected,
+  onChange,
+}: {
+  items: BenchmarkItem[];
+  loading: boolean;
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+}): JSX.Element {
+  const groups = useMemo(() => {
+    const bySeries = new Map<string, BenchmarkItem[]>();
+    for (const b of items) {
+      const key = b.series ?? "";
+      const bucket = bySeries.get(key) ?? [];
+      bucket.push(b);
+      bySeries.set(key, bucket);
+    }
+    return Array.from(bySeries.entries())
+      .map(([series, rows]) => ({
+        series,
+        rows: rows.sort((a, b) =>
+          (a.display_name ?? a.id).localeCompare(b.display_name ?? b.id),
+        ),
+      }))
+      .sort((a, b) => {
+        // "Other" (empty series) sinks to the bottom.
+        if (a.series === "" && b.series !== "") return 1;
+        if (b.series === "" && a.series !== "") return -1;
+        return a.series.localeCompare(b.series);
+      });
+  }, [items]);
+
+  const toggleOne = (id: string): void => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  };
+  const toggleGroup = (rows: BenchmarkItem[]): void => {
+    const next = new Set(selected);
+    const allOn = rows.every((r) => next.has(r.id));
+    for (const r of rows) {
+      if (allOn) next.delete(r.id);
+      else next.add(r.id);
+    }
+    onChange(next);
+  };
+
+  if (loading && items.length === 0) {
+    return (
+      <p className="mt-1 text-xs text-slate-500">Loading benchmarks…</p>
+    );
+  }
+
+  return (
+    <div className="mt-1 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+      {groups.map(({ series, rows }) => {
+        const seriesLabel = series === "" ? "Other" : series;
+        const allOn = rows.every((r) => selected.has(r.id));
+        const someOn = !allOn && rows.some((r) => selected.has(r.id));
+        return (
+          <div key={seriesLabel} className="border-b border-slate-100 last:border-b-0">
+            <label className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-slate-600">
+              <input
+                type="checkbox"
+                checked={allOn}
+                ref={(el) => {
+                  if (el) el.indeterminate = someOn;
+                }}
+                onChange={() => toggleGroup(rows)}
+                aria-label={`Select all in series ${seriesLabel}`}
+                className="h-4 w-4 border-slate-300"
+              />
+              <span>{seriesLabel}</span>
+              <span className="ml-auto font-normal text-slate-400 normal-case">
+                {rows.length} benchmark{rows.length === 1 ? "" : "s"}
+              </span>
+            </label>
+            {rows.map((r) => {
+              const label = r.display_name ?? r.id;
+              const count = r.task_count;
+              return (
+                <label
+                  key={r.id}
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(r.id)}
+                    onChange={() => toggleOne(r.id)}
+                    aria-label={`Select benchmark ${r.id}`}
+                    className="h-4 w-4 border-slate-300"
+                  />
+                  <span className="flex-1 truncate">{label}</span>
+                  {count !== undefined ? (
+                    <span className="text-xs text-slate-400">
+                      {count} task{count === 1 ? "" : "s"}
+                    </span>
+                  ) : null}
+                </label>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Tag-filter card.
+ *
+ * Renders one labelled checkbox-group per distinct tag key discovered
+ * across the selected benchmarks. AND across keys, OR within each
+ * key's value list — matches the backend resolver added in PR-2.
+ * Empty value lists are skipped at submit so a mid-edit "no values
+ * checked under this key" state is a no-op rather than a filter that
+ * matches zero rows.
+ */
+function TagFiltersCard({
+  schema,
+  value,
+  onChange,
+  loading,
+}: {
+  schema: { key: string; values: string[] }[];
+  value: Record<string, Set<string>>;
+  onChange: (
+    next:
+      | Record<string, Set<string>>
+      | ((prev: Record<string, Set<string>>) => Record<string, Set<string>>),
+  ) => void;
+  loading: boolean;
+}): JSX.Element | null {
+  if (loading && schema.length === 0) {
+    return (
+      <p className="text-xs text-slate-500">Loading tag schema…</p>
+    );
+  }
+  if (schema.length === 0) return null;
+
+  const toggle = (key: string, val: string): void => {
+    onChange((prev) => {
+      const next = { ...prev };
+      const bucket = new Set(next[key] ?? []);
+      if (bucket.has(val)) bucket.delete(val);
+      else bucket.add(val);
+      next[key] = bucket;
+      return next;
+    });
+  };
+  const clearKey = (key: string): void => {
+    onChange((prev) => {
+      const next = { ...prev };
+      next[key] = new Set();
+      return next;
+    });
+  };
+  const anyActive = Object.values(value).some((s) => s.size > 0);
+
+  return (
+    <details className="rounded-lg border border-slate-200 bg-slate-50/50" open={anyActive}>
+      <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-medium text-slate-700">
+        <span>Filter by tag</span>
+        <span className="text-xs font-normal text-slate-500">
+          {anyActive ? "active" : "narrow the slate further"}
+        </span>
+      </summary>
+      <div className="space-y-3 px-3 py-2">
+        {schema.map(({ key, values }) => {
+          const active = value[key] ?? new Set<string>();
+          return (
+            <div key={key}>
+              <div className="mb-1 flex items-baseline gap-2">
+                <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                  {key}
+                </span>
+                {active.size > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => clearKey(key)}
+                    className="text-xs text-indigo-600 hover:underline"
+                  >
+                    clear
+                  </button>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {values.map((v) => {
+                  const on = active.has(v);
+                  return (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => toggle(key, v)}
+                      aria-pressed={on}
+                      className={
+                        on
+                          ? "rounded-md border border-indigo-500 bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700"
+                          : "rounded-md border border-slate-200 bg-white px-2 py-0.5 text-xs text-slate-700 hover:border-slate-300"
+                      }
+                    >
+                      {v}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
 function freshSeed(): number {
   // 32-bit unsigned seed — Math.random() over 2**31 gives the route's
   // validation a value it'll always accept.
@@ -253,7 +484,12 @@ export default function NewBatch(): JSX.Element {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [backend, setBackend] = useState("");
-  const [benchmark, setBenchmark] = useState("");
+  const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [tagFilters, setTagFilters] = useState<Record<string, Set<string>>>(
+    {},
+  );
   const [subsetKind, setSubsetKind] = useState<SubsetKind>("all");
   const [subsetN, setSubsetN] = useState("10");
   const [subsetSeed, setSubsetSeed] = useState<string>(() => String(freshSeed()));
@@ -297,27 +533,80 @@ export default function NewBatch(): JSX.Element {
   // "Parsed N ids" preview as the user types.
   const parsed = useMemo(() => parseTaskIds(explicitText), [explicitText]);
 
-  // For the "all / first / last / random" modes we ask the backend
-  // how many tasks match — this drives the confirmation banner and
-  // the "Submit N trials" button text. For explicit, the count is
-  // the parsed-ids length.
-  const matchedTasksQuery = useQuery({
-    queryKey: ["tasks-count", benchmark],
-    queryFn: () =>
-      api.listTasks({
-        benchmark_id: benchmark || undefined,
-        limit: "1",
-      }) as unknown as Promise<{ items: { id: string }[]; total: number }>,
-    enabled: subsetKind !== "explicit" && Boolean(benchmark),
+  // Per-benchmark tag-key discovery. Fires once per selected benchmark
+  // so we can union the keys/values and render one checkbox group per
+  // distinct key. Cheap enough to refetch on selection changes; keyed
+  // by benchmark id so React Query dedupes identical refetches.
+  const tagQueries = useQueries({
+    queries: Array.from(selectedBenchmarks).map((id) => ({
+      queryKey: ["benchmark-tags", id],
+      queryFn: () => api.listBenchmarkTags(id),
+      staleTime: 5 * 60 * 1000,
+    })),
   });
+
+  // Merged tag schema across the selected benchmarks. Each key's value
+  // set is the union of the per-benchmark values — matches the backend
+  // resolver where tag_filters is applied across the unioned slate.
+  const tagSchema = useMemo<{ key: string; values: string[] }[]>(() => {
+    const merged = new Map<string, Set<string>>();
+    for (const q of tagQueries) {
+      const data = q.data as BenchmarkTagsResponse | undefined;
+      if (!data) continue;
+      for (const { key, values } of data.items) {
+        const bucket = merged.get(key) ?? new Set<string>();
+        for (const v of values) bucket.add(v);
+        merged.set(key, bucket);
+      }
+    }
+    return Array.from(merged.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, vs]) => ({ key, values: Array.from(vs).sort() }));
+  }, [tagQueries]);
+
+  // Drop tag-filter entries whose key is no longer in the schema (the
+  // user deselected its benchmark). Keeps the submit payload tight.
+  useEffect(() => {
+    setTagFilters((prev) => {
+      const validKeys = new Set(tagSchema.map((s) => s.key));
+      let changed = false;
+      const next: Record<string, Set<string>> = {};
+      for (const [k, vs] of Object.entries(prev)) {
+        if (validKeys.has(k)) next[k] = vs;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [tagSchema]);
+
+  // PR-2 backend takes the candidate count from a real query; the SPA
+  // gets a "good enough" estimate by summing per-benchmark task_count
+  // from /benchmarks. When tag_filters are active we show this as an
+  // upper bound — the submit-time count is authoritative.
+  const hasTagFilter = Object.values(tagFilters).some((v) => v.size > 0);
+  const sumOfSelectedTasks = useMemo(() => {
+    if (!benchmarks.data || selectedBenchmarks.size === 0) return undefined;
+    let total = 0;
+    let allKnown = true;
+    for (const b of benchmarks.data.items as BenchmarkItem[]) {
+      if (!selectedBenchmarks.has(b.id)) continue;
+      if (typeof b.task_count !== "number") {
+        allKnown = false;
+        break;
+      }
+      total += b.task_count;
+    }
+    return allKnown ? total : undefined;
+  }, [benchmarks.data, selectedBenchmarks]);
 
   const matchedTaskCount: number | undefined = (() => {
     if (subsetKind === "explicit") return parsed.ids.length;
-    if (subsetKind === "all") return matchedTasksQuery.data?.total;
-    const total = matchedTasksQuery.data?.total;
+    if (sumOfSelectedTasks === undefined) return undefined;
+    const cap = hasTagFilter ? sumOfSelectedTasks : sumOfSelectedTasks;
+    if (subsetKind === "all") return cap;
     const n = Number.parseInt(subsetN, 10);
-    if (total === undefined || !Number.isFinite(n)) return undefined;
-    return Math.min(total, Math.max(0, n));
+    if (!Number.isFinite(n)) return undefined;
+    return Math.min(cap, Math.max(0, n));
   })();
 
   const create = useMutation({
@@ -425,8 +714,8 @@ export default function NewBatch(): JSX.Element {
         return;
       }
     } else {
-      if (!benchmark) {
-        setLocalError("Pick a benchmark.");
+      if (selectedBenchmarks.size === 0) {
+        setLocalError("Pick at least one benchmark.");
         return;
       }
       if (subsetKind !== "all") {
@@ -443,17 +732,14 @@ export default function NewBatch(): JSX.Element {
           return;
         }
       }
-      if (matchedTasksQuery.isError) {
-        setLocalError(
-          "Couldn't count matching tasks. Fix the filter or retry before submitting.",
-        );
-        return;
-      }
       if (matchedTaskCount === undefined) {
         setLocalError("Still counting matching tasks — try again in a moment.");
         return;
       }
-      if (matchedTaskCount === 0) {
+      // Submit-time check only when no tag filters could narrow the set.
+      // With tag_filters the upper-bound count can be nonzero while the
+      // filtered count is zero — the backend resolver catches that.
+      if (matchedTaskCount === 0 && !hasTagFilter) {
         setLocalError("No tasks match the current benchmark + subset.");
         return;
       }
@@ -485,7 +771,14 @@ export default function NewBatch(): JSX.Element {
     if (subsetKind === "explicit") {
       task_filter.task_ids = parsed.ids;
     } else {
-      task_filter.benchmark_id = benchmark;
+      task_filter.benchmark_ids = Array.from(selectedBenchmarks).sort();
+      const tagPayload: Record<string, string[]> = {};
+      for (const [k, vs] of Object.entries(tagFilters)) {
+        if (vs.size > 0) tagPayload[k] = Array.from(vs).sort();
+      }
+      if (Object.keys(tagPayload).length > 0) {
+        task_filter.tag_filters = tagPayload;
+      }
       if (subsetKind !== "all") {
         task_filter.n = Number.parseInt(subsetN, 10);
       }
@@ -515,17 +808,18 @@ export default function NewBatch(): JSX.Element {
   let countSummary = "";
   if (subsetKind === "explicit") {
     countSummary = "";
-  } else if (!benchmark) {
-    countSummary = "Pick a benchmark to count matching tasks.";
-  } else if (matchedTasksQuery.isError) {
-    countSummary = "Couldn't load the task count.";
-  } else if (matchedTasksQuery.isPending) {
+  } else if (selectedBenchmarks.size === 0) {
+    countSummary = "Pick at least one benchmark to count matching tasks.";
+  } else if (matchedTaskCount === undefined) {
     countSummary = "Counting matching tasks…";
   } else if (matchedTaskCount === 0) {
     countSummary =
-      "No tasks registered for this benchmark yet. Run `python -m loom_benchmark_tool import <benchmark>` to populate, or pick a different benchmark.";
-  } else if (matchedTaskCount !== undefined) {
-    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match.`;
+      "No tasks registered for the selected benchmarks. Run `python -m loom_benchmark_tool import <benchmark>` to populate, or pick a different benchmark.";
+  } else if (hasTagFilter) {
+    countSummary = `Up to ${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match before tag filtering — exact count is determined at submit.`;
+  } else {
+    const benchN = selectedBenchmarks.size;
+    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${benchN} benchmark${benchN === 1 ? "" : "s"}.`;
   }
 
   return (
@@ -602,35 +896,23 @@ export default function NewBatch(): JSX.Element {
           <Card>
             <Card.Header
               title="Which tasks"
-              description="Pick a benchmark + a subset rule, or paste explicit ids."
+              description="Pick one or more benchmarks (grouped by series) + a subset rule, or paste explicit ids."
             />
             <Card.Body className="space-y-4">
-              <label className="block">
+              <fieldset
+                className="block"
+                disabled={subsetKind === "explicit"}
+                aria-label="Benchmarks"
+              >
                 <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "required"}>
-                  Benchmark
+                  Benchmarks
                 </FieldLabel>
-                <select
-                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:opacity-50"
-                  value={benchmark}
-                  onChange={(e) => setBenchmark(e.target.value)}
-                  disabled={benchmarks.isPending || subsetKind === "explicit"}
-                  aria-label="Benchmark"
-                >
-                  <option value="">Choose a benchmark…</option>
-                  {(benchmarks.data?.items ?? []).map((b: BenchmarkItem) => {
-                    const label = b.display_name ?? b.id;
-                    const count = b.task_count;
-                    const suffix =
-                      count !== undefined
-                        ? ` — ${count} task${count === 1 ? "" : "s"}`
-                        : "";
-                    return (
-                      <option key={b.id} value={b.id}>
-                        {label}{suffix}
-                      </option>
-                    );
-                  })}
-                </select>
+                <BenchmarkPicker
+                  items={(benchmarks.data?.items ?? []) as BenchmarkItem[]}
+                  loading={benchmarks.isPending}
+                  selected={selectedBenchmarks}
+                  onChange={setSelectedBenchmarks}
+                />
                 {!benchmarks.isPending &&
                 (benchmarks.data?.items.length ?? 0) === 0 ? (
                   <Help>
@@ -641,7 +923,16 @@ export default function NewBatch(): JSX.Element {
                     to populate one.
                   </Help>
                 ) : null}
-              </label>
+              </fieldset>
+
+              {subsetKind !== "explicit" && selectedBenchmarks.size > 0 ? (
+                <TagFiltersCard
+                  schema={tagSchema}
+                  value={tagFilters}
+                  onChange={setTagFilters}
+                  loading={tagQueries.some((q) => q.isPending)}
+                />
+              ) : null}
 
               <fieldset className="space-y-2">
                 <legend className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
@@ -771,7 +1062,10 @@ export default function NewBatch(): JSX.Element {
                   className="text-xs text-slate-500"
                   role="status"
                   aria-live="polite"
-                  aria-busy={Boolean(benchmark) && matchedTasksQuery.isPending}
+                  aria-busy={
+                    selectedBenchmarks.size > 0 &&
+                    (benchmarks.isPending || matchedTaskCount === undefined)
+                  }
                 >
                   {countSummary}
                 </p>

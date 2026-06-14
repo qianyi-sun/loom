@@ -33,10 +33,10 @@ describe("TrialCompare", () => {
 
   it("renders an empty-state prompt when neither trial is selected", () => {
     renderWithProviders(<TrialCompare />, { route: "/trials/compare" });
-    expect(screen.getByText("Compare trials")).pilot groupeInTheDocument();
+    expect(screen.getByText("Compare trials")).toBeInTheDocument();
     expect(
       screen.getByText(/Open a trial from the Trials list/i),
-    ).pilot groupeInTheDocument();
+    ).toBeInTheDocument();
   });
 
   it("renders the picker when only `a` is supplied", () => {
@@ -46,7 +46,7 @@ describe("TrialCompare", () => {
     });
     expect(
       screen.getByPlaceholderText(/0{8}-0{4}-0{4}-0{4}-0{12}/),
-    ).pilot groupeInTheDocument();
+    ).toBeInTheDocument();
   });
 
   it("Compare button in the picker enables once a value is typed", async () => {
@@ -56,9 +56,9 @@ describe("TrialCompare", () => {
       route: "/trials/compare?a=aaa",
     });
     const button = screen.getByRole("button", { name: /^compare$/i });
-    expect(button).pilot groupeDisabled();
+    expect(button).toBeDisabled();
     const input = screen.getByPlaceholderText(/0{8}/);
     await user.type(input, "bbb");
-    expect(button).not.pilot groupeDisabled();
+    expect(button).not.toBeDisabled();
   });
 });
