@@ -20,7 +20,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, cast, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
@@ -65,9 +66,15 @@ class _CreateBatch(BaseModel):
 # (`liscense` instead of `license`) doesn't silently match nothing.
 # Plan 28 PR-3 adds the subset_kind / n / seed keys for richer task
 # selection (all / first_n / last_n / random_n / explicit).
-_FILTER_KEYS: frozenset[str] = frozenset(
-    {"license", "task_ids", "benchmark_id", "subset_kind", "n", "seed"},
-)
+_FILTER_KEYS: frozenset[str] = frozenset({
+    "license", "task_ids", "benchmark_id",
+    "subset_kind", "n", "seed",
+    # PR-2 series/tags: multi-select benchmarks (union of slates) +
+    # dict tag filter applied across the matched set. `benchmark_ids`
+    # takes precedence when both are sent — handy for the SPA's
+    # group-select on a series.
+    "benchmark_ids", "tag_filters",
+})
 
 _SUBSET_KINDS: frozenset[str] = frozenset(
     {"all", "first_n", "last_n", "random_n", "explicit"},
@@ -110,17 +117,66 @@ async def _resolve_task_filter(
             ),
         )
 
-    # Build the candidate query using the predicate keys
-    # (license / task_ids / benchmark_id). subset_kind / n / seed
-    # are then applied to the candidate set in Python.
+    # Build the candidate query using the predicate keys. subset_kind /
+    # n / seed are then applied to the candidate set in Python.
+    #
+    # PR-2 series/tags: `benchmark_ids` (list) takes precedence over
+    # the singular `benchmark_id` for multi-select / group-select UX.
+    # `tag_filters` is a dict like `{"verified": ["true"]}` applied
+    # as a JSONB containment predicate per key — `AND` across keys,
+    # `OR` within each key's value list.
     stmt = select(Task.id).order_by(Task.id.asc())
     if "license" in task_filter:
         stmt = stmt.where(Task.license == task_filter["license"])
     if "task_ids" in task_filter:
         ids = [str(x) for x in task_filter["task_ids"]]
         stmt = stmt.where(Task.id.in_(ids))
-    if "benchmark_id" in task_filter:
+    benchmark_ids_raw = task_filter.get("benchmark_ids")
+    if benchmark_ids_raw is not None:
+        if not isinstance(benchmark_ids_raw, (list, tuple)) or not all(
+            isinstance(x, str) for x in benchmark_ids_raw
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="task_filter.benchmark_ids must be a list of strings",
+            )
+        if benchmark_ids_raw:
+            stmt = stmt.where(Task.benchmark_id.in_(list(benchmark_ids_raw)))
+    elif "benchmark_id" in task_filter:
         stmt = stmt.where(Task.benchmark_id == task_filter["benchmark_id"])
+    tag_filters_raw = task_filter.get("tag_filters")
+    if tag_filters_raw is not None:
+        if not isinstance(tag_filters_raw, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="task_filter.tag_filters must be a JSON object",
+            )
+        for tag_key, tag_values in tag_filters_raw.items():
+            if not isinstance(tag_key, str) or not tag_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="tag_filters keys must be non-empty strings",
+                )
+            if not isinstance(tag_values, list) or not all(
+                isinstance(v, str) for v in tag_values
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"tag_filters[{tag_key!r}] must be a list of strings"
+                    ),
+                )
+            if not tag_values:
+                continue
+            # OR within a key: any of the listed values matches.
+            # Composes a jsonb @> predicate per value, then ORs them.
+            value_clauses = [
+                Task.tags.op("@>")(
+                    cast({tag_key: v}, JSONB),
+                )
+                for v in tag_values
+            ]
+            stmt = stmt.where(or_(*value_clauses))
     candidates: list[str] = [
         row[0] for row in (await session.execute(stmt)).all()
     ]

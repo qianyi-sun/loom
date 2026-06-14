@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Benchmark, Task
@@ -39,6 +39,9 @@ def _bench_row(b: Benchmark, task_count: int = 0) -> dict[str, Any]:
         # rows. Empty benchmarks are excluded from the default listing
         # (see `include_empty` below).
         "task_count": task_count,
+        # PR-2 series/tags: surface series so the SPA can group
+        # related benchmarks in the dropdown. NULL = standalone.
+        "series": b.series,
     }
 
 
@@ -105,3 +108,59 @@ async def get_benchmark(
             )
         b, count = row
         return _bench_row(b, int(count))
+
+
+@router.get("/benchmarks/{benchmark_id}/tags")
+async def list_benchmark_tags(
+    request: Request,
+    benchmark_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Distinct tag keys → distinct values for a benchmark's tasks.
+
+    Drives the SPA's tag-filter UI (PR-3): one dropdown per key, each
+    populated with the values actually present in that benchmark. The
+    SPA can then build a `task_filter.tag_filters` payload from user
+    selections without guessing what's in the data.
+
+    Implementation: `jsonb_each_text(tags)` cross-joined to each task
+    row in the benchmark, grouped by key, distinct values aggregated.
+    Result shape:
+
+        {
+          "items": [
+            {"key": "year", "values": ["2022", "2023", "2024"]},
+            {"key": "exam", "values": ["I", "II"]},
+            {"key": "problem", "values": ["1", "2", ..., "15"]}
+          ]
+        }
+    """
+    async with request.app.state.session_factory() as s:
+        ctx = await verify_bearer_token(s, authorization)
+        require_human_or_admin(ctx)
+        # 404 if the benchmark itself doesn't exist so the SPA can
+        # distinguish "no tags here" (empty list, 200) from "wrong id"
+        # (404).
+        exists = (await s.execute(
+            select(Benchmark.id).where(Benchmark.id == benchmark_id),
+        )).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(
+                status_code=404, detail="benchmark not found",
+            )
+        rows = (await s.execute(
+            text(
+                "SELECT kv.key, ARRAY_AGG(DISTINCT kv.value ORDER BY kv.value) "
+                "FROM tasks t, jsonb_each_text(t.tags) AS kv(key, value) "
+                "WHERE t.benchmark_id = :bid "
+                "GROUP BY kv.key "
+                "ORDER BY kv.key",
+            ),
+            {"bid": benchmark_id},
+        )).all()
+    return {
+        "items": [
+            {"key": key, "values": list(values)}
+            for key, values in rows
+        ],
+    }
