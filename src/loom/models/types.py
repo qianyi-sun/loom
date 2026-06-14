@@ -60,3 +60,34 @@ class ModelSpec(BaseModel):
     region: str | None = None
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
+
+    def to_gateway_model_string(self) -> str:
+        """Serialize this spec into the string the gateway's chat route
+        parses as `provider/name`.
+
+        Mapping (PR-D):
+
+        - api: `<provider>/<name>` (existing — anthropic/openai/together)
+        - local-server: `local/<local_server>/<name>` (gateway reads the
+          operator-configured base_url for `local_server` and proxies the
+          OpenAI-compatible request)
+        - hf + inference-api: `huggingface/<name>` (LiteLLM's HF
+          Inference path, requires `HF_TOKEN` on the gateway)
+        - hf + local-vllm: `local-vllm/<name>` (worker-spawned vLLM
+          subprocess; the gateway returns a clear 501 today and the
+          worker handles this path directly in a follow-up)
+        """
+        if self.source == "api":
+            return f"{self.provider}/{self.name}"
+        if self.source == "local-server":
+            if not self.local_server:
+                raise ValueError(
+                    "ModelSpec.source='local-server' requires "
+                    "local_server to be set",
+                )
+            return f"local/{self.local_server}/{self.name}"
+        if self.source == "hf":
+            if self.hf_execution == "inference-api":
+                return f"huggingface/{self.name}"
+            return f"local-vllm/{self.name}"
+        raise ValueError(f"unknown ModelSpec.source {self.source!r}")

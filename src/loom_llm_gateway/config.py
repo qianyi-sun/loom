@@ -71,6 +71,11 @@ class GatewaySettings(BaseSettings):
     openai_api_key: SecretStr | None = None
     google_api_key: SecretStr | None = None         # Gemini native passthrough
     together_api_key: SecretStr | None = None
+    # PR-D: HF Inference Endpoints — consumed by the `huggingface`
+    # provider path in routes/chat.py. LiteLLM auto-reads HF_TOKEN
+    # from env too; this explicit setting keeps secret handling
+    # consistent with the other providers.
+    huggingface_api_key: SecretStr | None = None
 
     # HS256 secret shared with the Control Plane (Plan 9 amendments §6.1).
     # Verifies loom_step_... bearer tokens minted by CP's

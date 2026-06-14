@@ -26,7 +26,7 @@ class HttpLLMGatewayClient:
 
     async def call(self, request: GatewayCallRequest) -> GatewayCallResponse:
         body: dict[str, Any] = {
-            "model": f"{request.model.provider}/{request.model.name}",
+            "model": request.model.to_gateway_model_string(),
             "messages": [m.model_dump() for m in request.messages],
             "loom": {
                 "team_id": request.team_id,

@@ -32,7 +32,20 @@ _RESERVED_BODY_KEYS = frozenset(
 # Providers we accept on the wire. The Gateway only holds keys for these;
 # any other provider in `model="X/Y"` is rejected with 400 upfront rather
 # than silently passing api_key=None into LiteLLM.
-_SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai", "together"})
+#
+# PR-D additions:
+# - `local`: routes `model="local/<server>/<model_id>"` to the operator-
+#   configured local OpenAI-compatible server (vLLM / ollama / etc.).
+# - `huggingface`: routes `model="huggingface/<id>"` to HF Inference
+#   Endpoints via LiteLLM. Requires LOOM_GW_HF_TOKEN (Plan D follow-up
+#   adds the explicit setting; LiteLLM falls back to HF_TOKEN env).
+# - `local-vllm`: reserved for worker-spawned vLLM (`source=hf` +
+#   `hf_execution=local-vllm`). The worker handles this directly without
+#   round-tripping the gateway; if a request lands here we surface 501.
+_SUPPORTED_PROVIDERS = frozenset({
+    "anthropic", "openai", "together",
+    "local", "huggingface", "local-vllm",
+})
 
 
 class _LoomBlock(BaseModel):
@@ -107,45 +120,126 @@ async def chat_completions(
             ),
         )
 
-    # Rate card lookup (cached).
-    table = await request.app.state.rate_card_cache.get()
-    spec = ModelSpec(
-        provider=provider, name=model_name,
-        tier=req.loom.tier, region=req.loom.region,
-    )
-    try:
-        entry = lookup_entry(table, spec)
-    except RateCardNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # PR-D: worker-spawned vLLM bypasses the gateway entirely. If a
+    # request lands here something is misconfigured upstream.
+    if provider == "local-vllm":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "local-vllm execution is handled by the worker, not "
+                "the gateway. The agent should call the worker's local "
+                "vLLM directly. If you see this error, the worker "
+                "dispatcher is forwarding HF+local-vllm requests to "
+                "the gateway by mistake."
+            ),
+        )
 
-    # Forward to provider.
     settings = request.app.state.settings
-    api_key = _pick_api_key(provider, settings)
+
+    # PR-D: per-provider dispatch. Three paths converge into a single
+    # acompletion call with different (model_string, api_key, api_base,
+    # rate_card) tuples. Local servers don't yet have rate cards →
+    # cost=0; HF Inference models often don't either → cost=0.
+    api_base: str | None = None
+    entry: object | None
+    if provider == "local":
+        # `local/<server>/<id>` — split off the server name.
+        try:
+            server_name, local_model_id = model_name.split("/", 1)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "local model string must be "
+                    f"'local/<server>/<model_id>', got {raw_model!r}"
+                ),
+            ) from exc
+        cfg = settings.local_providers.get(server_name)
+        if cfg is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"local server {server_name!r} is not configured. "
+                    "Set LOOM_GW_LOCAL_<NAME>_BASE_URL."
+                ),
+            )
+        # LiteLLM's openai/ dialect + api_base override hits any
+        # OpenAI-compatible endpoint (ollama, vLLM, lm-studio, etc.).
+        litellm_model = f"openai/{local_model_id}"
+        api_key = cfg.api_key or "no-key"
+        api_base = cfg.base_url
+        entry = None
+    elif provider == "huggingface":
+        # LiteLLM resolves `huggingface/<id>` against HF Inference
+        # Endpoints. Requires HF_TOKEN in the gateway env (LiteLLM
+        # auto-reads it).
+        litellm_model = raw_model
+        api_key = settings.huggingface_api_key.get_secret_value() if (
+            settings.huggingface_api_key is not None
+        ) else None
+        # HF models may not have a rate card; allow None → cost=0.
+        table = await request.app.state.rate_card_cache.get()
+        spec = ModelSpec(
+            provider=provider, name=model_name,
+            tier=req.loom.tier, region=req.loom.region,
+        )
+        try:
+            entry = lookup_entry(table, spec)
+        except RateCardNotFoundError:
+            entry = None
+    else:
+        # Existing api-providers path (anthropic / openai / together).
+        litellm_model = raw_model
+        api_key = _pick_api_key(provider, settings)
+        table = await request.app.state.rate_card_cache.get()
+        spec = ModelSpec(
+            provider=provider, name=model_name,
+            tier=req.loom.tier, region=req.loom.region,
+        )
+        try:
+            entry = lookup_entry(table, spec)
+        except RateCardNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     extra_kwargs = {
         k: v for k, v in raw_body.items()
         if k not in _RESERVED_BODY_KEYS
     }
     started = time.monotonic()
-    raw = await litellm_wrapper.acompletion(
-        model=raw_model,
+    acompletion_kwargs = dict(
+        model=litellm_model,
         messages=req.messages,
         api_key=api_key,
         timeout=settings.upstream_timeout_sec,
         **extra_kwargs,
     )
+    if api_base is not None:
+        acompletion_kwargs["api_base"] = api_base
+    raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
     duration_sec = time.monotonic() - started
 
-    # Parse + cost.
+    # Parse + cost. PR-D: rate cards are optional for `local` and
+    # `huggingface` paths; when entry is None we report cost=0 rather
+    # than 400-ing the call. Future work: per-server pricing tables.
     parsed = litellm_wrapper.parse_litellm_response(raw, provider=provider)
-    cost = compute_cost_usd(
-        entry,
-        input_tokens=parsed.input_tokens,
-        output_tokens=parsed.output_tokens,
-        cached_input_tokens=parsed.cached_input_tokens,
-        cache_write_tokens=parsed.cache_write_tokens,
-    )
+    if entry is None:
+        cost = 0.0
+    else:
+        cost = compute_cost_usd(
+            entry,
+            input_tokens=parsed.input_tokens,
+            output_tokens=parsed.output_tokens,
+            cached_input_tokens=parsed.cached_input_tokens,
+            cache_write_tokens=parsed.cache_write_tokens,
+        )
 
-    # Build response.
+    # Build response. PR-D: `local` provider skips the rate-card
+    # lookup → no table was loaded; report a sentinel hash so the
+    # field still has a deterministic shape downstream.
+    rate_card_hash = (
+        "local-server-no-card" if provider == "local"
+        else hash_table(table)
+    )
     loom_block = {
         "input_tokens": parsed.input_tokens,
         "cached_input_tokens": parsed.cached_input_tokens,
@@ -154,7 +248,7 @@ async def chat_completions(
         "thinking_tokens": parsed.thinking_tokens,
         "provider_extras": parsed.provider_extras,
         "cost_usd": cost,
-        "rate_card_hash": hash_table(table),
+        "rate_card_hash": rate_card_hash,
         "finish_reason": parsed.finish_reason,
         "duration_sec": duration_sec,
         "streamed": False,
