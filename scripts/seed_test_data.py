@@ -73,13 +73,29 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
     from loom_benchmarks.registry import REGISTRY
 
     inserted = 0
+    updated = 0
     for slug, adapter in sorted(REGISTRY.items()):
-        existing = s.execute(
-            select(Benchmark.id).where(Benchmark.id == slug),
-        ).scalar_one_or_none()
-        if existing is not None:
-            continue
         upstream = adapter.upstream_source
+        # PR-1 series/tags: pull `series` off the adapter so freshly
+        # seeded rows group correctly in the SPA dropdown. Adapters
+        # that don't declare a series leave the column NULL ("Other").
+        adapter_series = getattr(adapter, "series", None)
+        existing = s.execute(
+            select(Benchmark.id, Benchmark.series)
+            .where(Benchmark.id == slug),
+        ).first()
+        if existing is not None:
+            # Backfill `series` on rows seeded before PR-1 — otherwise
+            # every benchmark from a pre-PR-1 `loom service up` lands
+            # in the SPA's "Other" bucket forever.
+            if existing[1] is None and adapter_series is not None:
+                s.execute(
+                    Benchmark.__table__.update()
+                    .where(Benchmark.id == slug)
+                    .values(series=adapter_series),
+                )
+                updated += 1
+            continue
         s.execute(insert(Benchmark).values(
             id=slug,
             display_name=getattr(adapter, "display_name", slug),
@@ -92,10 +108,11 @@ def _seed_benchmarks_from_entrypoints(s: Session) -> int:
             license_spdx=getattr(adapter, "license_spdx", "UNKNOWN"),
             license_url=getattr(adapter, "license_url", ""),
             splits=list(getattr(adapter, "splits", ())) or ["test"],
+            series=adapter_series,
             imported_by="seed_test_data.py",
         ))
         inserted += 1
-    return inserted
+    return inserted + updated
 
 
 def _auto_register_benchmarks(
