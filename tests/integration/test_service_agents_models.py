@@ -134,6 +134,18 @@ async def test_agents_includes_builtins_and_adapters(
     assert by_name["oracle"]["kind"] == "builtin"
     assert by_name["claude-code"]["kind"] == "adapter"
 
+    # PR-A metadata: providers + sources are surfaced so the SPA can
+    # filter the model picker by agent.
+    assert by_name["oracle"]["supported_providers"] == []
+    assert by_name["oracle"]["supported_model_sources"] == []
+    assert by_name["litellm"]["supported_providers"] == ["*"]
+    assert set(by_name["litellm"]["supported_model_sources"]) == {
+        "api", "local-server", "hf",
+    }
+    # CLI adapters lock down to their provider.
+    assert by_name["claude-code"]["supported_providers"] == ["anthropic"]
+    assert by_name["claude-code"]["supported_model_sources"] == ["api"]
+
 
 async def test_models_deduplicates_across_rate_cards(
     setup: tuple[FastAPI, str],

@@ -192,6 +192,24 @@ export interface paths {
       };
     };
   };
+  "/api/v1/local-servers": {
+    get: {
+      responses: {
+        200: {
+          content: {
+            "application/json": {
+              items: {
+                name: string;
+                base_url: string;
+                kind: string | null;
+                description: string | null;
+              }[];
+            };
+          };
+        };
+      };
+    };
+  };
   "/api/v1/batches/{id}": {
     get: {
       parameters: { path: { id: string } };

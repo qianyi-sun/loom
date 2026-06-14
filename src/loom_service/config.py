@@ -59,3 +59,31 @@ class LoomServiceSettings(BaseSettings):
     # the operator provisions the secret. Production deploys set
     # `LOOM_SVC_BATCH_RUNNER_CP_TOKEN` from k8s secret material.
     batch_runner_cp_token: SecretStr | None = None
+
+    # Operator-configured local OpenAI-compatible model servers
+    # (vLLM / ollama / llama.cpp / lm-studio). The SPA's model picker
+    # surfaces these via `GET /api/v1/local-servers` so users can pick
+    # `ModelSpec.source="local-server"` against a name the cluster
+    # actually has.
+    #
+    # Format: JSON object mapping server name → {base_url, kind?,
+    # description?}. Set via env var
+    # `LOOM_SVC_LOCAL_SERVERS_JSON` so secrets / URLs stay out of code
+    # and the schema can grow without code churn:
+    #
+    #   LOOM_SVC_LOCAL_SERVERS_JSON='{
+    #     "vllm-h100": {
+    #       "base_url": "http://vllm-h100.cluster.local:8000/v1",
+    #       "kind": "vllm",
+    #       "description": "8x H100, prod model pool"
+    #     },
+    #     "ollama-dev": {
+    #       "base_url": "http://ollama:11434/v1",
+    #       "kind": "ollama",
+    #       "description": "Developer-laptop GPU"
+    #     }
+    #   }'
+    #
+    # Empty {} (default) means the SPA's local-server tab shows an
+    # empty state pointing at this env var.
+    local_servers_json: str = "{}"

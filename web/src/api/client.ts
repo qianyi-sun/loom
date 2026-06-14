@@ -163,8 +163,21 @@ export const api = {
         needs_model: boolean;
         kind: "builtin" | "adapter";
         description: string;
+        /** PR-A: provider whitelist. ["*"] = any provider the gateway routes. */
+        supported_providers: string[];
+        /** PR-A: subset of ["api","local-server","hf"]. Empty when needs_model=false. */
+        supported_model_sources: string[];
       }[];
     }>("/api/v1/agents"),
+  listLocalServers: () =>
+    apiFetch<{
+      items: {
+        name: string;
+        base_url: string;
+        kind: string | null;
+        description: string | null;
+      }[];
+    }>("/api/v1/local-servers"),
   listModels: () =>
     apiFetch<{
       items: { provider: string; name: string }[];
