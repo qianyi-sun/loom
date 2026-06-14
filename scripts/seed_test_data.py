@@ -119,14 +119,25 @@ def _auto_register_benchmarks(
     db_url: str, hf_org: str, hf_token: str | None,
 ) -> dict[str, str]:
     """Register every adapter in REGISTRY by reading its manifest from
-    HF Hub. Per-benchmark errors (most often: benchmark not yet
-    published) are logged + skipped so a missing publish doesn't block
-    the whole seed.
+    HF Hub. Returns {benchmark_id: status} for stderr logging.
 
-    Returns {benchmark_id: status} for stderr logging by the caller.
+    Status values:
+    - `ok registered=N` — manifest fetched + N tasks upserted.
+    - `not_published` — HF returned 401 (repo not found) or 404 (repo
+      exists but `manifest.json` missing). Treated as a normal status,
+      not an error: it's the expected state for adapters that exist
+      in code but haven't been published to PRHW yet. The stub seed
+      already inserted a Benchmark row so the SPA still shows them
+      grouped under their series.
+    - `error <type>: <msg>` — anything else (network failure, bad
+      manifest schema, etc). Still doesn't abort the seed.
     """
     import asyncio
 
+    from huggingface_hub.errors import (
+        EntryNotFoundError,
+        RepositoryNotFoundError,
+    )
     from loom_benchmarks.registry import REGISTRY
 
     from loom_benchmark_tool.register_cmd import run_register
@@ -142,10 +153,14 @@ def _auto_register_benchmarks(
                 registered_by="seed_test_data.py:auto_register",
             ))
             results[slug] = f"ok registered={stats['registered']}"
+        except (RepositoryNotFoundError, EntryNotFoundError):
+            # Not published yet — this is the steady-state for any
+            # adapter the Loom team hasn't run `loom_benchmark_tool
+            # publish` on yet. Quiet skip; the SPA still shows the
+            # stub row because `_seed_benchmarks_from_entrypoints`
+            # already inserted it with `task_count=0`.
+            results[slug] = "not_published"
         except Exception as exc:
-            # Most likely: the benchmark hasn't been published to HF
-            # yet (loom-team operation). Re-run after publish to pick
-            # it up; the seed re-running is idempotent.
             results[slug] = f"error {type(exc).__name__}: {exc}"
     return results
 
@@ -428,8 +443,29 @@ def main() -> None:
             hf_org=args.hf_org,
             hf_token=args.hf_token,
         )
+        # Per-slug detail only for `ok` and real `error` rows. The
+        # `not_published` case is the steady-state for any adapter
+        # that hasn't been published to PRHW yet — it's expected, not
+        # alarming, and printing one line per slug just adds noise.
+        # Summarized on a single line below.
+        not_published = sorted(
+            s for s, status in results.items() if status == "not_published"
+        )
         for slug, status in sorted(results.items()):
+            if status == "not_published":
+                continue
             sys.stderr.write(f"seed:   {slug}: {status}\n")
+        if not_published:
+            sys.stderr.write(
+                f"seed:   {len(not_published)} adapter(s) not yet "
+                f"published to {args.hf_org} — registered as stubs, "
+                f"task_count=0: {', '.join(not_published)}\n"
+            )
+            sys.stderr.write(
+                "seed:   to populate: "
+                "`python -m loom_benchmark_tool publish <slug>` "
+                "(needs HF write token for the target org)\n"
+            )
 
     # Opt-in: local-import path for air-gapped deploys. Slower + needs
     # MinIO; only fires when explicitly requested.
