@@ -10,12 +10,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Task
-from loom_service.auth_guards import require_human_or_admin
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
@@ -47,7 +46,7 @@ def _task_row(t: Task) -> dict[str, Any]:
 
 @router.get("/tasks")
 async def list_tasks(
-    request: Request,
+    sc: SessionAndCtx,
     benchmark_id: Annotated[str | None, Query()] = None,
     # Plan 24: drop the license-spdx filter from the SPA browse path
     # (operators almost never search by SPDX tag) and add an
@@ -62,31 +61,28 @@ async def list_tasks(
     ] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        # Shared where clauses so the page query and the count query
-        # touch the same predicate (count gets a clean COUNT(*) plan
-        # rather than COUNT over an ordered subquery).
-        conds: list[Any] = []
-        if benchmark_id is not None:
-            conds.append(Task.benchmark_id == benchmark_id)
-        if q:
-            # `ilike` with explicit '%' wrapping. Postgres LIKE
-            # patterns treat `%` and `_` as metacharacters, but a
-            # query that happens to contain them just matches more
-            # broadly — no injection risk through the SQL boundary.
-            conds.append(Task.id.ilike(f"%{q}%"))
-        total = (await s.execute(
-            select(func.count()).select_from(Task).where(*conds),
-        )).scalar_one()
-        stmt = select(Task).where(*conds).order_by(Task.id)
-        if cursor:
-            stmt = stmt.where(Task.id > cursor)
-        stmt = stmt.limit(limit + 1)
-        rows = list((await s.execute(stmt)).scalars().all())
+    s, _ctx = sc
+    # Shared where clauses so the page query and the count query
+    # touch the same predicate (count gets a clean COUNT(*) plan
+    # rather than COUNT over an ordered subquery).
+    conds: list[Any] = []
+    if benchmark_id is not None:
+        conds.append(Task.benchmark_id == benchmark_id)
+    if q:
+        # `ilike` with explicit '%' wrapping. Postgres LIKE
+        # patterns treat `%` and `_` as metacharacters, but a
+        # query that happens to contain them just matches more
+        # broadly — no injection risk through the SQL boundary.
+        conds.append(Task.id.ilike(f"%{q}%"))
+    total = (await s.execute(
+        select(func.count()).select_from(Task).where(*conds),
+    )).scalar_one()
+    stmt = select(Task).where(*conds).order_by(Task.id)
+    if cursor:
+        stmt = stmt.where(Task.id > cursor)
+    stmt = stmt.limit(limit + 1)
+    rows = list((await s.execute(stmt)).scalars().all())
 
     if len(rows) > limit:
         rows = rows[:limit]
@@ -101,19 +97,13 @@ async def list_tasks(
 
 
 @router.get("/tasks/{task_id:path}")
-async def get_task(
-    request: Request,
-    task_id: str,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        t = (await s.execute(
-            select(Task).where(Task.id == task_id),
-        )).scalar_one_or_none()
-        if t is None:
-            raise HTTPException(status_code=404, detail="task not found")
-        d = _task_row(t)
-        d["config"] = t.config
-        return d
+async def get_task(task_id: str, sc: SessionAndCtx) -> dict[str, Any]:
+    s, _ctx = sc
+    t = (await s.execute(
+        select(Task).where(Task.id == task_id),
+    )).scalar_one_or_none()
+    if t is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    d = _task_row(t)
+    d["config"] = t.config
+    return d

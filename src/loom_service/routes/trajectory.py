@@ -16,17 +16,16 @@ from typing import Annotated, Any, cast
 from uuid import UUID
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Trial
 from loom_service.auth_guards import (
-    require_human_or_admin,
     require_scope,
     require_team_or_admin,
 )
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
@@ -48,17 +47,15 @@ async def _load_trial(session: Any, trial_id: UUID, ctx: Any) -> Trial:
 @router.get("/trials/{trial_id}/trajectory")
 async def list_events(
     request: Request,
+    sc: SessionAndCtx,
     trial_id: UUID,
     cursor: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(gt=0, le=1000)] = 200,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     settings = request.app.state.settings
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "read:own")
-        trial = await _load_trial(s, trial_id, ctx)
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = await _load_trial(s, trial_id, ctx)
 
     client = request.app.state.minio_client
     try:
@@ -112,15 +109,13 @@ async def list_events(
 @router.get("/trials/{trial_id}/trajectory/download")
 async def download_trajectory(
     request: Request,
+    sc: SessionAndCtx,
     trial_id: UUID,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> RedirectResponse:
     settings = request.app.state.settings
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "read:own")
-        trial = await _load_trial(s, trial_id, ctx)
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = await _load_trial(s, trial_id, ctx)
 
     url = request.app.state.minio_client.generate_presigned_url(
         "get_object",

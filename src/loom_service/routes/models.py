@@ -9,29 +9,23 @@ SubmitTrialModal + NewBatch.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter
 from sqlalchemy import select
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import RateCard
-from loom_service.auth_guards import require_human_or_admin
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
 
 @router.get("/models")
-async def list_models(
-    request: Request,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
+async def list_models(sc: SessionAndCtx) -> dict[str, Any]:
     """De-duplicates across all rate cards. A model that appears in
     multiple cards (older + newer pricing) collapses to one entry."""
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        rows = (await s.execute(select(RateCard.table))).scalars().all()
+    s, _ctx = sc
+    rows = (await s.execute(select(RateCard.table))).scalars().all()
     seen: set[tuple[str, str]] = set()
     items: list[dict[str, Any]] = []
     for card in rows:

@@ -12,12 +12,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select, text
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Benchmark, Task
-from loom_service.auth_guards import require_human_or_admin
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
@@ -47,7 +46,7 @@ def _bench_row(b: Benchmark, task_count: int = 0) -> dict[str, Any]:
 
 @router.get("/benchmarks")
 async def list_benchmarks(
-    request: Request,
+    sc: SessionAndCtx,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
     # By default the SPA-facing listing hides benchmarks with zero
@@ -57,25 +56,22 @@ async def list_benchmarks(
     # `?include_empty=true` to see every registered benchmark (e.g.
     # admin tools that drive imports).
     include_empty: Annotated[bool, Query()] = False,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        # LEFT JOIN tasks for the count so empty benchmarks still show
-        # up when include_empty=True. GROUP BY on the PK is safe.
-        stmt = (
-            select(Benchmark, func.count(Task.id).label("task_count"))
-            .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
-            .group_by(Benchmark.id)
-            .order_by(Benchmark.display_name)
-        )
-        if cursor:
-            stmt = stmt.where(Benchmark.display_name > cursor)
-        if not include_empty:
-            stmt = stmt.having(func.count(Task.id) > 0)
-        stmt = stmt.limit(limit + 1)
-        rows = list((await s.execute(stmt)).all())
+    s, _ctx = sc
+    # LEFT JOIN tasks for the count so empty benchmarks still show
+    # up when include_empty=True. GROUP BY on the PK is safe.
+    stmt = (
+        select(Benchmark, func.count(Task.id).label("task_count"))
+        .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
+        .group_by(Benchmark.id)
+        .order_by(Benchmark.display_name)
+    )
+    if cursor:
+        stmt = stmt.where(Benchmark.display_name > cursor)
+    if not include_empty:
+        stmt = stmt.having(func.count(Task.id) > 0)
+    stmt = stmt.limit(limit + 1)
+    rows = list((await s.execute(stmt)).all())
     if len(rows) > limit:
         rows = rows[:limit]
         next_cursor: str | None = rows[-1][0].display_name
@@ -89,32 +85,26 @@ async def list_benchmarks(
 
 @router.get("/benchmarks/{benchmark_id}")
 async def get_benchmark(
-    request: Request,
-    benchmark_id: str,
-    authorization: Annotated[str | None, Header()] = None,
+    benchmark_id: str, sc: SessionAndCtx,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        row = (await s.execute(
-            select(Benchmark, func.count(Task.id).label("task_count"))
-            .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
-            .where(Benchmark.id == benchmark_id)
-            .group_by(Benchmark.id),
-        )).one_or_none()
-        if row is None:
-            raise HTTPException(
-                status_code=404, detail="benchmark not found",
-            )
-        b, count = row
-        return _bench_row(b, int(count))
+    s, _ctx = sc
+    row = (await s.execute(
+        select(Benchmark, func.count(Task.id).label("task_count"))
+        .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
+        .where(Benchmark.id == benchmark_id)
+        .group_by(Benchmark.id),
+    )).one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail="benchmark not found",
+        )
+    b, count = row
+    return _bench_row(b, int(count))
 
 
 @router.get("/benchmarks/{benchmark_id}/tags")
 async def list_benchmark_tags(
-    request: Request,
-    benchmark_id: str,
-    authorization: Annotated[str | None, Header()] = None,
+    benchmark_id: str, sc: SessionAndCtx,
 ) -> dict[str, Any]:
     """Distinct tag keys → distinct values for a benchmark's tasks.
 
@@ -125,39 +115,28 @@ async def list_benchmark_tags(
 
     Implementation: `jsonb_each_text(tags)` cross-joined to each task
     row in the benchmark, grouped by key, distinct values aggregated.
-    Result shape:
-
-        {
-          "items": [
-            {"key": "year", "values": ["2022", "2023", "2024"]},
-            {"key": "exam", "values": ["I", "II"]},
-            {"key": "problem", "values": ["1", "2", ..., "15"]}
-          ]
-        }
     """
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        # 404 if the benchmark itself doesn't exist so the SPA can
-        # distinguish "no tags here" (empty list, 200) from "wrong id"
-        # (404).
-        exists = (await s.execute(
-            select(Benchmark.id).where(Benchmark.id == benchmark_id),
-        )).scalar_one_or_none()
-        if exists is None:
-            raise HTTPException(
-                status_code=404, detail="benchmark not found",
-            )
-        rows = (await s.execute(
-            text(
-                "SELECT kv.key, ARRAY_AGG(DISTINCT kv.value ORDER BY kv.value) "
-                "FROM tasks t, jsonb_each_text(t.tags) AS kv(key, value) "
-                "WHERE t.benchmark_id = :bid "
-                "GROUP BY kv.key "
-                "ORDER BY kv.key",
-            ),
-            {"bid": benchmark_id},
-        )).all()
+    s, _ctx = sc
+    # 404 if the benchmark itself doesn't exist so the SPA can
+    # distinguish "no tags here" (empty list, 200) from "wrong id"
+    # (404).
+    exists = (await s.execute(
+        select(Benchmark.id).where(Benchmark.id == benchmark_id),
+    )).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(
+            status_code=404, detail="benchmark not found",
+        )
+    rows = (await s.execute(
+        text(
+            "SELECT kv.key, ARRAY_AGG(DISTINCT kv.value ORDER BY kv.value) "
+            "FROM tasks t, jsonb_each_text(t.tags) AS kv(key, value) "
+            "WHERE t.benchmark_id = :bid "
+            "GROUP BY kv.key "
+            "ORDER BY kv.key",
+        ),
+        {"bid": benchmark_id},
+    )).all()
     return {
         "items": [
             {"key": key, "values": list(values)}

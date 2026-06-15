@@ -25,7 +25,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Trial
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
@@ -34,10 +33,10 @@ from loom_service.agent_catalog import (
 )
 from loom_service.auth_guards import (
     is_admin,
-    require_human_or_admin,
     require_scope,
     require_team_or_admin,
 )
+from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 
@@ -103,6 +102,7 @@ def _trial_row(t: Trial) -> dict[str, Any]:
 @router.get("/trials")
 async def list_trials(
     request: Request,
+    sc: SessionAndCtx,
     team_id: Annotated[UUID | None, Query()] = None,
     task_id: Annotated[str | None, Query()] = None,
     state: Annotated[
@@ -111,54 +111,51 @@ async def list_trials(
     ] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "read:own")
+    s, ctx = sc
+    require_scope(ctx, "read:own")
 
-        # Resolve the team filter:
-        # - explicit `team_id` query → require_team_or_admin
-        # - no filter + non-admin → scope to caller's own team
-        # - no filter + admin → no team filter
-        target_team = team_id
-        if target_team is not None:
-            require_team_or_admin(ctx, target_team)
-        elif not is_admin(ctx):
-            target_team = ctx.team_id
+    # Resolve the team filter:
+    # - explicit `team_id` query → require_team_or_admin
+    # - no filter + non-admin → scope to caller's own team
+    # - no filter + admin → no team filter
+    target_team = team_id
+    if target_team is not None:
+        require_team_or_admin(ctx, target_team)
+    elif not is_admin(ctx):
+        target_team = ctx.team_id
 
-        stmt = select(Trial).order_by(
-            Trial.submitted_at.desc(), Trial.id.desc(),
-        )
-        if target_team is not None:
-            stmt = stmt.where(Trial.team_id == target_team)
-        if task_id is not None:
-            stmt = stmt.where(Trial.task_id == task_id)
-        if state:
-            wanted = [x.strip() for x in state.split(",") if x.strip()]
-            if wanted:
-                stmt = stmt.where(Trial.state.in_(wanted))
-        if cursor:
-            try:
-                c = decode_cursor(cursor)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400, detail=str(exc),
-                ) from exc
-            # Composite (submitted_at, id) key: rows strictly LESS than
-            # the cursor (DESC ordering).
-            stmt = stmt.where(
-                or_(
-                    Trial.submitted_at < c.submitted_at,
-                    and_(
-                        Trial.submitted_at == c.submitted_at,
-                        Trial.id < c.id,
-                    ),
+    stmt = select(Trial).order_by(
+        Trial.submitted_at.desc(), Trial.id.desc(),
+    )
+    if target_team is not None:
+        stmt = stmt.where(Trial.team_id == target_team)
+    if task_id is not None:
+        stmt = stmt.where(Trial.task_id == task_id)
+    if state:
+        wanted = [x.strip() for x in state.split(",") if x.strip()]
+        if wanted:
+            stmt = stmt.where(Trial.state.in_(wanted))
+    if cursor:
+        try:
+            c = decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=str(exc),
+            ) from exc
+        # Composite (submitted_at, id) key: rows strictly LESS than
+        # the cursor (DESC ordering).
+        stmt = stmt.where(
+            or_(
+                Trial.submitted_at < c.submitted_at,
+                and_(
+                    Trial.submitted_at == c.submitted_at,
+                    Trial.id < c.id,
                 ),
-            )
-        stmt = stmt.limit(limit + 1)
-        rows = list((await s.execute(stmt)).scalars().all())
+            ),
+        )
+    stmt = stmt.limit(limit + 1)
+    rows = list((await s.execute(stmt)).scalars().all())
 
     if len(rows) > limit:
         rows = rows[:limit]
@@ -188,20 +185,18 @@ def _presign_get(
 @router.get("/trials/{trial_id}")
 async def get_trial(
     request: Request,
+    sc: SessionAndCtx,
     trial_id: UUID,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     settings = request.app.state.settings
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "read:own")
-        trial = (await s.execute(
-            select(Trial).where(Trial.id == trial_id),
-        )).scalar_one_or_none()
-        if trial is None:
-            raise HTTPException(status_code=404, detail="trial not found")
-        require_team_or_admin(ctx, trial.team_id)
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = (await s.execute(
+        select(Trial).where(Trial.id == trial_id),
+    )).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
 
     base = _trial_row(trial)
     # The worker's TrajectoryWriter writes events.jsonl under
@@ -279,6 +274,7 @@ def _validate_agent_name(config: dict[str, Any]) -> None:
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
+    sc: SessionAndCtx,
     payload: _SubmitReq,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
@@ -286,10 +282,8 @@ async def submit_trial(
     Control Plane's POST /trials. The CP runs the canonical license-
     allowlist + team-quota checks; this route just keeps unauthorized
     requests from touching the upstream at all."""
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "submit")
+    _, ctx = sc
+    require_scope(ctx, "submit")
     _validate_agent_name(payload.config)
     resp = await forward(
         request.app.state.http_client,
@@ -303,21 +297,20 @@ async def submit_trial(
 @router.post("/trials/{trial_id}/cancel")
 async def cancel_trial(
     request: Request,
+    sc: SessionAndCtx,
     trial_id: UUID,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """Same-team check happens BEFORE the forward so we don't burn
     a CP round-trip when the caller is unauthorized."""
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "submit")
-        trial = (await s.execute(
-            select(Trial).where(Trial.id == trial_id),
-        )).scalar_one_or_none()
-        if trial is None:
-            raise HTTPException(status_code=404, detail="trial not found")
-        require_team_or_admin(ctx, trial.team_id)
+    s, ctx = sc
+    require_scope(ctx, "submit")
+    trial = (await s.execute(
+        select(Trial).where(Trial.id == trial_id),
+    )).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
     resp = await forward(
         request.app.state.http_client,
         method="POST",

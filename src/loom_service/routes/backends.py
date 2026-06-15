@@ -13,14 +13,13 @@ naturally stall (claim returns 204).
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter
 from sqlalchemy import select
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Worker
-from loom_service.auth_guards import require_human_or_admin
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
@@ -39,16 +38,11 @@ _KNOWN_BACKENDS: tuple[str, ...] = ("docker", "daytona", "modal", "fake")
 
 
 @router.get("/backends")
-async def list_backends(
-    request: Request,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-        rows = (await s.execute(
-            select(Worker.capabilities).where(Worker.status == "active"),
-        )).scalars().all()
+async def list_backends(sc: SessionAndCtx) -> dict[str, Any]:
+    s, _ctx = sc
+    rows = (await s.execute(
+        select(Worker.capabilities).where(Worker.status == "active"),
+    )).scalars().all()
 
     seen: set[str] = set()
     for caps_list in rows:

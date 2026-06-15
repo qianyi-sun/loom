@@ -19,19 +19,18 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, select, update
 
-from loom.auth import verify_bearer_token
 from loom.db.schema import Token
 from loom_service.auth_guards import (
     is_admin,
-    require_human_or_admin,
 )
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
@@ -85,92 +84,88 @@ def _serialize(row: Token) -> dict[str, Any]:
 @router.get("/tokens")
 async def list_tokens(
     request: Request,
-    authorization: Annotated[str | None, Header()] = None,
+    sc: SessionAndCtx,
 ) -> dict[str, list[dict[str, Any]]]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        stmt = select(Token).order_by(Token.issued_at.desc())
-        if not is_admin(ctx):
-            stmt = stmt.where(Token.team_id == ctx.team_id)
-        rows = (await s.execute(stmt)).scalars().all()
+    s, ctx = sc
+    stmt = select(Token).order_by(Token.issued_at.desc())
+    if not is_admin(ctx):
+        stmt = stmt.where(Token.team_id == ctx.team_id)
+    rows = (await s.execute(stmt)).scalars().all()
     return {"items": [_serialize(r) for r in rows]}
 
 
 @router.post("/tokens", status_code=201)
 async def create_token(
     request: Request,
+    sc: SessionAndCtx,
     payload: _CreateTokenReq,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, str]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
+    s, ctx = sc
 
-        # Reject unrecognized scopes up front (audit M2). Catches
-        # typos before they reach the DB; downstream guards only check
-        # known scopes, so an unknown scope is dead weight at best,
-        # confusing at worst.
-        unknown = [sc for sc in payload.scopes if sc not in _KNOWN_SCOPES]
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unrecognized scopes: {sorted(unknown)}",
-            )
-
-        admin = is_admin(ctx)
-        if not admin:
-            if payload.type != "team":
-                raise HTTPException(
-                    status_code=403,
-                    detail="only admins may mint admin tokens",
-                )
-            if payload.team_id is not None and payload.team_id != ctx.team_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="cannot mint into another team",
-                )
-            for sc in payload.scopes:
-                if sc not in _TEAM_ALLOWED_SCOPES:
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"scope {sc!r} requires admin:tokens",
-                    )
-
-        # Admin tokens are global — accidentally pinning one to a team
-        # would create a confused-deputy hazard at a later API revision,
-        # so reject the input rather than silently dropping the field
-        # (audit H2).
-        if payload.type == "admin" and payload.team_id is not None:
-            raise HTTPException(
-                status_code=400,
-                detail="admin tokens are global; team_id must be omitted",
-            )
-
-        target_team = (
-            payload.team_id if payload.team_id else ctx.team_id
-        )
-        if payload.type == "team" and target_team is None:
-            raise HTTPException(
-                status_code=400, detail="team_id required for team token",
-            )
-
-        prefix_str = "team" if payload.type == "team" else "admin"
-        raw = f"loom_{prefix_str}_{secrets.token_urlsafe(32)}"
-        token_hash = hashlib.sha256(raw.encode()).digest()
-        expires_at = datetime.now(UTC) + timedelta(
-            days=payload.expires_in_days,
+    # Reject unrecognized scopes up front (audit M2). Catches
+    # typos before they reach the DB; downstream guards only check
+    # known scopes, so an unknown scope is dead weight at best,
+    # confusing at worst.
+    unknown = [sc for sc in payload.scopes if sc not in _KNOWN_SCOPES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unrecognized scopes: {sorted(unknown)}",
         )
 
-        await s.execute(insert(Token).values(
-            token_hash=token_hash,
-            type=payload.type,
-            scopes=list(payload.scopes),
-            team_id=target_team if payload.type == "team" else None,
-            issued_at=datetime.now(UTC),
-            expires_at=expires_at,
-        ))
-        await s.commit()
+    admin = is_admin(ctx)
+    if not admin:
+        if payload.type != "team":
+            raise HTTPException(
+                status_code=403,
+                detail="only admins may mint admin tokens",
+            )
+        if payload.team_id is not None and payload.team_id != ctx.team_id:
+            raise HTTPException(
+                status_code=403,
+                detail="cannot mint into another team",
+            )
+        for scope in payload.scopes:
+            if scope not in _TEAM_ALLOWED_SCOPES:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"scope {scope!r} requires admin:tokens",
+                )
+
+    # Admin tokens are global — accidentally pinning one to a team
+    # would create a confused-deputy hazard at a later API revision,
+    # so reject the input rather than silently dropping the field
+    # (audit H2).
+    if payload.type == "admin" and payload.team_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="admin tokens are global; team_id must be omitted",
+        )
+
+    target_team = (
+        payload.team_id if payload.team_id else ctx.team_id
+    )
+    if payload.type == "team" and target_team is None:
+        raise HTTPException(
+            status_code=400, detail="team_id required for team token",
+        )
+
+    prefix_str = "team" if payload.type == "team" else "admin"
+    raw = f"loom_{prefix_str}_{secrets.token_urlsafe(32)}"
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at = datetime.now(UTC) + timedelta(
+        days=payload.expires_in_days,
+    )
+
+    await s.execute(insert(Token).values(
+        token_hash=token_hash,
+        type=payload.type,
+        scopes=list(payload.scopes),
+        team_id=target_team if payload.type == "team" else None,
+        issued_at=datetime.now(UTC),
+        expires_at=expires_at,
+    ))
+    await s.commit()
 
     return {
         "token": raw,
@@ -182,57 +177,55 @@ async def create_token(
 @router.delete("/tokens/{prefix}", status_code=204)
 async def revoke_token(
     request: Request,
+    sc: SessionAndCtx,
     prefix: str,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     if len(prefix) != 8 or not all(c in "0123456789abcdef" for c in prefix):
         raise HTTPException(
             status_code=400, detail="prefix must be 8 lowercase hex chars",
         )
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
+    s, ctx = sc
 
-        # Scope the lookup to what the caller is allowed to see: team
-        # callers can only revoke their own team's tokens, so include
-        # the team_id predicate BEFORE the prefix scan. This both
-        # closes a non-deterministic cross-team-collision window
-        # (audit H1) and avoids loading every row into Python
-        # (audit M1). Admins still get the full table.
-        stmt = select(Token).where(Token.revoked_at.is_(None))
-        if not is_admin(ctx):
-            stmt = stmt.where(Token.team_id == ctx.team_id)
-        rows = (await s.execute(stmt)).scalars().all()
-        matches = [
-            r for r in rows if r.token_hash.hex().startswith(prefix)
-        ]
-        if not matches:
-            raise HTTPException(status_code=404, detail="token not found")
-        if len(matches) > 1:
-            # 8-hex-char prefix collisions are rare but possible (32
-            # bits, birthday ≈ 77k tokens). When they happen, refuse
-            # rather than silently picking one — the caller can supply
-            # more hex digits in a future API revision (currently
-            # 8 is hard-coded by spec §5.5).
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"prefix {prefix!r} matches {len(matches)} tokens; "
-                    f"ambiguous"
-                ),
-            )
-        target = matches[0]
-        if target.team_id is None and not is_admin(ctx):
-            # Defense-in-depth: a non-admin shouldn't have reached the
-            # prefix-scan over a global-admin token (team_id filter
-            # above), but guard anyway in case the scope filter ever
-            # changes shape.
-            raise HTTPException(
-                status_code=403, detail="admin scope required",
-            )
-        await s.execute(
-            update(Token)
-            .where(Token.token_hash == target.token_hash)
-            .values(revoked_at=datetime.now(UTC)),
+    # Scope the lookup to what the caller is allowed to see: team
+    # callers can only revoke their own team's tokens, so include
+    # the team_id predicate BEFORE the prefix scan. This both
+    # closes a non-deterministic cross-team-collision window
+    # (audit H1) and avoids loading every row into Python
+    # (audit M1). Admins still get the full table.
+    stmt = select(Token).where(Token.revoked_at.is_(None))
+    if not is_admin(ctx):
+        stmt = stmt.where(Token.team_id == ctx.team_id)
+    rows = (await s.execute(stmt)).scalars().all()
+    matches = [
+        r for r in rows if r.token_hash.hex().startswith(prefix)
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="token not found")
+    if len(matches) > 1:
+        # 8-hex-char prefix collisions are rare but possible (32
+        # bits, birthday ≈ 77k tokens). When they happen, refuse
+        # rather than silently picking one — the caller can supply
+        # more hex digits in a future API revision (currently
+        # 8 is hard-coded by spec §5.5).
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"prefix {prefix!r} matches {len(matches)} tokens; "
+                f"ambiguous"
+            ),
         )
-        await s.commit()
+    target = matches[0]
+    if target.team_id is None and not is_admin(ctx):
+        # Defense-in-depth: a non-admin shouldn't have reached the
+        # prefix-scan over a global-admin token (team_id filter
+        # above), but guard anyway in case the scope filter ever
+        # changes shape.
+        raise HTTPException(
+            status_code=403, detail="admin scope required",
+        )
+    await s.execute(
+        update(Token)
+        .where(Token.token_hash == target.token_hash)
+        .values(revoked_at=datetime.now(UTC)),
+    )
+    await s.commit()

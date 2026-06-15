@@ -14,43 +14,22 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
-from loom.auth import verify_bearer_token
-from loom_service.auth_guards import require_human_or_admin, require_scope
+from loom_service.auth_guards import require_scope
+from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
 
 router = APIRouter()
 
 
-async def _check_read(
-    request: Request, authorization: str | None,
-) -> None:
-    """Any signed-in team/human/admin token can read rate cards.
-
-    Costs are derived at query time from the rate card the call was
-    priced against; teams need to see those rows to interpret their
-    own bills and reproduce historical cost math. Mutations stay
-    admin-only via `_check_admin_mutation` below.
-    """
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
-
-
-async def _check_admin_mutation(
-    request: Request, authorization: str | None,
-) -> None:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        ctx = require_human_or_admin(ctx)
-        require_scope(ctx, "admin:rate_cards")
-
-
 @router.get("/rate-cards")
 async def list_rate_cards(
     request: Request,
+    sc: SessionAndCtx,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
-    await _check_read(request, authorization)
+    # SessionAndCtx enforces human-or-admin; reads stay open to any
+    # authenticated user.
+    _ = sc
     resp = await forward(
         request.app.state.gateway_client,
         method="GET", path="/admin/rate-cards",
@@ -62,10 +41,11 @@ async def list_rate_cards(
 @router.get("/rate-cards/{rate_card_id}")
 async def get_rate_card(
     request: Request,
+    sc: SessionAndCtx,
     rate_card_id: str,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
-    await _check_read(request, authorization)
+    _ = sc
     resp = await forward(
         request.app.state.gateway_client,
         method="GET",
@@ -78,10 +58,12 @@ async def get_rate_card(
 @router.post("/rate-cards", status_code=201)
 async def create_rate_card(
     request: Request,
+    sc: SessionAndCtx,
     payload: dict[str, Any],
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
-    await _check_admin_mutation(request, authorization)
+    _session, ctx = sc
+    require_scope(ctx, "admin:rate_cards")
     resp = await forward(
         request.app.state.gateway_client,
         method="POST", path="/admin/rate-cards",

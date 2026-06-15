@@ -17,12 +17,11 @@ uses).
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
-from loom.auth import verify_bearer_token
-from loom_service.auth_guards import require_human_or_admin
+from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
@@ -30,11 +29,11 @@ router = APIRouter()
 @router.get("/local-servers")
 async def list_local_servers(
     request: Request,
-    authorization: Annotated[str | None, Header()] = None,
+    sc: SessionAndCtx,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as s:
-        ctx = await verify_bearer_token(s, authorization)
-        require_human_or_admin(ctx)
+    # `sc` triggers auth via Depends. We still need `request` for the
+    # settings lookup (and to keep the legacy route shape obvious).
+    _ = sc
 
     raw = request.app.state.settings.local_servers_json
     try:
