@@ -43,12 +43,14 @@ class AIME25Adapter:
     name = "aime-25"
     display_name = "AIME 2025"
     series = "aime"
-    # `locator` is informational only — we actually load two HF
-    # datasets in list_instances. The display string here is what
-    # surfaces in benchmark metadata + the manifest.
+    # `locator` is what `fetch_upstream` actually feeds to
+    # `datasets.load_dataset`; HF rejects ids containing `+`, so we
+    # point at the AIME-I dataset and load AIME-II separately inside
+    # `list_instances`. The exam-II cache populates lazily on first
+    # iteration; both halves are 15 problems each, 30 total.
     upstream_source = UpstreamSource(
         kind="huggingface",
-        locator="MathArena/aime_2025_I+II",
+        locator="MathArena/aime_2025_I",
         revision=None,
     )
     license_spdx = "proprietary-MAA"
@@ -104,16 +106,13 @@ class AIME25Adapter:
         (verifier_dir / "check.py").write_text(_AIME_CHECK_PY)
         (out_dir / "task.toml").write_text(_aime_2025_toml(task_id))
 
-        # Re-use the structured verifier helper (same wrapper script
-        # as AIMEAdapter — see loom_benchmarks.util).
-        _script = structured_verifier_script(
-            command=["python", "verifier/check.py"],
-            agent_output_var="LOOM_AGENT_OUTPUT",
-            verifier_output_var="LOOM_VERIFIER_OUTPUT",
-            task_dir_var="LOOM_TASK_DIR",
+        # Same wrapper script as the per-year AIMEAdapter:
+        # `python "$LOOM_TASK_DIR/verifier/check.py"`. The helper
+        # writes verifier/run.sh + chmods +x; no further wiring.
+        structured_verifier_script(
+            'python "$LOOM_TASK_DIR/verifier/check.py"',
+            out_dir=out_dir,
         )
-        (verifier_dir / "run.sh").write_text(_script)
-        (verifier_dir / "run.sh").chmod(0o755)
 
         checksum = sha256_of_dir(out_dir)
         return ConvertedTask(
@@ -126,16 +125,30 @@ class AIME25Adapter:
 
 def _aime_2025_toml(task_id: str) -> str:
     """Mirrors the AIMEAdapter task.toml shape so the worker treats
-    2025 problems identically to AIMO-validation ones."""
-    return toml_string({
-        "schema_version": "1",
-        "task": {"id": task_id, "name": f"AIME 2025 — {task_id}"},
-        "environment": {
-            "os": "linux", "docker_image": "python:3.11-slim",
-        },
-        "agent": {"name": "oracle"},
-        "verifier": {"name": "script"},
-        "steps": [
-            {"name": "main", "artifacts": ["final_answer.txt"]},
-        ],
-    })
+    2025 problems identically to AIMO-validation ones. `toml_string`
+    is a *string-escape* helper (not a serializer) — hand-render the
+    document with the same shape the per-year AIME adapters use."""
+    import textwrap as _tw
+    toml_id = toml_string(task_id)
+    toml_name = toml_string(f"AIME 2025 — {task_id}")
+    return _tw.dedent(f"""
+        schema_version = "1"
+
+        [task]
+        id = {toml_id}
+        name = {toml_name}
+
+        [environment]
+        os = "linux"
+        docker_image = "python:3.11-slim"
+
+        [agent]
+        name = "oracle"
+
+        [verifier]
+        name = "script"
+
+        [[steps]]
+        name = "main"
+        artifacts = ["final_answer.txt"]
+    """).strip() + "\n"
