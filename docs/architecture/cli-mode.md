@@ -188,6 +188,11 @@ Internals:
   `[sys.executable, "-m", "pip", "install", spec]` after rejecting
   shell metacharacters in spec (policy-only — `subprocess.run` with a
   list doesn't shell-expand).
+- **Lifecycle subcommands** (modular-D) — `import`, `publish`,
+  `register`, `verify` live in `src/loom_cli/datasets_cmd.py` and
+  delegate to `loom_benchmark_tool.{import_cmd, publish_cmd,
+  register_cmd, verify_cmd}`'s `run_*` functions. `python -m
+  loom_benchmark_tool` keeps working as a deprecation shim.
 
 ## Common pitfalls
 

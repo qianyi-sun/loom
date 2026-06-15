@@ -4,41 +4,78 @@ A `BenchmarkAdapter` is a class that knows how to fetch an upstream
 dataset, walk its instances, and convert each one into the Loom
 canonical task layout (`task.toml` + `instruction.md` + assets).
 
-Lives at `packages/loom-benchmarks/loom_benchmarks/base.py`.
+Lives at `packages/loom-benchmarks/loom_benchmarks/base.py`. Per-adapter
+metadata (display_name, series, upstream, license, splits, params) is
+declarative — `packages/loom-benchmarks/loom_benchmarks/catalog.json`.
 
-## Contract
+## Contract (first-party, catalog-backed)
 
 ```python
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Protocol
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 
-class BenchmarkAdapter(Protocol):
-    name: str                          # slug, e.g. "humaneval"
-    display_name: str                  # "HumanEval"
-    upstream_source: UpstreamSource    # kind ∈ {huggingface, git, https-tarball}
-    license_spdx: str                  # e.g. "MIT"
-    license_url: str                   # canonical license URL
-    splits: tuple[str, ...]            # ("test",), or ("train", "test"), ...
+
+class MyAdapter(CatalogBackedAdapter):
+    # Just the catalog key. The mixin installs display_name, series,
+    # upstream_source, license_spdx, license_url, splits, and _params
+    # from `catalog.json` at class-creation time.
+    name = "my-benchmark"
 
     def list_instances(
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
         """Walk the cached upstream tree, yield one BenchmarkInstance
-        per task. `source_dir` is the path fetch_upstream cached the
-        dataset to."""
+        per task. `source_dir` is what fetch_upstream produced."""
 
     def convert_instance(
         self, instance: BenchmarkInstance, *, out_dir: Path,
     ) -> ConvertedTask:
         """Write the Loom canonical task layout under out_dir/.
         Returns ConvertedTask(task_id, checksum, license_spdx, warnings)."""
+```
+
+### catalog.json entry
+
+```json
+{
+  "name": "my-benchmark",
+  "display_name": "My Benchmark",
+  "series": "code",
+  "upstream": {"kind": "huggingface", "locator": "org/repo"},
+  "license": {"spdx": "MIT", "url": "https://github.com/org/repo/blob/main/LICENSE"},
+  "splits": ["test"],
+  "params": {}
+}
+```
+
+`params` is an arbitrary string→string dict the adapter can read via
+`self._params`. Per-year AIME adapters share `_AIMEYearBase` and read
+`self._params["year"]` to filter the upstream — adding `aime-21` is one
+JSON entry + a 2-line subclass.
+
+### Third-party / external adapters
+
+`CatalogBackedAdapter` is optional. External adapter packages that
+declare metadata as plain class attributes still work — the mixin
+falls back silently when the catalog has no entry for `cls.name`. The
+declarative pattern is for first-party benchmarks shipped inside
+`loom_benchmarks/`; external plugins keep using the legacy shape:
+
+```python
+class MyAdapter:
+    name = "third-party-bench"
+    display_name = "Third-Party Bench"
+    upstream_source = UpstreamSource(kind="huggingface", locator="org/repo")
+    license_spdx = "MIT"
+    license_url = "..."
+    splits = ("test",)
+    # list_instances / convert_instance as above
 ```
 
 ### Canonical task layout (what `convert_instance` writes)
@@ -110,23 +147,20 @@ remote service surface is described in
 
 ## Shipped adapters
 
-### `packages/loom-benchmarks/` — 13 adapters
+### `packages/loom-benchmarks/` — 16 adapters across 7 series
 
-| Slug | License | Upstream |
-|---|---|---|
-| aime | proprietary-MAA | HF `AI-MO/aimo-validation-aime` |
-| bfcl | Apache-2.0 | git `gorilla` |
-| gaia | Apache-2.0 | HF `gaia-benchmark/GAIA` |
-| humaneval | MIT | HF `openai/openai_humaneval` |
-| livecodebench | CC-BY-NC-4.0 | HF `livecodebench/code_generation_lite` |
-| mbpp | CC-BY-4.0 | HF `google-research-datasets/mbpp` (subset `sanitized`) |
-| osworld | Apache-2.0 | git `OSWorld` |
-| skillflow | NOASSERTION | git `ZhangZi-a/SkillFlow` |
-| skilllearnbench | Apache-2.0 | git `cxcscmu/SkillLearnBench` |
-| swe-bench | MIT | HF `princeton-nlp/SWE-bench` |
-| swe-bench-multimodal | MIT | HF `princeton-nlp/SWE-bench_Multimodal` |
-| swe-bench-verified | MIT | HF `princeton-nlp/SWE-bench_Verified` |
-| webarena | Apache-2.0 | git `webarena` |
+Source of truth: `packages/loom-benchmarks/loom_benchmarks/catalog.json`.
+Use `loom datasets list` to enumerate at runtime.
+
+| Series | Adapters |
+|---|---|
+| `aime` | aime-22, aime-23, aime-24, aime-25 |
+| `swe-bench` | swe-bench, swe-bench-verified, swe-bench-multimodal |
+| `code` | humaneval, mbpp, livecodebench |
+| `tool-use` | bfcl |
+| `ui-agent` | osworld, webarena |
+| `research-agent` | gaia |
+| `skill` | skillflow, skilllearnbench |
 
 ### `packages/loom-benchmark-terminal-bench-2/` — 1 adapter
 
@@ -167,31 +201,51 @@ get cleaned up via `rmtree` on the next call.
 
 ## Adding a new adapter
 
-1. New PyPI-style sibling under `packages/loom-benchmark-<name>/`
-   with `pyproject.toml`, `loom_benchmark_<name>/`, `tests/` (no
-   `__init__.py` in `tests/` to avoid collision with the main repo's
-   `tests/` root).
-2. Implement the `BenchmarkAdapter` Protocol. The `terminal-bench-2`
-   adapter is the slimmest reference.
-3. `pyproject.toml`:
-   ```toml
-   [project]
-   name = "loom-benchmark-<name>"
-   dependencies = ["loom-benchmarks>=0.1.0,<0.3", "loom>=0.0.0"]
+**First-party (inside `loom_benchmarks/adapters/`):**
 
+1. Add a JSON entry to `packages/loom-benchmarks/loom_benchmarks/catalog.json`:
+   ```json
+   {
+     "name": "my-bench",
+     "display_name": "My Bench",
+     "series": "code",
+     "upstream": {"kind": "huggingface", "locator": "org/repo"},
+     "license": {"spdx": "MIT", "url": "https://..."},
+     "splits": ["test"]
+   }
+   ```
+2. Write the Python adapter — inherit `CatalogBackedAdapter`, declare
+   `name = "my-bench"`, implement `list_instances` + `convert_instance`.
+3. Register the entry-point in `packages/loom-benchmarks/pyproject.toml`:
+   ```toml
+   my-bench = "loom_benchmarks.adapters.my_bench:MyBenchAdapter"
+   ```
+4. Run `uv pip install -e packages/loom-benchmarks --no-deps` so the
+   entry-point dist-info regenerates.
+5. Verify: `loom datasets list --installed` shows the new slug;
+   `python -m pytest packages/loom-benchmarks/tests/test_catalog.py`
+   passes (catalog ↔ adapter consistency).
+
+**Third-party (sibling package, e.g. `packages/loom-benchmark-<name>/`):**
+
+1. New PyPI-style sibling with `pyproject.toml`,
+   `loom_benchmark_<name>/`, `tests/` (no `__init__.py` in `tests/`
+   to avoid collision with the main repo's `tests/` root).
+2. Declare metadata on the adapter class (the legacy attribute shape).
+   No catalog.json needed — `CatalogBackedAdapter` is optional.
+3. Add the entry-point in your `pyproject.toml`:
+   ```toml
    [project.entry-points."loom.benchmarks"]
    <slug> = "loom_benchmark_<name>.adapter:<YourAdapterClass>"
    ```
 4. License must be in the default allowlist (MIT, Apache-2.0,
-   BSD-3-Clause, CC-BY-4.0) or operators will need to extend their
-   team's allowlist before trials run.
+   BSD-3-Clause, CC-BY-4.0) or operators extend their team's
+   allowlist before trials run.
 5. `convert_instance` must produce a deterministic checksum —
-   `loom_benchmarks.util.sha256_of_dir` walks `out_dir` in sorted
-   order and hashes relpath + bytes. Avoid timestamp-based or
-   iteration-order-dependent content.
-6. Test with `loom datasets list --installed` (should surface your
-   slug) and `loom run --task <slug>/<one-instance-id> --agent
-   oracle --backend fake` (should round-trip).
+   `loom_benchmarks.util.sha256_of_dir` hashes `out_dir`'s relpaths +
+   bytes in sorted order. Avoid timestamp-based content.
+6. Smoke-test with `loom datasets list --installed` + `loom run
+   --task <slug>/<one-instance-id> --agent oracle --backend fake`.
 
 ## Reusable conversion helpers
 
