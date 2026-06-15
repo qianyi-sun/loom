@@ -64,13 +64,22 @@ class MBPPAdapter:
         r = instance.raw
         task_id = f"{self.name}/{instance.instance_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
+        # The `sanitized` config renames the legacy `text` field to
+        # `prompt` and `test_setup_code` to `test_imports` (a list of
+        # import statements). Fall back to the legacy field names so
+        # the adapter still works if a future config swap returns the
+        # `full` schema.
+        prompt = r.get("prompt") or r.get("text") or ""
+        setup = r.get("test_imports") or r.get("test_setup_code") or ""
+        if isinstance(setup, list):
+            setup = "\n".join(setup)
         (out_dir / "instruction.md").write_text(
-            f"# MBPP {instance.instance_id}\n\n{r['text']}\n",
+            f"# MBPP {instance.instance_id}\n\n{prompt}\n",
         )
 
         sol_dir = out_dir / "solution"
         sol_dir.mkdir(parents=True, exist_ok=True)
-        body = (r.get("test_setup_code") or "") + "\n" + str(r["code"])
+        body = str(setup) + "\n" + str(r["code"])
         (sol_dir / "solution.py").write_text(body)
         (sol_dir / "__init__.py").write_text(
             "from solution.solution import *  # noqa: F401,F403\n",

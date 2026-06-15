@@ -43,11 +43,23 @@ class WebArenaAdapter:
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
         cfg_dir = source_dir / "repo" / "config_files"
+        # WebArena ships its full task slate as `test.raw.json` — a
+        # single JSON file containing a LIST of ~800 task records. The
+        # original adapter assumed one task per file (config_files/*),
+        # which is the post-instantiation layout the repo's bootstrap
+        # produces but isn't in the upstream tarball. Iterate every
+        # *.json + flatten lists so both shapes work.
         for path in sorted(cfg_dir.glob("*.json")):
-            rec = cast(dict[str, Any], json.loads(path.read_text()))
-            yield BenchmarkInstance(
-                instance_id=str(rec["task_id"]), split=split, raw=rec,
-            )
+            doc = json.loads(path.read_text())
+            records: list[dict[str, Any]]
+            if isinstance(doc, list):
+                records = [cast(dict[str, Any], r) for r in doc]
+            else:
+                records = [cast(dict[str, Any], doc)]
+            for rec in records:
+                yield BenchmarkInstance(
+                    instance_id=str(rec["task_id"]), split=split, raw=rec,
+                )
 
     def convert_instance(
         self, instance: BenchmarkInstance, *, out_dir: Path,

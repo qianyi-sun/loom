@@ -49,6 +49,7 @@ class LiveCodeBenchAdapter:
         kind="huggingface",
         locator="livecodebench/code_generation_lite",
         revision=None,
+        trust_remote_code=True,
     )
     # Spec §7: upstream license clause is CC-BY-NC; LiveCodeBench tasks
     # must NOT be in the default allowlist — operators add `CC-BY-NC-4.0`
@@ -60,10 +61,17 @@ class LiveCodeBenchAdapter:
     def list_instances(
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
+        # `trust_remote_code=True` is required: the upstream repo ships
+        # a custom loader script (`code_generation_lite.py`) that
+        # `datasets>=2.20` won't execute by default. The dataset has
+        # been vetted (CC-BY-NC-4.0, public, no shell-out at load time
+        # — just JSON deserialization), and gating Loom on a non-loader
+        # config would silently drop a major coding benchmark.
         ds = datasets.load_dataset(
             self.upstream_source.locator,
             cache_dir=str(source_dir),
             revision=self.upstream_source.revision,
+            trust_remote_code=True,
         )[split]
         for record in ds:
             rec = cast(dict[str, Any], dict(record))
@@ -92,9 +100,29 @@ class LiveCodeBenchAdapter:
 
         tests_dir = out_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
+        # Upstream stores test-case bundles as JSON strings, not as
+        # actual list-of-dicts. The `private_test_cases` payload is
+        # additionally base64-pickled-then-gzipped on some splits;
+        # skip those for now (return empty list) since unpickling
+        # arbitrary upstream bytes is a code-execution risk worse
+        # than missing private coverage.
+        def _decode_cases(raw: object) -> list[dict[str, object]]:
+            import json as _json
+            if not raw:
+                return []
+            if isinstance(raw, list):
+                return [c for c in raw if isinstance(c, dict)]
+            if isinstance(raw, str):
+                try:
+                    parsed = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    # Likely the base64/pickle private-case format.
+                    return []
+                return parsed if isinstance(parsed, list) else []
+            return []
         cases = (
-            (r.get("public_test_cases") or [])
-            + (r.get("private_test_cases") or [])
+            _decode_cases(r.get("public_test_cases"))
+            + _decode_cases(r.get("private_test_cases"))
         )
         for idx, c in enumerate(cases):
             (tests_dir / f"test_lcb_{idx}.py").write_text(

@@ -4,7 +4,7 @@
     "repo": "vega/vega-lite",
     "base_commit": "01234567890abcde",
     "problem_statement": "Tooltip is misaligned at the top of the chart — see attached screenshot.",
-    "image_assets": ["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII="],
+    "image_assets": "{\"problem_statement\": [\"https://user-images.githubusercontent.com/9042104/example-screenshot.png\"]}",
     "patch": "diff --git a/src/tooltip.ts b/src/tooltip.ts\n--- a/src/tooltip.ts\n+++ b/src/tooltip.ts\n@@ -1,1 +1,1 @@\n-top: 0\n+top: 8\n",
     "test_patch": "",
     "FAIL_TO_PASS": "[\"tests/tooltip.test.ts::aligns_at_8px\"]",

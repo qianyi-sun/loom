@@ -26,6 +26,11 @@ class UpstreamSource:
     locator: str
     revision: str | None = None
     subset: str | None = None
+    # HF-only: opt-in to running the dataset's custom loader script.
+    # Required for repos like LiveCodeBench that ship a Python loader.
+    # Adapters declare this on their upstream_source so fetch_upstream
+    # consents at the boundary; default False keeps the safe behavior.
+    trust_remote_code: bool = False
 
 
 @dataclass(frozen=True)

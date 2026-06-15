@@ -19,15 +19,20 @@ FIXTURE = (
 )
 
 
-def test_multimodal_embeds_image_in_instruction(tmp_path: Path) -> None:
+def test_multimodal_renders_image_assets_as_markdown_links(tmp_path: Path) -> None:
+    """Upstream stores image_assets as a JSON string mapping section
+    names to URL lists. We append those as inline-markdown image links
+    rather than downloading + base64-embedding (keeps bundle size sane;
+    the worker can re-resolve the URLs at trial time)."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(
         instance_id=rec["instance_id"], split="test", raw=rec,
     )
     SWEBenchMultimodalAdapter().convert_instance(inst, out_dir=tmp_path)
     md = (tmp_path / "instruction.md").read_text()
-    assert "data:image/png;base64," in md
     assert "Tooltip is misaligned" in md
+    assert "![problem_statement-0]" in md
+    assert "user-images.githubusercontent.com" in md
 
 
 def test_multimodal_uses_multimodal_task_id(tmp_path: Path) -> None:
@@ -44,11 +49,11 @@ def test_multimodal_uses_multimodal_task_id(tmp_path: Path) -> None:
 
 def test_multimodal_no_images_falls_back_to_plain(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
-    rec["image_assets"] = []
+    rec["image_assets"] = ""
     inst = BenchmarkInstance(
         instance_id=rec["instance_id"], split="test", raw=rec,
     )
     SWEBenchMultimodalAdapter().convert_instance(inst, out_dir=tmp_path)
     md = (tmp_path / "instruction.md").read_text()
-    assert "data:image" not in md
+    assert "![" not in md
     assert "Tooltip is misaligned" in md

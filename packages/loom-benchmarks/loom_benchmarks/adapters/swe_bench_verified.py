@@ -112,14 +112,18 @@ class SWEBenchVerifiedAdapter:
         )
         solve.chmod(0o755)
 
-        f2p_raw: Any = r["FAIL_TO_PASS"]
-        p2p_raw: Any = r["PASS_TO_PASS"]
-        f2p: list[str] = (
-            json.loads(f2p_raw) if isinstance(f2p_raw, str) else list(f2p_raw)
-        )
-        p2p: list[str] = (
-            json.loads(p2p_raw) if isinstance(p2p_raw, str) else list(p2p_raw)
-        )
+        def _as_list(v: Any) -> list[str]:
+            """Upstream sometimes stores the test-id lists as JSON
+            strings ("[\"a\",\"b\"]"), sometimes as actual lists, and
+            occasionally as empty strings (multimodal instances with
+            no fail-to-pass coverage). Normalize all three."""
+            if v is None or v == "":
+                return []
+            if isinstance(v, str):
+                return list(json.loads(v))
+            return list(v)
+        f2p: list[str] = _as_list(r["FAIL_TO_PASS"])
+        p2p: list[str] = _as_list(r["PASS_TO_PASS"])
         tests_dir = out_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
         (tests_dir / "test_swebench.py").write_text(_pytest_for_swebench(f2p, p2p))

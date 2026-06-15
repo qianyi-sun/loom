@@ -1,19 +1,26 @@
 """SWE-Bench Multimodal. Spec §5.2 row 3.
 
-Same conversion as SWE-Bench Verified, plus base64-encoded screenshot
-attachments inlined into `instruction.md`. We delegate to the parent
-for solution.sh + tests + task.toml, then overwrite instruction.md
-with the enriched body that includes the markdown image embeds.
+Same conversion as SWE-Bench Verified, plus screenshot URLs from the
+upstream `image_assets` field appended to `instruction.md`. We delegate
+to the parent for solution.sh + tests + task.toml, then overwrite
+instruction.md with the body that includes the image links.
+
+Upstream stores `image_assets` as a JSON string mapping section names
+to URL lists (e.g. `{"problem_statement": ["https://user-images..."]}`).
+We render those as inline-markdown image links rather than downloading
++ embedding to keep the bundle size sane and avoid per-import network
+chatter; the worker's HTTP fetcher can re-resolve them at trial time
+if the agent needs the pixels.
 """
 
 from __future__ import annotations
 
-import base64
+import json
 from pathlib import Path
 
 from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
-from loom_benchmarks.util import embed_base64_image, sha256_of_dir
+from loom_benchmarks.util import sha256_of_dir
 
 
 class SWEBenchMultimodalAdapter(SWEBenchVerifiedAdapter):
@@ -30,17 +37,33 @@ class SWEBenchMultimodalAdapter(SWEBenchVerifiedAdapter):
         self, instance: BenchmarkInstance, *, out_dir: Path,
     ) -> ConvertedTask:
         # Delegate to parent so solution/, tests/, task.toml are
-        # generated (task_id, image, FAIL_TO_PASS, etc. all share the
-        # SWE-Bench Verified rules). The parent also writes
-        # instruction.md = problem_statement.
+        # generated. The parent also writes instruction.md =
+        # problem_statement.
         super().convert_instance(instance, out_dir=out_dir)
 
-        # Re-render instruction.md with the screenshots inlined.
         body = str(instance.raw["problem_statement"])
-        for i, b64 in enumerate(instance.raw.get("image_assets") or []):
-            body += "\n\n" + embed_base64_image(
-                base64.b64decode(b64), alt_text=f"screenshot-{i}",
-            )
+        assets_raw = instance.raw.get("image_assets")
+        assets: dict[str, list[str]] = {}
+        if isinstance(assets_raw, str) and assets_raw:
+            try:
+                parsed = json.loads(assets_raw)
+                if isinstance(parsed, dict):
+                    assets = {
+                        k: [u for u in v if isinstance(u, str)]
+                        for k, v in parsed.items()
+                        if isinstance(v, list)
+                    }
+            except json.JSONDecodeError:
+                pass
+        elif isinstance(assets_raw, dict):
+            assets = {
+                k: [u for u in v if isinstance(u, str)]
+                for k, v in assets_raw.items()
+                if isinstance(v, list)
+            }
+        for section, urls in assets.items():
+            for i, url in enumerate(urls):
+                body += f"\n\n![{section}-{i}]({url})"
         (out_dir / "instruction.md").write_text(body)
 
         return ConvertedTask(
