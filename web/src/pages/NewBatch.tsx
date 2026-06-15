@@ -291,6 +291,7 @@ function BenchmarkPicker({
       });
   }, [items]);
 
+  const isEmpty = (r: BenchmarkItem): boolean => r.task_count === 0;
   const toggleOne = (id: string): void => {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -298,9 +299,11 @@ function BenchmarkPicker({
     onChange(next);
   };
   const toggleGroup = (rows: BenchmarkItem[]): void => {
+    const selectable = rows.filter((r) => !isEmpty(r));
+    if (selectable.length === 0) return;
     const next = new Set(selected);
-    const allOn = rows.every((r) => next.has(r.id));
-    for (const r of rows) {
+    const allOn = selectable.every((r) => next.has(r.id));
+    for (const r of selectable) {
       if (allOn) next.delete(r.id);
       else next.add(r.id);
     }
@@ -317,11 +320,22 @@ function BenchmarkPicker({
     <div className="mt-1 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white">
       {groups.map(({ series, rows }) => {
         const seriesLabel = series === "" ? "Other" : series;
-        const allOn = rows.every((r) => selected.has(r.id));
-        const someOn = !allOn && rows.some((r) => selected.has(r.id));
+        const selectableRows = rows.filter((r) => !isEmpty(r));
+        const allOn =
+          selectableRows.length > 0 &&
+          selectableRows.every((r) => selected.has(r.id));
+        const someOn =
+          !allOn && selectableRows.some((r) => selected.has(r.id));
+        const populated = selectableRows.length;
         return (
           <div key={seriesLabel} className="border-b border-slate-100 last:border-b-0">
-            <label className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-slate-600">
+            <label
+              className={
+                populated > 0
+                  ? "flex items-center gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-slate-600"
+                  : "flex items-center gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-slate-400"
+              }
+            >
               <input
                 type="checkbox"
                 checked={allOn}
@@ -329,33 +343,52 @@ function BenchmarkPicker({
                   if (el) el.indeterminate = someOn;
                 }}
                 onChange={() => toggleGroup(rows)}
+                disabled={populated === 0}
                 aria-label={`Select all in series ${seriesLabel}`}
-                className="h-4 w-4 border-slate-300"
+                className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <span>{seriesLabel}</span>
               <span className="ml-auto font-normal text-slate-400 normal-case">
-                {rows.length} benchmark{rows.length === 1 ? "" : "s"}
+                {populated}/{rows.length} populated
               </span>
             </label>
             {rows.map((r) => {
               const label = r.display_name ?? r.id;
               const count = r.task_count;
+              const empty = isEmpty(r);
               return (
                 <label
                   key={r.id}
-                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                  className={
+                    empty
+                      ? "flex items-center gap-2 px-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
+                      : "flex items-center gap-2 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                  }
+                  title={
+                    empty
+                      ? "0 tasks imported — publish or import the benchmark to enable"
+                      : undefined
+                  }
                 >
                   <input
                     type="checkbox"
                     checked={selected.has(r.id)}
                     onChange={() => toggleOne(r.id)}
+                    disabled={empty}
                     aria-label={`Select benchmark ${r.id}`}
-                    className="h-4 w-4 border-slate-300"
+                    className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed"
                   />
                   <span className="flex-1 truncate">{label}</span>
                   {count !== undefined ? (
-                    <span className="text-xs text-slate-400">
+                    <span
+                      className={
+                        empty
+                          ? "text-xs italic text-slate-400"
+                          : "text-xs text-slate-400"
+                      }
+                    >
                       {count} task{count === 1 ? "" : "s"}
+                      {empty ? " — needs publish" : ""}
                     </span>
                   ) : null}
                 </label>
@@ -502,8 +535,14 @@ export default function NewBatch(): JSX.Element {
   const navigate = useNavigate();
 
   const benchmarks = useQuery({
-    queryKey: ["benchmarks"],
-    queryFn: () => api.listBenchmarks({ limit: "200" }),
+    queryKey: ["benchmarks", "with-empty"],
+    // include_empty=true so series groups stay coherent — the SPA
+    // would otherwise hide e.g. aime-2025 (task_count=0 until its HF
+    // manifest is published), leaving the "aime" series header empty
+    // and the picker out of step with the Benchmarks browse page.
+    // Empty rows are rendered disabled with a "0 tasks" badge so users
+    // can't pick them by accident.
+    queryFn: () => api.listBenchmarks({ limit: "200", include_empty: "true" }),
     staleTime: 5 * 60 * 1000,
   });
   const agents = useQuery({
