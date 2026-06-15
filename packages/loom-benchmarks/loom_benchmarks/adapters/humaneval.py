@@ -28,28 +28,16 @@ import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import sha256_of_dir, toml_string
 
 
-class HumanEvalAdapter:
+class HumanEvalAdapter(CatalogBackedAdapter):
+    # All metadata (display_name, series, upstream_source, license_*,
+    # splits) loads from catalog.json keyed on `name`.
     name = "humaneval"
-    display_name = "HumanEval"
-    series = "code"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        # HuggingFace Hub >=1.x requires namespace/name; the legacy
-        # unnamespaced "openai_humaneval" alias raises HfUriError on
-        # current datasets/hub releases.
-        locator="openai/openai_humaneval",
-        revision=None,
-        subset=None,
-    )
-    license_spdx = "MIT"
-    license_url = "https://github.com/openai/human-eval/blob/master/LICENSE"
-    splits = ("test",)
 
     def list_instances(
         self, *, source_dir: Path, split: str,

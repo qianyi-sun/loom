@@ -18,26 +18,15 @@ import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.judges.gaia import GAIA_RUBRIC_TEMPLATE
 from loom_benchmarks.util import sha256_of_dir, toml_string
 
 
-class GAIAAdapter:
+class GAIAAdapter(CatalogBackedAdapter):
     name = "gaia"
-    display_name = "GAIA"
-    series = "research-agent"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        locator="gaia-benchmark/GAIA",
-        revision=None,
-        subset="2023_all",
-    )
-    license_spdx = "CC-BY-4.0"
-    license_url = "https://huggingface.co/datasets/gaia-benchmark/GAIA"
-    splits = ("validation", "test")
 
     def list_instances(
         self, *, source_dir: Path, split: str,

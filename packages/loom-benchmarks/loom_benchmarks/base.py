@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -75,3 +75,50 @@ class BenchmarkAdapter(Protocol):
         """Write task.toml + instruction.md (+ solution/, tests/,
         environment/) into out_dir."""
         ...
+
+
+class CatalogBackedAdapter:
+    """Mixin: pull adapter metadata from `loom_benchmarks/catalog.json`
+    keyed by `cls.name`.
+
+    Subclasses declare just `name` (the catalog key) + their
+    `list_instances` / `convert_instance` methods. The mixin installs
+    `display_name`, `series`, `upstream_source`, `license_spdx`,
+    `license_url`, `splits` from the JSON entry at class-creation
+    time, and exposes the per-entry `params` dict as `cls._params` so
+    parametric adapters (e.g. AIME's per-year siblings) can read
+    `self._params["year"]` instead of repeating the value as a class
+    attr.
+
+    Falls back to the legacy class-attr pattern when the catalog has
+    no entry for `cls.name` — third-party adapter packages don't need
+    to ship a catalog.json to keep working.
+
+    Abstract base classes (the ones that don't pick a `name` yet) are
+    skipped: `__init_subclass__` only fires the catalog lookup when
+    the subclass has a non-empty `name` attribute set on itself
+    (i.e. not inherited unset)."""
+
+    name: ClassVar[str] = ""
+    _params: ClassVar[dict[str, str]] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        name = cls.__dict__.get("name")
+        if not isinstance(name, str) or not name:
+            return
+        # Lazy import to avoid a base.py ↔ catalog.py cycle at module
+        # load: catalog.py imports UpstreamSource from base.py.
+        from loom_benchmarks.catalog import CATALOG
+
+        entry = CATALOG.get(name)
+        if entry is None:
+            return
+        cls.display_name = entry.display_name
+        if entry.series is not None:
+            cls.series = entry.series
+        cls.upstream_source = entry.upstream.to_dataclass()
+        cls.license_spdx = entry.license.spdx
+        cls.license_url = entry.license.url
+        cls.splits = tuple(entry.splits)
+        cls._params = dict(entry.params)

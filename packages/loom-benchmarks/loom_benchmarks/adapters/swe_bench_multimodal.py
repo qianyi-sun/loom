@@ -19,19 +19,14 @@ import json
 from pathlib import Path
 
 from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
-from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
+from loom_benchmarks.base import BenchmarkInstance, ConvertedTask
 from loom_benchmarks.util import sha256_of_dir
 
 
 class SWEBenchMultimodalAdapter(SWEBenchVerifiedAdapter):
+    # All metadata loads from catalog.json. Inherits convert_instance
+    # from the Verified parent + overrides for image-asset rendering.
     name = "swe-bench-multimodal"
-    display_name = "SWE-Bench Multimodal"
-    series = "swe-bench"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        locator="princeton-nlp/SWE-bench_Multimodal",
-        revision=None,
-    )
 
     def convert_instance(
         self, instance: BenchmarkInstance, *, out_dir: Path,

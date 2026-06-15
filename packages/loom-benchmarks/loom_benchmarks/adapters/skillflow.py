@@ -16,24 +16,14 @@ from typing import Any, cast
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import sha256_of_dir, toml_string
 
 
-class SkillFlowAdapter:
+class SkillFlowAdapter(CatalogBackedAdapter):
     name = "skillflow"
-    display_name = "SkillFlow"
-    series = "skill"
-    upstream_source = UpstreamSource(
-        kind="git",
-        locator="https://github.com/ZhangZi-a/SkillFlow.git",
-        revision="main",
-    )
-    license_spdx = "NOASSERTION"
-    license_url = "https://github.com/ZhangZi-a/SkillFlow"
-    splits = ("test",)
 
     def list_instances(
         self, *, source_dir: Path, split: str,

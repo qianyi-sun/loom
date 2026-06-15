@@ -26,8 +26,8 @@ import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import (
     sha256_of_dir,
@@ -72,37 +72,16 @@ def _parse_aime_url(url: str) -> tuple[str, str, str] | None:
     return m.group("year"), m.group("exam"), m.group("num")
 
 
-class _AIMEYearBase:
+class _AIMEYearBase(CatalogBackedAdapter):
     """Shared list/convert logic for the per-year AIME adapters.
 
-    Subclasses set `name`, `display_name`, and `_year`. `list_instances`
-    iterates the full `AI-MO/aimo-validation-aime` dataset and yields
-    only rows whose parsed URL matches `_year` — so each year-adapter
-    publishes a disjoint 30-task slate (15 problems × 2 exams). The
-    upstream cache is shared across adapters via `source_dir`, so
-    publishing all three years costs one dataset download.
+    Subclasses set `name`; everything else (display_name, series,
+    upstream, license, splits) loads from catalog.json. The year to
+    filter on comes from `cls._params["year"]` — also set by the
+    catalog. So adding AIME-21 = one JSON entry + one 2-line subclass.
     """
 
-    _year: ClassVar[str] = ""  # subclass sets a 4-digit year
-    series: ClassVar[str] = "aime"
-    upstream_source: ClassVar[UpstreamSource] = UpstreamSource(
-        kind="huggingface",
-        locator="AI-MO/aimo-validation-aime",
-        revision=None,
-    )
-    # Spec §7: AIME problem text is owned by the Mathematical
-    # Association of America. License is `proprietary-MAA`, NOT in
-    # any default allowlist. Plan 16 ships an `--accept-maa-terms`
-    # gate on `loom_benchmark_tool import`; this adapter just stamps
-    # the license tag so submit-time enforcement does the rest.
-    license_spdx: ClassVar[str] = "proprietary-MAA"
-    license_url: ClassVar[str] = (
-        "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"
-    )
-    splits: ClassVar[tuple[str, ...]] = ("train",)
-
     name: ClassVar[str]
-    display_name: ClassVar[str]
 
     def list_instances(
         self, *, source_dir: Path, split: str,
@@ -110,18 +89,14 @@ class _AIMEYearBase:
         ds = datasets.load_dataset(
             self.upstream_source.locator, cache_dir=str(source_dir),
         )[split]
+        year_filter = self._params.get("year", "")
         for record in ds:
             rec = cast(dict[str, Any], dict(record))
             parsed = _parse_aime_url(str(rec.get("url", "")))
             if parsed is None:
-                # Skip rows we can't classify rather than emit them
-                # under the wrong year-adapter. The original combined
-                # adapter (pre-split) used to fall back to the upstream
-                # row id; per-year adapters can't do that without
-                # knowing which year owns the row.
                 continue
             year, exam, num = parsed
-            if year != self._year:
+            if year != year_filter:
                 continue
             yield BenchmarkInstance(
                 instance_id=f"{year}-{exam}/{num}",
@@ -190,17 +165,11 @@ class _AIMEYearBase:
 
 class AIME22Adapter(_AIMEYearBase):
     name = "aime-22"
-    display_name = "AIME 2022"
-    _year = "2022"
 
 
 class AIME23Adapter(_AIMEYearBase):
     name = "aime-23"
-    display_name = "AIME 2023"
-    _year = "2023"
 
 
 class AIME24Adapter(_AIMEYearBase):
     name = "aime-24"
-    display_name = "AIME 2024"
-    _year = "2024"

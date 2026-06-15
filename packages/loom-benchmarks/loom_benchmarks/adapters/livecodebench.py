@@ -16,8 +16,8 @@ import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import sha256_of_dir, toml_string
 
@@ -41,22 +41,11 @@ def _stdin_pytest_case(idx: int, inp: str, expected: str) -> str:
     """).strip() + "\n"
 
 
-class LiveCodeBenchAdapter:
+class LiveCodeBenchAdapter(CatalogBackedAdapter):
+    # CC-BY-NC-4.0 — NOT in the default allowlist. Operators add
+    # `CC-BY-NC-4.0` to a team's allowlist explicitly to opt in
+    # (non-commercial use). `trust_remote_code=True` set in catalog.
     name = "livecodebench"
-    display_name = "LiveCodeBench"
-    series = "code"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        locator="livecodebench/code_generation_lite",
-        revision=None,
-        trust_remote_code=True,
-    )
-    # Spec §7: upstream license clause is CC-BY-NC; LiveCodeBench tasks
-    # must NOT be in the default allowlist — operators add `CC-BY-NC-4.0`
-    # to a team's allowlist explicitly to opt in (non-commercial use).
-    license_spdx = "CC-BY-NC-4.0"
-    license_url = "https://github.com/LiveCodeBench/LiveCodeBench/blob/main/LICENSE"
-    splits = ("test",)
 
     def list_instances(
         self, *, source_dir: Path, split: str,

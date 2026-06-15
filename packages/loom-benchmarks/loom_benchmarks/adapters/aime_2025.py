@@ -20,8 +20,8 @@ import datasets  # type: ignore[import-untyped]
 from loom_benchmarks.adapters.aime import _AIME_CHECK_PY
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import (
     sha256_of_dir,
@@ -30,7 +30,7 @@ from loom_benchmarks.util import (
 )
 
 
-class AIME25Adapter:
+class AIME25Adapter(CatalogBackedAdapter):
     """AIME 2025 I + II.
 
     Series: `aime`. Peer of `aime-22`, `aime-23`, `aime-24`. Combines
@@ -40,22 +40,11 @@ class AIME25Adapter:
     explicitly so the SPA's tag UI is uniform across the AIME series.
     """
 
+    # Metadata loads from catalog.json. `upstream.locator` points at
+    # AIME-I; AIME-II is loaded separately inside `list_instances`
+    # (HF rejects locators with `+`, so the composite name can't go
+    # in catalog.json directly).
     name = "aime-25"
-    display_name = "AIME 2025"
-    series = "aime"
-    # `locator` is what `fetch_upstream` actually feeds to
-    # `datasets.load_dataset`; HF rejects ids containing `+`, so we
-    # point at the AIME-I dataset and load AIME-II separately inside
-    # `list_instances`. The exam-II cache populates lazily on first
-    # iteration; both halves are 15 problems each, 30 total.
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        locator="MathArena/aime_2025_I",
-        revision=None,
-    )
-    license_spdx = "proprietary-MAA"
-    license_url = "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"
-    splits = ("train",)
 
     _SOURCES: tuple[tuple[str, str], ...] = (
         ("MathArena/aime_2025_I", "I"),

@@ -21,18 +21,14 @@ from typing import Any, cast
 import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
-from loom_benchmarks.base import BenchmarkInstance, UpstreamSource
+from loom_benchmarks.base import BenchmarkInstance
 
 
 class SWEBenchAdapter(SWEBenchVerifiedAdapter):
+    # All metadata (display_name, series, upstream_source, license,
+    # splits) loads from catalog.json. Inherits convert_instance from
+    # the Verified parent.
     name = "swe-bench"
-    display_name = "SWE-Bench (full)"
-    series = "swe-bench"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        locator="princeton-nlp/SWE-bench",
-        revision=None,
-    )
 
     # Cache the Verified instance-id set across list_instances calls so
     # republishing different splits doesn't reload the same dataset.

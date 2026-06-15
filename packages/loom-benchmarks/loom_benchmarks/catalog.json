@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "benchmarks": [
+    {
+      "name": "aime-22",
+      "display_name": "AIME 2022",
+      "series": "aime",
+      "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "splits": ["train"],
+      "params": {"year": "2022"}
+    },
+    {
+      "name": "aime-23",
+      "display_name": "AIME 2023",
+      "series": "aime",
+      "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "splits": ["train"],
+      "params": {"year": "2023"}
+    },
+    {
+      "name": "aime-24",
+      "display_name": "AIME 2024",
+      "series": "aime",
+      "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "splits": ["train"],
+      "params": {"year": "2024"}
+    },
+    {
+      "name": "aime-25",
+      "display_name": "AIME 2025",
+      "series": "aime",
+      "upstream": {"kind": "huggingface", "locator": "MathArena/aime_2025_I"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "splits": ["train"]
+    },
+    {
+      "name": "bfcl",
+      "display_name": "BFCL",
+      "series": "tool-use",
+      "upstream": {"kind": "git", "locator": "https://github.com/ShishirPatil/gorilla.git", "revision": "main"},
+      "license": {"spdx": "Apache-2.0", "url": "https://github.com/ShishirPatil/gorilla/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "gaia",
+      "display_name": "GAIA",
+      "series": "research-agent",
+      "upstream": {"kind": "huggingface", "locator": "gaia-benchmark/GAIA", "subset": "2023_all"},
+      "license": {"spdx": "CC-BY-4.0", "url": "https://huggingface.co/datasets/gaia-benchmark/GAIA"},
+      "splits": ["validation", "test"]
+    },
+    {
+      "name": "humaneval",
+      "display_name": "HumanEval",
+      "series": "code",
+      "upstream": {"kind": "huggingface", "locator": "openai/openai_humaneval"},
+      "license": {"spdx": "MIT", "url": "https://github.com/openai/human-eval/blob/master/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "livecodebench",
+      "display_name": "LiveCodeBench",
+      "series": "code",
+      "upstream": {"kind": "huggingface", "locator": "livecodebench/code_generation_lite", "trust_remote_code": true},
+      "license": {"spdx": "CC-BY-NC-4.0", "url": "https://github.com/LiveCodeBench/LiveCodeBench/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "mbpp",
+      "display_name": "MBPP",
+      "series": "code",
+      "upstream": {"kind": "huggingface", "locator": "google-research-datasets/mbpp", "subset": "sanitized"},
+      "license": {"spdx": "CC-BY-4.0", "url": "https://github.com/google-research/google-research/blob/master/mbpp/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "osworld",
+      "display_name": "OSWorld",
+      "series": "ui-agent",
+      "upstream": {"kind": "git", "locator": "https://github.com/xlang-ai/OSWorld.git", "revision": "main"},
+      "license": {"spdx": "Apache-2.0", "url": "https://github.com/xlang-ai/OSWorld/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "skillflow",
+      "display_name": "SkillFlow",
+      "series": "skill",
+      "upstream": {"kind": "git", "locator": "https://github.com/ZhangZi-a/SkillFlow.git", "revision": "main"},
+      "license": {"spdx": "NOASSERTION", "url": "https://github.com/ZhangZi-a/SkillFlow"},
+      "splits": ["test"]
+    },
+    {
+      "name": "skilllearnbench",
+      "display_name": "SkillLearnBench",
+      "series": "skill",
+      "upstream": {"kind": "git", "locator": "https://github.com/cxcscmu/SkillLearnBench.git", "revision": "main"},
+      "license": {"spdx": "NOASSERTION", "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "swe-bench",
+      "display_name": "SWE-Bench (full)",
+      "series": "swe-bench",
+      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench"},
+      "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "swe-bench-verified",
+      "display_name": "SWE-Bench Verified",
+      "series": "swe-bench",
+      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Verified"},
+      "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "swe-bench-multimodal",
+      "display_name": "SWE-Bench Multimodal",
+      "series": "swe-bench",
+      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Multimodal"},
+      "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
+      "splits": ["test"]
+    },
+    {
+      "name": "webarena",
+      "display_name": "WebArena",
+      "series": "ui-agent",
+      "upstream": {"kind": "git", "locator": "https://github.com/web-arena-x/webarena.git", "revision": "main"},
+      "license": {"spdx": "Apache-2.0", "url": "https://github.com/web-arena-x/webarena/blob/main/LICENSE"},
+      "splits": ["test"]
+    }
+  ]
+}

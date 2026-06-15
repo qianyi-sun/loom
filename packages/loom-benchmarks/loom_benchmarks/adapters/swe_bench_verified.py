@@ -29,8 +29,8 @@ import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import sha256_of_dir, toml_string
 
@@ -67,18 +67,8 @@ def _pytest_for_swebench(
     """).strip() + "\n"
 
 
-class SWEBenchVerifiedAdapter:
+class SWEBenchVerifiedAdapter(CatalogBackedAdapter):
     name = "swe-bench-verified"
-    display_name = "SWE-Bench Verified"
-    series = "swe-bench"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        locator="princeton-nlp/SWE-bench_Verified",
-        revision=None,
-    )
-    license_spdx = "MIT"
-    license_url = "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"
-    splits = ("test",)
 
     def list_instances(
         self, *, source_dir: Path, split: str,

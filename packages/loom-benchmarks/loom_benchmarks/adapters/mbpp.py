@@ -17,8 +17,8 @@ import datasets  # type: ignore[import-untyped]
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import (
     pytest_from_test_strings,
@@ -27,22 +27,8 @@ from loom_benchmarks.util import (
 )
 
 
-class MBPPAdapter:
+class MBPPAdapter(CatalogBackedAdapter):
     name = "mbpp"
-    display_name = "MBPP"
-    series = "code"
-    upstream_source = UpstreamSource(
-        kind="huggingface",
-        # Namespaced form required by HuggingFace Hub >=1.x.
-        locator="google-research-datasets/mbpp",
-        revision=None,
-        subset="sanitized",
-    )
-    license_spdx = "CC-BY-4.0"
-    license_url = (
-        "https://github.com/google-research/google-research/blob/master/mbpp/LICENSE"
-    )
-    splits = ("test",)
 
     def list_instances(
         self, *, source_dir: Path, split: str,

@@ -16,8 +16,8 @@ from typing import Any, cast
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
+    CatalogBackedAdapter,
     ConvertedTask,
-    UpstreamSource,
 )
 from loom_benchmarks.util import (
     sha256_of_dir,
@@ -26,18 +26,8 @@ from loom_benchmarks.util import (
 )
 
 
-class WebArenaAdapter:
+class WebArenaAdapter(CatalogBackedAdapter):
     name = "webarena"
-    display_name = "WebArena"
-    series = "ui-agent"
-    upstream_source = UpstreamSource(
-        kind="git",
-        locator="https://github.com/web-arena-x/webarena.git",
-        revision="main",
-    )
-    license_spdx = "Apache-2.0"
-    license_url = "https://github.com/web-arena-x/webarena/blob/main/LICENSE"
-    splits = ("test",)
 
     def list_instances(
         self, *, source_dir: Path, split: str,
