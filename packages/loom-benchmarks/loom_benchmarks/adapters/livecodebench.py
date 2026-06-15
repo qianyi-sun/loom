@@ -44,6 +44,7 @@ def _stdin_pytest_case(idx: int, inp: str, expected: str) -> str:
 class LiveCodeBenchAdapter:
     name = "livecodebench"
     display_name = "LiveCodeBench"
+    series = "code"
     upstream_source = UpstreamSource(
         kind="huggingface",
         locator="livecodebench/code_generation_lite",

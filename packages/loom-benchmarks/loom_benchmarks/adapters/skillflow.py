@@ -25,6 +25,7 @@ from loom_benchmarks.util import sha256_of_dir, toml_string
 class SkillFlowAdapter:
     name = "skillflow"
     display_name = "SkillFlow"
+    series = "skill"
     upstream_source = UpstreamSource(
         kind="git",
         locator="https://github.com/ZhangZi-a/SkillFlow.git",

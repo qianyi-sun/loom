@@ -537,7 +537,7 @@ export default function NewBatch(): JSX.Element {
   const benchmarks = useQuery({
     queryKey: ["benchmarks", "with-empty"],
     // include_empty=true so series groups stay coherent — the SPA
-    // would otherwise hide e.g. aime-2025 (task_count=0 until its HF
+    // would otherwise hide e.g. aime-25 (task_count=0 until its HF
     // manifest is published), leaving the "aime" series header empty
     // and the picker out of step with the Benchmarks browse page.
     // Empty rows are rendered disabled with a "0 tasks" badge so users

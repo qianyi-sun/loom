@@ -29,6 +29,7 @@ from loom_benchmarks.util import (
 class WebArenaAdapter:
     name = "webarena"
     display_name = "WebArena"
+    series = "agents"
     upstream_source = UpstreamSource(
         kind="git",
         locator="https://github.com/web-arena-x/webarena.git",

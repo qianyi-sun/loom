@@ -30,6 +30,7 @@ from loom_benchmarks.util import (
 class MBPPAdapter:
     name = "mbpp"
     display_name = "MBPP"
+    series = "code"
     upstream_source = UpstreamSource(
         kind="huggingface",
         # Namespaced form required by HuggingFace Hub >=1.x.

@@ -28,14 +28,14 @@ async def session(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Benchmark).values(
-            id="aime-aimo-validation", display_name="AIME",
+            id="aime-22", display_name="AIME",
             upstream_kind="huggingface",
             upstream_locator="x", upstream_revision="main",
             license_spdx="proprietary-MAA", license_url="",
             splits=["train"], series="aime",
         ))
         s.execute(insert(Benchmark).values(
-            id="aime-2025", display_name="AIME 2025",
+            id="aime-25", display_name="AIME 2025",
             upstream_kind="huggingface",
             upstream_locator="y", upstream_revision="main",
             license_spdx="proprietary-MAA", license_url="",
@@ -43,15 +43,15 @@ async def session(
         ))
         # 2 each year × 2 exams, mixed across both benchmarks.
         rows = [
-            ("aime-aimo-validation/2024-I/1", "aime-aimo-validation",
+            ("aime-22/2024-I/1", "aime-22",
                 {"year": "2024", "exam": "I"}),
-            ("aime-aimo-validation/2024-II/3", "aime-aimo-validation",
+            ("aime-22/2024-II/3", "aime-22",
                 {"year": "2024", "exam": "II"}),
-            ("aime-aimo-validation/2023-I/7", "aime-aimo-validation",
+            ("aime-22/2023-I/7", "aime-22",
                 {"year": "2023", "exam": "I"}),
-            ("aime-2025/2025-I/2", "aime-2025",
+            ("aime-25/2025-I/2", "aime-25",
                 {"year": "2025", "exam": "I"}),
-            ("aime-2025/2025-II/9", "aime-2025",
+            ("aime-25/2025-II/9", "aime-25",
                 {"year": "2025", "exam": "II"}),
         ]
         for tid, bid, tags in rows:
@@ -85,11 +85,11 @@ async def test_benchmark_ids_unions_two_benchmarks(
     """Group-select of an `aime` series → both benchmarks resolved
     in one call. Total 5 tasks across both."""
     out = await _resolve_task_filter(session, {
-        "benchmark_ids": ["aime-aimo-validation", "aime-2025"],
+        "benchmark_ids": ["aime-22", "aime-25"],
     })
     assert len(out) == 5
     assert all(
-        t.startswith(("aime-aimo-validation/", "aime-2025/"))
+        t.startswith(("aime-22/", "aime-25/"))
         for t in out
     )
 
@@ -102,9 +102,9 @@ async def test_benchmark_ids_takes_precedence_over_benchmark_id(
     authoritative one."""
     out = await _resolve_task_filter(session, {
         "benchmark_id": "humaneval",  # nonexistent here
-        "benchmark_ids": ["aime-aimo-validation"],
+        "benchmark_ids": ["aime-22"],
     })
-    assert all(t.startswith("aime-aimo-validation/") for t in out)
+    assert all(t.startswith("aime-22/") for t in out)
     assert len(out) == 3
 
 
@@ -113,12 +113,12 @@ async def test_tag_filters_AND_across_keys_OR_within_value_list(  # noqa: N802
 ) -> None:
     """`{year: ["2024"], exam: ["I"]}` → only the 2024 AIME I row."""
     out = await _resolve_task_filter(session, {
-        "benchmark_ids": ["aime-aimo-validation", "aime-2025"],
+        "benchmark_ids": ["aime-22", "aime-25"],
         "tag_filters": {
             "year": ["2024"], "exam": ["I"],
         },
     })
-    assert out == ["aime-aimo-validation/2024-I/1"]
+    assert out == ["aime-22/2024-I/1"]
 
 
 async def test_tag_filters_value_list_is_OR(  # noqa: N802
@@ -126,13 +126,13 @@ async def test_tag_filters_value_list_is_OR(  # noqa: N802
 ) -> None:
     """Two values for the same key → union (OR semantics)."""
     out = await _resolve_task_filter(session, {
-        "benchmark_ids": ["aime-aimo-validation", "aime-2025"],
+        "benchmark_ids": ["aime-22", "aime-25"],
         "tag_filters": {"year": ["2023", "2025"]},
     })
     assert sorted(out) == sorted([
-        "aime-aimo-validation/2023-I/7",
-        "aime-2025/2025-I/2",
-        "aime-2025/2025-II/9",
+        "aime-22/2023-I/7",
+        "aime-25/2025-I/2",
+        "aime-25/2025-II/9",
     ])
 
 
@@ -142,10 +142,10 @@ async def test_tag_filters_empty_value_list_is_no_op(
     """SPA may send `{year: []}` while the user is mid-edit; that
     shouldn't drop the result set to empty."""
     out = await _resolve_task_filter(session, {
-        "benchmark_ids": ["aime-aimo-validation"],
+        "benchmark_ids": ["aime-22"],
         "tag_filters": {"year": []},
     })
-    assert len(out) == 3  # all three aime-aimo-validation rows
+    assert len(out) == 3  # all three aime-22 rows
 
 
 async def test_invalid_benchmark_ids_type_400s(
@@ -153,7 +153,7 @@ async def test_invalid_benchmark_ids_type_400s(
 ) -> None:
     with pytest.raises(HTTPException) as exc:
         await _resolve_task_filter(session, {
-            "benchmark_ids": "aime-aimo-validation",  # str not list
+            "benchmark_ids": "aime-22",  # str not list
         })
     assert exc.value.status_code == 400
     assert "benchmark_ids" in exc.value.detail
@@ -164,7 +164,7 @@ async def test_invalid_tag_filter_value_type_400s(
 ) -> None:
     with pytest.raises(HTTPException) as exc:
         await _resolve_task_filter(session, {
-            "benchmark_ids": ["aime-aimo-validation"],
+            "benchmark_ids": ["aime-22"],
             "tag_filters": {"year": "2024"},  # str not list
         })
     assert exc.value.status_code == 400
@@ -177,7 +177,7 @@ async def test_benchmark_ids_combined_with_subset_random_n(
     """Union of benchmarks, then random_n across the union — verifies
     the subset_kind path still works on the multi-benchmark slate."""
     out = await _resolve_task_filter(session, {
-        "benchmark_ids": ["aime-aimo-validation", "aime-2025"],
+        "benchmark_ids": ["aime-22", "aime-25"],
         "subset_kind": "random_n", "n": 2, "seed": 42,
     })
     assert len(out) == 2

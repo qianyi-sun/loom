@@ -13,6 +13,7 @@ from loom_benchmarks.base import UpstreamSource
 class SkillLearnBenchAdapter(SkillFlowAdapter):
     name = "skilllearnbench"
     display_name = "SkillLearnBench"
+    series = "skill"
     upstream_source = UpstreamSource(
         kind="git",
         locator="https://github.com/cxcscmu/SkillLearnBench.git",

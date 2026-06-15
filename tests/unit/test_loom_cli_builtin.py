@@ -8,18 +8,21 @@ from loom_cli.builtin import load_builtin_entries
 
 
 def test_load_returns_all_shipped_adapters() -> None:
-    """PR-1 (series): `aime` slug renamed to `aime-aimo-validation`
-    (with `aime-2025` as a sibling); `swe-bench-verified` slug dropped
-    (now a tag on `swe-bench`). Floor stays at 13 — we added AIME 2025
-    and removed swe-bench-verified."""
+    """PR-2 (per-year AIME split): aime ships as aime-22/aime-23/aime-24/
+    aime-25 — one slug per exam year so users can pick AIME-24 / AIME-25
+    / both in a single click. `swe-bench-verified` restored as a peer
+    of `swe-bench` and `swe-bench-multimodal`. Floor bumps to 14."""
     entries = load_builtin_entries()
     slugs = {e.slug for e in entries}
     assert "humaneval" in slugs
-    assert "aime-aimo-validation" in slugs
-    assert "aime-2025" in slugs
-    assert "swe-bench-verified" not in slugs
+    assert "aime-22" in slugs
+    assert "aime-23" in slugs
+    assert "aime-24" in slugs
+    assert "aime-25" in slugs
     assert "swe-bench" in slugs
-    assert len(entries) >= 13
+    assert "swe-bench-verified" in slugs
+    assert "swe-bench-multimodal" in slugs
+    assert len(entries) >= 14
 
 
 def test_each_entry_has_display_name_and_license() -> None:

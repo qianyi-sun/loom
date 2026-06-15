@@ -31,6 +31,7 @@ from loom_benchmarks.util import (
 class OSWorldAdapter:
     name = "osworld"
     display_name = "OSWorld"
+    series = "agents"
     upstream_source = UpstreamSource(
         kind="git",
         locator="https://github.com/xlang-ai/OSWorld.git",

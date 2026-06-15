@@ -30,17 +30,17 @@ from loom_benchmarks.util import (
 )
 
 
-class AIME2025Adapter:
+class AIME25Adapter:
     """AIME 2025 I + II.
 
-    Series: `aime`. Sibling of `aime-aimo-validation`. Combines
+    Series: `aime`. Peer of `aime-22`, `aime-23`, `aime-24`. Combines
     `MathArena/aime_2025_I` and `MathArena/aime_2025_II` into a single
     benchmark of 30 problems (15 per exam) tagged by `exam` ("I"/"II")
     and `problem` (1-15). The `year` tag is always "2025"; included
     explicitly so the SPA's tag UI is uniform across the AIME series.
     """
 
-    name = "aime-2025"
+    name = "aime-25"
     display_name = "AIME 2025"
     series = "aime"
     # `locator` is informational only — we actually load two HF

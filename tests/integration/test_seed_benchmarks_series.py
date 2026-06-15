@@ -29,7 +29,7 @@ def session(postgres_url: str):
     with sl() as s:
         s.execute(delete(Benchmark).where(
             Benchmark.id.in_([
-                "aime-aimo-validation", "aime-2025",
+                "aime-22", "aime-25",
                 "swe-bench", "swe-bench-multimodal",
                 "humaneval",
             ]),
@@ -40,7 +40,7 @@ def session(postgres_url: str):
     with sl() as s:
         s.execute(delete(Benchmark).where(
             Benchmark.id.in_([
-                "aime-aimo-validation", "aime-2025",
+                "aime-22", "aime-25",
                 "swe-bench", "swe-bench-multimodal",
                 "humaneval",
             ]),
@@ -55,28 +55,28 @@ def test_fresh_seed_writes_series_from_adapter(session) -> None:
     rows = {
         b.id: b.series for b in session.execute(
             select(Benchmark).where(Benchmark.id.in_([
-                "aime-aimo-validation", "aime-2025",
+                "aime-22", "aime-25",
                 "swe-bench", "swe-bench-multimodal",
                 "humaneval",
             ])),
         ).scalars().all()
     }
     # AIME siblings group under "aime".
-    assert rows.get("aime-aimo-validation") == "aime"
-    assert rows.get("aime-2025") == "aime"
+    assert rows.get("aime-22") == "aime"
+    assert rows.get("aime-25") == "aime"
     # SWE-Bench siblings group under "swe-bench".
     assert rows.get("swe-bench") == "swe-bench"
     assert rows.get("swe-bench-multimodal") == "swe-bench"
-    # Standalone benchmarks stay NULL.
-    assert rows.get("humaneval") is None
+    # PR-2 (no Other): standalone code benchmarks land in series='code'.
+    assert rows.get("humaneval") == "code"
 
 
 def test_reseed_backfills_null_series_on_existing_rows(session) -> None:
-    """Pre-PR-1 row simulation: insert an `aime-aimo-validation` row
+    """Pre-PR-1 row simulation: insert an `aime-22` row
     with series=NULL, then re-run the seed. The seed must NOT skip the
     backfill just because the row already exists."""
     session.execute(insert(Benchmark).values(
-        id="aime-aimo-validation",
+        id="aime-22",
         display_name="AIME (legacy seed)",
         upstream_kind="huggingface",
         upstream_locator="AI-MO/aimo-validation-aime",
@@ -90,6 +90,6 @@ def test_reseed_backfills_null_series_on_existing_rows(session) -> None:
     _seed_benchmarks_from_entrypoints(session)
     session.commit()
     series = session.execute(
-        select(Benchmark.series).where(Benchmark.id == "aime-aimo-validation"),
+        select(Benchmark.series).where(Benchmark.id == "aime-22"),
     ).scalar_one()
     assert series == "aime"

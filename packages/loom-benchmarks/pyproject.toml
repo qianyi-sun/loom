@@ -19,12 +19,18 @@ dependencies = [
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
 
 [project.entry-points."loom.benchmarks"]
-# PR-1 (series): AIME split into peer benchmarks under series="aime".
-# Old `aime` slug renamed to `aime-aimo-validation` to make room for
-# year-specific siblings. The `swe-bench-verified` slug is dropped —
-# the verified flag is now a tag on the unified swe-bench benchmark.
-aime-aimo-validation = "loom_benchmarks.adapters.aime:AIMEAdapter"
-aime-2025 = "loom_benchmarks.adapters.aime_2025:AIME2025Adapter"
+# PR-2 (per-year AIME split + series-for-all): each AIME year ships
+# as its own adapter so users can pick AIME-24 / AIME-25 / both with
+# a single click. The combined `aime-aimo-validation` adapter is gone
+# (migration 0016 drops its row); the per-year adapters all pull from
+# `AI-MO/aimo-validation-aime` filtered by parsed year. AIME-25 stays
+# on its MathArena upstream. `swe-bench-verified` restored as a peer.
+# All standalone adapters get a series so the SPA has no "Other"
+# bucket: code / agents / skill.
+aime-22 = "loom_benchmarks.adapters.aime:AIME22Adapter"
+aime-23 = "loom_benchmarks.adapters.aime:AIME23Adapter"
+aime-24 = "loom_benchmarks.adapters.aime:AIME24Adapter"
+aime-25 = "loom_benchmarks.adapters.aime_2025:AIME25Adapter"
 bfcl = "loom_benchmarks.adapters.bfcl:BFCLAdapter"
 gaia = "loom_benchmarks.adapters.gaia:GAIAAdapter"
 humaneval = "loom_benchmarks.adapters.humaneval:HumanEvalAdapter"
@@ -34,6 +40,7 @@ osworld = "loom_benchmarks.adapters.osworld:OSWorldAdapter"
 skillflow = "loom_benchmarks.adapters.skillflow:SkillFlowAdapter"
 skilllearnbench = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchAdapter"
 swe-bench = "loom_benchmarks.adapters.swe_bench:SWEBenchAdapter"
+swe-bench-verified = "loom_benchmarks.adapters.swe_bench_verified:SWEBenchVerifiedAdapter"
 swe-bench-multimodal = "loom_benchmarks.adapters.swe_bench_multimodal:SWEBenchMultimodalAdapter"
 webarena = "loom_benchmarks.adapters.webarena:WebArenaAdapter"
 

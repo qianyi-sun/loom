@@ -61,7 +61,7 @@ async def tags_setup(
         # Seed a small AIME-style benchmark: 4 tasks across years +
         # exams so the discovery endpoint has multiple keys.
         s.execute(insert(Benchmark).values(
-            id="aime-aimo-validation",
+            id="aime-22",
             display_name="AIME (AIMO validation)",
             upstream_kind="huggingface",
             upstream_locator="AI-MO/aimo-validation-aime",
@@ -71,13 +71,13 @@ async def tags_setup(
         ))
         for tags, task_id in (
             ({"year": "2024", "exam": "I", "problem": "1"},
-                "aime-aimo-validation/2024-I/1"),
+                "aime-22/2024-I/1"),
             ({"year": "2024", "exam": "II", "problem": "1"},
-                "aime-aimo-validation/2024-II/1"),
+                "aime-22/2024-II/1"),
             ({"year": "2023", "exam": "I", "problem": "1"},
-                "aime-aimo-validation/2023-I/1"),
+                "aime-22/2023-I/1"),
             ({"year": "2023", "exam": "II", "problem": "5"},
-                "aime-aimo-validation/2023-II/5"),
+                "aime-22/2023-II/5"),
         ):
             s.execute(insert(Task).values(
                 id=task_id,
@@ -85,7 +85,7 @@ async def tags_setup(
                 config={},
                 source=f"hf://PRHW/loom-benchmark-aime/{task_id}/",
                 license="proprietary-MAA",
-                benchmark_id="aime-aimo-validation",
+                benchmark_id="aime-22",
                 tags=tags,
             ))
         # An untagged benchmark so the empty-tags path is exercised.
@@ -131,7 +131,7 @@ async def test_tags_endpoint_returns_keys_and_distinct_values(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            "/api/v1/benchmarks/aime-aimo-validation/tags",
+            "/api/v1/benchmarks/aime-22/tags",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200
@@ -189,7 +189,7 @@ async def test_benchmarks_listing_surfaces_series(
         )
     items = r.json()["items"]
     by_id = {b["id"]: b for b in items}
-    assert by_id["aime-aimo-validation"]["series"] == "aime"
+    assert by_id["aime-22"]["series"] == "aime"
     assert by_id["humaneval"]["series"] is None
 
 
@@ -201,5 +201,5 @@ async def test_unauthenticated_401(
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
-        r = await ac.get("/api/v1/benchmarks/aime-aimo-validation/tags")
+        r = await ac.get("/api/v1/benchmarks/aime-22/tags")
     assert r.status_code == 401

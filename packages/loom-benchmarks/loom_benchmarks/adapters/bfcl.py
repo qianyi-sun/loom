@@ -30,6 +30,7 @@ from loom_benchmarks.util import (
 class BFCLAdapter:
     name = "bfcl"
     display_name = "BFCL"
+    series = "code"
     upstream_source = UpstreamSource(
         kind="git",
         locator="https://github.com/ShishirPatil/gorilla.git",

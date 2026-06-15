@@ -62,13 +62,13 @@ const BENCHMARKS_RESPONSE = {
       series: null,
     },
     {
-      id: "aime-aimo-validation",
+      id: "aime-22",
       display_name: "AIME (AIMO validation 2022–2024)",
       task_count: 90,
       series: "aime",
     },
     {
-      id: "aime-2025",
+      id: "aime-25",
       display_name: "AIME 2025",
       task_count: 30,
       series: "aime",
@@ -78,13 +78,13 @@ const BENCHMARKS_RESPONSE = {
 };
 
 const BENCHMARK_TAGS_RESPONSES: Record<string, { items: { key: string; values: string[] }[] }> = {
-  "aime-aimo-validation": {
+  "aime-22": {
     items: [
       { key: "year", values: ["2022", "2023", "2024"] },
       { key: "exam", values: ["I", "II"] },
     ],
   },
-  "aime-2025": {
+  "aime-25": {
     items: [
       { key: "year", values: ["2025"] },
       { key: "exam", values: ["I", "II"] },
@@ -469,13 +469,13 @@ describe("NewBatch", () => {
         name: /Select all in series aime/i,
       }),
     );
-    // 90 (aime-aimo-validation) + 30 (aime-2025) = 120 across 2 benchmarks.
+    // 90 (aime-22) + 30 (aime-25) = 120 across 2 benchmarks.
     await screen.findByText(/120 tasks match across 2 benchmarks/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.task_filter).toEqual({
       subset_kind: "all",
-      benchmark_ids: ["aime-2025", "aime-aimo-validation"],
+      benchmark_ids: ["aime-22", "aime-25"],
     });
   });
 
@@ -486,7 +486,7 @@ describe("NewBatch", () => {
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "filtered");
     await pickBackend();
-    await pickBenchmark("aime-aimo-validation");
+    await pickBenchmark("aime-22");
     // Card auto-opens once the schema loads; tap 2024 under `year`.
     await user.click(
       await screen.findByRole("button", { name: "2024", pressed: false }),
@@ -501,7 +501,7 @@ describe("NewBatch", () => {
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.task_filter).toEqual({
       subset_kind: "all",
-      benchmark_ids: ["aime-aimo-validation"],
+      benchmark_ids: ["aime-22"],
       tag_filters: { exam: ["I"], year: ["2024"] },
     });
   });
@@ -513,7 +513,7 @@ describe("NewBatch", () => {
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "swap-batch");
     await pickBackend();
-    await pickBenchmark("aime-aimo-validation");
+    await pickBenchmark("aime-22");
     await user.click(
       await screen.findByRole("button", { name: "2024", pressed: false }),
     );
@@ -521,7 +521,7 @@ describe("NewBatch", () => {
     // tag schema disappears, so the tag_filters payload must too.
     await user.click(
       screen.getByRole("checkbox", {
-        name: /Select benchmark aime-aimo-validation/i,
+        name: /Select benchmark aime-22/i,
       }),
     );
     await pickBenchmark("humaneval");

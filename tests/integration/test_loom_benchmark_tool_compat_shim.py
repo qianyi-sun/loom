@@ -9,16 +9,17 @@ from loom_benchmark_tool.list_cmd import run_list
 
 
 def test_registry_exposes_all_shipped_adapters_via_entry_points() -> None:
-    """PR-1 (series): swe-bench-verified slug dropped (verified is now
-    a tag on swe-bench); aime renamed to aime-aimo-validation with
-    aime-2025 as a sibling under the aime series. Floor stays ≥ 13."""
+    """PR-2 (per-year AIME): aime ships as aime-22/aime-23/aime-24/
+    aime-25, all under series=aime. swe-bench-verified restored as a
+    sibling of swe-bench + swe-bench-multimodal. Floor bumps to ≥ 14."""
     assert "humaneval" in REGISTRY
     assert "swe-bench" in REGISTRY
-    assert "aime-aimo-validation" in REGISTRY
-    assert "aime-2025" in REGISTRY
-    assert "swe-bench-verified" not in REGISTRY
+    assert "swe-bench-verified" in REGISTRY
+    assert "swe-bench-multimodal" in REGISTRY
+    for year_slug in ("aime-22", "aime-23", "aime-24", "aime-25"):
+        assert year_slug in REGISTRY
     assert REGISTRY["humaneval"].display_name == "HumanEval"
-    assert len(REGISTRY) >= 13
+    assert len(REGISTRY) >= 14
 
 
 def test_run_list_still_prints_each_adapter() -> None:
@@ -32,9 +33,9 @@ def test_run_list_still_prints_each_adapter() -> None:
 def test_registry_is_iterable_like_a_dict() -> None:
     slugs = sorted(REGISTRY)
     assert "humaneval" in slugs
-    # PR-1 (series): slug `aime` is now `aime-aimo-validation` so
-    # year-specific siblings (aime-2025) can coexist in the series.
-    assert "aime-aimo-validation" in slugs
+    # PR-1 (series): slug `aime` is now `aime-22` so
+    # year-specific siblings (aime-25) can coexist in the series.
+    assert "aime-22" in slugs
 
 
 def test_registry_copy_returns_plain_dict() -> None:

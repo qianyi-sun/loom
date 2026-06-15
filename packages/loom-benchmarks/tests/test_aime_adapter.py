@@ -9,7 +9,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from loom_benchmarks.adapters.aime import AIMEAdapter
+from loom_benchmarks.adapters.aime import AIME22Adapter
 from loom_benchmarks.base import BenchmarkInstance
 
 from loom.models.task import TaskConfig
@@ -33,8 +33,8 @@ def test_aime_adapter_declares_series() -> None:
     """SPA's dropdown groups benchmarks by series. PR-1 puts AIME
     variants under series='aime' so AIME 2025 + AIME (AIMO validation)
     appear together."""
-    assert AIMEAdapter.series == "aime"
-    assert AIMEAdapter.name == "aime-aimo-validation"
+    assert AIME22Adapter.series == "aime"
+    assert AIME22Adapter.name == "aime-22"
 
 
 def test_aime_emits_structured_integer_verifier(tmp_path: Path) -> None:
@@ -43,16 +43,16 @@ def test_aime_emits_structured_integer_verifier(tmp_path: Path) -> None:
     # from the upstream `url` ("2022-I/1"); the test constructs the
     # BenchmarkInstance directly so the helper isn't exercised here, but
     # the resulting `task.id` reflects the renamed adapter slug
-    # `aime-aimo-validation`.
+    # `aime-22` (year-22 adapter).
     inst = BenchmarkInstance(
         instance_id="2022-I/1", split="train", raw=rec,
     )
-    AIMEAdapter().convert_instance(inst, out_dir=tmp_path)
+    AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
     cfg = TaskConfig.model_validate(
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.verifier.name == "script"
-    assert cfg.task.id == "aime-aimo-validation/2022-I/1"
+    assert cfg.task.id == "aime-22/2022-I/1"
     assert (tmp_path / "expected_answer.txt").read_text() == "45"
     assert "ordered pairs" in (tmp_path / "instruction.md").read_text()
     assert "verifier/check.py" in (tmp_path / "verifier" / "run.sh").read_text()
@@ -63,7 +63,7 @@ def test_aime_checker_extracts_last_integer(tmp_path: Path) -> None:
     against a fake agent output and assert the JSON it produces."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
-    AIMEAdapter().convert_instance(inst, out_dir=tmp_path)
+    AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
 
     agent_out = tmp_path / "agent_output.txt"
     agent_out.write_text(
@@ -95,9 +95,9 @@ def test_aime_license_spdx_is_proprietary_maa(tmp_path: Path) -> None:
     license-bypass finding)."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
-    converted = AIMEAdapter().convert_instance(inst, out_dir=tmp_path)
+    converted = AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
     assert converted.license_spdx == "proprietary-MAA"
-    assert AIMEAdapter.license_spdx == "proprietary-MAA"
+    assert AIME22Adapter.license_spdx == "proprietary-MAA"
 
 
 def test_aime_checker_picks_last_integer(tmp_path: Path) -> None:
@@ -108,7 +108,7 @@ def test_aime_checker_picks_last_integer(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
     rec["answer"] = "100"  # rig so 'last integer' is the correct one
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
-    AIMEAdapter().convert_instance(inst, out_dir=tmp_path)
+    AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
 
     agent_out = tmp_path / "agent_output.txt"
     agent_out.write_text("Some reasoning... 45 is partial... final: 100\n")
@@ -131,7 +131,7 @@ def test_aime_checker_picks_last_integer(tmp_path: Path) -> None:
 def test_aime_checker_rejects_wrong_answer(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
-    AIMEAdapter().convert_instance(inst, out_dir=tmp_path)
+    AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
 
     agent_out = tmp_path / "agent_output.txt"
     agent_out.write_text("Final answer: 42\n")

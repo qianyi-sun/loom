@@ -70,6 +70,7 @@ def _pytest_for_swebench(
 class SWEBenchVerifiedAdapter:
     name = "swe-bench-verified"
     display_name = "SWE-Bench Verified"
+    series = "swe-bench"
     upstream_source = UpstreamSource(
         kind="huggingface",
         locator="princeton-nlp/SWE-bench_Verified",

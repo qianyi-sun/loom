@@ -37,6 +37,7 @@ from loom_benchmarks.util import sha256_of_dir, toml_string
 class HumanEvalAdapter:
     name = "humaneval"
     display_name = "HumanEval"
+    series = "code"
     upstream_source = UpstreamSource(
         kind="huggingface",
         # HuggingFace Hub >=1.x requires namespace/name; the legacy
