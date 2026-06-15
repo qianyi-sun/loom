@@ -76,7 +76,7 @@ class _AIMEYearBase(CatalogBackedAdapter):
     """Shared list/convert logic for the per-year AIME adapters.
 
     Subclasses set `name`; everything else (display_name, series,
-    upstream, license, splits) loads from catalog.json. The year to
+    upstream, license, splits) loads from benchmarks.json. The year to
     filter on comes from `cls._params["year"]` — also set by the
     catalog. So adding AIME-21 = one JSON entry + one 2-line subclass.
     """

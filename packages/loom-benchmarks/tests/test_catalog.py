@@ -1,8 +1,8 @@
-"""`loom_benchmarks/catalog.json` schema + adapter consistency.
+"""`loom_benchmarks/benchmarks.json` schema + adapter consistency.
 
 Pins three contracts the catalog redesign relies on:
 
-1. catalog.json parses against the Pydantic schema. Typos in the JSON
+1. benchmarks.json parses against the Pydantic schema. Typos in the JSON
    surface at import time as ValidationError, not deep inside a fetch.
 2. Every entry-point adapter has a catalog entry. New adapters that
    forget to add JSON metadata will fail this test loud.
@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 
 def test_catalog_json_parses() -> None:
-    """If catalog.json has a typo (`licence` vs `license`, missing
+    """If benchmarks.json has a typo (`licence` vs `license`, missing
     field, wrong type) Pydantic raises at module load — this test
     confirms the import path doesn't hide a ValidationError."""
     import json
@@ -36,11 +36,11 @@ def test_every_registry_adapter_has_a_catalog_entry() -> None:
     from loom_benchmarks.registry import REGISTRY
     missing = sorted(s for s in REGISTRY if s not in CATALOG)
     # terminal-bench-2 ships from a sibling package and isn't covered
-    # by loom_benchmarks/catalog.json — that's fine; only first-party
+    # by loom_benchmarks/benchmarks.json — that's fine; only first-party
     # benchmarks (loom_benchmarks/adapters/*) need a catalog entry.
     missing = [s for s in missing if s != "terminal-bench-2"]
     assert missing == [], (
-        f"Registry adapters without a catalog.json entry: {missing}"
+        f"Registry adapters without a benchmarks.json entry: {missing}"
     )
 
 

@@ -36,7 +36,7 @@ from loom_benchmarks.util import sha256_of_dir, toml_string
 
 class HumanEvalAdapter(CatalogBackedAdapter):
     # All metadata (display_name, series, upstream_source, license_*,
-    # splits) loads from catalog.json keyed on `name`.
+    # splits) loads from benchmarks.json keyed on `name`.
     name = "humaneval"
 
     def list_instances(

@@ -78,7 +78,7 @@ class BenchmarkAdapter(Protocol):
 
 
 class CatalogBackedAdapter:
-    """Mixin: pull adapter metadata from `loom_benchmarks/catalog.json`
+    """Mixin: pull adapter metadata from `loom_benchmarks/benchmarks.json`
     keyed by `cls.name`.
 
     Subclasses declare just `name` (the catalog key) + their
@@ -92,7 +92,7 @@ class CatalogBackedAdapter:
 
     Falls back to the legacy class-attr pattern when the catalog has
     no entry for `cls.name` — third-party adapter packages don't need
-    to ship a catalog.json to keep working.
+    to ship a benchmarks.json to keep working.
 
     Abstract base classes (the ones that don't pick a `name` yet) are
     skipped: `__init_subclass__` only fires the catalog lookup when

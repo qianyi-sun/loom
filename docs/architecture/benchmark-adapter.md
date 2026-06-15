@@ -6,7 +6,7 @@ canonical task layout (`task.toml` + `instruction.md` + assets).
 
 Lives at `packages/loom-benchmarks/loom_benchmarks/base.py`. Per-adapter
 metadata (display_name, series, upstream, license, splits, params) is
-declarative — `packages/loom-benchmarks/loom_benchmarks/catalog.json`.
+declarative — `packages/loom-benchmarks/loom_benchmarks/benchmarks.json`.
 
 ## Contract (first-party, catalog-backed)
 
@@ -24,7 +24,7 @@ from loom_benchmarks.base import (
 class MyAdapter(CatalogBackedAdapter):
     # Just the catalog key. The mixin installs display_name, series,
     # upstream_source, license_spdx, license_url, splits, and _params
-    # from `catalog.json` at class-creation time.
+    # from `benchmarks.json` at class-creation time.
     name = "my-benchmark"
 
     def list_instances(
@@ -40,7 +40,7 @@ class MyAdapter(CatalogBackedAdapter):
         Returns ConvertedTask(task_id, checksum, license_spdx, warnings)."""
 ```
 
-### catalog.json entry
+### benchmarks.json entry
 
 ```json
 {
@@ -149,7 +149,7 @@ remote service surface is described in
 
 ### `packages/loom-benchmarks/` — 16 adapters across 7 series
 
-Source of truth: `packages/loom-benchmarks/loom_benchmarks/catalog.json`.
+Source of truth: `packages/loom-benchmarks/loom_benchmarks/benchmarks.json`.
 Use `loom datasets list` to enumerate at runtime.
 
 | Series | Adapters |
@@ -203,7 +203,7 @@ get cleaned up via `rmtree` on the next call.
 
 **First-party (inside `loom_benchmarks/adapters/`):**
 
-1. Add a JSON entry to `packages/loom-benchmarks/loom_benchmarks/catalog.json`:
+1. Add a JSON entry to `packages/loom-benchmarks/loom_benchmarks/benchmarks.json`:
    ```json
    {
      "name": "my-bench",
@@ -232,7 +232,7 @@ get cleaned up via `rmtree` on the next call.
    `loom_benchmark_<name>/`, `tests/` (no `__init__.py` in `tests/`
    to avoid collision with the main repo's `tests/` root).
 2. Declare metadata on the adapter class (the legacy attribute shape).
-   No catalog.json needed — `CatalogBackedAdapter` is optional.
+   No benchmarks.json needed — `CatalogBackedAdapter` is optional.
 3. Add the entry-point in your `pyproject.toml`:
    ```toml
    [project.entry-points."loom.benchmarks"]

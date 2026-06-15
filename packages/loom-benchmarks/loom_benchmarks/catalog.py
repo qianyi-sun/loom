@@ -2,7 +2,7 @@
 
 Single source of truth for benchmark metadata — series, display name,
 upstream source, license, splits, and per-benchmark params. Loaded
-from `catalog.json` shipped alongside this module. Adapter classes
+from `benchmarks.json` shipped alongside this module. Adapter classes
 that inherit `CatalogBackedAdapter` pick up everything except their
 conversion logic from here.
 
@@ -88,11 +88,11 @@ class Catalog(BaseModel):
     benchmarks: list[CatalogEntry]
 
 
-_CATALOG_PATH = Path(__file__).parent / "catalog.json"
+_CATALOG_PATH = Path(__file__).parent / "benchmarks.json"
 
 
 def _load_catalog() -> dict[str, CatalogEntry]:
-    """Parse `catalog.json` into a name → entry mapping. Module-level
+    """Parse `benchmarks.json` into a name → entry mapping. Module-level
     side effect; raises at import time if the catalog doesn't parse
     so typos surface fast instead of leaking into runtime fetches."""
     raw = json.loads(_CATALOG_PATH.read_text())
@@ -101,7 +101,7 @@ def _load_catalog() -> dict[str, CatalogEntry]:
     for entry in parsed.benchmarks:
         if entry.name in by_name:
             raise ValueError(
-                f"catalog.json: duplicate benchmark name {entry.name!r}",
+                f"benchmarks.json: duplicate benchmark name {entry.name!r}",
             )
         by_name[entry.name] = entry
     return by_name

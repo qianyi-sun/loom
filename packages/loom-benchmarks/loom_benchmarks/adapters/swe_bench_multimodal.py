@@ -24,7 +24,7 @@ from loom_benchmarks.util import sha256_of_dir
 
 
 class SWEBenchMultimodalAdapter(SWEBenchVerifiedAdapter):
-    # All metadata loads from catalog.json. Inherits convert_instance
+    # All metadata loads from benchmarks.json. Inherits convert_instance
     # from the Verified parent + overrides for image-asset rendering.
     name = "swe-bench-multimodal"
 

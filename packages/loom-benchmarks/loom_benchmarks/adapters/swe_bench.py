@@ -26,7 +26,7 @@ from loom_benchmarks.base import BenchmarkInstance
 
 class SWEBenchAdapter(SWEBenchVerifiedAdapter):
     # All metadata (display_name, series, upstream_source, license,
-    # splits) loads from catalog.json. Inherits convert_instance from
+    # splits) loads from benchmarks.json. Inherits convert_instance from
     # the Verified parent.
     name = "swe-bench"
 

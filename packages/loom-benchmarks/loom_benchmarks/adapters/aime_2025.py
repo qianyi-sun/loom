@@ -40,10 +40,10 @@ class AIME25Adapter(CatalogBackedAdapter):
     explicitly so the SPA's tag UI is uniform across the AIME series.
     """
 
-    # Metadata loads from catalog.json. `upstream.locator` points at
+    # Metadata loads from benchmarks.json. `upstream.locator` points at
     # AIME-I; AIME-II is loaded separately inside `list_instances`
     # (HF rejects locators with `+`, so the composite name can't go
-    # in catalog.json directly).
+    # in benchmarks.json directly).
     name = "aime-25"
 
     _SOURCES: tuple[tuple[str, str], ...] = (

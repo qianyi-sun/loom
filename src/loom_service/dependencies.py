@@ -97,4 +97,4 @@ def team_membership(team_id: UUID, sc: SessionAndCtx) -> AuthContext:
     require_team_or_admin(ctx, team_id)
     return ctx
 
-# modular-A/B/C/D shipped: catalog.json + Depends() + Materializer + `loom datasets`
+# modular-A/B/C/D shipped: benchmarks.json + Depends() + Materializer + `loom datasets`
