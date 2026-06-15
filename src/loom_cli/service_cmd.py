@@ -205,8 +205,51 @@ def _up(args: argparse.Namespace) -> int:
         sys.stderr.write("error: seed_test_data.py failed.\n")
         return rc
 
+    # Persist the just-seeded tokens to .env so `docker compose`,
+    # curl/HTTPie examples, and the SPA's local-storage bootstrap all
+    # keep working after `down -v` invalidates the previous set. Without
+    # this, every fresh seed leaves .env pointing at a deleted token
+    # hash and every API request 401s until the operator copy-pastes
+    # the new tokens by hand.
+    if env_file is not None:
+        _write_env_tokens(env_file, tokens)
+        print(f"→ updated {env_file} with fresh tokens")
+
     _print_summary(tokens)
     return 0
+
+
+_ENV_TOKEN_KEYS: dict[str, str] = {
+    "team": "LOOM_TEAM_TOKEN",
+    "worker": "LOOM_WORKER_TOKEN",
+    "admin": "LOOM_ADMIN_TOKEN",
+}
+
+
+def _write_env_tokens(env_file: Path, tokens: dict[str, str]) -> None:
+    """Replace LOOM_{TEAM,WORKER,ADMIN}_TOKEN= lines in `env_file` with
+    the freshly-seeded values. Preserves any other lines in the file
+    (comments, custom overrides), and appends a missing key rather
+    than silently dropping it. Creates the file if absent.
+    """
+    lines: list[str] = []
+    if env_file.exists():
+        lines = env_file.read_text().splitlines()
+    seen: set[str] = set()
+    for i, raw in enumerate(lines):
+        stripped = raw.lstrip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        for label, env_key in _ENV_TOKEN_KEYS.items():
+            if key == env_key and tokens.get(label):
+                lines[i] = f"{env_key}={tokens[label]}"
+                seen.add(env_key)
+                break
+    for label, env_key in _ENV_TOKEN_KEYS.items():
+        if env_key not in seen and tokens.get(label):
+            lines.append(f"{env_key}={tokens[label]}")
+    env_file.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
 def _down(args: argparse.Namespace) -> int:

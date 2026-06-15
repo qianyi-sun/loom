@@ -182,3 +182,72 @@ def test_print_summary_labels_admin_as_dev_only(
     assert "loom_admin_y" in out
     assert "DEV-ONLY" in out
     assert "issue #295" in out
+
+
+def test_write_env_tokens_creates_file_when_absent(tmp_path) -> None:
+    from loom_cli.service_cmd import _write_env_tokens
+
+    env_file = tmp_path / ".env"
+    _write_env_tokens(env_file, {
+        "team": "loom_team_aaa",
+        "worker": "loom_w_bbb",
+        "admin": "loom_admin_ccc",
+    })
+    content = env_file.read_text()
+    assert "LOOM_TEAM_TOKEN=loom_team_aaa" in content
+    assert "LOOM_WORKER_TOKEN=loom_w_bbb" in content
+    assert "LOOM_ADMIN_TOKEN=loom_admin_ccc" in content
+
+
+def test_write_env_tokens_replaces_existing_keys_preserving_others(
+    tmp_path,
+) -> None:
+    """Idempotent overwrite: existing token lines get the new value,
+    unrelated lines (comments, custom env vars) survive verbatim."""
+    from loom_cli.service_cmd import _write_env_tokens
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# Local dev tokens\n"
+        "LOOM_WORKER_TOKEN=loom_w_old\n"
+        "LOOM_TEAM_TOKEN=loom_team_old\n"
+        "LOOM_ADMIN_TOKEN=loom_admin_old\n"
+        "MY_CUSTOM_VAR=please-keep-me\n",
+    )
+    _write_env_tokens(env_file, {
+        "team": "loom_team_new",
+        "worker": "loom_w_new",
+        "admin": "loom_admin_new",
+    })
+    lines = env_file.read_text().splitlines()
+    assert "# Local dev tokens" in lines
+    assert "LOOM_TEAM_TOKEN=loom_team_new" in lines
+    assert "LOOM_WORKER_TOKEN=loom_w_new" in lines
+    assert "LOOM_ADMIN_TOKEN=loom_admin_new" in lines
+    assert "MY_CUSTOM_VAR=please-keep-me" in lines
+    # Old values are gone; no duplicates of any key.
+    assert not any(line.endswith("=loom_team_old") for line in lines)
+    keys = [
+        line.split("=", 1)[0]
+        for line in lines
+        if "=" in line and not line.lstrip().startswith("#")
+    ]
+    assert len(keys) == len(set(keys))
+
+
+def test_write_env_tokens_appends_missing_keys(tmp_path) -> None:
+    """If only one key exists in .env, the other two must be appended
+    rather than silently dropped."""
+    from loom_cli.service_cmd import _write_env_tokens
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("LOOM_TEAM_TOKEN=loom_team_only\n")
+    _write_env_tokens(env_file, {
+        "team": "loom_team_new",
+        "worker": "loom_w_new",
+        "admin": "loom_admin_new",
+    })
+    content = env_file.read_text()
+    assert "LOOM_TEAM_TOKEN=loom_team_new" in content
+    assert "LOOM_WORKER_TOKEN=loom_w_new" in content
+    assert "LOOM_ADMIN_TOKEN=loom_admin_new" in content
