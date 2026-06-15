@@ -42,6 +42,10 @@ from loom.verifier.pytest_verifier import PytestVerifier
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
 from loom_worker.heartbeat import HeartbeatThread
+from loom_worker.materializers import (
+    build_default_materializers,
+    dispatch_materialize,
+)
 from loom_worker.orphan_cleanup import cleanup_orphan_trajectories
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
@@ -273,87 +277,6 @@ async def _spawn_trial(
     await pool.spawn(_run_and_cleanup())
 
 
-def _parse_hf_source(source: str) -> tuple[str, str, str]:
-    """Parse `hf://{org}/{repo}@{rev}/{path}` into
-    (repo_id, revision, path). Revision defaults to "main" if absent.
-
-    Raises ValueError on malformed input — the caller logs + skips."""
-    if not source.startswith("hf://"):
-        raise ValueError(f"not an hf:// URL: {source!r}")
-    without_scheme = source[len("hf://"):]
-    # `org/repo@rev/path` — split on first / to separate org, then
-    # split on @ to peel the revision off the repo segment, then the
-    # remainder of the string is the path. HF org + repo names don't
-    # contain `/` or `@`, so this is unambiguous.
-    if "/" not in without_scheme:
-        raise ValueError(f"hf:// URL missing repo: {source!r}")
-    org, rest = without_scheme.split("/", 1)
-    # rest is e.g. "loom-benchmark-aime@main/HumanEval_0/"
-    if "@" in rest:
-        repo, after_at = rest.split("@", 1)
-        revision, _, path = after_at.partition("/")
-    else:
-        repo, _, path = rest.partition("/")
-        revision = "main"
-    if not org or not repo:
-        raise ValueError(f"hf:// URL missing org or repo: {source!r}")
-    return f"{org}/{repo}", revision, path
-
-
-async def _materialize_hf_dir(
-    *, source: str, task_dir: Path, cache_dir: Path | None,
-    trial_id: UUID,
-) -> Path:
-    """Pull a `hf://{repo}@{rev}/{path}` bundle into `task_dir`.
-
-    Uses `huggingface_hub.snapshot_download` with `allow_patterns` so
-    only the one bundle's files transfer, not the entire repo. The
-    HF library handles its own cache + atomic writes; if `cache_dir`
-    is set, snapshots live there (persisted across worker restarts)
-    instead of the default `~/.cache/huggingface/`.
-
-    snapshot_download writes the bundle at `{snapshot_root}/{path}/...`
-    so the worker shifts files up one level into `task_dir` to match
-    the layout `Trial.run` expects (task.toml at the root).
-    """
-    from huggingface_hub import snapshot_download
-
-    repo_id, revision, path = _parse_hf_source(source)
-    if not path:
-        raise ValueError(
-            f"hf:// URL missing bundle path: {source!r}",
-        )
-    # snapshot_download patterns are gitignore-style; `path*` matches
-    # the bundle dir + every file under it.
-    pattern_root = path.rstrip("/")
-    snapshot = await asyncio.to_thread(
-        snapshot_download,
-        repo_id=repo_id,
-        revision=revision,
-        repo_type="dataset",
-        allow_patterns=[f"{pattern_root}/*"],
-        cache_dir=str(cache_dir) if cache_dir is not None else None,
-    )
-    bundle_dir = Path(snapshot) / pattern_root
-    if not bundle_dir.is_dir():
-        raise FileNotFoundError(
-            f"hf:// bundle dir not found after snapshot: {bundle_dir}",
-        )
-    # Mirror the s3:// dispatcher's layout: bundle contents at the
-    # root of task_dir, not nested under the instance-id segment.
-    for src_path in bundle_dir.iterdir():
-        dst = task_dir / src_path.name
-        if src_path.is_dir():
-            shutil.copytree(src_path, dst, dirs_exist_ok=True)
-        else:
-            shutil.copy2(src_path, dst)
-    logger.info(
-        "materialized_task_dir trial=%s hf=%s repo=%s path=%s",
-        trial_id, source, repo_id, path,
-    )
-    return task_dir
-
-
 async def _materialize_task_dir(
     *,
     bundle: dict[str, Any],
@@ -362,98 +285,24 @@ async def _materialize_task_dir(
     fixtures_root: Path | None = None,
     benchmark_cache: Path | None = None,
 ) -> Path:
-    """Plan 13 Task 3: create a fresh tempdir and populate it from
-    `bundle["source"]`.
+    """Create a fresh tempdir and populate it from `bundle["source"]`.
 
-    - `s3://bucket/prefix/` — pull every object via download_prefix.
-      Benchmark-imported tasks follow this shape.
-    - `fixture://<task_id>` — when `fixtures_root` is set, copy from
-      `<fixtures_root>/<task_id>/` (dev compose mounts the repo's
-      tests/fixtures/tasks into the worker so the canary hello-world
-      trial runs end-to-end). When `fixtures_root` is None, leave the
-      dir empty — production rejects fixture:// in favor of s3://.
-    - None / `git+...` — leave the dir empty. The operator runbook
-      documents the volume-mount alternative.
-    - `s3://bucket` or `s3://bucket/` with no prefix is REJECTED with
-      an empty dir + warning — without a prefix, download_prefix would
-      drain the entire bucket into one trial's workspace.
-
-    If download_prefix raises, the tempdir is removed before the
-    exception propagates so failed claims don't leak `/tmp` inodes.
+    Dispatches to the registered `Materializer` whose `matches(source)`
+    returns True. Adding a new URL scheme is a new Materializer impl in
+    `loom_worker.materializers`; the dispatcher stays as-is.
     """
     task_dir = Path(tempfile.mkdtemp(prefix=f"loom-trial-{trial_id}-"))
-    source = bundle.get("source")
-    if isinstance(source, str) and source.startswith("hf://"):
-        try:
-            return await _materialize_hf_dir(
-                source=source, task_dir=task_dir,
-                cache_dir=benchmark_cache, trial_id=trial_id,
-            )
-        except BaseException:
-            shutil.rmtree(task_dir, ignore_errors=True)
-            raise
-    if isinstance(source, str) and source.startswith("fixture://"):
-        task_id = source[len("fixture://"):]
-        if fixtures_root is None:
-            logger.warning(
-                "materialize_task_dir trial=%s fixture:// source %r but "
-                "fixtures_root unset; leaving dir empty",
-                trial_id, source,
-            )
-            return task_dir
-        src = fixtures_root / task_id
-        if not src.is_dir():
-            logger.warning(
-                "materialize_task_dir trial=%s fixture %r not found at %s; "
-                "leaving dir empty",
-                trial_id, task_id, src,
-            )
-            return task_dir
-        try:
-            # copytree into the already-created tempdir. Using
-            # dirs_exist_ok=True because mkdtemp() pre-created task_dir.
-            shutil.copytree(src, task_dir, dirs_exist_ok=True)
-        except BaseException:
-            shutil.rmtree(task_dir, ignore_errors=True)
-            raise
-        logger.info(
-            "materialized_task_dir trial=%s fixture=%s from=%s",
-            trial_id, task_id, src,
-        )
-        return task_dir
-    if isinstance(source, str) and source.startswith("s3://"):
-        without_scheme = source[len("s3://"):]
-        if "/" not in without_scheme:
-            logger.warning(
-                "bundle source %s has no key prefix; skipping materialize",
-                source,
-            )
-            return task_dir
-        bucket, prefix = without_scheme.split("/", 1)
-        if not prefix:
-            logger.warning(
-                "bundle source %s has empty key prefix; refusing to "
-                "drain entire bucket — leaving task_dir empty",
-                source,
-            )
-            return task_dir
-        try:
-            count = await object_store.download_prefix(
-                bucket=bucket, prefix=prefix, out_dir=task_dir,
-            )
-        except BaseException:
-            shutil.rmtree(task_dir, ignore_errors=True)
-            raise
-        logger.info(
-            "materialized_task_dir trial=%s objects=%d source=%s",
-            trial_id, count, source,
-        )
-    else:
-        logger.info(
-            "materialize_task_dir trial=%s left dir empty (source=%r)",
-            trial_id, source,
-        )
-    return task_dir
+    materializers = build_default_materializers(
+        object_store=object_store,
+        fixtures_root=fixtures_root,
+        benchmark_cache=benchmark_cache,
+    )
+    return await dispatch_materialize(
+        source=bundle.get("source"),
+        task_dir=task_dir,
+        trial_id=trial_id,
+        materializers=materializers,
+    )
 
 
 def _default_agent_factory(

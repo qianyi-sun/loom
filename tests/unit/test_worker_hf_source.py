@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from loom_worker.main_loop import _parse_hf_source
+from loom_worker.materializers import _parse_hf_source
 
 
 def test_parse_with_explicit_revision() -> None:
