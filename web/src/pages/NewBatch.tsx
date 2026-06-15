@@ -332,8 +332,8 @@ function BenchmarkPicker({
             <label
               className={
                 populated > 0
-                  ? "flex items-center gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-slate-600"
-                  : "flex items-center gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-slate-400"
+                  ? "flex items-center gap-2 bg-indigo-50/60 px-3 py-2 text-sm font-semibold text-indigo-900"
+                  : "flex items-center gap-2 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-400"
               }
             >
               <input
@@ -347,8 +347,24 @@ function BenchmarkPicker({
                 aria-label={`Select all in series ${seriesLabel}`}
                 className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               />
-              <span>{seriesLabel}</span>
-              <span className="ml-auto font-normal text-slate-400 normal-case">
+              <span
+                className={
+                  populated > 0
+                    ? "inline-block h-2 w-2 rounded-full bg-indigo-400"
+                    : "inline-block h-2 w-2 rounded-full bg-slate-300"
+                }
+                aria-hidden="true"
+              />
+              <span className="uppercase tracking-wider text-xs">
+                {seriesLabel}
+              </span>
+              <span
+                className={
+                  populated > 0
+                    ? "ml-auto font-normal normal-case text-xs text-indigo-600/70"
+                    : "ml-auto font-normal normal-case text-xs text-slate-400"
+                }
+              >
                 {populated}/{rows.length} populated
               </span>
             </label>
@@ -361,8 +377,8 @@ function BenchmarkPicker({
                   key={r.id}
                   className={
                     empty
-                      ? "flex items-center gap-2 px-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
-                      : "flex items-center gap-2 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                      ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
+                      : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                   }
                   title={
                     empty

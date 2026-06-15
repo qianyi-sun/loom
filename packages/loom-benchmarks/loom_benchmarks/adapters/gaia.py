@@ -28,7 +28,7 @@ from loom_benchmarks.util import sha256_of_dir, toml_string
 class GAIAAdapter:
     name = "gaia"
     display_name = "GAIA"
-    series = "agents"
+    series = "research-agent"
     upstream_source = UpstreamSource(
         kind="huggingface",
         locator="gaia-benchmark/GAIA",

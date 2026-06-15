@@ -118,20 +118,28 @@ export default function Benchmarks(): JSX.Element {
                 key={seriesLabel}
                 className="divide-y divide-slate-100 border-t border-slate-200"
               >
-                <tr className="bg-slate-50">
+                <tr className="bg-indigo-50/60">
                   <th
                     colSpan={6}
-                    className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-slate-600"
+                    className="px-4 py-2.5 text-left text-sm font-semibold text-indigo-900"
                   >
-                    <span className="mr-2">{seriesLabel}</span>
-                    <span className="font-normal normal-case text-slate-400">
-                      {rows.length} benchmark{rows.length === 1 ? "" : "s"}
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="inline-block h-2 w-2 rounded-full bg-indigo-400"
+                        aria-hidden="true"
+                      />
+                      <span className="uppercase tracking-wider text-xs">
+                        {seriesLabel}
+                      </span>
+                      <span className="font-normal normal-case text-xs text-indigo-600/70">
+                        ({rows.length} benchmark{rows.length === 1 ? "" : "s"})
+                      </span>
                     </span>
                   </th>
                 </tr>
                 {rows.map((b) => (
                   <tr key={b.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                    <td className="px-4 py-3 pl-10 font-mono text-xs text-slate-700">
                       {b.id}
                     </td>
                     <td className="px-4 py-3 text-slate-700">{b.display_name}</td>
