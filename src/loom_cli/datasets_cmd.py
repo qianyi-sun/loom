@@ -1,16 +1,30 @@
-"""`loom datasets <subcommand>` — discovery + install commands.
+"""`loom datasets <subcommand>` — discovery + lifecycle commands.
 
 Subcommands:
 - list [--installed | --available | --remote] [--json]
 - show <slug>
 - install <slug>
 - refresh-catalog
+- import <slug> [--db-url --minio-* --bucket --cache-dir --limit ...]
+- publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
+- register <slug> [--hf-org --hf-token --db-url --revision]
+- verify <slug> [--limit --minio-* --bucket --seed]
+
+The {import, publish, register, verify} subcommands were previously
+shipped as `python -m loom_benchmark_tool <cmd>`. Folded into
+`loom datasets` here so operators have one CLI to learn instead of
+guessing which tool owns which verb. The old `loom_benchmark_tool`
+entry-point stays as a deprecation shim — see its module docstring.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
 import sys
+from collections.abc import Callable
+from pathlib import Path
 
 from loom_cli import builtin as builtin_mod
 from loom_cli import catalog as catalog_mod
@@ -18,6 +32,88 @@ from loom_cli import install as install_mod
 from loom_cli import remote as remote_mod
 from loom_cli.discovery import DatasetEntry, union_entries
 from loom_cli.output import render_datasets_json, render_datasets_table
+
+
+def _add_import_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    # Each secret falls back to an env var so operators don't have to
+    # leak them through `ps`/shell history. CLI flag wins when both set.
+    p.add_argument("--db-url", default=os.environ.get("LOOM_DB_URL"))
+    p.add_argument(
+        "--minio-endpoint",
+        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+    )
+    p.add_argument(
+        "--minio-access-key",
+        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+    )
+    p.add_argument(
+        "--minio-secret-key",
+        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+    )
+    p.add_argument("--bucket", default="loom-benchmarks")
+    p.add_argument(
+        "--cache-dir", type=Path, default=Path("/tmp/loom-benchmark-cache"),
+    )
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--imported-by", default=None)
+    p.add_argument("--refresh", action="store_true")
+
+
+def _add_publish_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    p.add_argument(
+        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+        help="HF namespace to publish under (default: env LOOM_HF_ORG, falling back to 'PRHW').",
+    )
+    p.add_argument(
+        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        help="HF write token (env: HF_TOKEN). Required.",
+    )
+    p.add_argument(
+        "--cache-dir", type=Path,
+        default=Path(
+            os.environ.get(
+                "LOOM_BENCHMARK_CACHE", "/tmp/loom-benchmark-cache",
+            ),
+        ),
+    )
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--private", action="store_true")
+    p.add_argument("--refresh", action="store_true")
+
+
+def _add_register_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    p.add_argument(
+        "--hf-org", default=os.environ.get("LOOM_HF_ORG", "PRHW"),
+    )
+    p.add_argument(
+        "--hf-token", default=os.environ.get("HF_TOKEN"),
+        help="HF read token (optional for public datasets).",
+    )
+    p.add_argument("--db-url", default=os.environ.get("LOOM_DB_URL"))
+    p.add_argument("--revision", default="main")
+    p.add_argument("--registered-by", default=None)
+
+
+def _add_verify_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark")
+    p.add_argument("--limit", type=int, default=10)
+    p.add_argument(
+        "--minio-endpoint",
+        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+    )
+    p.add_argument(
+        "--minio-access-key",
+        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+    )
+    p.add_argument(
+        "--minio-secret-key",
+        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+    )
+    p.add_argument("--bucket", default="loom-benchmarks")
+    p.add_argument("--seed", type=int, default=0)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,6 +141,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--catalog-url", default=None)
 
     sub.add_parser("refresh-catalog")
+
+    # Folded-in benchmark-tool subcommands.
+    _add_import_args(sub.add_parser(
+        "import",
+        help="Convert a benchmark's tasks + upload to MinIO + insert task rows.",
+    ))
+    _add_publish_args(sub.add_parser(
+        "publish",
+        help="Convert + push a benchmark to a HuggingFace dataset repo (Loom-team operation).",
+    ))
+    _add_register_args(sub.add_parser(
+        "register",
+        help="Read a benchmark's HF manifest + upsert task rows pointing at hf:// URLs.",
+    ))
+    _add_verify_args(sub.add_parser(
+        "verify",
+        help="Sample tasks from a benchmark + run the oracle agent end-to-end.",
+    ))
 
     return p
 
@@ -142,15 +256,157 @@ def _cmd_refresh(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_import(args: argparse.Namespace) -> int:
+    from loom.trajectory.storage import MinioObjectStore
+    from loom_benchmark_tool.import_cmd import run_import
+
+    missing = [
+        f for f, v in (
+            ("--db-url / LOOM_DB_URL", args.db_url),
+            ("--minio-endpoint / LOOM_MINIO_ENDPOINT", args.minio_endpoint),
+            ("--minio-access-key / LOOM_MINIO_ACCESS_KEY", args.minio_access_key),
+            ("--minio-secret-key / LOOM_MINIO_SECRET_KEY", args.minio_secret_key),
+        ) if not v
+    ]
+    if missing:
+        print(f"error: import requires: {', '.join(missing)}", file=sys.stderr)
+        return 2
+    store = MinioObjectStore(
+        endpoint_url=args.minio_endpoint,
+        access_key=args.minio_access_key,
+        secret_key=args.minio_secret_key,
+    )
+    stats = asyncio.run(run_import(
+        benchmark=args.benchmark,
+        db_url=args.db_url,
+        object_store=store,
+        bucket=args.bucket,
+        cache_dir=args.cache_dir,
+        limit=args.limit,
+        imported_by=args.imported_by,
+        refresh=args.refresh,
+    ))
+    print(f"converted={stats['converted']} warnings={stats['warnings']}")
+    return 0
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    from loom_benchmark_tool.publish_cmd import run_publish
+
+    if not args.hf_token:
+        print(
+            "error: publish requires --hf-token / env HF_TOKEN",
+            file=sys.stderr,
+        )
+        return 2
+    result = run_publish(
+        benchmark=args.benchmark,
+        hf_org=args.hf_org,
+        hf_token=args.hf_token,
+        cache_dir=args.cache_dir,
+        limit=args.limit,
+        private=args.private,
+        refresh=args.refresh,
+    )
+    print(
+        f"publish {args.benchmark}: "
+        f"published={result['published']} "
+        f"warnings={result['warnings']} "
+        f"repo={result['repo_id']} "
+        f"rev={result['revision']}",
+    )
+    return 0
+
+
+def _cmd_register(args: argparse.Namespace) -> int:
+    from loom_benchmark_tool.register_cmd import run_register
+
+    if not args.db_url:
+        print(
+            "error: register requires --db-url / env LOOM_DB_URL",
+            file=sys.stderr,
+        )
+        return 2
+    result = asyncio.run(run_register(
+        benchmark=args.benchmark,
+        hf_org=args.hf_org,
+        hf_token=args.hf_token,
+        db_url=args.db_url,
+        revision=args.revision,
+        registered_by=args.registered_by,
+    ))
+    print(
+        f"register {args.benchmark}: "
+        f"registered={result['registered']} "
+        f"skipped={result['skipped']} "
+        f"repo={result['repo_id']} "
+        f"rev={result['revision']}",
+    )
+    return 0
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from loom.trajectory.storage import MinioObjectStore
+    from loom_benchmark_tool.verify_cmd import run_verify
+
+    missing = [
+        f for f, v in (
+            ("--minio-endpoint / LOOM_MINIO_ENDPOINT", args.minio_endpoint),
+            ("--minio-access-key / LOOM_MINIO_ACCESS_KEY", args.minio_access_key),
+            ("--minio-secret-key / LOOM_MINIO_SECRET_KEY", args.minio_secret_key),
+        ) if not v
+    ]
+    if missing:
+        print(f"error: verify requires: {', '.join(missing)}", file=sys.stderr)
+        return 2
+    store = MinioObjectStore(
+        endpoint_url=args.minio_endpoint,
+        access_key=args.minio_access_key,
+        secret_key=args.minio_secret_key,
+    )
+    report = asyncio.run(run_verify(
+        benchmark=args.benchmark,
+        object_store=store,
+        bucket=args.bucket,
+        limit=args.limit,
+        seed=args.seed,
+    ))
+    print(
+        f"verify {args.benchmark}: "
+        f"total={report['total']} "
+        f"passed={report['passed']} "
+        f"failed={report['failed']}",
+    )
+    for r in report["results"]:
+        if not r["passed"]:
+            print(f"  FAIL {r['task_id']}: {r['stderr_tail']}")
+    if report["total"] == 0:
+        print(
+            f"  WARNING: no tasks found for benchmark "
+            f"{args.benchmark!r} under bucket {args.bucket!r}",
+        )
+        return 2
+    if report["failed"] > 0:
+        return 1
+    return 0
+
+
+_DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
+    "list": _cmd_list,
+    "show": _cmd_show,
+    "install": _cmd_install,
+    "refresh-catalog": _cmd_refresh,
+    "import": _cmd_import,
+    "publish": _cmd_publish,
+    "register": _cmd_register,
+    "verify": _cmd_verify,
+}
+
+
 def dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.subcmd == "list":
-        return _cmd_list(args)
-    if args.subcmd == "show":
-        return _cmd_show(args)
-    if args.subcmd == "install":
-        return _cmd_install(args)
-    if args.subcmd == "refresh-catalog":
-        return _cmd_refresh(args)
-    parser.error(f"unknown subcommand: {args.subcmd}")  # raises SystemExit
+    handler = _DISPATCH.get(args.subcmd)
+    if handler is None:
+        parser.error(f"unknown subcommand: {args.subcmd}")  # raises SystemExit
+    return handler(args)
