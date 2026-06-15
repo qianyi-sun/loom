@@ -43,14 +43,34 @@ class BFCLAdapter:
     def list_instances(
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
-        data_dir = (
-            source_dir / "repo" / "berkeley-function-call-leaderboard" / "data"
-        )
+        # Upstream restructured circa BFCL v4: data moved from
+        # `berkeley-function-call-leaderboard/data/` to
+        # `berkeley-function-call-leaderboard/bfcl_eval/data/`. Try
+        # both so the adapter keeps working if the repo ever moves
+        # back, and fall back to a recursive search as a last resort.
+        bfcl_root = source_dir / "repo" / "berkeley-function-call-leaderboard"
+        candidates = [
+            bfcl_root / "bfcl_eval" / "data",
+            bfcl_root / "data",
+        ]
+        data_dir = next((c for c in candidates if c.is_dir()), None)
+        if data_dir is None:
+            return
         for path in sorted(data_dir.glob("BFCL_*.json")):
+            # Upstream mixes JSONL task files with auxiliary index
+            # files (`BFCL_v4_format_sensitivity.json` etc.) that are
+            # single multi-line JSON objects mapping category names to
+            # task-id lists. Skip non-JSONL files (any line that isn't
+            # a parseable object with an `id` field).
             for line in path.read_text().splitlines():
                 if not line.strip():
                     continue
-                rec = cast(dict[str, Any], json.loads(line))
+                try:
+                    rec = cast(dict[str, Any], json.loads(line))
+                except json.JSONDecodeError:
+                    break  # file is not JSONL; skip remainder
+                if not isinstance(rec, dict) or "id" not in rec:
+                    break
                 yield BenchmarkInstance(
                     instance_id=str(rec["id"]), split=split, raw=rec,
                 )
@@ -71,8 +91,17 @@ class BFCLAdapter:
             f"## Available functions\n\n"
             f"```json\n{json.dumps(r['function'], indent=2)}\n```\n",
         )
+        # BFCL v4 split the ground truth out into a separate
+        # `possible_answer/BFCL_v4_*.json` file keyed by `id`. The
+        # task-record itself no longer carries it, so write an empty
+        # placeholder + warn — verifier-side wiring should fetch from
+        # the parallel file when the v4 verifier ships. For now this
+        # gets the tasks registered so the picker can show them.
+        ground_truth = r.get("ground_truth")
+        if ground_truth is None:
+            ground_truth = {"_v4_note": "ground truth lives in possible_answer/*.json"}
         (out_dir / "ground_truth.json").write_text(
-            json.dumps(r["ground_truth"], indent=2),
+            json.dumps(ground_truth, indent=2),
         )
 
         structured_verifier_script(
