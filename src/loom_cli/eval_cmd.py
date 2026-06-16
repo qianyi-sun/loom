@@ -49,13 +49,32 @@ _TYPE_TO_AGENT_PROVIDER: dict[str, str] = {
 }
 
 
-def _build_agent_model(connection_type: str, model_name: str) -> dict[str, Any]:
+def _build_agent_model(
+    connection_type: str, model_name: str,
+    *, agent_provider_override: str | None = None,
+) -> dict[str, Any]:
     """Construct the `agent_model` dict the worker hands to the agent.
-    Provider is derived from the connection type; the model name comes
-    from `--model`. `source='api'` is the default for cloud / gateway-
-    routed models — local-server / hf overrides are out of scope here
-    (use `loom run` for local execution)."""
-    provider = _TYPE_TO_AGENT_PROVIDER.get(connection_type, "openai")
+
+    Provider resolution priority:
+    1. `agent_provider_override` (the operator's explicit
+       `--agent-provider` flag) — wins when set.
+    2. `_TYPE_TO_AGENT_PROVIDER[connection_type]` — sensible default.
+    3. Fallback `"openai"` for unknown types.
+
+    Why the override matters (#69): connections of type
+    `openai-compatible` or `custom` pointing at Together / Fireworks /
+    Mistral need `agent_model.provider="together"` (etc.) for the
+    legacy rate-card lookup to find pricing entries. Without the
+    override every such connection became `provider="openai"` and
+    silently lost cost attribution. The facade (PR #64) uses
+    operator-supplied pricing so this matters mostly for the legacy
+    `/v1/chat/completions` path — but operators upgrading partial
+    deployments still hit it.
+    """
+    if agent_provider_override:
+        provider = agent_provider_override
+    else:
+        provider = _TYPE_TO_AGENT_PROVIDER.get(connection_type, "openai")
     return {
         "provider": provider,
         "name": model_name,
@@ -129,7 +148,10 @@ def _run(args: argparse.Namespace) -> int:
             conn = _resolve_by_name(c, args.provider)
             trial_config: dict[str, Any] = {
                 "agent_name": args.agent,
-                "agent_model": _build_agent_model(conn["type"], args.model),
+                "agent_model": _build_agent_model(
+                    conn["type"], args.model,
+                    agent_provider_override=args.agent_provider,
+                ),
             }
             payload: dict[str, Any] = {
                 "task_id": args.task,
@@ -189,7 +211,10 @@ def _batch_create(args: argparse.Namespace) -> int:
             conn = _resolve_by_name(c, args.provider)
             trial_config: dict[str, Any] = {
                 "agent_name": args.agent,
-                "agent_model": _build_agent_model(conn["type"], args.model),
+                "agent_model": _build_agent_model(
+                    conn["type"], args.model,
+                    agent_provider_override=args.agent_provider,
+                ),
             }
             # --benchmark is a SHORTCUT for the most common task_filter:
             # `{"benchmark_id": <slug>}`. Operators wanting richer
@@ -402,6 +427,18 @@ def dispatch(argv: list[str]) -> int:
         "--task", required=True,
         help="Task id (e.g. `humaneval/HumanEval/0`).",
     )
+    p_run.add_argument(
+        "--agent-provider", dest="agent_provider", default=None,
+        help=(
+            "Override the agent_model.provider derived from the "
+            "connection type. Use this for openai-compatible "
+            "connections to Together / Fireworks / Mistral / etc. "
+            "(e.g. --agent-provider together). When unset, the "
+            "connection's type maps to a default (openai-compatible "
+            "→ openai, anthropic → anthropic, google → google, "
+            "custom → openai)."
+        ),
+    )
     p_run.set_defaults(handler=_run)
 
     # --- batch ---
@@ -439,6 +476,10 @@ def dispatch(argv: list[str]) -> int:
     )
     p_bc.add_argument("--backend", default=None,
                       help="Worker backend (default: server default).")
+    p_bc.add_argument(
+        "--agent-provider", dest="agent_provider", default=None,
+        help="See `loom eval run --agent-provider`.",
+    )
     p_bc.set_defaults(handler=_batch_create)
 
     p_bl = batch_sub.add_parser("list", help="List batches.")

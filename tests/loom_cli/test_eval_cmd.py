@@ -188,6 +188,64 @@ def test_run_with_anthropic_provider_maps_type_to_provider(
     assert body["config"]["agent_model"]["name"] == "claude-opus-4-7"
 
 
+def test_run_agent_provider_override_wins_over_type_mapping(
+    mock_server: MockServer,
+) -> None:
+    """Issue #69: operator with a Together-hosted openai-compatible
+    connection passes `--agent-provider together`; the override wins
+    over the type→provider default (which would have produced 'openai'
+    and silently dropped the rate-card lookup)."""
+    _stub_connection_lookup(
+        mock_server, name="together-prod", type_="openai-compatible",
+    )
+    mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
+        201, json={"id": _TRIAL_ID, "task_id": "t", "state": "queued"},
+    )
+    rc = main([
+        "eval", "run",
+        "--provider", "together-prod",
+        "--model", "meta-llama/Llama-3.1-70B-Instruct",
+        "--agent", "claude-code",
+        "--task", "humaneval/HumanEval/0",
+        "--agent-provider", "together",
+    ])
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["config"]["agent_model"]["provider"] == "together"
+    assert body["config"]["agent_model"]["name"] == (
+        "meta-llama/Llama-3.1-70B-Instruct"
+    )
+
+
+def test_batch_create_agent_provider_override(
+    mock_server: MockServer,
+) -> None:
+    """Same override on batch create."""
+    _stub_connection_lookup(
+        mock_server, name="fireworks-prod", type_="custom",
+    )
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={
+            "batch_id": _BATCH_ID, "expected_trial_count": 1,
+            "n_per_task": 1, "backend": "docker",
+            "combinations": [], "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main([
+        "eval", "batch", "create",
+        "--provider", "fireworks-prod",
+        "--model", "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        "--agent", "claude-code",
+        "--benchmark", "humaneval",
+        "--name", "fw-run",
+        "--agent-provider", "fireworks_ai",
+    ])
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["trial_config"]["agent_model"]["provider"] == "fireworks_ai"
+
+
 def test_run_unknown_provider_returns_1(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:
