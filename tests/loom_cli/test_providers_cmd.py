@@ -483,6 +483,25 @@ def test_test_unknown_name_returns_1(
     assert "no provider connection named 'nope'" in err
 
 
+def test_test_tolerates_malformed_server_response(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Server returned 200 but with fields missing — handler must NOT
+    crash with KeyError. Renders status='unknown' and returns 1 (not
+    valid)."""
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/test")
+    ] = httpx.Response(200, json={"connection_id": conn["id"]})  # no status
+    rc = main(["providers", "test", "openai-prod"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status:                unknown" in out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # models
 # ──────────────────────────────────────────────────────────────────────

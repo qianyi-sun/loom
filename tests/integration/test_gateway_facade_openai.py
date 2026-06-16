@@ -239,7 +239,7 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     assert row["team_id"] == team_id
     assert row["trial_id"] == trial_id
     assert row["step_id"] == "step-1"
-    assert row["dialect"] == "openai-facade"
+    assert row["dialect"] == "openai_facade"
     assert row["model"] == "gpt-4o"
     assert row["input_tokens"] == 100
     assert row["output_tokens"] == 50
@@ -432,6 +432,31 @@ async def test_facade_surfaces_upstream_401(
         rows = list(conn.execute(text("SELECT * FROM llm_calls")))
     sync_engine.dispose()
     assert rows == []
+
+
+async def test_facade_redacts_api_key_from_upstream_error_body(
+    facade_setup,
+) -> None:
+    """If the upstream echoes the api_key in a 4xx debug page, the
+    facade MUST scrub it before surfacing — the sandbox caller is
+    less trusted than the operator who supplied the key."""
+    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    # Fixture seeds api_key="sk-upstream-XYZ" — same string the
+    # SecretStore round-trips. Have the upstream echo it.
+    captures["response"] = httpx.Response(  # type: ignore[index]
+        401,
+        text=(
+            "Auth failed. Token sent: Bearer sk-upstream-XYZ. "
+            "Check Authorization header."
+        ),
+    )
+    r = await _post(
+        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 401
+    detail = r.json()["detail"]
+    assert "sk-upstream-XYZ" not in detail
+    assert "[REDACTED]" in detail
 
 
 async def test_facade_handles_missing_upstream_usage_block(

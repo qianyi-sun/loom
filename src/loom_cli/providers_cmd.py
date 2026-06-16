@@ -410,15 +410,19 @@ def _test(args: argparse.Namespace) -> int:
             resp, action=f"test provider connection {args.name!r}",
         )
         # status is 'valid' or 'invalid'; rc=0 for valid, rc=1 for
-        # invalid so this is greppable from CI.
+        # invalid so this is greppable from CI. .get() everywhere so
+        # a malformed server response surfaces as 'unknown' rather
+        # than crashing with KeyError.
+        status = body.get("status", "unknown")
         print(f"name:                  {args.name}")
-        print(f"status:                {body['status']}")
+        print(f"status:                {status}")
         if body.get("http_status") is not None:
             print(f"http_status:           {body['http_status']}")
         if body.get("last_validation_error"):
             print(f"last_validation_error: {body['last_validation_error']}")
-        print(f"last_validated_at:     {body['last_validated_at']}")
-        return 0 if body["status"] == "valid" else 1
+        if body.get("last_validated_at"):
+            print(f"last_validated_at:     {body['last_validated_at']}")
+        return 0 if status == "valid" else 1
 
     return _run_with_error_handling(_body)
 

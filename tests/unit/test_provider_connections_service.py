@@ -672,3 +672,95 @@ async def test_fetch_upstream_models_non_json_body() -> None:
             "openai-compatible", "https://api.openai.com/v1", "k",
             _client_factory=_client_factory(httpx.MockTransport(_handler)),
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# api_key redaction — regression guard for the audit fix
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_probe_redacts_api_key_in_error_excerpt() -> None:
+    """Some upstream debug pages echo the Authorization header in the
+    body. The error string is persisted to `last_validation_error`
+    (readable via GET /provider-connections/{id}); it MUST NOT contain
+    the api_key."""
+    real_key = "sk-LIVE-supersecret123456"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            text=(
+                "Unauthorized. You sent Authorization: Bearer "
+                f"{real_key}"
+            ),
+        )
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", real_key,
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "invalid"
+    assert result.error is not None
+    assert real_key not in result.error
+    assert "[REDACTED]" in result.error
+
+
+async def test_probe_redacts_api_key_when_echoed_in_url() -> None:
+    """Google's `?key=<API_KEY>` style — the URL itself contains the
+    secret and lands in the error string. Redaction must scrub it too."""
+    real_key = "AIza-supersecret-google-key-1234"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="invalid api key")
+
+    result = await probe_connection(
+        "google", "https://generativelanguage.googleapis.com/v1beta",
+        real_key,
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "invalid"
+    assert result.error is not None
+    assert real_key not in result.error
+    assert "[REDACTED]" in result.error
+
+
+async def test_fetch_upstream_models_redacts_api_key_in_502_detail() -> None:
+    """The 502 raised on non-2xx surfaces via the route's HTTPException
+    detail to operators — same redaction requirement as probe."""
+    real_key = "sk-LIVE-fetch-supersecret789"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401, text=f"Bad key={real_key}",
+        )
+
+    with pytest.raises(UpstreamModelFetchError) as exc:
+        await fetch_upstream_models(
+            "openai-compatible", "https://api.openai.com/v1", real_key,
+            _client_factory=_client_factory(httpx.MockTransport(_handler)),
+        )
+    msg = str(exc.value)
+    assert real_key not in msg
+    assert "[REDACTED]" in msg
+
+
+def test_redact_secret_helper_minimum_length_guard() -> None:
+    """A 1-3 char "secret" should NOT trigger redaction — that would
+    over-redact common substrings ("a", "b", "to"). 4-char minimum
+    keeps the helper safe with degenerate inputs."""
+    from loom_service.provider_connections_service import _redact_secret
+    assert _redact_secret("hello world", "") == "hello world"
+    assert _redact_secret("hello world", "ab") == "hello world"
+    assert _redact_secret("hello world", "abc") == "hello world"
+    assert _redact_secret("hello world", "world") == "hello [REDACTED]"
+
+
+def test_redact_secret_helper_multiple_secrets() -> None:
+    from loom_service.provider_connections_service import _redact_secret
+    out = _redact_secret(
+        "key=sk-AAA url=sk-BBB",
+        "sk-AAA", "sk-BBB",
+    )
+    assert "sk-AAA" not in out
+    assert "sk-BBB" not in out
+    assert out == "key=[REDACTED] url=[REDACTED]"

@@ -306,6 +306,12 @@ class Trial:
         _provider_by_dialect = {
             "openai_chat": "openai",
             "openai_responses": "openai",
+            # Facade routes (`/openai/v1/chat/completions` —
+            # cluster-deploy.md provider-connection plumbing) write
+            # llm_calls.dialect="openai_facade". Map to "openai" so
+            # the projection produces ModelSpec(provider="openai", ...)
+            # rather than the "unknown" fallback.
+            "openai_facade": "openai",
             "anthropic": "anthropic",
             "gemini": "google",
         }

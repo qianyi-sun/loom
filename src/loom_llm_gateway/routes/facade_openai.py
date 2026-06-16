@@ -1,12 +1,28 @@
 """POST /openai/v1/chat/completions — provider-connection facade
 (cluster-deploy.md §Component map: `loom-llm-gateway`).
 
-This is the route the in-sandbox agent SDK targets when it speaks the
-OpenAI dialect. Unlike `/v1/chat/completions` (which routes by
-`model="provider/name"` and uses gateway-resident provider keys),
-this facade route resolves a `provider_connection_id` to the
-operator's stored credential, decrypts it, and forwards verbatim to
-the connection's `base_url`. The agent never sees the upstream key.
+This is the route the **in-sandbox agent SDK** targets when it speaks
+the OpenAI dialect. The intended consumer is the agent process
+running inside a per-trial Docker sandbox (Phase 3, not yet wired):
+the sandbox SDK is configured with `OPENAI_BASE_URL=...` pointing at
+`loom-sandbox-gateway.local`, which proxies to this route. That code
+path is built out alongside `loom-llm-gateway-sandbox` + the per-trial
+Docker bridges.
+
+Today's in-process agent runtimes (`HttpLLMGatewayClient`) still hit
+the legacy `/v1/chat/completions` — they don't go through this
+facade because they live in the worker process, not the sandbox.
+Phase 3 closes that loop end-to-end.
+
+Difference from `/v1/chat/completions`:
+- `/v1/chat/completions`: routes by `model="provider/name"`, uses
+  gateway-resident provider keys, wraps the response with a `loom`
+  attribution block.
+- `/openai/v1/chat/completions` (this route): resolves a
+  `provider_connection_id` to the operator's stored credential,
+  decrypts it in-process, forwards verbatim, and returns the raw
+  upstream OpenAI body so the unmodified SDK can parse it. The
+  agent never sees the upstream key.
 
 Wire shape (MVP):
 - `Authorization: Bearer loom_step_<jwt>` — step-scoped JWT minted
@@ -14,16 +30,18 @@ Wire shape (MVP):
 - `x-loom-provider-connection-id: <uuid>` — required header.
   (Eventually folded into the JWT scope alongside trial_id/step_id;
   see cluster-deploy.md §Authentication. For now an explicit header
-  keeps this PR focused on the facade plumbing.)
+  keeps this route focused on the facade plumbing.)
 - Body: OpenAI-shape chat completion request, passed through.
 
-Out of scope for this PR (explicit follow-ups):
+Out of scope for this route (explicit follow-ups):
 - Streaming (`stream=true` returns 501 — see comment below).
 - `/anthropic/v1/messages` + `/google/v1beta/...` facade variants
-  (each provider's dialect needs its own request/response shape;
-  this PR ships the OpenAI variant only).
+  (each provider's dialect needs its own request/response shape).
 - Egress proxy routing (the upstream POST goes direct from the
-  gateway pod today; egress-proxy IP allowlisting is Phase 2.5+).
+  gateway pod today; egress-proxy IP allowlisting is Phase 3).
+- Rate-card pricing lookup on facade calls (operator-supplied
+  pricing is the cost path today; rate-card lookup is bound to the
+  legacy `provider/name` routing and migrating it is its own PR).
 """
 
 from __future__ import annotations
@@ -55,10 +73,13 @@ router = APIRouter()
 _OPENAI_SHAPED_TYPES = frozenset({"openai-compatible", "custom"})
 
 # String stored in `llm_calls.dialect` for facade-routed traffic.
-# Lets downstream consumers (finalize projection, billing rollup)
-# distinguish facade calls from the legacy model="provider/name"
-# path without parsing the model string.
-_FACADE_DIALECT = "openai-facade"
+# Snake-case to match the existing convention (openai_chat,
+# openai_responses, anthropic, gemini) so trial.py's projection
+# map (_provider_by_dialect) maps facade rows to provider="openai"
+# rather than the "unknown" fallback. The `rate_card_hash` field
+# carries the facade marker for downstream billing/audit
+# (see `record_call(..., rate_card_hash=f"facade:{pricing_source}")`).
+_FACADE_DIALECT = "openai_facade"
 
 
 async def _resolve_connection(
@@ -212,11 +233,20 @@ async def openai_chat_facade(
         ) from e
 
     if upstream_response.status_code >= 400:
+        # Redact the api_key from the upstream body before surfacing.
+        # Some operator-side endpoints echo `Authorization` headers
+        # in 4xx debug pages; without this, a single bad upstream call
+        # leaks the credential back to the (less-trusted) caller via
+        # the HTTP detail. 4-char minimum keeps short keys from
+        # over-redacting the body.
+        excerpt = upstream_response.text[:500]
+        if api_key and len(api_key) >= 4:
+            excerpt = excerpt.replace(api_key, "[REDACTED]")
         raise HTTPException(
             status_code=upstream_response.status_code,
             detail=(
                 f"upstream returned {upstream_response.status_code}: "
-                f"{upstream_response.text[:500]}"
+                f"{excerpt}"
             ),
         )
 

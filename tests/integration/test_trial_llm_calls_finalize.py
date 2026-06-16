@@ -89,6 +89,22 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
                 "cost_usd": 0.0008,
                 "rate_card_hash": "abc",
             },
+            # Provider-connection facade row: dialect="openai_facade"
+            # MUST map to provider="openai" in the projection (else
+            # ATIF gets provider="unknown"). Regression guard for the
+            # cluster-deploy.md §gateway-facade plumbing.
+            {
+                "captured_at": "2026-06-07T00:00:02Z",
+                "trial_id": str(tid),
+                "step_id": "main",
+                "model": "gpt-4o",
+                "dialect": "openai_facade",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "provider_extras": {},
+                "cost_usd": 0.0001,
+                "rate_card_hash": "facade:operator-supplied",
+            },
         ]
 
     store = FakeObjectStore()
@@ -119,12 +135,17 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
         line for line in lines
         if json.loads(line).get("kind") == "llm_call"
     ]
-    assert len(llm_call_lines) == 2
+    assert len(llm_call_lines) == 3
     parsed = [json.loads(line) for line in llm_call_lines]
     assert parsed[0]["input_tokens"] == 100
     assert parsed[1]["input_tokens"] == 80
+    assert parsed[2]["input_tokens"] == 10
     # Dialect is encoded as ModelSpec.provider on the synthetic event.
     assert parsed[0]["model"]["provider"] == "anthropic"
+    # Regression: openai_facade dialect → provider="openai" (was
+    # "unknown" before the projection-map fix in this PR).
+    assert parsed[2]["model"]["provider"] == "openai"
+    assert parsed[2]["model"]["name"] == "gpt-4o"
     assert parsed[0]["cached_input_tokens"] == 20
     assert parsed[0]["cost_usd_snapshot"] == 0.001
 

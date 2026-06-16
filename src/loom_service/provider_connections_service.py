@@ -252,6 +252,28 @@ def default_pricing_source_for(provider_type: str) -> str:
 _PROBE_TIMEOUT_SEC = 5.0
 
 
+def _redact_secret(s: str, *secrets: str) -> str:
+    """Replace every occurrence of each non-empty secret in `s` with
+    ``[REDACTED]``. Used on upstream-body excerpts + URLs before they
+    land in DB columns (``last_validation_error``) or response bodies
+    that downstream operators can read.
+
+    Real concern: some upstreams echo the auth header / `?key=` query
+    parameter in 4xx error bodies (debug pages, dev OpenAI-compatible
+    servers). Without redaction, a single bad probe leaks the key
+    into `provider_connections.last_validation_error`, where any
+    team-scoped GET surfaces it.
+
+    Two-character minimum on each secret avoids the degenerate case
+    where an empty or 1-char secret would replace half the string.
+    """
+    out = s
+    for secret in secrets:
+        if secret and len(secret) >= 4:
+            out = out.replace(secret, "[REDACTED]")
+    return out
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     """Outcome of a connection probe. `http_status` is None when the
@@ -349,10 +371,19 @@ async def probe_connection(
             status="valid", http_status=resp.status_code, error=None,
         )
     excerpt = (resp.text or "")[:200]
+    # Redact: upstream may echo the auth header / `?key=` query param
+    # in 4xx debug pages, and this error string is persisted to
+    # `provider_connections.last_validation_error` (readable via
+    # GET /provider-connections/{id}).
+    safe_url = _redact_secret(url, api_key)
+    safe_excerpt = _redact_secret(excerpt, api_key)
     return ProbeResult(
         status="invalid",
         http_status=resp.status_code,
-        error=f"HTTP {resp.status_code} from {url}; body excerpt: {excerpt!r}",
+        error=(
+            f"HTTP {resp.status_code} from {safe_url}; "
+            f"body excerpt: {safe_excerpt!r}"
+        ),
     )
 
 
@@ -479,9 +510,14 @@ async def fetch_upstream_models(
 
     if not (200 <= resp.status_code < 300):
         excerpt = (resp.text or "")[:200]
+        # Same redaction rationale as probe_connection — this string
+        # surfaces via the /models/refresh 502 detail body which the
+        # CLI prints back to operators.
+        safe_url = _redact_secret(url, api_key)
+        safe_excerpt = _redact_secret(excerpt, api_key)
         raise UpstreamModelFetchError(
-            f"HTTP {resp.status_code} from {url}; "
-            f"body excerpt: {excerpt!r}",
+            f"HTTP {resp.status_code} from {safe_url}; "
+            f"body excerpt: {safe_excerpt!r}",
             http_status=resp.status_code,
         )
     try:
