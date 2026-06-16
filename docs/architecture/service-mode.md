@@ -228,6 +228,12 @@ sandboxes hit them directly):
 
 ## Auth tokens
 
+The current token model is suitable for local and shared development. The
+production auth redesign is tracked in
+[`auth-threat-model.md`](auth-threat-model.md): singleton admin secret,
+admin-approved team registration, audit logging, and rotation must ship before
+this model is treated as production-grade.
+
 Four token kinds, all bearer-format:
 
 | Prefix | Issued by | Scope |

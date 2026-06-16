@@ -52,6 +52,9 @@ Start with the overview, drill into the area you care about:
 - **[architecture/service-mode.md](architecture/service-mode.md)** —
   Control Plane + Worker + LLM Gateway + Postgres + MinIO; auth
   model; persistence schema
+- **[architecture/auth-threat-model.md](architecture/auth-threat-model.md)** —
+  threat model for singleton admin auth, team registration, audit,
+  rotation, and production rollout gates
 - **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
   — the single-SQL claim query; DRF tie-break + priority + FIFO;
   caps eligibility; crash recovery

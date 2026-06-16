@@ -43,7 +43,9 @@ For public repository operation:
 
 ## Platform Security Topics To Resolve
 
-- Team and project-level access model.
+- Team and project-level access model; see
+  [`docs/architecture/auth-threat-model.md`](docs/architecture/auth-threat-model.md)
+  for the #10 admin/team-registration baseline.
 - Secret injection into sandboxed jobs.
 - Network egress policy for execution environments.
 - Artifact retention and deletion rules.
