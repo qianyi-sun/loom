@@ -39,6 +39,7 @@ from loom_service.auth_guards import (
 from loom_service.dependencies import SessionAndCtx
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
 
@@ -371,6 +372,27 @@ async def create_batch(
                     status_code=400,
                     detail=f"trial_config: {err}",
                 )
+
+    # cluster-deploy.md §POST /batches: reject when no live worker
+    # advertises the requested backend. Saves operators from creating
+    # batches that would stall in 'submitted' forever (no worker will
+    # ever claim them). Backend catalog is owned by /api/v1/backends;
+    # this check uses the same predicate so a backend that shows
+    # `available=false` there also rejects here.
+    active_backends = await get_active_backends(s)
+    if payload.backend not in active_backends:
+        available_str = (
+            ", ".join(sorted(active_backends)) if active_backends
+            else "(none — no active workers)"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"no active worker advertises backend "
+                f"{payload.backend!r}. Currently available: "
+                f"{available_str}. See `GET /api/v1/backends`."
+            ),
+        )
 
     task_ids = await _resolve_task_filter(s, payload.task_filter)
     # Audit M2: a filter materializing to zero tasks creates a

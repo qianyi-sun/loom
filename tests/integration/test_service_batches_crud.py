@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial, Worker
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -75,6 +75,20 @@ async def camp_setup(
                 id=f"local/apache-{i}", checksum="x" * 64, config={},
                 source="local", license="Apache-2.0",
             ))
+        # Live worker advertising every backend Loom ships drivers for —
+        # required by the POST /batches reject-when-no-worker check.
+        # Individual tests that want to exercise the rejection path
+        # delete this row before issuing their POST.
+        s.execute(insert(Worker).values(
+            id=uuid4(), hostname="fixture-worker", version="test",
+            capabilities=[
+                {"backend": "docker"}, {"backend": "fake"},
+                {"backend": "daytona"}, {"backend": "modal"},
+            ],
+            registered_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            status="active",
+        ))
         s.commit()
     try:
         yield app, raw, team_id
@@ -86,6 +100,7 @@ async def camp_setup(
             s.execute(delete(Token))
             s.execute(delete(Batch))
             s.execute(delete(Task))
+            s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.commit()
@@ -235,6 +250,115 @@ async def test_post_rejects_empty_filter_match(
         )
     assert r.status_code == 400
     assert "zero tasks" in r.json()["detail"]
+
+
+async def test_post_rejects_when_no_worker_advertises_backend(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """cluster-deploy.md §POST /batches: reject when no live worker
+    advertises the requested backend. Saves the operator from a batch
+    that would stall in 'submitted' forever (no claim ever comes)."""
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    # Tear down the fixture worker so no backend is live.
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "lonely",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "backend": "docker",
+            },
+        )
+    sync_engine.dispose()
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "no active worker advertises backend 'docker'" in detail
+    assert "no active workers" in detail
+
+
+async def test_post_rejects_when_no_worker_serves_specific_backend(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """A worker exists, but it doesn't advertise the requested backend.
+    The 400 detail names what IS available so operators can switch."""
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    # Replace fixture worker with one that ONLY serves docker.
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.execute(insert(Worker).values(
+            id=uuid4(), hostname="docker-only", version="test",
+            capabilities=[{"backend": "docker"}],
+            registered_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            status="active",
+        ))
+        s.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "wants-modal",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "backend": "modal",
+            },
+        )
+    sync_engine.dispose()
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "'modal'" in detail
+    assert "docker" in detail  # what IS available
+
+
+async def test_post_rejects_when_only_worker_is_inactive(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """An inactive worker doesn't count — `status='active'` is the
+    predicate. Catches a regression to checking presence-only."""
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        # Demote the fixture worker to inactive.
+        s.execute(Worker.__table__.update().values(status="shutting-down"))
+        s.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "stale-only", "task_filter": {"license": "MIT"},
+                "trial_config": {}, "backend": "docker",
+            },
+        )
+    sync_engine.dispose()
+    assert r.status_code == 400
+    assert "no active workers" in r.json()["detail"]
 
 
 async def test_post_requires_submit_scope(

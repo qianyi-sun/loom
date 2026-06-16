@@ -26,6 +26,7 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    Worker,
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -88,6 +89,18 @@ async def setup(
                 license="MIT",
                 benchmark_id=None,
             ))
+        # Live worker advertising every backend Loom ships drivers for —
+        # required by the POST /batches reject-when-no-worker check.
+        s.execute(insert(Worker).values(
+            id=uuid4(), hostname="fixture-worker", version="test",
+            capabilities=[
+                {"backend": "docker"}, {"backend": "fake"},
+                {"backend": "daytona"}, {"backend": "modal"},
+            ],
+            registered_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            status="active",
+        ))
         s.commit()
 
     try:
@@ -101,6 +114,7 @@ async def setup(
             s.execute(delete(Batch))
             s.execute(delete(Task))
             s.execute(delete(Token))
+            s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.execute(delete(RateCard))

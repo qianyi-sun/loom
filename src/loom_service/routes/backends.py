@@ -16,10 +16,9 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter
-from sqlalchemy import select
 
-from loom.db.schema import Worker
 from loom_service.dependencies import SessionAndCtx
+from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
 
@@ -40,25 +39,7 @@ _KNOWN_BACKENDS: tuple[str, ...] = ("docker", "daytona", "modal", "fake")
 @router.get("/backends")
 async def list_backends(sc: SessionAndCtx) -> dict[str, Any]:
     s, _ctx = sc
-    rows = (await s.execute(
-        select(Worker.capabilities).where(Worker.status == "active"),
-    )).scalars().all()
-
-    seen: set[str] = set()
-    for caps_list in rows:
-        # Worker.capabilities is a JSONB list of one-or-more capability
-        # dicts. Each cap dict may carry a `backend` key (workers
-        # registered after Plan 28 PR-3) — older workers omit it,
-        # so we default to "docker" on those rows since the only
-        # backend the worker pool shipped before this PR was docker.
-        if not isinstance(caps_list, list):
-            continue
-        for cap in caps_list:
-            if not isinstance(cap, dict):
-                continue
-            backend_name = cap.get("backend", "docker")
-            if isinstance(backend_name, str):
-                seen.add(backend_name)
+    seen = await get_active_backends(s)
 
     # Union of known + worker-advertised. Each entry marks `available`
     # so the SPA can render greyed-out options for backends that have
