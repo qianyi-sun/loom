@@ -314,6 +314,7 @@ class Trial:
             # than the "unknown" fallback.
             "openai_facade": "openai",
             "anthropic_facade": "anthropic",
+            "gemini_facade": "google",
             "anthropic": "anthropic",
             "gemini": "google",
         }

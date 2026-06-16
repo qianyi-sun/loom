@@ -120,6 +120,21 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
                 "cost_usd": 0.00007,
                 "rate_card_hash": "facade:operator-supplied",
             },
+            # Gemini facade row — same projection guard for the
+            # google variant. Was unknown before adding the
+            # "gemini_facade": "google" entry to the map.
+            {
+                "captured_at": "2026-06-07T00:00:04Z",
+                "trial_id": str(tid),
+                "step_id": "main",
+                "model": "gemini-2.5-flash",
+                "dialect": "gemini_facade",
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "provider_extras": {},
+                "cost_usd": 0.00005,
+                "rate_card_hash": "facade:operator-supplied",
+            },
         ]
 
     store = FakeObjectStore()
@@ -150,12 +165,13 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
         line for line in lines
         if json.loads(line).get("kind") == "llm_call"
     ]
-    assert len(llm_call_lines) == 4
+    assert len(llm_call_lines) == 5
     parsed = [json.loads(line) for line in llm_call_lines]
     assert parsed[0]["input_tokens"] == 100
     assert parsed[1]["input_tokens"] == 80
     assert parsed[2]["input_tokens"] == 10
     assert parsed[3]["input_tokens"] == 7
+    assert parsed[4]["input_tokens"] == 5
     # Dialect is encoded as ModelSpec.provider on the synthetic event.
     assert parsed[0]["model"]["provider"] == "anthropic"
     # Regression: openai_facade dialect → provider="openai" (was
@@ -163,10 +179,14 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
     assert parsed[2]["model"]["provider"] == "openai"
     assert parsed[2]["model"]["name"] == "gpt-4o"
     # Regression: anthropic_facade dialect → provider="anthropic" (was
-    # "unknown" before adding the entry in this PR's projection-map
-    # update; same gotcha that PR #65 surfaced for openai_facade).
+    # "unknown" before adding the entry in PR #83 — same gotcha that
+    # PR #65 surfaced for openai_facade).
     assert parsed[3]["model"]["provider"] == "anthropic"
     assert parsed[3]["model"]["name"] == "claude-opus-4-7"
+    # Regression: gemini_facade dialect → provider="google" (added
+    # alongside the google facade route in this PR).
+    assert parsed[4]["model"]["provider"] == "google"
+    assert parsed[4]["model"]["name"] == "gemini-2.5-flash"
     assert parsed[0]["cached_input_tokens"] == 20
     assert parsed[0]["cost_usd_snapshot"] == 0.001
 

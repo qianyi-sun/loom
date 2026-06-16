@@ -15,6 +15,7 @@ from loom_llm_gateway.routes import (
     admin,
     chat,
     facade_anthropic,
+    facade_google,
     facade_openai,
     gemini,
     health,
@@ -55,6 +56,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app.include_router(gemini.router)
     app.include_router(facade_openai.router)
     app.include_router(facade_anthropic.router)
+    app.include_router(facade_google.router)
     app.include_router(admin.router)
     return app
 
