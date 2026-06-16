@@ -252,6 +252,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "auth":
         from loom_cli.auth_cmd import dispatch as auth_dispatch
         return auth_dispatch(raw[1:])
+    if raw and raw[0] == "providers":
+        from loom_cli.providers_cmd import dispatch as providers_dispatch
+        return providers_dispatch(raw[1:])
     parser = _build_parser()
     args = parser.parse_args(raw)
     return cast(int, args.handler(args))
