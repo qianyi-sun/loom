@@ -354,3 +354,141 @@ async def probe_connection(
         http_status=resp.status_code,
         error=f"HTTP {resp.status_code} from {url}; body excerpt: {excerpt!r}",
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Upstream models fetch (used by /models/refresh route)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class UpstreamModelFetchError(Exception):
+    """Upstream `/models` listing call failed or returned an unparseable
+    shape. Includes the http_status when one was received."""
+
+    def __init__(
+        self, message: str, *, http_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
+def _parse_upstream_models(
+    provider_type: str, payload: object,
+) -> list[str]:
+    """Map a provider's /models response body to a flat list of model
+    ids. Shapes covered:
+
+    - openai-compatible / custom / anthropic: `{"data": [{"id": "..."}]}`
+      (Anthropic's /models endpoint matches the OpenAI shape since 2024)
+    - google: `{"models": [{"name": "models/<id>"}]}` — strip the
+      `models/` prefix (Google's convention; the user-visible id is
+      the suffix).
+
+    Unknown shapes raise UpstreamModelFetchError so the route returns
+    a 502-ish error to the operator rather than a silently-empty cache.
+    """
+    if not isinstance(payload, dict):
+        raise UpstreamModelFetchError(
+            f"upstream /models returned non-object: {type(payload).__name__}",
+        )
+    ids: list[str] = []
+    if provider_type == "google":
+        raw_list = payload.get("models")
+        if not isinstance(raw_list, list):
+            raise UpstreamModelFetchError(
+                "google /models response missing top-level `models` array",
+            )
+        for entry in raw_list:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str):
+                continue
+            # Google returns `name: "models/<id>"`. Strip the prefix
+            # so the stored id matches what users type in --model.
+            ids.append(name.removeprefix("models/"))
+    else:
+        # openai-compatible / custom / anthropic
+        raw_list = payload.get("data")
+        if not isinstance(raw_list, list):
+            raise UpstreamModelFetchError(
+                f"{provider_type} /models response missing top-level "
+                "`data` array",
+            )
+        for entry in raw_list:
+            if not isinstance(entry, dict):
+                continue
+            mid = entry.get("id")
+            if isinstance(mid, str) and mid:
+                ids.append(mid)
+    if not ids:
+        raise UpstreamModelFetchError(
+            "upstream /models returned no model entries we could parse",
+        )
+    # Dedup preserving order — operators see the upstream's preferred
+    # ordering, but the same id repeated would be a UNIQUE-violation
+    # at upsert.
+    seen: set[str] = set()
+    out: list[str] = []
+    for mid in ids:
+        if mid not in seen:
+            seen.add(mid)
+            out.append(mid)
+    return out
+
+
+async def fetch_upstream_models(
+    provider_type: str, base_url: str, api_key: str,
+    *, _client_factory: object = None,
+) -> list[str]:
+    """Issue the same `/models` GET that probe_connection uses, then
+    parse the response body into a flat list of model ids.
+
+    Raises UpstreamModelFetchError on network errors, non-2xx
+    responses, or unparseable bodies. Successful return is always
+    a non-empty list (parser raises if zero ids).
+    """
+    import httpx
+
+    url, headers = _probe_url_and_headers(provider_type, base_url, api_key)
+    if _client_factory is None:
+        client_cm = httpx.AsyncClient(
+            timeout=_PROBE_TIMEOUT_SEC, follow_redirects=False,
+        )
+    else:
+        client_cm = _client_factory()  # type: ignore[operator]
+
+    try:
+        async with client_cm as client:
+            try:
+                resp = await client.get(url, headers=headers)
+            except httpx.TimeoutException as e:
+                raise UpstreamModelFetchError(
+                    f"timeout after {_PROBE_TIMEOUT_SEC}s: {e}",
+                ) from e
+            except httpx.RequestError as e:
+                raise UpstreamModelFetchError(
+                    f"{type(e).__name__}: {e}",
+                ) from e
+    except UpstreamModelFetchError:
+        raise
+    except Exception as e:
+        raise UpstreamModelFetchError(
+            f"{type(e).__name__}: {e}",
+        ) from e
+
+    if not (200 <= resp.status_code < 300):
+        excerpt = (resp.text or "")[:200]
+        raise UpstreamModelFetchError(
+            f"HTTP {resp.status_code} from {url}; "
+            f"body excerpt: {excerpt!r}",
+            http_status=resp.status_code,
+        )
+    try:
+        payload = resp.json()
+    except ValueError as e:
+        raise UpstreamModelFetchError(
+            f"upstream /models returned non-JSON body: {e}",
+            http_status=resp.status_code,
+        ) from e
+    return _parse_upstream_models(provider_type, payload)

@@ -793,3 +793,297 @@ def test_test_returns_404_for_soft_deleted_connection(
         headers=_auth(tokens["team_a"]),
     )
     assert r.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Models cache: list / refresh / hide / unhide
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _stub_fetch_upstream_models(
+    monkeypatch: pytest.MonkeyPatch, returns: list[str] | None = None,
+    *, raises: Exception | None = None,
+) -> dict[str, object]:
+    """Patch fetch_upstream_models on the routes module + record the
+    call. Returns a dict the test can inspect for call_count / last_args."""
+    state: dict[str, object] = {"call_count": 0, "last_args": None}
+
+    async def _fake(
+        provider_type: str, base_url: str, api_key: str,
+        *, _client_factory: object = None,
+    ) -> list[str]:
+        state["call_count"] = int(state["call_count"]) + 1  # type: ignore[arg-type]
+        state["last_args"] = (provider_type, base_url, api_key)
+        if raises is not None:
+            raise raises
+        assert returns is not None
+        return list(returns)
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.fetch_upstream_models",
+        _fake,
+    )
+    return state
+
+
+def _create_conn(c, token: str, name: str = "openai-prod") -> str:  # type: ignore[no-untyped-def]
+    r = c.post(
+        "/api/v1/provider-connections", headers=_auth(token),
+        json={"name": name, "type": "openai-compatible",
+              "base_url": "https://api.openai.com/v1", "api_key": "sk-XYZ"},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]  # type: ignore[no-any-return]
+
+
+def test_models_list_initially_empty(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    r = c.get(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 200
+    assert r.json() == {"items": []}
+
+
+def test_models_refresh_populates_cache_then_list_returns_it(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _stub_fetch_upstream_models(
+        monkeypatch, returns=["gpt-4o", "gpt-3.5-turbo"],
+    )
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 2
+    assert body["refreshed"] == 0
+    assert body["missing"] == 0
+    ids = [it["model_id"] for it in body["items"]]
+    assert sorted(ids) == ["gpt-3.5-turbo", "gpt-4o"]
+    # All entries start visible + upstream-present.
+    for it in body["items"]:
+        assert it["visible"] is True
+        assert it["upstream_present"] is True
+        assert it["hidden_reason"] is None
+
+    # Decrypted api_key reached the fetcher (not the opaque ref).
+    last_args = state["last_args"]
+    assert isinstance(last_args, tuple)
+    assert last_args[2] == "sk-XYZ"
+
+    # GET /models surfaces the same set.
+    listed = c.get(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+    ).json()
+    assert sorted(it["model_id"] for it in listed["items"]) == [
+        "gpt-3.5-turbo", "gpt-4o",
+    ]
+
+
+def test_models_refresh_marks_missing_models_unhidden_to_missing(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A previously-cached model not in the new upstream response →
+    visible=false, hidden_reason='missing-upstream', upstream_present=false."""
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    _stub_fetch_upstream_models(
+        monkeypatch, returns=["gpt-4o", "gpt-3.5-turbo"],
+    )
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    # Upstream drops gpt-3.5-turbo.
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    body = r.json()
+    assert body["added"] == 0
+    assert body["refreshed"] == 1
+    assert body["missing"] == 1
+    rows = {it["model_id"]: it for it in body["items"]}
+    assert rows["gpt-4o"]["visible"] is True
+    assert rows["gpt-4o"]["upstream_present"] is True
+    assert rows["gpt-3.5-turbo"]["visible"] is False
+    assert rows["gpt-3.5-turbo"]["upstream_present"] is False
+    assert rows["gpt-3.5-turbo"]["hidden_reason"] == "missing-upstream"
+
+
+def test_models_refresh_preserves_operator_hide_across_refresh(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row hidden by the operator stays hidden after refresh even
+    when the upstream still returns it. hidden_reason stays
+    'operator-hidden', not flipped to NULL or 'missing-upstream'."""
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    _stub_fetch_upstream_models(
+        monkeypatch, returns=["gpt-4o", "gpt-3.5-turbo"],
+    )
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-3.5-turbo/hide",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    # Refresh again with same upstream — operator-hidden persists.
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    rows = {it["model_id"]: it for it in r.json()["items"]}
+    assert rows["gpt-3.5-turbo"]["visible"] is False
+    assert rows["gpt-3.5-turbo"]["hidden_reason"] == "operator-hidden"
+    # upstream_present should still be True — we saw it.
+    assert rows["gpt-3.5-turbo"]["upstream_present"] is True
+
+
+def test_models_refresh_upstream_502_does_not_partially_commit(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.provider_connections_service import (
+        UpstreamModelFetchError,
+    )
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    # Populate with one model first so we can verify cache isn't wiped.
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    # Now an upstream error.
+    _stub_fetch_upstream_models(
+        monkeypatch,
+        raises=UpstreamModelFetchError("auth failure", http_status=401),
+    )
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 502
+    assert "upstream HTTP 401" in r.json()["detail"]
+
+    # Cache state still has the prior gpt-4o row, untouched.
+    listed = c.get(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+    ).json()
+    assert [it["model_id"] for it in listed["items"]] == ["gpt-4o"]
+
+
+def test_models_hide_404_for_uncached_model(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-never-cached/hide",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 404
+    assert "run POST /models/refresh first" in r.json()["detail"]
+
+
+def test_models_unhide_keeps_missing_upstream_invisible(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unhiding a model that's no longer upstream MUST NOT make it
+    visible — we can't run a trial against a model the provider
+    doesn't serve. hidden_reason flips back to 'missing-upstream'."""
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    # Drop gpt-4o upstream — it becomes missing-upstream.
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-3.5"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    # Operator tries to unhide it.
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/unhide",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["visible"] is False
+    assert body["hidden_reason"] == "missing-upstream"
+    assert body["upstream_present"] is False
+
+
+def test_models_unhide_makes_operator_hidden_visible(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/hide",
+        headers=_auth(tokens["team_a"]),
+    )
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/unhide",
+        headers=_auth(tokens["team_a"]),
+    )
+    body = r.json()
+    assert body["visible"] is True
+    assert body["hidden_reason"] is None
+
+
+def test_models_routes_cross_team_return_404(app_setup) -> None:
+    """team_a owns the connection; team_b can't list / refresh / hide /
+    unhide it. 404 (not 403) so existence isn't leaked."""
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    for path in [
+        f"/api/v1/provider-connections/{conn_id}/models",
+    ]:
+        r = c.get(path, headers=_auth(tokens["team_b"]))
+        assert r.status_code == 404, path
+
+    for path in [
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/hide",
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/unhide",
+    ]:
+        r = c.post(path, headers=_auth(tokens["team_b"]))
+        assert r.status_code == 404, path

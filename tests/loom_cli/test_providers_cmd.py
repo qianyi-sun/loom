@@ -484,6 +484,233 @@ def test_test_unknown_name_returns_1(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# models
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _make_model(
+    *, model_id: str, visible: bool = True,
+    hidden_reason: str | None = None, upstream_present: bool = True,
+) -> dict[str, Any]:
+    return {
+        "model_id": model_id,
+        "family": None,
+        "context_length": None,
+        "capabilities": {},
+        "visible": visible,
+        "hidden_reason": hidden_reason,
+        "last_seen_at": "2026-06-16T00:00:00Z",
+        "upstream_present": upstream_present,
+    }
+
+
+def test_models_empty_list_hints_refresh(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": []})
+    rc = main(["providers", "models", "openai-prod"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no models cached" in out
+    assert "--refresh" in out
+
+
+def test_models_table_renders_visible_and_hidden(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": [
+        _make_model(model_id="gpt-4o"),
+        _make_model(model_id="gpt-3.5", visible=False,
+                    hidden_reason="operator-hidden"),
+        _make_model(model_id="gpt-stale", visible=False,
+                    hidden_reason="missing-upstream",
+                    upstream_present=False),
+    ]})
+    rc = main(["providers", "models", "openai-prod"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gpt-4o" in out
+    assert "[visible]" in out
+    assert "gpt-3.5" in out
+    assert "operator-hidden" in out
+    assert "gpt-stale" in out
+    assert "missing-upstream" in out
+
+
+def test_models_json_format(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    items = [_make_model(model_id="gpt-4o")]
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": items})
+    rc = main(["providers", "models", "openai-prod", "--format", "json"])
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == items
+
+
+def test_models_refresh_posts_then_lists(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    items = [_make_model(model_id="gpt-4o")]
+    mock_server.canned[(
+        "POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh",
+    )] = httpx.Response(200, json={
+        "added": 1, "refreshed": 0, "missing": 0, "items": items,
+    })
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": items})
+
+    rc = main(["providers", "models", "openai-prod", "--refresh"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Refreshed: +1 new" in out
+    assert "gpt-4o" in out
+    # POST refresh comes before GET list (after the GET-to-resolve-name).
+    methods = [(r.method, r.url.path) for r in mock_server.requests]
+    assert methods == [
+        ("GET", "/api/v1/provider-connections"),
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh"),
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models"),
+    ]
+
+
+def test_models_hide_posts_hide_then_lists(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[(
+        "POST", f"/api/v1/provider-connections/{conn['id']}/models/gpt-3.5/hide",
+    )] = httpx.Response(200, json=_make_model(
+        model_id="gpt-3.5", visible=False, hidden_reason="operator-hidden",
+    ))
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": []})
+
+    rc = main([
+        "providers", "models", "openai-prod", "--hide", "gpt-3.5",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Hid model 'gpt-3.5'" in out
+    methods = [(r.method, r.url.path) for r in mock_server.requests]
+    assert ("POST",
+            f"/api/v1/provider-connections/{conn['id']}/models/gpt-3.5/hide",
+            ) in methods
+
+
+def test_models_unhide_posts_unhide_then_lists(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[(
+        "POST",
+        f"/api/v1/provider-connections/{conn['id']}/models/gpt-3.5/unhide",
+    )] = httpx.Response(200, json=_make_model(
+        model_id="gpt-3.5", visible=True,
+    ))
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": []})
+
+    rc = main([
+        "providers", "models", "openai-prod", "--unhide", "gpt-3.5",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Unhid model 'gpt-3.5'" in out
+
+
+def test_models_refresh_and_hide_combine(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Order is refresh → hide → unhide → list. Both flags fire."""
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[(
+        "POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh",
+    )] = httpx.Response(200, json={
+        "added": 0, "refreshed": 1, "missing": 0, "items": [],
+    })
+    mock_server.canned[(
+        "POST", f"/api/v1/provider-connections/{conn['id']}/models/gpt-3.5/hide",
+    )] = httpx.Response(200, json=_make_model(
+        model_id="gpt-3.5", visible=False, hidden_reason="operator-hidden",
+    ))
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": []})
+
+    rc = main([
+        "providers", "models", "openai-prod",
+        "--refresh", "--hide", "gpt-3.5",
+    ])
+    assert rc == 0
+    methods = [(r.method, r.url.path) for r in mock_server.requests]
+    # Expected order: resolve, refresh, hide, list.
+    assert methods == [
+        ("GET", "/api/v1/provider-connections"),
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh"),
+        ("POST",
+         f"/api/v1/provider-connections/{conn['id']}/models/gpt-3.5/hide"),
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models"),
+    ]
+
+
+def test_models_refresh_upstream_502_surfaces_error(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[(
+        "POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh",
+    )] = httpx.Response(502, json={
+        "detail": "upstream /models fetch failed: HTTP 401 ... (upstream HTTP 401)",
+    })
+
+    rc = main([
+        "providers", "models", "openai-prod", "--refresh",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "HTTP 502" in err
+    assert "upstream HTTP 401" in err
+
+
+# ──────────────────────────────────────────────────────────────────────
 # not-logged-in path
 # ──────────────────────────────────────────────────────────────────────
 

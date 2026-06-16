@@ -29,11 +29,12 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
-from loom.db.schema import ProviderConnection, TeamQuota
+from loom.db.schema import ProviderConnection, ProviderModelCache, TeamQuota
 from loom.security.secret_store import LocalEncryptedSecretStore, SecretStore
 from loom_service.auth_guards import is_admin
 from loom_service.dependencies import SessionAndCtx
@@ -41,7 +42,9 @@ from loom_service.provider_connections_service import (
     InvalidBaseUrlError,
     InvalidPricingError,
     SsrfRejectedError,
+    UpstreamModelFetchError,
     default_pricing_source_for,
+    fetch_upstream_models,
     probe_connection,
     resolve_and_validate,
     validate_pricing,
@@ -140,9 +143,53 @@ class ProviderConnectionTestResponse(BaseModel):
     last_validated_at: datetime
 
 
+class ProviderModelCacheEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str
+    family: str | None
+    context_length: int | None
+    capabilities: dict[str, object]
+    visible: bool
+    hidden_reason: str | None
+    last_seen_at: datetime
+    upstream_present: bool
+
+
+class ProviderModelCacheListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ProviderModelCacheEntry]
+
+
+class ProviderModelRefreshResponse(BaseModel):
+    """Summary of a /models/refresh: counts and the resulting cache
+    state. Counts are computed against the cache BEFORE the upsert."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    added: int
+    refreshed: int
+    missing: int
+    items: list[ProviderModelCacheEntry]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
+
+
+def _cache_row_to_entry(row: ProviderModelCache) -> ProviderModelCacheEntry:
+    return ProviderModelCacheEntry(
+        model_id=row.model_id,
+        family=row.family,
+        context_length=row.context_length,
+        capabilities=dict(row.capabilities or {}),
+        visible=row.visible,
+        hidden_reason=row.hidden_reason,
+        last_seen_at=row.last_seen_at,
+        upstream_present=row.upstream_present,
+    )
 
 
 def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
@@ -479,6 +526,249 @@ async def test_connection(
         last_validation_error=result.error,
         last_validated_at=now,
     )
+
+
+@router.get(
+    "/provider-connections/{connection_id}/models",
+    response_model=ProviderModelCacheListResponse,
+)
+async def list_models(
+    connection_id: UUID, sc: SessionAndCtx,
+) -> ProviderModelCacheListResponse:
+    """Return every cached model row for the connection.
+
+    No auto-refresh: the cache is populated on `POST /models/refresh`
+    only. The CLI surfaces an empty list with a hint to run refresh.
+    Ordering by model_id keeps the output stable for CI use.
+    """
+    session, ctx = sc
+    row = await _get_active_connection(session, connection_id, ctx)
+    rows = (await session.execute(
+        select(ProviderModelCache)
+        .where(ProviderModelCache.provider_connection_id == row.id)
+        .order_by(ProviderModelCache.model_id.asc()),
+    )).scalars().all()
+    return ProviderModelCacheListResponse(
+        items=[_cache_row_to_entry(r) for r in rows],
+    )
+
+
+@router.post(
+    "/provider-connections/{connection_id}/models/refresh",
+    response_model=ProviderModelRefreshResponse,
+)
+async def refresh_models(
+    connection_id: UUID, sc: SessionAndCtx,
+) -> ProviderModelRefreshResponse:
+    """Probe the upstream `/models` endpoint and upsert the cache.
+
+    For each id returned by the upstream:
+    - existing row → bump `last_seen_at`, set `upstream_present=true`;
+      if the row was marked `missing-upstream` (system-hidden), flip
+      it back to visible (operator-hidden rows stay hidden — refresh
+      MUST NOT clobber operator overrides).
+    - new row → INSERT visible=true, upstream_present=true.
+
+    For each existing row NOT returned by the upstream:
+    - set `upstream_present=false` and (only if not operator-hidden)
+      `visible=false, hidden_reason='missing-upstream'`. Operator-
+      hidden rows keep their `hidden_reason='operator-hidden'`.
+
+    Upstream errors (network / non-2xx / parse) bubble up as 502;
+    the cache is left untouched (no partial commits).
+    """
+    session, ctx = sc
+    row = await _get_active_connection(session, connection_id, ctx)
+
+    secret_store = _make_secret_store(session)
+    api_key = await secret_store.get(row.encrypted_api_key_ref)
+
+    try:
+        upstream_ids = await fetch_upstream_models(
+            row.provider_type, row.base_url, api_key,
+        )
+    except UpstreamModelFetchError as e:
+        # 502 — operator's upstream is the source of the failure, not
+        # loom_service itself. Carry along the http_status when we have
+        # one so the CLI can render a useful hint.
+        detail = f"upstream /models fetch failed: {e}"
+        if e.http_status is not None:
+            detail += f" (upstream HTTP {e.http_status})"
+        raise HTTPException(status_code=502, detail=detail) from e
+
+    upstream_set = set(upstream_ids)
+    existing_rows = (await session.execute(
+        select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == row.id,
+        ),
+    )).scalars().all()
+    existing_by_id = {r.model_id: r for r in existing_rows}
+    existing_ids = set(existing_by_id.keys())
+
+    now = datetime.now(UTC)
+
+    # Upsert each upstream id. INSERT ... ON CONFLICT DO UPDATE handles
+    # the new vs. seen split atomically; we count after-the-fact.
+    added = 0
+    refreshed = 0
+    for mid in upstream_ids:
+        existing = existing_by_id.get(mid)
+        if existing is None:
+            added += 1
+        else:
+            refreshed += 1
+        # Determine visibility post-refresh:
+        # - operator-hidden stays hidden
+        # - missing-upstream → unhide (we just saw it)
+        # - everything else → visible
+        if existing is not None and existing.hidden_reason == "operator-hidden":
+            visible = False
+            hidden_reason: str | None = "operator-hidden"
+        else:
+            visible = True
+            hidden_reason = None
+
+        stmt = pg_insert(ProviderModelCache).values(
+            provider_connection_id=row.id,
+            model_id=mid,
+            last_seen_at=now,
+            upstream_present=True,
+            visible=visible,
+            hidden_reason=hidden_reason,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                ProviderModelCache.provider_connection_id,
+                ProviderModelCache.model_id,
+            ],
+            set_=dict(
+                last_seen_at=now,
+                upstream_present=True,
+                visible=visible,
+                hidden_reason=hidden_reason,
+            ),
+        )
+        await session.execute(stmt)
+
+    # Mark anything we DIDN'T see as missing. Operator-hidden rows keep
+    # their hidden_reason; only flip upstream_present.
+    missing_ids = existing_ids - upstream_set
+    missing = len(missing_ids)
+    for mid in missing_ids:
+        prev = existing_by_id[mid]
+        if prev.hidden_reason == "operator-hidden":
+            await session.execute(
+                update(ProviderModelCache)
+                .where(
+                    ProviderModelCache.provider_connection_id == row.id,
+                    ProviderModelCache.model_id == mid,
+                )
+                .values(upstream_present=False),
+            )
+        else:
+            await session.execute(
+                update(ProviderModelCache)
+                .where(
+                    ProviderModelCache.provider_connection_id == row.id,
+                    ProviderModelCache.model_id == mid,
+                )
+                .values(
+                    upstream_present=False,
+                    visible=False,
+                    hidden_reason="missing-upstream",
+                ),
+            )
+
+    await session.commit()
+
+    refreshed_rows = (await session.execute(
+        select(ProviderModelCache)
+        .where(ProviderModelCache.provider_connection_id == row.id)
+        .order_by(ProviderModelCache.model_id.asc()),
+    )).scalars().all()
+    return ProviderModelRefreshResponse(
+        added=added,
+        refreshed=refreshed,
+        missing=missing,
+        items=[_cache_row_to_entry(r) for r in refreshed_rows],
+    )
+
+
+@router.post(
+    "/provider-connections/{connection_id}/models/{model_id:path}/hide",
+    response_model=ProviderModelCacheEntry,
+)
+async def hide_model(
+    connection_id: UUID, model_id: str, sc: SessionAndCtx,
+) -> ProviderModelCacheEntry:
+    """Mark a cached model `visible=false` with reason `operator-hidden`.
+    Subsequent refreshes will not flip it back to visible — the operator's
+    hide overrides upstream presence.
+
+    404 if the model isn't in the cache for this connection. The CLI
+    hints to run /refresh first when this happens.
+    """
+    session, ctx = sc
+    row = await _get_active_connection(session, connection_id, ctx)
+    cache_row = (await session.execute(
+        select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == row.id,
+            ProviderModelCache.model_id == model_id,
+        ),
+    )).scalar_one_or_none()
+    if cache_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"model {model_id!r} not in cache for this connection — "
+                f"run POST /models/refresh first"
+            ),
+        )
+    cache_row.visible = False
+    cache_row.hidden_reason = "operator-hidden"
+    await session.commit()
+    return _cache_row_to_entry(cache_row)
+
+
+@router.post(
+    "/provider-connections/{connection_id}/models/{model_id:path}/unhide",
+    response_model=ProviderModelCacheEntry,
+)
+async def unhide_model(
+    connection_id: UUID, model_id: str, sc: SessionAndCtx,
+) -> ProviderModelCacheEntry:
+    """Reverse a previous hide. If the model is still upstream-present,
+    sets `visible=true, hidden_reason=NULL`. If the model is no longer
+    upstream-present, sets `visible=false, hidden_reason='missing-upstream'`
+    — operators can't make a missing model visible without re-refreshing
+    and finding it.
+
+    404 if the model isn't in the cache.
+    """
+    session, ctx = sc
+    row = await _get_active_connection(session, connection_id, ctx)
+    cache_row = (await session.execute(
+        select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == row.id,
+            ProviderModelCache.model_id == model_id,
+        ),
+    )).scalar_one_or_none()
+    if cache_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"model {model_id!r} not in cache for this connection — "
+                f"run POST /models/refresh first"
+            ),
+        )
+    if cache_row.upstream_present:
+        cache_row.visible = True
+        cache_row.hidden_reason = None
+    else:
+        cache_row.visible = False
+        cache_row.hidden_reason = "missing-upstream"
+    await session.commit()
+    return _cache_row_to_entry(cache_row)
 
 
 @router.delete(

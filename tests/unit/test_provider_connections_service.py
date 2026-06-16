@@ -550,3 +550,125 @@ async def test_probe_strips_trailing_slash_in_base_url() -> None:
     )
     # No `//models` — single slash.
     assert str(captured[0].url) == "https://api.openai.com/v1/models"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# fetch_upstream_models + _parse_upstream_models
+# ──────────────────────────────────────────────────────────────────────
+
+
+from loom_service.provider_connections_service import (  # noqa: E402
+    UpstreamModelFetchError,
+    _parse_upstream_models,
+    fetch_upstream_models,
+)
+
+
+def test_parse_openai_compatible_extracts_data_id() -> None:
+    body = {"data": [
+        {"id": "gpt-4o", "object": "model"},
+        {"id": "gpt-3.5-turbo"},
+    ], "object": "list"}
+    assert _parse_upstream_models("openai-compatible", body) == [
+        "gpt-4o", "gpt-3.5-turbo",
+    ]
+
+
+def test_parse_anthropic_uses_same_data_id_shape() -> None:
+    body = {"data": [
+        {"id": "claude-opus-4-7"},
+        {"id": "claude-sonnet-4-6"},
+    ]}
+    assert _parse_upstream_models("anthropic", body) == [
+        "claude-opus-4-7", "claude-sonnet-4-6",
+    ]
+
+
+def test_parse_google_strips_models_prefix() -> None:
+    body = {"models": [
+        {"name": "models/gemini-2.5-pro"},
+        {"name": "models/gemini-2.5-flash"},
+    ]}
+    assert _parse_upstream_models("google", body) == [
+        "gemini-2.5-pro", "gemini-2.5-flash",
+    ]
+
+
+def test_parse_dedup_preserves_order() -> None:
+    body = {"data": [{"id": "x"}, {"id": "y"}, {"id": "x"}]}
+    assert _parse_upstream_models("openai-compatible", body) == ["x", "y"]
+
+
+def test_parse_rejects_non_dict_body() -> None:
+    with pytest.raises(UpstreamModelFetchError, match="non-object"):
+        _parse_upstream_models("openai-compatible", [{"id": "x"}])
+
+
+def test_parse_rejects_missing_data_field() -> None:
+    with pytest.raises(UpstreamModelFetchError, match="missing top-level"):
+        _parse_upstream_models("openai-compatible", {"models": [{"id": "x"}]})
+
+
+def test_parse_rejects_missing_models_field_for_google() -> None:
+    with pytest.raises(UpstreamModelFetchError, match="missing top-level"):
+        _parse_upstream_models("google", {"data": [{"name": "models/x"}]})
+
+
+def test_parse_rejects_empty_result() -> None:
+    """A 200 with no recognized entries → error so the cache doesn't
+    silently get wiped on a parser-shape regression."""
+    with pytest.raises(UpstreamModelFetchError, match="no model entries"):
+        _parse_upstream_models("openai-compatible", {"data": [{"foo": "bar"}]})
+
+
+def test_parse_skips_non_string_ids() -> None:
+    body = {"data": [{"id": "gpt-4o"}, {"id": 123}, {"id": None}]}
+    assert _parse_upstream_models("openai-compatible", body) == ["gpt-4o"]
+
+
+async def test_fetch_upstream_models_happy_path() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "gpt-4o"}, {"id": "gpt-3.5-turbo"},
+        ]})
+
+    out = await fetch_upstream_models(
+        "openai-compatible", "https://api.openai.com/v1", "k",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert out == ["gpt-4o", "gpt-3.5-turbo"]
+
+
+async def test_fetch_upstream_models_401_raises_with_status() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "bad key"})
+
+    with pytest.raises(UpstreamModelFetchError) as exc:
+        await fetch_upstream_models(
+            "openai-compatible", "https://api.openai.com/v1", "k",
+            _client_factory=_client_factory(httpx.MockTransport(_handler)),
+        )
+    assert exc.value.http_status == 401
+    assert "HTTP 401" in str(exc.value)
+
+
+async def test_fetch_upstream_models_timeout() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("connect timeout")
+
+    with pytest.raises(UpstreamModelFetchError, match="timeout"):
+        await fetch_upstream_models(
+            "openai-compatible", "https://api.openai.com/v1", "k",
+            _client_factory=_client_factory(httpx.MockTransport(_handler)),
+        )
+
+
+async def test_fetch_upstream_models_non_json_body() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>nginx</html>")
+
+    with pytest.raises(UpstreamModelFetchError, match="non-JSON"):
+        await fetch_upstream_models(
+            "openai-compatible", "https://api.openai.com/v1", "k",
+            _client_factory=_client_factory(httpx.MockTransport(_handler)),
+        )

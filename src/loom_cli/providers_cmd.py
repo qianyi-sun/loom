@@ -293,6 +293,105 @@ def _delete(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _print_model_row(entry: dict[str, Any]) -> None:
+    """Stable one-row format for `models` table output. Greppable."""
+    visible = "visible" if entry["visible"] else "hidden"
+    flags = [visible]
+    if entry.get("hidden_reason"):
+        flags.append(entry["hidden_reason"])
+    if not entry.get("upstream_present", True):
+        flags.append("missing-upstream")
+    flag_str = ",".join(flags)
+    extras = []
+    if entry.get("family"):
+        extras.append(f"family={entry['family']}")
+    if entry.get("context_length"):
+        extras.append(f"ctx={entry['context_length']}")
+    extra_str = ("  " + " ".join(extras)) if extras else ""
+    print(f"{entry['model_id']:<48}  [{flag_str}]{extra_str}")
+
+
+def _models(args: argparse.Namespace) -> int:
+    """`loom providers models NAME [--refresh] [--hide M] [--unhide M]
+    [--format text|json]` — inspect + manage the per-connection model
+    cache.
+
+    Action order: refresh → hide → unhide → list. All actions are
+    additive (no mutual exclusion); the trailing list always runs so
+    the operator sees the resulting state."""
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            row = _resolve_by_name(c, args.name)
+            conn_id = row["id"]
+
+            if args.refresh:
+                resp = c.post(
+                    f"/api/v1/provider-connections/{conn_id}/models/refresh",
+                    # Generous timeout — the server caps the probe at 5s
+                    # but we want headroom for round-trip + decrypt +
+                    # batch upserts. 30s is the same default as the
+                    # other authed_client calls; spell it for clarity.
+                    timeout=30.0,
+                )
+                refresh_body = assert_2xx(
+                    resp, action=f"refresh models for {args.name!r}",
+                )
+                if args.format != "json":
+                    print(
+                        f"Refreshed: +{refresh_body['added']} new, "
+                        f"{refresh_body['refreshed']} updated, "
+                        f"{refresh_body['missing']} missing.",
+                    )
+
+            if args.hide is not None:
+                resp = c.post(
+                    f"/api/v1/provider-connections/{conn_id}/models/"
+                    f"{args.hide}/hide",
+                )
+                assert_2xx(
+                    resp,
+                    action=f"hide model {args.hide!r} for {args.name!r}",
+                )
+                if args.format != "json":
+                    print(f"Hid model {args.hide!r}.")
+
+            if args.unhide is not None:
+                resp = c.post(
+                    f"/api/v1/provider-connections/{conn_id}/models/"
+                    f"{args.unhide}/unhide",
+                )
+                assert_2xx(
+                    resp,
+                    action=f"unhide model {args.unhide!r} for {args.name!r}",
+                )
+                if args.format != "json":
+                    print(f"Unhid model {args.unhide!r}.")
+
+            list_resp = c.get(
+                f"/api/v1/provider-connections/{conn_id}/models",
+            )
+        body = assert_2xx(
+            list_resp, action=f"list models for {args.name!r}",
+        )
+        items = body["items"]
+        if args.format == "json":
+            print(json.dumps(items, indent=2))
+            return 0
+        if not items:
+            print(
+                f"(no models cached for {args.name!r} — run "
+                f"`loom providers models {args.name} --refresh` "
+                f"to populate)",
+            )
+            return 0
+        for it in items:
+            _print_model_row(it)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _test(args: argparse.Namespace) -> int:
     """`loom providers test NAME` — probe the connection's base_url with
     the stored credentials. The server route persists the outcome on
@@ -438,6 +537,43 @@ def dispatch(argv: list[str]) -> int:
     )
     p_test.add_argument("name", help="Display name to test.")
     p_test.set_defaults(handler=_test)
+
+    # --- models ---
+    p_models = sub.add_parser(
+        "models",
+        help=(
+            "List, refresh, or hide/unhide models on a provider's "
+            "cached model list. With no flags, lists the current cache."
+        ),
+    )
+    p_models.add_argument("name", help="Provider connection display name.")
+    p_models.add_argument(
+        "--refresh", action="store_true",
+        help=(
+            "Probe the upstream /models endpoint and upsert the cache "
+            "before listing. The probe is server-side; the CLI just "
+            "triggers it."
+        ),
+    )
+    p_models.add_argument(
+        "--hide", default=None, metavar="MODEL",
+        help=(
+            "Mark MODEL as operator-hidden (sticky across refreshes). "
+            "Must already be in the cache — run --refresh first if not."
+        ),
+    )
+    p_models.add_argument(
+        "--unhide", default=None, metavar="MODEL",
+        help=(
+            "Reverse a previous --hide. Re-visible only if the model "
+            "is still upstream-present."
+        ),
+    )
+    p_models.add_argument(
+        "--format", choices=["table", "json"], default="table",
+        help="Output format. JSON for scripting.",
+    )
+    p_models.set_defaults(handler=_models)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
