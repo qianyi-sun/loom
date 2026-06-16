@@ -8,8 +8,9 @@ Validates:
 - Batch POST does the same validation in-process (no CP forward).
 - NULL provider_connection_id is the back-compat path (existing trial
   submission code that doesn't pass the new fields keeps working).
-- Cross-team / nonexistent / soft-deleted refs → 400 with a clear
-  error message.
+- Cross-team refs → 404 so provider_connection_id lookup behavior is
+  consistent with other team-boundary paths. Nonexistent /
+  soft-deleted refs still return 400 with operator-facing hints.
 """
 
 from __future__ import annotations
@@ -226,9 +227,9 @@ def test_trial_submit_without_provider_succeeds(app_setup) -> None:
     assert r.status_code == 201
 
 
-def test_trial_submit_with_cross_team_provider_returns_400(app_setup) -> None:
-    """team_a submits with team_b's connection_id → 400 with a clear
-    message (NOT 404 — the id was provided deliberately)."""
+def test_trial_submit_with_cross_team_provider_returns_404(app_setup) -> None:
+    """team_a submits with team_b's connection_id → 404, matching
+    provider connection route + gateway existence-hiding behavior."""
     app, tokens, ids = app_setup
     c = _client(app)
     r = c.post(
@@ -240,8 +241,8 @@ def test_trial_submit_with_cross_team_provider_returns_400(app_setup) -> None:
             "provider_connection_id": str(ids["conn_b"]),
         },
     )
-    assert r.status_code == 400
-    assert "different team" in r.json()["detail"]
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"]
 
 
 def test_trial_submit_with_nonexistent_provider_returns_400(app_setup) -> None:
@@ -327,7 +328,7 @@ def test_batch_create_without_provider_succeeds(app_setup) -> None:
     assert r.status_code == 201
 
 
-def test_batch_create_with_cross_team_provider_returns_400(app_setup) -> None:
+def test_batch_create_with_cross_team_provider_returns_404(app_setup) -> None:
     app, tokens, ids = app_setup
     c = _client(app)
     r = c.post(
@@ -340,8 +341,8 @@ def test_batch_create_with_cross_team_provider_returns_400(app_setup) -> None:
             "provider_connection_id": str(ids["conn_b"]),
         },
     )
-    assert r.status_code == 400
-    assert "different team" in r.json()["detail"]
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"]
 
 
 def test_batch_create_with_nonexistent_provider_returns_400(app_setup) -> None:

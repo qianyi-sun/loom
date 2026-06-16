@@ -6,10 +6,8 @@ The user supplies a UUID; the route must check that:
 
 1. The UUID parses (handled by Pydantic before this is called).
 2. The row exists.
-3. The row belongs to the caller's team (cross-team → 400 — NOT 404,
-   because the caller chose the id deliberately and a clear error
-   helps debugging; the cross-team-leak concern only applies to lookup
-   by id, not validation of a user-supplied id).
+3. The row belongs to the caller's team (cross-team → 404, matching
+   provider connection route + gateway existence-hiding behavior).
 4. The row is not soft-deleted (deleted_at IS NULL).
 
 Centralized here so the Trial and Batch routes use the same shape +
@@ -33,8 +31,8 @@ async def validate_provider_connection(
     *,
     team_id: UUID,
 ) -> None:
-    """Raise HTTPException(400) if the connection is missing, soft-
-    deleted, or owned by a different team. Returns None on success."""
+    """Raise HTTPException if the connection is missing, soft-deleted,
+    or owned by a different team. Returns None on success."""
     row = (await session.execute(
         select(
             ProviderConnection.team_id, ProviderConnection.deleted_at,
@@ -59,15 +57,6 @@ async def validate_provider_connection(
             ),
         )
     if found_team_id != team_id:
-        # Different message from "not found" — the id was clearly
-        # supplied deliberately and we want operators to notice the
-        # cross-team mistake quickly. Existence isn't leaked because
-        # any non-team caller would already know the id (it came
-        # from them).
         raise HTTPException(
-            status_code=400,
-            detail=(
-                f"provider_connection {provider_connection_id} belongs to "
-                f"a different team."
-            ),
+            status_code=404, detail="provider_connection not found",
         )
