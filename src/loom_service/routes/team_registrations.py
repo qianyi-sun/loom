@@ -15,6 +15,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import PendingTeamRegistration, Team, TeamQuota, Token
+from loom_service.admin_audit import (
+    hash_optional,
+    require_admin_actor,
+    write_admin_audit_event,
+)
 from loom_service.dependencies import AdminSessionAndCtx
 
 router = APIRouter()
@@ -50,12 +55,6 @@ class _RejectRegistrationReq(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-def _hash_optional(value: str | None) -> str | None:
-    if not value:
-        return None
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
 def _hash_prefix(token_hash: bytes) -> str:
     return token_hash.hex()[:8]
 
@@ -75,21 +74,6 @@ def _serialize_registration(row: PendingTeamRegistration) -> dict[str, Any]:
             str(row.approved_team_id) if row.approved_team_id else None
         ),
     }
-
-
-def _require_admin_actor(actor: str | None) -> str:
-    cleaned = actor.strip() if actor else ""
-    if not cleaned:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Loom-Admin-Actor header is required",
-        )
-    if len(cleaned) > 128:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Loom-Admin-Actor must be at most 128 characters",
-        )
-    return cleaned
 
 
 async def _active_registration_exists(
@@ -157,10 +141,10 @@ async def register_team(
             contact_email=payload.contact_email,
             status="pending",
             requested_at=now,
-            source_ip_hash=_hash_optional(
+            source_ip_hash=hash_optional(
                 request.client.host if request.client else None,
             ),
-            user_agent_hash=_hash_optional(request.headers.get("user-agent")),
+            user_agent_hash=hash_optional(request.headers.get("user-agent")),
             request_metadata=payload.metadata,
         )
         session.add(registration)
@@ -192,11 +176,12 @@ async def list_team_registrations(
 
 @router.post("/admin/team-registrations/{registration_id}/approve")
 async def approve_team_registration(
+    request: Request,
     sc: AdminSessionAndCtx,
     registration_id: UUID,
     x_loom_admin_actor: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    actor = _require_admin_actor(x_loom_admin_actor)
+    actor = require_admin_actor(x_loom_admin_actor)
     session, _ctx = sc
     registration = (await session.execute(
         select(PendingTeamRegistration)
@@ -235,6 +220,19 @@ async def approve_team_registration(
     registration.reviewed_at = now
     registration.reviewed_by_actor = actor
     registration.approved_team_id = team_id
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="team_registration.approve",
+        target_type="team_registration",
+        target_id=str(registration.id),
+        request=request,
+        metadata={
+            "team_id": str(team_id),
+            "team_name": team.name,
+            "team_token_hash_prefix": _hash_prefix(token_hash),
+        },
+    )
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -252,12 +250,13 @@ async def approve_team_registration(
 
 @router.post("/admin/team-registrations/{registration_id}/reject")
 async def reject_team_registration(
+    request: Request,
     sc: AdminSessionAndCtx,
     registration_id: UUID,
     payload: _RejectRegistrationReq | None = None,
     x_loom_admin_actor: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    actor = _require_admin_actor(x_loom_admin_actor)
+    actor = require_admin_actor(x_loom_admin_actor)
     session, _ctx = sc
     registration = (await session.execute(
         select(PendingTeamRegistration)
@@ -280,5 +279,14 @@ async def reject_team_registration(
     registration.reviewed_at = now
     registration.reviewed_by_actor = actor
     registration.request_metadata = metadata
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="team_registration.reject",
+        target_type="team_registration",
+        target_id=str(registration.id),
+        request=request,
+        metadata={"reason_present": bool(payload and payload.reason)},
+    )
     await session.commit()
     return _serialize_registration(registration)

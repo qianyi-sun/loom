@@ -103,6 +103,28 @@ class PendingTeamRegistration(Base):
     )
 
 
+class AdminAuditEvent(Base):
+    __tablename__ = "admin_audit_events"
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_ip_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("jsonb_build_object()"),
+        default=dict,
+    )
+
+
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String, primary_key=True)

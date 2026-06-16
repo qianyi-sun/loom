@@ -51,4 +51,7 @@ For public repository operation:
 - Secret injection into sandboxed jobs.
 - Network egress policy for execution environments.
 - Artifact retention and deletion rules.
-- Audit log requirements for PM, infra, and research users.
+- Audit log requirements for PM, infra, and research users. The first #10
+  backend audit surface now covers team-registration approve/reject and
+  `loom_service` token admin mint/revoke; broader admin mutation coverage and
+  SPA audit review remain follow-up work.

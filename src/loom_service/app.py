@@ -27,6 +27,7 @@ from loom.admin_secret import (
 from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
+    admin_audit,
     agents,
     atif,
     backends,
@@ -181,6 +182,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(benchmarks.router, prefix="/api/v1")
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
+    app.include_router(admin_audit.router, prefix="/api/v1")
     app.include_router(team_registrations.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
     app.include_router(usage.router, prefix="/api/v1")

@@ -43,6 +43,7 @@ Trial/Batch payloads as `provider_connection_id` + `provider_model_id`.
                         │     benchmarks, tasks, tokens,       │
                         │     usage, rate-cards, teams,        │
                         │     team registrations,              │
+                        │     admin audit events,              │
                         │     trajectory, atif, health}        │
                         └────┬──────────────────┬──────────────┘
                              │                  │
@@ -258,7 +259,15 @@ Four token kinds, all bearer-format:
 | `step:*` | Worker mints per-step JWT (`mint_step_token`) | Short-lived (per-step); CLI agent calls Gateway with bounded scope |
 | `admin:*` | Operator (DB seed or admin issue) | Manage tokens, rate-cards, teams |
 
-`tokens` table tracks `last_seen_at` per token for rotation hygiene.
+Admin callers to `POST /api/v1/tokens` and `DELETE /api/v1/tokens/{prefix}`
+must send `X-Loom-Admin-Actor`; those service-token mutations are recorded in
+`admin_audit_events` with safe metadata such as token hash prefixes. Team
+callers minting or revoking their own team tokens do not need an admin actor.
+
+`tokens` table tracks `last_seen_at` per token for rotation hygiene. The
+`admin_audit_events` table records the first #10 backend audit surface: team
+registration approve/reject and service-token admin mint/revoke. Wider admin
+mutation audit coverage should be added deliberately as follow-up work.
 
 ## Auto-cancellation: trial source-state awareness
 

@@ -105,6 +105,7 @@ EOF
    # token), or any existing team.
    RAW=$(curl -sS -X POST http://localhost:8090/api/v1/tokens \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Loom-Admin-Actor: qianyi" \
      -d "{\"type\": \"team\", \"team_id\": \"$SYSTEM_TEAM_UUID\",
           \"scopes\": [\"submit\"], \"expires_in_days\": 365}" \
      | jq -r .token)
@@ -132,6 +133,13 @@ EOF
    The approval response reveals the raw `loom_team_...` token exactly once;
    store or deliver it through an operator-approved secure channel. Reject
    accidental requests with `POST .../$REG_ID/reject` and the same actor header.
+   Review backend audit evidence with:
+   ```bash
+   curl https://loom.example.com/api/v1/admin/audit-events?limit=20 \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+   Audit rows include the operator-attested actor and safe metadata such as
+   token hash prefixes, never raw bearer tokens.
 
 ## Upgrade
 
@@ -194,10 +202,14 @@ Team tokens: managed via `loom_service`'s public API:
 ```bash
 curl -X POST https://loom.example.com/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Loom-Admin-Actor: qianyi" \
   -d '{"type": "team", "team_id": "...",
        "scopes": ["submit"], "expires_in_days": 90}'
 ```
-`type` is required; allowed values are `team` and `admin`.
+Admin callers must include `X-Loom-Admin-Actor`; service token create/revoke
+admin mutations are written to `admin_audit_events`. `type` is required;
+allowed values are currently `team` and `admin`, though `admin` is scheduled for
+removal in the final #10 DB-admin removal slice.
 Recognized `scopes`: `read:own`, `submit`, `admin:tokens`,
 `admin:rate_cards`. Unrecognized scopes 400 at the route.
 

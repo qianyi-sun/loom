@@ -1,10 +1,12 @@
 # Auth And Team Registration Implementation Spec
 
 This spec turns the [auth threat model](auth-threat-model.md) into an
-implementation plan for issue #10. It is a target design, not current shipped
-behavior. Current development stacks still support database-backed admin tokens
-seeded by `scripts/seed_test_data.py`; production deployment must not rely on
-that model after #10 ships.
+implementation plan for issue #10. It is partly shipped: singleton admin secret
+verification, Control Plane singleton-admin bootstrap, default-closed team
+registration APIs, and backend admin audit events for registration review plus
+service token mint/revoke are implemented. Current development stacks still
+support database-backed admin tokens seeded by `scripts/seed_test_data.py`;
+production deployment must not rely on that model after #10 ships.
 
 ## Goals
 
@@ -189,11 +191,12 @@ row.
 
 ### Admin Audit
 
-`GET /api/v1/admin/audit-events`
+`GET /api/v1/admin/audit-events?limit=50&cursor=<event-id>`
 
-Returns recent admin audit rows with cursor pagination. Team users never see
-this endpoint. Raw tokens, provider secrets, request bodies, and artifact paths
-must not appear in audit metadata.
+Returns recent admin audit rows with cursor pagination. The current backend uses
+the last event id as the next cursor. Team users never see this endpoint. Raw
+tokens, provider secrets, request bodies, and artifact paths must not appear in
+audit metadata.
 
 ## Token Route Changes
 
@@ -206,6 +209,8 @@ Team-token behavior stays database-backed:
 
 - team callers can mint only same-team `read:own` and `submit` tokens;
 - admin callers can mint team tokens for approved teams;
+- admin callers must send `X-Loom-Admin-Actor` for token mint/revoke so the
+  action can be written to `admin_audit_events`;
 - token responses reveal raw token values only on creation;
 - token list/detail responses reveal only hash prefixes.
 
@@ -256,8 +261,9 @@ production UX/security issues and must not block the singleton-admin backend.
    register endpoint, admin list/approve/reject endpoint, and token mint once.
    The backend portion is implemented before the SPA table/action wiring.
 4. **Audit events:** migration for `admin_audit_events`, audit writer helper,
-   and admin mutation hooks for registration approval/rejection and token
-   mint/revoke.
+   admin mutation hooks for registration approval/rejection and service token
+   mint/revoke, plus the backend audit listing endpoint. The SPA audit table is
+   still part of the SPA wiring slice.
 5. **Operator CLI and runbook:** `init-admin`, `reveal-admin`, `rotate-admin`,
    production runbook update, and rotation smoke.
 6. **DB-admin removal:** reject admin token creation, delete or revoke existing
@@ -274,7 +280,8 @@ production UX/security issues and must not block the singleton-admin backend.
   tokens still work, and DB admin rows are rejected after the removal slice.
 - API tests for closed-mode registration, duplicate pending names, approve,
   reject, one-time token reveal, and team-token usability after approval.
-- Audit tests proving admin mutations fail if audit insertion fails and that
+- Audit tests proving admin mutations fail if audit insertion fails, team users
+  cannot read the audit endpoint, admin token mutations require an actor, and
   audit metadata excludes raw secrets.
 - CLI tests proving `init-admin` and `rotate-admin` do not print raw token values
   by default and write files with mode `0600`.
@@ -285,6 +292,9 @@ production UX/security issues and must not block the singleton-admin backend.
   slice, but must log the fallback as development-only.
 - Shared dev can run the singleton-admin path before migration to validate SPA
   behavior without breaking Hongjian's v0.1 dev-env lane.
-- Production deployment is blocked until singleton admin, team approval, audit,
-  rotation, and DB-admin removal are all complete or an explicit deployment
-  exception is documented.
+- Production deployment is blocked until singleton admin, team approval, backend
+  audit, rotation, and DB-admin removal are all complete or an explicit
+  deployment exception is documented. Backend audit is now present for #10
+  registration review and service token admin mutations; broader admin mutation
+  coverage should be handled by follow-up issues instead of silently claiming
+  complete platform-wide audit.

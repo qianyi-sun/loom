@@ -50,6 +50,7 @@ async def registration_app(
         sync_engine = create_engine(postgres_url)
         with sync_engine.begin() as conn:
             for table_name in (
+                "admin_audit_events",
                 "tokens",
                 "team_quotas",
                 "pending_team_registrations",

@@ -22,11 +22,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, select, update
 
 from loom.db.schema import Token
+from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import (
     is_admin,
 )
@@ -99,6 +100,7 @@ async def create_token(
     request: Request,
     sc: SessionAndCtx,
     payload: _CreateTokenReq,
+    x_loom_admin_actor: str | None = Header(default=None),
 ) -> dict[str, str]:
     s, ctx = sc
 
@@ -114,6 +116,7 @@ async def create_token(
         )
 
     admin = is_admin(ctx)
+    admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
     if not admin:
         if payload.type != "team":
             raise HTTPException(
@@ -165,11 +168,28 @@ async def create_token(
         issued_at=datetime.now(UTC),
         expires_at=expires_at,
     ))
+    token_hash_prefix = token_hash.hex()[:8]
+    if admin_actor is not None:
+        await write_admin_audit_event(
+            s,
+            actor=admin_actor,
+            action="token.create",
+            target_type="token",
+            target_id=token_hash_prefix,
+            request=request,
+            metadata={
+                "token_hash_prefix": token_hash_prefix,
+                "token_type": payload.type,
+                "team_id": str(target_team) if target_team else None,
+                "scopes": list(payload.scopes),
+                "expires_at": expires_at.isoformat(),
+            },
+        )
     await s.commit()
 
     return {
         "token": raw,
-        "token_hash_prefix": token_hash.hex()[:8],
+        "token_hash_prefix": token_hash_prefix,
         "expires_at": expires_at.isoformat(),
     }
 
@@ -179,12 +199,15 @@ async def revoke_token(
     request: Request,
     sc: SessionAndCtx,
     prefix: str,
+    x_loom_admin_actor: str | None = Header(default=None),
 ) -> None:
     if len(prefix) != 8 or not all(c in "0123456789abcdef" for c in prefix):
         raise HTTPException(
             status_code=400, detail="prefix must be 8 lowercase hex chars",
         )
     s, ctx = sc
+    admin = is_admin(ctx)
+    admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
 
     # Scope the lookup to what the caller is allowed to see: team
     # callers can only revoke their own team's tokens, so include
@@ -228,4 +251,19 @@ async def revoke_token(
         .where(Token.token_hash == target.token_hash)
         .values(revoked_at=datetime.now(UTC)),
     )
+    if admin_actor is not None:
+        await write_admin_audit_event(
+            s,
+            actor=admin_actor,
+            action="token.revoke",
+            target_type="token",
+            target_id=prefix,
+            request=request,
+            metadata={
+                "token_hash_prefix": prefix,
+                "token_type": target.type,
+                "team_id": str(target.team_id) if target.team_id else None,
+                "scopes": list(target.scopes),
+            },
+        )
     await s.commit()
