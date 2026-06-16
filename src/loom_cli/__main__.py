@@ -255,6 +255,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "providers":
         from loom_cli.providers_cmd import dispatch as providers_dispatch
         return providers_dispatch(raw[1:])
+    if raw and raw[0] == "eval":
+        from loom_cli.eval_cmd import dispatch as eval_dispatch
+        return eval_dispatch(raw[1:])
     parser = _build_parser()
     args = parser.parse_args(raw)
     return cast(int, args.handler(args))
