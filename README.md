@@ -61,6 +61,8 @@ source .venv/bin/activate                         # so `loom` is on PATH
 
 loom datasets list                          # what's available
 loom config set token.anthropic sk-ant-xxx  # one-time provider key setup
+# Or put provider env vars in the nearest project .env; exported
+# shell variables still win over .env values.
 
 # Smoke test: one HumanEval task, oracle baseline, no real agent.
 loom run --task humaneval/HumanEval/0 \

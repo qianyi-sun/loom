@@ -60,6 +60,7 @@ ls /tmp/loom-smoke/<trial-id>/
 # Anthropic / OpenAI / Google API key
 loom config set token.anthropic sk-ant-...
 # Or via env: export ANTHROPIC_API_KEY=sk-ant-...
+# Or add ANTHROPIC_API_KEY=sk-ant-... to the nearest project .env.
 
 # Run a benchmark
 loom run \
@@ -70,6 +71,10 @@ loom run \
   --concurrency 4 \
   --output-dir ./runs
 ```
+
+On startup, the `loom` CLI walks up from the current directory to the
+nearest git root or home directory and loads the first `.env` it finds
+without overriding already-exported shell variables.
 
 Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout

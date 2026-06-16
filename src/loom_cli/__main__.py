@@ -4,11 +4,37 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import cast
 
+from dotenv import load_dotenv
+
 from loom_cli import __version__
+
+_LOG = logging.getLogger(__name__)
+
+
+def _find_dotenv_from_cwd() -> Path | None:
+    """Find .env from CWD upward without crossing a project boundary."""
+    current = Path.cwd().resolve()
+    home = Path.home().resolve()
+    for directory in (current, *current.parents):
+        dotenv_path = directory / ".env"
+        if dotenv_path.is_file():
+            return dotenv_path
+        if (directory / ".git").exists() or directory == home:
+            break
+    return None
+
+
+def _load_dotenv_from_cwd() -> None:
+    dotenv_path = _find_dotenv_from_cwd()
+    if dotenv_path is None:
+        return
+    load_dotenv(dotenv_path=dotenv_path, override=False)
+    _LOG.debug("loaded .env from %s", dotenv_path)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -245,6 +271,7 @@ def _serve_handler(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv_from_cwd()
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] == "datasets":
         from loom_cli.datasets_cmd import dispatch as datasets_dispatch

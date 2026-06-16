@@ -178,6 +178,12 @@ Internals:
   `~/.config/loom/config.toml`). `LoomConfig` dataclass with `tokens`
   + `server_url`. `loom config show` redacts token values to
   `<first2>***<last2>`.
+- **Environment** — `src/loom_cli/__main__.py` loads the nearest
+  project `.env` on CLI startup, walking upward from CWD and stopping
+  at the first git root or home directory. Loading uses
+  `override=False`, so exported shell variables take precedence over
+  `.env`, and no missing-file message is emitted when no `.env` is
+  found.
 - **Datasets discovery** — three sources merged with precedence
   `builtin > remote > catalog`:
   - `src/loom_cli/builtin.py` — entry-points loader
