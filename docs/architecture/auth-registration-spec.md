@@ -62,10 +62,12 @@ database `Token` row.
 ### File Location
 
 - Development default: `~/.config/loom/secrets.toml`.
-- Production: `LOOM_SVC_ADMIN_SECRET_FILE` is required and must point to a
-  mounted secret file, not an `envFrom` value.
-- `loom_control_plane` may also read the same secret for CP-internal admin
-  routes until those routes are fully driven through `loom_service`.
+- Production: `LOOM_SVC_ADMIN_SECRET_FILE` and `LOOM_CP_ADMIN_SECRET_FILE`
+  are required and must point to the same mounted secret file, not an
+  `envFrom` value.
+- `loom_control_plane` reads the same secret for CP-internal admin routes such
+  as worker-token bootstrap until those routes are fully driven through
+  `loom_service`.
 
 ### File Shape
 
@@ -242,10 +244,10 @@ production UX/security issues and must not block the singleton-admin backend.
 1. **Spec and docs:** this document plus links from docs index, service-mode,
    operator runbook, and security docs.
 2. **Admin secret verifier:** settings, file validation, in-memory verifier,
-   `loom_service` auth integration, Kubernetes secret mount, and production
-   startup guard. Keep DB-admin fallback only for development until the
-   migration slice. Control Plane admin-route integration may land as a
-   follow-up if the worker-token route is still served directly by CP.
+   `loom_service` and Control Plane admin-route auth integration, Kubernetes
+   secret mounts, and production startup guards. The Control Plane worker-token
+   bootstrap route reads the same singleton admin verifier. Keep DB-admin
+   fallback only for development until the migration slice.
 3. **Team registration API:** migration for `pending_team_registrations`, public
    register endpoint, admin list/approve/reject endpoint, and token mint once.
 4. **Audit events:** migration for `admin_audit_events`, audit writer helper,

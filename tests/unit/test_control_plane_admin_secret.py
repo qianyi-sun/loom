@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from loom.admin_secret import AdminSecretConfigError
+from loom_control_plane.app import _load_admin_secret_verifier
+from loom_control_plane.config import ControlPlaneSettings
+
+RAW_ADMIN_TOKEN = "loom_admin_" + "D" * 43
+
+
+def _settings(*, admin_secret_file: Path | None = None) -> ControlPlaneSettings:
+    return ControlPlaneSettings(
+        db_url="postgresql+psycopg://loom:pw@localhost:5432/loom",
+        minio_endpoint="http://localhost:9000",
+        minio_access_key="loomdev",
+        minio_secret_key="loomdev123",
+        llm_gateway_url="http://gateway:9100",
+        admin_secret_file=admin_secret_file,
+    )
+
+
+def _write_secret(path: Path) -> None:
+    path.write_text(
+        "[admin]\n"
+        f"token = \"{RAW_ADMIN_TOKEN}\"\n"
+        "created_at = \"2026-06-16T00:00:00Z\"\n"
+        "version = 1\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+def test_load_admin_secret_verifier_uses_configured_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LOOM_ENV", raising=False)
+    secret_file = tmp_path / "secrets.toml"
+    _write_secret(secret_file)
+
+    verifier = _load_admin_secret_verifier(_settings(admin_secret_file=secret_file))
+
+    assert verifier is not None
+    assert verifier.verify(RAW_ADMIN_TOKEN)
+
+
+def test_load_admin_secret_verifier_requires_file_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOOM_ENV", "production")
+
+    with pytest.raises(AdminSecretConfigError, match="admin secret"):
+        _load_admin_secret_verifier(_settings(admin_secret_file=None))

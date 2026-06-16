@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,7 @@ from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.routes import (
     admin,
@@ -27,11 +29,23 @@ from loom_control_plane.routes import (
 from loom_control_plane.scheduler.crash_detector import run_crash_detector_loop
 
 
+def _load_admin_secret_verifier(
+    settings: ControlPlaneSettings,
+) -> AdminSecretVerifier | None:
+    """Load singleton admin auth material for Control Plane startup."""
+    production = os.environ.get("LOOM_ENV", "").lower() == "production"
+    return load_optional_admin_secret_verifier(
+        settings.admin_secret_file,
+        production=production,
+    )
+
+
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(str(settings.db_url))
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        admin_secret_verifier = _load_admin_secret_verifier(settings)
 
         minio_client = boto3.client(
             "s3",
@@ -44,6 +58,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
 
         app.state.settings = settings
         app.state.session_factory = session_factory
+        app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
 
         crash_detector_task = asyncio.create_task(

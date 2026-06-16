@@ -29,7 +29,13 @@ async def issue_worker_token(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(
+                request.app.state, "admin_secret_verifier", None,
+            ),
+        )
     if ctx is None or "admin:tokens" not in ctx.scopes:
         raise HTTPException(status_code=403, detail="missing scope admin:tokens")
 
@@ -65,7 +71,13 @@ async def revoke_token(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(
+                request.app.state, "admin_secret_verifier", None,
+            ),
+        )
     if ctx is None or "admin:tokens" not in ctx.scopes:
         raise HTTPException(status_code=403, detail="missing scope")
     if not _HEX_PREFIX_RE.fullmatch(prefix):

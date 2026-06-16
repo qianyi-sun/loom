@@ -14,8 +14,12 @@ spec:
         - name: control-plane
           image: loom-control-plane:0.7
           env:
+            - name: LOOM_ENV
+              value: production
             - name: LOOM_CP_DB_URL
               valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
+            - name: LOOM_CP_ADMIN_SECRET_FILE
+              value: /var/run/loom/secrets/admin/secrets.toml
             - name: LOOM_CP_MINIO_ENDPOINT
               value: http://loom-minio:9000
             - name: LOOM_CP_MINIO_ACCESS_KEY
@@ -24,6 +28,10 @@ spec:
               valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
             - name: LOOM_CP_LLM_GATEWAY_URL
               value: http://loom-llm-gateway:9100
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/secrets/admin
+              readOnly: true
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -32,6 +40,11 @@ spec:
           resources:
             requests: { cpu: 200m, memory: 256Mi }
             limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0400
 ---
 apiVersion: v1
 kind: Service

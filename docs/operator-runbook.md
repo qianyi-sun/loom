@@ -69,21 +69,11 @@ EOF
    kubectl exec deploy/loom-control-plane -- alembic upgrade head
    ```
 
-5. **Mint a worker token** via the admin API. The admin credential for
-   `loom_service` now comes from `loom-admin-secret`. The direct Control Plane
-   worker-token route has not yet been migrated to the singleton verifier, so
-   this bootstrap step still uses the legacy temporary DB-admin row until the
-   CP integration and DB-admin removal slices land. Hash the same
-   `ADMIN_TOKEN` generated in step 2:
-   ```sql
-   INSERT INTO tokens (token_hash, type, scopes, issued_at)
-   VALUES (decode(sha256_hex('ADMIN_TOKEN_RAW_VALUE'), 'hex'),
-           'admin', ARRAY['admin:tokens'], now());
-   ```
-   Treat this SQL bootstrap as a remaining #10 gap: use it only to mint the
-   worker token for current alpha deployments, then remove or revoke the row.
-   Full production go-live remains blocked until the CP route and DB-admin
-   removal slices are complete.
+5. **Mint a worker token** via the admin API. The admin credential is the
+   singleton `loom-admin-secret` mounted into both `loom_service` and the
+   Control Plane. Use the same `ADMIN_TOKEN` generated in step 2; do not create
+   a temporary database-backed admin row for this bootstrap path.
+
    The Control Plane's `POST /admin/worker-tokens` route is
    intentionally NOT exposed via Ingress (see
    `deploy/k8s/ingress.yaml`). Reach it via port-forward:

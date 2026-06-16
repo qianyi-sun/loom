@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,30 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import Token
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
+
+RAW_ADMIN_TOKEN = "loom_admin_" + "C" * 43
+
+
+def _write_admin_secret(path: Path) -> None:
+    path.write_text(
+        "[admin]\n"
+        f"token = \"{RAW_ADMIN_TOKEN}\"\n"
+        "created_at = \"2026-06-16T00:00:00Z\"\n"
+        "version = 1\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+def _set_cp_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> None:
+    for k, v in {
+        "LOOM_CP_DB_URL": postgres_url,
+        "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
+        "LOOM_CP_MINIO_ACCESS_KEY": "x",
+        "LOOM_CP_MINIO_SECRET_KEY": "y",
+        "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
+    }.items():
+        monkeypatch.setenv(k, v)
 
 
 @pytest.fixture
@@ -36,14 +61,7 @@ def admin_seed(postgres_url: str) -> Iterator[str]:
 
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch, postgres_url: str, admin_seed: str):
-    for k, v in {
-        "LOOM_CP_DB_URL": postgres_url,
-        "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
-        "LOOM_CP_MINIO_ACCESS_KEY": "x",
-        "LOOM_CP_MINIO_SECRET_KEY": "y",
-        "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
-    }.items():
-        monkeypatch.setenv(k, v)
+    _set_cp_env(monkeypatch, postgres_url)
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
@@ -60,6 +78,30 @@ def test_issue_worker_token(app, admin_seed):  # type: ignore[no-untyped-def]
         assert "token_hash_prefix" in body
 
 
+def test_issue_worker_token_accepts_singleton_admin_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    postgres_url: str,
+) -> None:
+    secret_file = tmp_path / "secrets.toml"
+    _write_admin_secret(secret_file)
+    _set_cp_env(monkeypatch, postgres_url)
+    monkeypatch.setenv("LOOM_CP_ADMIN_SECRET_FILE", str(secret_file))
+    admin_app = create_app(ControlPlaneSettings(_env_file=None))
+
+    with TestClient(admin_app) as client:
+        r = client.post(
+            "/admin/worker-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={"expires_in_days": 90},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["token"].startswith("loom_w_")
+    assert "token_hash_prefix" in body
+
+
 def test_revoke_token(app, admin_seed):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
@@ -73,6 +115,33 @@ def test_revoke_token(app, admin_seed):  # type: ignore[no-untyped-def]
             headers={"Authorization": f"Bearer {admin_seed}"},
         )
         assert r2.status_code == 200
+
+
+def test_revoke_token_accepts_singleton_admin_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    postgres_url: str,
+) -> None:
+    secret_file = tmp_path / "secrets.toml"
+    _write_admin_secret(secret_file)
+    _set_cp_env(monkeypatch, postgres_url)
+    monkeypatch.setenv("LOOM_CP_ADMIN_SECRET_FILE", str(secret_file))
+    admin_app = create_app(ControlPlaneSettings(_env_file=None))
+
+    with TestClient(admin_app) as client:
+        r = client.post(
+            "/admin/worker-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={"expires_in_days": 1},
+        )
+        assert r.status_code == 201, r.text
+        prefix = r.json()["token_hash_prefix"]
+        r2 = client.delete(
+            f"/admin/worker-tokens/{prefix}",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+
+    assert r2.status_code == 200, r2.text
 
 
 def test_issue_without_admin_scope_rejected(app, admin_seed):  # type: ignore[no-untyped-def]

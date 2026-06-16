@@ -64,6 +64,34 @@ def load_admin_secret_file(
     return AdminSecretVerifier.from_token(token)
 
 
+def load_optional_admin_secret_verifier(
+    configured_path: Path | None,
+    *,
+    production: bool,
+    default_path: Path | None = None,
+) -> AdminSecretVerifier | None:
+    """Load singleton admin auth material for a Loom process.
+
+    Service and Control Plane share the same operator-managed file shape. In
+    development, absence means the process continues on legacy DB-backed admin
+    fixtures. In production, absence is a startup error.
+    """
+    fallback_path = default_path or Path.home() / ".config" / "loom" / "secrets.toml"
+    secret_path = configured_path
+    if secret_path is None and fallback_path.is_file():
+        secret_path = fallback_path
+    if secret_path is None:
+        if production:
+            raise AdminSecretConfigError(
+                "admin secret file is required when LOOM_ENV=production",
+            )
+        return None
+    return load_admin_secret_file(
+        secret_path,
+        require_safe_permissions=production,
+    )
+
+
 def _validate_admin_token(token: str) -> None:
     if not token.startswith(_ADMIN_PREFIX):
         raise AdminSecretConfigError("admin token must start with loom_admin_")

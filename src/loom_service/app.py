@@ -13,7 +13,6 @@ import contextlib
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import boto3
 import httpx
@@ -22,9 +21,8 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.admin_secret import (
-    AdminSecretConfigError,
     AdminSecretVerifier,
-    load_admin_secret_file,
+    load_optional_admin_secret_verifier,
 )
 from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
@@ -53,20 +51,9 @@ def _load_admin_secret_verifier(
 ) -> AdminSecretVerifier | None:
     """Load singleton admin auth material for loom_service startup."""
     production = os.environ.get("LOOM_ENV", "").lower() == "production"
-    configured_path = settings.admin_secret_file
-    default_path = Path.home() / ".config" / "loom" / "secrets.toml"
-    secret_path = configured_path
-    if secret_path is None and default_path.is_file():
-        secret_path = default_path
-    if secret_path is None:
-        if production:
-            raise AdminSecretConfigError(
-                "admin secret file is required when LOOM_ENV=production",
-            )
-        return None
-    return load_admin_secret_file(
-        secret_path,
-        require_safe_permissions=production,
+    return load_optional_admin_secret_verifier(
+        settings.admin_secret_file,
+        production=production,
     )
 
 

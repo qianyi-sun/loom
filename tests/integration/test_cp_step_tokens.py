@@ -18,6 +18,17 @@ from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
 
+def _set_cp_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> None:
+    for k, v in {
+        "LOOM_CP_DB_URL": postgres_url,
+        "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
+        "LOOM_CP_MINIO_ACCESS_KEY": "x",
+        "LOOM_CP_MINIO_SECRET_KEY": "y",
+        "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
+    }.items():
+        monkeypatch.setenv(k, v)
+
+
 @pytest.fixture
 def seed(postgres_url: str) -> Iterator[dict]:
     """Seed a worker token + one team + one trial (so the step-token mint
@@ -66,14 +77,7 @@ def worker_token(seed: dict) -> str:
 
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch, postgres_url: str, worker_token: str):
-    for k, v in {
-        "LOOM_CP_DB_URL": postgres_url,
-        "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
-        "LOOM_CP_MINIO_ACCESS_KEY": "x",
-        "LOOM_CP_MINIO_SECRET_KEY": "y",
-        "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
-    }.items():
-        monkeypatch.setenv(k, v)
+    _set_cp_env(monkeypatch, postgres_url)
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
