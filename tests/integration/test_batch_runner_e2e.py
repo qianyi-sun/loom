@@ -21,7 +21,15 @@ from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import (
+    Batch,
+    ProviderConnection,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+)
 from loom_service.batch_runner import (
     _idempotency_key,
     next_batch_state,
@@ -33,7 +41,7 @@ from loom_service.batch_runner import (
 async def runner_setup(
     postgres_url: str,
 ) -> AsyncIterator[tuple[
-    async_sessionmaker, httpx.AsyncClient, UUID, list[str],
+    async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
 ]]:
     engine = create_async_engine(postgres_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -104,6 +112,11 @@ async def runner_setup(
                     ),
                     idempotency_key=idem,
                     sample_idx=int(body.get("sample_idx") or 0),
+                    provider_connection_id=(
+                        UUID(body["provider_connection_id"])
+                        if body.get("provider_connection_id") else None
+                    ),
+                    provider_model_id=body.get("provider_model_id"),
                 ))
                 s.commit()
             return httpx.Response(
@@ -123,7 +136,7 @@ async def runner_setup(
     )
 
     try:
-        yield session_factory, http_client, team_id, task_ids
+        yield session_factory, http_client, team_id, task_ids, captured
     finally:
         await http_client.aclose()
         await engine.dispose()
@@ -133,6 +146,7 @@ async def runner_setup(
             s.execute(delete(Trial))
             s.execute(delete(Token))
             s.execute(delete(Batch))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -141,10 +155,12 @@ async def runner_setup(
 
 
 async def test_runner_fans_out_5_trials(
-    runner_setup: tuple[async_sessionmaker, httpx.AsyncClient, UUID, list[str]],
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
     postgres_url: str,
 ) -> None:
-    session_factory, http_client, team_id, task_ids = runner_setup
+    session_factory, http_client, team_id, task_ids, _captured = runner_setup
     async with session_factory() as s:
         c = Batch(
             team_id=team_id, name="C",
@@ -190,11 +206,13 @@ async def test_runner_fans_out_5_trials(
 
 
 async def test_runner_is_idempotent(
-    runner_setup: tuple[async_sessionmaker, httpx.AsyncClient, UUID, list[str]],
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
     postgres_url: str,
 ) -> None:
     """Running the runner twice produces exactly 5 trials, not 10."""
-    session_factory, http_client, team_id, _task_ids = runner_setup
+    session_factory, http_client, team_id, _task_ids, _captured = runner_setup
     async with session_factory() as s:
         c = Batch(
             team_id=team_id, name="C",
@@ -228,13 +246,15 @@ async def test_runner_is_idempotent(
 
 
 async def test_runner_advances_to_finished_when_all_terminal(
-    runner_setup: tuple[async_sessionmaker, httpx.AsyncClient, UUID, list[str]],
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
     postgres_url: str,
 ) -> None:
     """After the runner submits, externally mark every trial succeeded
     and run again — the runner should transition the batch to
     finished."""
-    session_factory, http_client, team_id, _task_ids = runner_setup
+    session_factory, http_client, team_id, _task_ids, _captured = runner_setup
     async with session_factory() as s:
         c = Batch(
             team_id=team_id, name="C",
@@ -285,14 +305,16 @@ async def test_runner_advances_to_finished_when_all_terminal(
 
 
 async def test_runner_fans_out_n_samples_per_task(
-    runner_setup: tuple[async_sessionmaker, httpx.AsyncClient, UUID, list[str]],
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
     postgres_url: str,
 ) -> None:
     """Plan 23: batch.n_per_task=3 produces 3 trials per matched
     task, each with a distinct sample_idx 0..2, each carrying the
     sample-aware idempotency key. Re-running the runner is still
     idempotent — no duplicates."""
-    session_factory, http_client, team_id, task_ids = runner_setup
+    session_factory, http_client, team_id, task_ids, _captured = runner_setup
     async with session_factory() as s:
         c = Batch(
             team_id=team_id, name="C",
@@ -334,6 +356,72 @@ async def test_runner_fans_out_n_samples_per_task(
         == _idempotency_key(cid, t.task_id, t.sample_idx)
         for t in trials
     )
+
+
+async def test_runner_forwards_batch_provider_connection_fields(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, _task_ids, captured = runner_setup
+    conn_id = uuid4()
+    async with session_factory() as s:
+        s.add(ProviderConnection(
+            id=conn_id,
+            team_id=team_id,
+            provider_type="openai-compatible",
+            display_name="Lab vLLM",
+            base_url="https://api.openai.com/v1",
+            upstream_host="api.openai.com",
+            resolved_egress_ips=["104.18.0.1"],
+            encrypted_api_key_ref="test://runner",
+            status="valid",
+            pricing_source="tokens-only",
+            rate_card_provider="openai",
+            created_by="test:runner",
+        ))
+        await s.flush()
+        c = Batch(
+            team_id=team_id,
+            name="C",
+            task_filter={"license": "MIT"},
+            trial_config={"agent_name": "litellm"},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=5,
+            provider_connection_id=conn_id,
+            provider_model_id="deepseek-chat",
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    assert captured
+    assert {body["provider_connection_id"] for body in captured} == {
+        str(conn_id),
+    }
+    assert {body["provider_model_id"] for body in captured} == {
+        "deepseek-chat",
+    }
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial).where(Trial.batch_id == cid),
+        ).scalars().all()
+    sync_engine.dispose()
+    assert {t.provider_connection_id for t in trials} == {conn_id}
+    assert {t.provider_model_id for t in trials} == {"deepseek-chat"}
 
 
 # Sanity import to keep `next_batch_state` referenced.

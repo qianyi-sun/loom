@@ -229,6 +229,39 @@ Then switch `pricing_source` to `rate-card` only after the Gateway's
 with a missing entry still record tokens and use
 `rate_card_hash='facade:rate-card:missing'` with `cost_usd=0`.
 
+## BYO provider model selection
+
+Provider discovery is cached per connection:
+
+```bash
+loom providers models refresh lab-vllm
+loom providers models list lab-vllm
+```
+
+The service launch catalog at `GET /api/v1/models` defaults to
+agent-capable models only. Raw provider entries are still available with
+`GET /api/v1/models?view=raw`; suppressed entries include
+`hidden_reason` values such as `classifier-non-llm` so operators can
+debug noisy OpenAI-compatible catalogs.
+
+For self-hosted endpoints that do not implement useful discovery, add
+the model id manually through the provider model API:
+
+```bash
+curl -X POST \
+  "https://loom.example.com/api/v1/provider-connections/$CONNECTION_ID/models" \
+  -H "Authorization: Bearer $TEAM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"my-vllm-checkpoint"}'
+```
+
+Manual entries are tied to the provider connection and remain visible
+after refreshes even when upstream `/models` omits them. The SPA's
+normal launch flow selects one provider connection and one concrete
+model id for a batch; the current backend contract stores that override
+at batch level, so all BYO-provider combinations in one batch must share
+the same connection/model.
+
 ## Alarm response (troubleshooting matrix)
 
 | Symptom | Likely cause | First check |

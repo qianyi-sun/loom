@@ -17,7 +17,14 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import RateCard, Team, TeamQuota, Token
+from loom.db.schema import (
+    ProviderConnection,
+    ProviderModelCache,
+    RateCard,
+    Team,
+    TeamQuota,
+    Token,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -56,6 +63,7 @@ async def setup(
     raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
+    conn_id = uuid4()
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(Token).values(
@@ -93,6 +101,37 @@ async def setup(
                 ],
             },
         ))
+        s.execute(insert(ProviderConnection).values(
+            id=conn_id,
+            team_id=team_id,
+            provider_type="openai-compatible",
+            display_name="Lab vLLM",
+            base_url="https://api.openai.com/v1",
+            upstream_host="api.openai.com",
+            resolved_egress_ips=["104.18.0.1"],
+            encrypted_api_key_ref="test://lab-vllm",
+            allowed_models=None,
+            status="valid",
+            pricing_source="tokens-only",
+            pricing_data=None,
+            rate_card_provider="openai",
+            created_by="test:service-models",
+        ))
+        now = datetime.now(UTC)
+        for model_id in [
+            "deepseek-chat",
+            "amap-coordinate-convert",
+            "apisports-afl-games",
+            "tushare-stock-basic",
+        ]:
+            s.execute(insert(ProviderModelCache).values(
+                provider_connection_id=conn_id,
+                model_id=model_id,
+                capabilities={},
+                visible=True,
+                last_seen_at=now,
+                upstream_present=True,
+            ))
         s.commit()
     try:
         yield app, raw
@@ -101,6 +140,7 @@ async def setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Token))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(RateCard))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -147,7 +187,7 @@ async def test_agents_includes_builtins_and_adapters(
     assert by_name["claude-code"]["supported_model_sources"] == ["api"]
 
 
-async def test_models_deduplicates_across_rate_cards(
+async def test_models_deduplicates_across_rate_cards_and_adds_byo_metadata(
     setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = setup
@@ -161,13 +201,59 @@ async def test_models_deduplicates_across_rate_cards(
         )
     assert r.status_code == 200
     items = r.json()["items"]
-    pairs = [(m["provider"], m["name"]) for m in items]
+    rate_card_pairs = [
+        (m["provider"], m["name"]) for m in items
+        if m["source"] == "rate-card"
+    ]
     # claude-opus-4-7 appears in both cards but only once here.
-    assert pairs == [
+    assert rate_card_pairs == [
         ("anthropic", "claude-opus-4-7"),
         ("google", "gemini-2.5-pro"),
         ("openai", "gpt-4o"),
     ]
+    byo_items = [
+        m for m in items
+        if m.get("provider_connection_name") == "Lab vLLM"
+    ]
+    assert [m["name"] for m in byo_items] == ["deepseek-chat"]
+    item = byo_items[0]
+    assert item["provider"] == "openai"
+    assert item["provider_connection_id"]
+    assert item["provider_connection_type"] == "openai-compatible"
+    assert item["source"] == "discovered"
+    assert item["agent_capable"] is True
+    assert item["recommended"] is True
+    assert item["visibility"] == "default"
+    assert item["hidden_reason"] is None
+    assert item["last_seen_at"] is not None
+
+
+async def test_models_raw_view_explains_filtered_tool_api_entries(
+    setup: tuple[FastAPI, str],
+) -> None:
+    app, raw = setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/models?view=raw",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200
+    by_name = {m["name"]: m for m in r.json()["items"]}
+    for model_id in [
+        "amap-coordinate-convert",
+        "apisports-afl-games",
+        "tushare-stock-basic",
+    ]:
+        item = by_name[model_id]
+        assert item["provider_connection_name"] == "Lab vLLM"
+        assert item["source"] == "discovered"
+        assert item["agent_capable"] is False
+        assert item["recommended"] is False
+        assert item["visibility"] == "advanced"
+        assert item["hidden_reason"] == "classifier-non-llm"
 
 
 async def test_agents_unauthenticated_401(

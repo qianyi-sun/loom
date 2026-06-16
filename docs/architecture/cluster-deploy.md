@@ -285,7 +285,19 @@ model_id                text       -- (PK with provider_connection_id)
 family, context_length, capabilities, last_seen_at, visible, hidden_reason, upstream_present
 ```
 
-`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable; null = use platform-default provider). Trial FK has no cascade — soft-delete keeps audit/billing references valid.
+`capabilities.source` is `"discovered"` for upstream `/models` entries
+and `"manual"` for user-entered model ids. Manual rows stay visible even
+when a later refresh does not return the id, which keeps self-hosted
+OpenAI-compatible endpoints usable when discovery is absent or noisy.
+
+`GET /api/v1/models` returns a launch-safe catalog by default. It
+includes legacy rate-card tuples plus team-visible provider-connection
+cache rows tagged with `source`, `agent_capable`, `recommended`,
+`visibility`, `hidden_reason`, `provider_connection_id`, and freshness
+metadata. `view=raw` includes suppressed tool/API entries such as
+Amap/APISports/TuShare-style ids with classifier reasons for debugging.
+
+`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable; null = use platform-default provider). Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice.
 
 ## Secrets, SSRF, gateway hot path
 

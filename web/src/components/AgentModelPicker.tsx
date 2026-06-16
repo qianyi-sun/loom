@@ -29,7 +29,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { api } from "../api/client";
+import {
+  api,
+  type ModelEntry,
+  type ProviderConnectionEntry,
+} from "../api/client";
 import { Button } from "./Button";
 import { Input } from "./Input";
 
@@ -41,6 +45,9 @@ export interface AgentModelValue {
   source: ModelSource;
   modelProvider: string;
   modelName: string;
+  providerConnectionId?: string;
+  providerConnectionName?: string;
+  manualModel?: boolean;
   /** Required when source = "local-server". Name of an operator-configured server. */
   localServer?: string;
   /** Required when source = "hf". local-vllm (default) spawns vLLM; inference-api hits HF. */
@@ -63,11 +70,6 @@ interface AgentEntry {
   supported_model_sources: string[];
 }
 
-interface ModelEntry {
-  provider: string;
-  name: string;
-}
-
 interface LocalServerEntry {
   name: string;
   base_url: string;
@@ -82,11 +84,18 @@ const CUSTOM_MODEL_KEY = "__custom__";
 const ALL_SOURCES: ModelSource[] = ["api", "local-server", "hf"];
 
 function modelKey(m: ModelEntry): string {
-  return `${m.provider}|${m.name}`;
+  return `${m.provider}|${m.name}|${m.provider_connection_id ?? ""}`;
 }
 
 function sourceLabel(s: ModelSource): string {
-  return s === "api" ? "Catalog" : s === "hf" ? "HuggingFace" : "Local server";
+  return s === "api" ? "Provider API" : s === "hf" ? "HuggingFace" : "Local server";
+}
+
+function providerNamespace(conn: ProviderConnectionEntry | undefined): string {
+  if (!conn) return "";
+  if (conn.rate_card_provider) return conn.rate_card_provider;
+  if (conn.type === "openai-compatible") return "openai";
+  return conn.type;
 }
 
 export function AgentModelPicker({
@@ -94,14 +103,21 @@ export function AgentModelPicker({
   onChange,
   disabled,
 }: AgentModelPickerProps): JSX.Element {
+  const [showRaw, setShowRaw] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
   const agents = useQuery({
     queryKey: ["agents"],
     queryFn: () => api.listAgents(),
     staleTime: 5 * 60 * 1000,
   });
   const models = useQuery({
-    queryKey: ["models"],
-    queryFn: () => api.listModels(),
+    queryKey: ["models", showRaw ? "raw" : "default"],
+    queryFn: () => api.listModels(showRaw ? "raw" : "default"),
+    staleTime: 5 * 60 * 1000,
+  });
+  const providerConnections = useQuery({
+    queryKey: ["provider-connections"],
+    queryFn: () => api.listProviderConnections(),
     staleTime: 5 * 60 * 1000,
   });
   const localServers = useQuery({
@@ -133,6 +149,9 @@ export function AgentModelPicker({
       source: firstSource,
       modelProvider: "",
       modelName: "",
+      providerConnectionId: undefined,
+      providerConnectionName: undefined,
+      manualModel: false,
       hfExecution: "local-vllm",
     });
   }, [agents.data, value.agentName, onChange]);
@@ -163,10 +182,49 @@ export function AgentModelPicker({
     onChange({ ...value, source: firstSrc });
   }, [selectedAgent, availableSources, value, onChange]);
 
-  // For the catalog tab: filter the model list by the agent's
-  // supported_providers (unless "*").
+  const connectionList = useMemo(
+    () =>
+      [...(providerConnections.data?.items ?? [])].sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ),
+    [providerConnections.data],
+  );
+
+  const selectedConnection = useMemo(
+    () =>
+      connectionList.find((c) => c.id === value.providerConnectionId),
+    [connectionList, value.providerConnectionId],
+  );
+
   const filteredModels: ModelEntry[] = useMemo(() => {
     const items = models.data?.items ?? [];
+    const q = modelSearch.trim().toLocaleLowerCase();
+    const allowed = selectedAgent?.supported_providers.includes("*")
+      ? null
+      : new Set(selectedAgent?.supported_providers ?? []);
+    return items.filter((m) => {
+      if (m.provider_connection_id !== value.providerConnectionId) {
+        return false;
+      }
+      if (allowed !== null && !allowed.has(m.provider)) {
+        return false;
+      }
+      if (q && !m.name.toLocaleLowerCase().includes(q)) {
+        return false;
+      }
+      return true;
+    });
+  }, [
+    models.data,
+    modelSearch,
+    selectedAgent,
+    value.providerConnectionId,
+  ]);
+
+  const fallbackCatalogModels: ModelEntry[] = useMemo(() => {
+    const items = (models.data?.items ?? []).filter(
+      (m) => !m.provider_connection_id,
+    );
     if (!selectedAgent || selectedAgent.supported_providers.includes("*")) {
       return items;
     }
@@ -174,29 +232,21 @@ export function AgentModelPicker({
     return items.filter((m) => allowed.has(m.provider));
   }, [models.data, selectedAgent]);
 
-  const modelGroups = useMemo(() => {
-    const grouped: Record<string, ModelEntry[]> = {};
-    for (const m of filteredModels) {
-      (grouped[m.provider] ??= []).push(m);
-    }
-    return Object.entries(grouped)
-      .map(([provider, entries]) => ({
-        provider,
-        entries: entries.sort((a, b) => a.name.localeCompare(b.name)),
-      }))
-      .sort((a, b) => a.provider.localeCompare(b.provider));
-  }, [filteredModels]);
-
   const needsModel = selectedAgent?.needs_model ?? true;
 
-  // Custom-catalog mode state (existing behavior preserved).
   const inCatalog = useMemo(() => {
     if (!models.data) return false;
-    return filteredModels.some(
+    return [...filteredModels, ...fallbackCatalogModels].some(
       (m) =>
         m.provider === value.modelProvider && m.name === value.modelName,
     );
-  }, [models.data, filteredModels, value.modelProvider, value.modelName]);
+  }, [
+    models.data,
+    filteredModels,
+    fallbackCatalogModels,
+    value.modelProvider,
+    value.modelName,
+  ]);
 
   const [customMode, setCustomMode] = useState(false);
   const customCacheRef = useRef<{ provider: string; name: string }>({
@@ -246,98 +296,211 @@ export function AgentModelPicker({
 
   const leaveCustomMode = (): void => {
     setCustomMode(false);
-    onChange({ ...value, modelProvider: "", modelName: "" });
+    onChange({
+      ...value,
+      modelProvider: "",
+      modelName: "",
+      manualModel: false,
+    });
   };
 
   const selectedModelKey = customMode
     ? CUSTOM_MODEL_KEY
     : value.modelProvider && value.modelName
-      ? modelKey({ provider: value.modelProvider, name: value.modelName })
+      ? modelKey({
+          provider: value.modelProvider,
+          name: value.modelName,
+          provider_connection_id: value.providerConnectionId,
+        })
       : "";
 
   const renderCatalogPanel = (): JSX.Element => (
-    <div className="space-y-2">
+    <div className="space-y-3">
+      <label className="block">
+        <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+          Provider connection
+        </span>
+        <select
+          aria-label="Provider connection"
+          className={SELECT_CLS}
+          value={value.providerConnectionId ?? ""}
+          disabled={disabled || providerConnections.isPending}
+          onChange={(e) => {
+            const conn = connectionList.find((c) => c.id === e.target.value);
+            setCustomMode(false);
+            onChange({
+              ...value,
+              providerConnectionId: conn?.id,
+              providerConnectionName: conn?.name,
+              modelProvider: providerNamespace(conn),
+              modelName: "",
+              manualModel: false,
+            });
+          }}
+        >
+          <option value="">Choose a connection…</option>
+          {connectionList.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name} ({c.type})
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {connectionList.length === 0 && fallbackCatalogModels.length > 0 ? (
+        <p className="text-xs text-slate-500">
+          No provider connections are registered; showing legacy catalog models.
+        </p>
+      ) : null}
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label className="block flex-1">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Search models
+          </span>
+          <Input
+            value={modelSearch}
+            onChange={(e) => setModelSearch(e.target.value)}
+            placeholder="deepseek, qwen, llama"
+            disabled={disabled}
+          />
+        </label>
+        <label className="flex items-center gap-2 pb-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={showRaw}
+            onChange={(e) => setShowRaw(e.target.checked)}
+            disabled={disabled}
+            className="h-4 w-4 rounded border-slate-300"
+          />
+          <span>Show raw</span>
+        </label>
+      </div>
+
       <label className="block">
         <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
           Model
         </span>
         <select
+          aria-label="Model"
           className={SELECT_CLS}
           value={selectedModelKey}
-          disabled={disabled || models.isPending}
+          disabled={
+            disabled || models.isPending ||
+            (connectionList.length > 0 && !value.providerConnectionId)
+          }
           onChange={(e) => {
             const v = e.target.value;
             if (v === CUSTOM_MODEL_KEY) {
               enterCustomMode();
+              const provider = providerNamespace(selectedConnection);
+              onChange({
+                ...value,
+                modelProvider: provider,
+                modelName: "",
+                manualModel: true,
+              });
               return;
             }
             setCustomMode(false);
-            const [provider, name] = v.split("|");
+            const selected = [...filteredModels, ...fallbackCatalogModels]
+              .find((m) => modelKey(m) === v);
             onChange({
               ...value,
-              modelProvider: provider ?? "",
-              modelName: name ?? "",
+              modelProvider: selected?.provider ?? "",
+              modelName: selected?.name ?? "",
+              providerConnectionId: selected?.provider_connection_id
+                ?? value.providerConnectionId,
+              providerConnectionName: selected?.provider_connection_name
+                ?? value.providerConnectionName,
+              manualModel: false,
             });
           }}
         >
           <option value="">Choose a model…</option>
-          {modelGroups.map((g) => (
-            <optgroup key={g.provider} label={g.provider}>
-              {g.entries.map((m) => (
-                <option key={modelKey(m)} value={modelKey(m)}>
-                  {m.name}
-                </option>
-              ))}
-            </optgroup>
-          ))}
-          <option value={CUSTOM_MODEL_KEY}>Custom model…</option>
+          {(value.providerConnectionId ? filteredModels : fallbackCatalogModels)
+            .map((m) => (
+              <option key={modelKey(m)} value={modelKey(m)}>
+                {m.name}
+                {showRaw && m.hidden_reason ? ` (${m.hidden_reason})` : ""}
+              </option>
+            ))}
+          <option value={CUSTOM_MODEL_KEY}>Manual model…</option>
         </select>
       </label>
       {customMode ? (
         <div className="space-y-2">
-          <div className="grid grid-cols-2 gap-2">
+          {selectedConnection ? (
             <label className="block">
               <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                Provider
-              </span>
-              <Input
-                value={value.modelProvider}
-                onChange={(e) =>
-                  onChange({ ...value, modelProvider: e.target.value })
-                }
-                placeholder="anthropic"
-                disabled={disabled}
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                Model name
+                Manual model id
               </span>
               <Input
                 value={value.modelName}
                 onChange={(e) =>
-                  onChange({ ...value, modelName: e.target.value })
+                  onChange({
+                    ...value,
+                    modelProvider: providerNamespace(selectedConnection)
+                      || value.modelProvider,
+                    modelName: e.target.value,
+                    manualModel: true,
+                  })
                 }
-                placeholder="claude-opus-4-7"
+                placeholder="manual-vllm-checkpoint"
                 disabled={disabled}
               />
             </label>
-          </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                  Provider
+                </span>
+                <Input
+                  value={value.modelProvider}
+                  onChange={(e) =>
+                    onChange({
+                      ...value,
+                      modelProvider: e.target.value,
+                      manualModel: false,
+                    })
+                  }
+                  placeholder="anthropic"
+                  disabled={disabled}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+                  Model name
+                </span>
+                <Input
+                  value={value.modelName}
+                  onChange={(e) =>
+                    onChange({
+                      ...value,
+                      modelName: e.target.value,
+                      manualModel: false,
+                    })
+                  }
+                  placeholder="claude-opus-4-7"
+                  disabled={disabled}
+                />
+              </label>
+            </div>
+          )}
           <Button
             size="sm"
             variant="secondary"
             onClick={leaveCustomMode}
             disabled={disabled}
           >
-            Back to catalog
+            Back to discovered models
           </Button>
         </div>
       ) : null}
-      {filteredModels.length === 0 && !customMode ? (
+      {value.providerConnectionId && filteredModels.length === 0 && !customMode ? (
         <p className="text-xs text-amber-700">
-          No catalog models match this agent's supported providers.
-          Use &ldquo;Custom model…&rdquo; to point at any model the
-          Gateway accepts.
+          No discovered models match this agent and search.
         </p>
       ) : null}
     </div>
@@ -471,6 +634,7 @@ export function AgentModelPicker({
           Agent
         </span>
         <select
+          aria-label="Agent"
           className={SELECT_CLS}
           value={value.agentName}
           disabled={disabled || agents.isPending}
@@ -487,6 +651,9 @@ export function AgentModelPicker({
               source: next.needs_model ? nextSource : value.source,
               modelProvider: "",
               modelName: "",
+              providerConnectionId: undefined,
+              providerConnectionName: undefined,
+              manualModel: false,
               hfExecution: "local-vllm",
               localServer: undefined,
             });
@@ -525,7 +692,17 @@ export function AgentModelPicker({
                     type="button"
                     role="tab"
                     aria-selected={active}
-                    onClick={() => onChange({ ...value, source: s })}
+                    onClick={() =>
+                      onChange({
+                        ...value,
+                        source: s,
+                        modelProvider: "",
+                        modelName: "",
+                        providerConnectionId: undefined,
+                        providerConnectionName: undefined,
+                        manualModel: false,
+                      })
+                    }
                     disabled={disabled}
                     className={
                       "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
@@ -595,5 +772,26 @@ export function buildAgentModel(
     name,
     source: "local-server",
     local_server: ls,
+  };
+}
+
+export interface ProviderOverride {
+  provider_connection_id: string;
+  provider_model_id: string;
+  manual_model: boolean;
+}
+
+export function buildProviderOverride(
+  value: AgentModelValue,
+  needsModel: boolean,
+): ProviderOverride | null {
+  if (!needsModel || value.source !== "api") return null;
+  const connectionId = value.providerConnectionId?.trim();
+  const modelId = value.modelName.trim();
+  if (!connectionId || !modelId) return null;
+  return {
+    provider_connection_id: connectionId,
+    provider_model_id: modelId,
+    manual_model: value.manualModel === true,
   };
 }

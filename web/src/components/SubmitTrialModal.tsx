@@ -14,6 +14,7 @@ import { api } from "../api/client";
 import {
   AgentModelPicker,
   buildAgentModel,
+  buildProviderOverride,
   type AgentModelValue,
 } from "./AgentModelPicker";
 import { Button } from "./Button";
@@ -66,11 +67,26 @@ export function SubmitTrialModal({
       );
       return;
     }
+    const providerOverride = buildProviderOverride(
+      value, selected.needs_model,
+    );
     setSubmitting(true);
     try {
+      if (providerOverride?.manual_model) {
+        await api.createProviderConnectionModel(
+          providerOverride.provider_connection_id,
+          { model_id: providerOverride.provider_model_id },
+        );
+      }
       const result = await api.submitTrial({
         task_id: taskId,
         config: { agent_name: selected.name, agent_model: agentModel },
+        ...(providerOverride
+          ? {
+              provider_connection_id: providerOverride.provider_connection_id,
+              provider_model_id: providerOverride.provider_model_id,
+            }
+          : {}),
       });
       onClose();
       navigate(`/trials/${result.trial_id}`);

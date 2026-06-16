@@ -50,6 +50,7 @@ from loom_service.provider_connections_service import (
     resolve_and_validate,
     validate_pricing,
 )
+from loom_service.provider_model_classifier import classify_model_id
 
 router = APIRouter()
 
@@ -160,6 +161,10 @@ class ProviderModelCacheEntry(BaseModel):
     hidden_reason: str | None
     last_seen_at: datetime
     upstream_present: bool
+    source: str
+    agent_capable: bool
+    recommended: bool
+    visibility: str
 
 
 class ProviderModelCacheListResponse(BaseModel):
@@ -180,22 +185,54 @@ class ProviderModelRefreshResponse(BaseModel):
     items: list[ProviderModelCacheEntry]
 
 
+class ProviderModelManualCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(min_length=1, max_length=512)
+    family: str | None = Field(default=None, max_length=128)
+    context_length: int | None = Field(default=None, gt=0)
+    capabilities: dict[str, object] = Field(default_factory=dict)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
 
 
 def _cache_row_to_entry(row: ProviderModelCache) -> ProviderModelCacheEntry:
+    capabilities = dict(row.capabilities or {})
+    source = capabilities.get("source")
+    source_str = source if isinstance(source, str) else "discovered"
+    classification = classify_model_id(
+        row.model_id, source=source_str, family=row.family,
+    )
+    if not row.visible:
+        visibility = "hidden"
+        recommended = False
+        hidden_reason = row.hidden_reason
+    else:
+        visibility = classification.visibility
+        recommended = classification.recommended
+        hidden_reason = row.hidden_reason or classification.reason
     return ProviderModelCacheEntry(
         model_id=row.model_id,
         family=row.family,
         context_length=row.context_length,
-        capabilities=dict(row.capabilities or {}),
+        capabilities=capabilities,
         visible=row.visible,
-        hidden_reason=row.hidden_reason,
+        hidden_reason=hidden_reason,
         last_seen_at=row.last_seen_at,
         upstream_present=row.upstream_present,
+        source=source_str,
+        agent_capable=classification.agent_capable,
+        recommended=recommended,
+        visibility=visibility,
     )
+
+
+def _is_manual_model(row: ProviderModelCache) -> bool:
+    source = (row.capabilities or {}).get("source")
+    return source == "manual"
 
 
 def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
@@ -570,6 +607,64 @@ async def list_models(
 
 
 @router.post(
+    "/provider-connections/{connection_id}/models",
+    response_model=ProviderModelCacheEntry,
+    status_code=201,
+)
+async def create_manual_model(
+    connection_id: UUID,
+    payload: ProviderModelManualCreate,
+    sc: SessionAndCtx,
+) -> ProviderModelCacheEntry:
+    """Upsert an explicit model id for endpoints with no discovery.
+
+    Manual rows share `provider_models_cache` so the selector sees one
+    per-connection catalog. They remain visible even when a later
+    upstream refresh does not return the id.
+    """
+    session, ctx = sc
+    row = await _get_active_connection(session, connection_id, ctx)
+    now = datetime.now(UTC)
+    capabilities = dict(payload.capabilities)
+    capabilities["source"] = "manual"
+    stmt = pg_insert(ProviderModelCache).values(
+        provider_connection_id=row.id,
+        model_id=payload.model_id,
+        family=payload.family,
+        context_length=payload.context_length,
+        capabilities=capabilities,
+        visible=True,
+        hidden_reason=None,
+        last_seen_at=now,
+        upstream_present=False,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            ProviderModelCache.provider_connection_id,
+            ProviderModelCache.model_id,
+        ],
+        set_=dict(
+            family=payload.family,
+            context_length=payload.context_length,
+            capabilities=capabilities,
+            visible=True,
+            hidden_reason=None,
+            last_seen_at=now,
+            upstream_present=False,
+        ),
+    )
+    await session.execute(stmt)
+    await session.commit()
+    cache_row = (await session.execute(
+        select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == row.id,
+            ProviderModelCache.model_id == payload.model_id,
+        ),
+    )).scalar_one()
+    return _cache_row_to_entry(cache_row)
+
+
+@router.post(
     "/provider-connections/{connection_id}/models/refresh",
     response_model=ProviderModelRefreshResponse,
 )
@@ -651,18 +746,22 @@ async def refresh_models(
             upstream_present=True,
             visible=visible,
             hidden_reason=hidden_reason,
+            capabilities={"source": "discovered"},
         )
+        update_values: dict[str, object] = dict(
+            last_seen_at=now,
+            upstream_present=True,
+            visible=visible,
+            hidden_reason=hidden_reason,
+        )
+        if existing is None or not _is_manual_model(existing):
+            update_values["capabilities"] = {"source": "discovered"}
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 ProviderModelCache.provider_connection_id,
                 ProviderModelCache.model_id,
             ],
-            set_=dict(
-                last_seen_at=now,
-                upstream_present=True,
-                visible=visible,
-                hidden_reason=hidden_reason,
-            ),
+            set_=update_values,
         )
         await session.execute(stmt)
 
@@ -680,6 +779,19 @@ async def refresh_models(
                     ProviderModelCache.model_id == mid,
                 )
                 .values(upstream_present=False),
+            )
+        elif _is_manual_model(prev):
+            await session.execute(
+                update(ProviderModelCache)
+                .where(
+                    ProviderModelCache.provider_connection_id == row.id,
+                    ProviderModelCache.model_id == mid,
+                )
+                .values(
+                    upstream_present=False,
+                    visible=True,
+                    hidden_reason=None,
+                ),
             )
         else:
             await session.execute(

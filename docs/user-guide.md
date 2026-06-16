@@ -80,6 +80,13 @@ Per-trial outputs land at `./runs/<trial-id>/{events.jsonl,atif.json}`.
 With `--json`, each trial's result also prints as a JSON line on stdout
 for piping (e.g. `loom run ... --json | jq '.state'`).
 
+In service mode, team-scoped provider connections are the normal path
+for user-hosted OpenAI-compatible endpoints. Register the connection,
+refresh or manually add its model ids, then launch from the SPA. The
+SPA hides obvious tool/API entries by default and submits
+`provider_connection_id` + `provider_model_id` with the trial or batch;
+operators can use the raw model view for debugging noisy catalogs.
+
 ## Cloud sandboxes (Daytona)
 
 ```bash

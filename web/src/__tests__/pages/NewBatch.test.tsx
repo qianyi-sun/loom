@@ -28,6 +28,14 @@ const AGENTS_RESPONSE = {
       supported_model_sources: [],
     },
     {
+      name: "litellm",
+      needs_model: true,
+      kind: "builtin",
+      description: "Multi-provider tool-loop agent.",
+      supported_providers: ["*"],
+      supported_model_sources: ["api", "local-server", "hf"],
+    },
+    {
       name: "claude-code-inbox",
       needs_model: true,
       kind: "builtin",
@@ -40,8 +48,71 @@ const AGENTS_RESPONSE = {
 
 const MODELS_RESPONSE = {
   items: [
-    { provider: "anthropic", name: "claude-opus-4-7" },
-    { provider: "openai", name: "gpt-4o" },
+    {
+      provider: "anthropic",
+      name: "claude-opus-4-7",
+      source: "rate-card",
+      agent_capable: true,
+      recommended: true,
+      visibility: "default",
+      hidden_reason: null,
+    },
+    {
+      provider: "openai",
+      name: "deepseek-chat",
+      provider_connection_id: "11111111-1111-4111-8111-111111111111",
+      provider_connection_name: "Lab vLLM",
+      provider_connection_type: "openai-compatible",
+      source: "discovered",
+      agent_capable: true,
+      recommended: true,
+      visibility: "default",
+      hidden_reason: null,
+      last_seen_at: "2026-06-16T00:00:00Z",
+    },
+  ],
+};
+
+const RAW_MODELS_RESPONSE = {
+  items: [
+    ...MODELS_RESPONSE.items,
+    {
+      provider: "openai",
+      name: "amap-coordinate-convert",
+      provider_connection_id: "11111111-1111-4111-8111-111111111111",
+      provider_connection_name: "Lab vLLM",
+      provider_connection_type: "openai-compatible",
+      source: "discovered",
+      agent_capable: false,
+      recommended: false,
+      visibility: "advanced",
+      hidden_reason: "classifier-non-llm",
+      last_seen_at: "2026-06-16T00:00:00Z",
+    },
+  ],
+};
+
+const PROVIDER_CONNECTIONS_RESPONSE = {
+  items: [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      team_id: "22222222-2222-4222-8222-222222222222",
+      name: "Lab vLLM",
+      type: "openai-compatible",
+      base_url: "https://vllm.lab.example/v1",
+      upstream_host: "vllm.lab.example",
+      resolved_egress_ips: ["203.0.113.10"],
+      allowed_models: null,
+      status: "valid",
+      last_validated_at: "2026-06-16T00:00:00Z",
+      last_validation_error: null,
+      pricing_source: "tokens-only",
+      pricing_data: null,
+      rate_card_provider: "openai",
+      created_by: "test:web",
+      created_at: "2026-06-16T00:00:00Z",
+      updated_at: "2026-06-16T00:00:00Z",
+    },
   ],
 };
 
@@ -148,6 +219,13 @@ function mockEndpoints(opts: {
           }),
         );
       if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
+      if (url.includes("/api/v1/provider-connections/") && url.endsWith("/models")) {
+        return json({ model_id: "manual-vllm-checkpoint" }, 201);
+      }
+      if (url.includes("/api/v1/provider-connections")) {
+        return json(PROVIDER_CONNECTIONS_RESPONSE);
+      }
+      if (url.includes("/api/v1/models?view=raw")) return json(RAW_MODELS_RESPONSE);
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
       if (url.includes("/api/v1/local-servers")) return json(LOCAL_SERVERS_RESPONSE);
       const tagsMatch = url.match(/\/api\/v1\/benchmarks\/([^/]+)\/tags/);
@@ -173,6 +251,21 @@ function batchCall(
 ): { url: string; body: Record<string, unknown> } | null {
   const found = spy.mock.calls.find((c) =>
     String(c[0]).includes("/api/v1/batches") && (c[1] as RequestInit | undefined)?.method === "POST",
+  );
+  if (!found) return null;
+  return {
+    url: String(found[0]),
+    body: JSON.parse((found[1] as RequestInit).body as string),
+  };
+}
+
+function manualModelCall(
+  spy: ReturnType<typeof vi.spyOn>,
+): { url: string; body: Record<string, unknown> } | null {
+  const found = spy.mock.calls.find((c) =>
+    String(c[0]).includes("/api/v1/provider-connections/") &&
+    String(c[0]).endsWith("/models") &&
+    (c[1] as RequestInit | undefined)?.method === "POST",
   );
   if (!found) return null;
   return {
@@ -566,5 +659,87 @@ describe("NewBatch", () => {
       subset_kind: "all",
       benchmark_ids: ["humaneval"],
     });
+  });
+
+  it("submits a discovered BYO provider connection model", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "byo-batch");
+    await pickBackend();
+    await pickBenchmark();
+    await user.selectOptions(screen.getByLabelText(/^Agent$/i), "litellm");
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "11111111-1111-4111-8111-111111111111",
+    );
+    await user.selectOptions(
+      await screen.findByLabelText(/^Model$/i),
+      "openai|deepseek-chat|11111111-1111-4111-8111-111111111111",
+    );
+    expect(screen.queryByRole("option", {
+      name: /amap-coordinate-convert/i,
+    })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    const body = batchCall(spy)!.body;
+    expect(body.provider_connection_id).toBe(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    expect(body.provider_model_id).toBe("deepseek-chat");
+    expect(body.combinations).toEqual([
+      {
+        agent_name: "litellm",
+        agent_model: {
+          provider: "openai",
+          name: "deepseek-chat",
+          source: "api",
+        },
+        n_per_task: 1,
+      },
+    ]);
+  });
+
+  it("supports raw mode and manual BYO model ids", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "manual-batch");
+    await pickBackend();
+    await pickBenchmark();
+    await user.selectOptions(screen.getByLabelText(/^Agent$/i), "litellm");
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "11111111-1111-4111-8111-111111111111",
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /Show raw/i }));
+    expect(
+      await screen.findByRole("option", {
+        name: /amap-coordinate-convert.*classifier-non-llm/i,
+      }),
+    ).toBeInTheDocument();
+
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      screen.getByRole("option", { name: /Manual model/i }),
+    );
+    await user.type(
+      screen.getByLabelText(/^Manual model id$/i),
+      "manual-vllm-checkpoint",
+    );
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(manualModelCall(spy)?.body).toEqual({
+      model_id: "manual-vllm-checkpoint",
+    });
+    const body = batchCall(spy)!.body;
+    expect(body.provider_connection_id).toBe(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    expect(body.provider_model_id).toBe("manual-vllm-checkpoint");
   });
 });

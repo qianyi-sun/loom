@@ -140,6 +140,8 @@ async def _submit_one(
     task_id: str,
     sample_idx: int,
     trial_config: dict[str, Any],
+    provider_connection_id: UUID | None = None,
+    provider_model_id: str | None = None,
     combination_idx: int | None = None,
 ) -> None:
     payload: dict[str, Any] = {
@@ -154,6 +156,10 @@ async def _submit_one(
     }
     if combination_idx is not None:
         payload["combination_idx"] = combination_idx
+    if provider_connection_id is not None:
+        payload["provider_connection_id"] = str(provider_connection_id)
+    if provider_model_id is not None:
+        payload["provider_model_id"] = provider_model_id
     headers: dict[str, str] = {}
     if authorization:
         headers["Authorization"] = authorization
@@ -289,7 +295,7 @@ async def run_once(
     # Each work item is (batch_id, [(task_id, combination_or_None,
     # trial_config, sample_idx), ...]).
     PendingUnit = tuple[str, int | None, dict[str, Any], int]  # noqa: N806
-    work: list[tuple[UUID, list[PendingUnit]]] = []
+    work: list[tuple[UUID, UUID | None, str | None, list[PendingUnit]]] = []
     async with session_factory() as s:
         batches_to_process = (await s.execute(
             select(Batch)
@@ -325,7 +331,10 @@ async def run_once(
                             pending_units.append(
                                 (t, c_idx, combo_config, s_idx),
                             )
-                work.append((b.id, pending_units))
+                work.append((
+                    b.id, b.provider_connection_id, b.provider_model_id,
+                    pending_units,
+                ))
             else:
                 # Single-combination: keep the 2-tuple key shape and
                 # the None combination_idx so the resulting
@@ -345,11 +354,14 @@ async def run_once(
                         if (t, s_idx) in existing_single:
                             continue
                         pending_units.append((t, None, cfg, s_idx))
-                work.append((b.id, pending_units))
+                work.append((
+                    b.id, b.provider_connection_id, b.provider_model_id,
+                    pending_units,
+                ))
         await s.commit()
 
     # Phase 2: HTTP fanout. No DB locks.
-    for batch_id, pending_units in work:
+    for batch_id, provider_connection_id, provider_model_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]
             for tid, combo_idx, cfg, s_idx in chunk:
@@ -360,13 +372,15 @@ async def run_once(
                     task_id=tid,
                     sample_idx=s_idx,
                     trial_config=cfg,
+                    provider_connection_id=provider_connection_id,
+                    provider_model_id=provider_model_id,
                     combination_idx=combo_idx,
                 )
                 await asyncio.sleep(delay)
 
     # Phase 3: advance state for the batches we processed.
     async with session_factory() as s:
-        for batch_id, _ in work:
+        for batch_id, _provider_connection_id, _provider_model_id, _ in work:
             row = (await s.execute(
                 select(Batch).where(Batch.id == batch_id),
             )).scalar_one_or_none()

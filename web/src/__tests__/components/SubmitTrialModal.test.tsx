@@ -36,8 +36,31 @@ const AGENTS_RESPONSE = {
 
 const MODELS_RESPONSE = {
   items: [
-    { provider: "anthropic", name: "claude-opus-4-7" },
-    { provider: "openai", name: "gpt-4o" },
+    {
+      provider: "anthropic",
+      name: "claude-opus-4-7",
+      provider_connection_id: "33333333-3333-4333-8333-333333333333",
+      provider_connection_name: "Anthropic prod",
+      provider_connection_type: "anthropic",
+      source: "discovered",
+      agent_capable: true,
+      recommended: true,
+      visibility: "default",
+      hidden_reason: null,
+      last_seen_at: "2026-06-16T00:00:00Z",
+    },
+  ],
+};
+
+const PROVIDER_CONNECTIONS_RESPONSE = {
+  items: [
+    {
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Anthropic prod",
+      type: "anthropic",
+      status: "valid",
+      rate_card_provider: "anthropic",
+    },
   ],
 };
 
@@ -57,6 +80,14 @@ function mockEndpoints(): ReturnType<typeof vi.spyOn> {
       if (url.includes("/api/v1/models")) {
         return Promise.resolve(
           new Response(JSON.stringify(MODELS_RESPONSE), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.includes("/api/v1/provider-connections")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(PROVIDER_CONNECTIONS_RESPONSE), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
@@ -137,12 +168,14 @@ describe("SubmitTrialModal", () => {
     // First combobox = Agent.
     await user.selectOptions(dropdowns[0], "claude-code-inbox");
     // After the agent change, a Model combobox appears. Wait for it.
-    await vi.waitFor(() => {
-      expect(screen.getAllByRole("combobox").length).toBeGreaterThan(1);
-    });
-    const modelCombo = screen.getAllByRole("combobox")[1];
-    // selectOptions matches by value — composite key is "provider|name".
-    await user.selectOptions(modelCombo, "anthropic|claude-opus-4-7");
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "33333333-3333-4333-8333-333333333333",
+    );
+    await user.selectOptions(
+      await screen.findByLabelText(/^Model$/i),
+      "anthropic|claude-opus-4-7|33333333-3333-4333-8333-333333333333",
+    );
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
     await vi.waitFor(() => expect(trialSubmitCall(spy)).not.toBeNull());
     const call = trialSubmitCall(spy)!;
@@ -150,8 +183,14 @@ describe("SubmitTrialModal", () => {
       task_id: "humaneval-0",
       config: {
         agent_name: "claude-code-inbox",
-        agent_model: { provider: "anthropic", name: "claude-opus-4-7" },
+        agent_model: {
+          provider: "anthropic",
+          name: "claude-opus-4-7",
+          source: "api",
+        },
       },
+      provider_connection_id: "33333333-3333-4333-8333-333333333333",
+      provider_model_id: "claude-opus-4-7",
     });
   });
 

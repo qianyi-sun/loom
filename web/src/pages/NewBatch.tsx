@@ -35,6 +35,8 @@ import {
 import {
   AgentModelPicker,
   buildAgentModel,
+  buildProviderOverride,
+  type ProviderOverride,
   type AgentModelValue,
 } from "../components/AgentModelPicker";
 import { Button } from "../components/Button";
@@ -96,6 +98,10 @@ interface ComboRow {
   nPerTask: string;
   label: string;
 }
+
+type ProviderSelectionResult =
+  | { ok: true; value: ProviderOverride | null }
+  | { ok: false; error: string };
 
 function newRow(): ComboRow {
   return { picker: { ...INITIAL_PICKER }, nPerTask: "1", label: "" };
@@ -810,7 +816,43 @@ export default function NewBatch(): JSX.Element {
     return { ok: true, value: out };
   }
 
-  const submit = (): void => {
+  function buildProviderSelection(): ProviderSelectionResult {
+    const overrides: ProviderOverride[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const selectedAgent = agents.data?.items.find(
+        (a) => a.name === r.picker.agentName,
+      );
+      if (!selectedAgent) continue;
+      const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
+      if (override) overrides.push(override);
+    }
+    if (overrides.length === 0) return { ok: true, value: null };
+    const first = overrides[0];
+    const mismatch = overrides.find(
+      (o) =>
+        o.provider_connection_id !== first.provider_connection_id ||
+        o.provider_model_id !== first.provider_model_id,
+    );
+    if (mismatch) {
+      return {
+        ok: false,
+        error: (
+          "BYO provider batches currently require one provider " +
+          "connection and model across all combinations."
+        ),
+      };
+    }
+    return {
+      ok: true,
+      value: {
+        ...first,
+        manual_model: overrides.some((o) => o.manual_model),
+      },
+    };
+  }
+
+  const submit = async (): Promise<void> => {
     setLocalError(null);
     if (!name.trim()) {
       setLocalError("Name is required.");
@@ -869,6 +911,11 @@ export default function NewBatch(): JSX.Element {
       setLocalError(combos.error);
       return;
     }
+    const providerSelection = buildProviderSelection();
+    if (!providerSelection.ok) {
+      setLocalError(providerSelection.error);
+      return;
+    }
 
     if (totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD && !confirmedLargeFanOut) {
       setLocalError(
@@ -906,6 +953,21 @@ export default function NewBatch(): JSX.Element {
       }
     }
 
+    const providerOverride = providerSelection.value;
+    try {
+      if (providerOverride?.manual_model) {
+        await api.createProviderConnectionModel(
+          providerOverride.provider_connection_id,
+          { model_id: providerOverride.provider_model_id },
+        );
+      }
+    } catch (e) {
+      setLocalError(
+        e instanceof Error ? e.message : "Could not save manual model id.",
+      );
+      return;
+    }
+
     create.mutate({
       name: name.trim(),
       description: description.trim() || undefined,
@@ -913,6 +975,12 @@ export default function NewBatch(): JSX.Element {
       task_filter,
       trial_config,
       combinations: combos.value,
+      ...(providerOverride
+        ? {
+            provider_connection_id: providerOverride.provider_connection_id,
+            provider_model_id: providerOverride.provider_model_id,
+          }
+        : {}),
     });
   };
 
@@ -1633,7 +1701,9 @@ export default function NewBatch(): JSX.Element {
       <div className="flex items-center justify-end">
         <Button
           variant="primary"
-          onClick={submit}
+          onClick={() => {
+            void submit();
+          }}
           disabled={create.isPending || totalTrials === 0}
         >
           {submitButtonLabel}

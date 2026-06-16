@@ -128,6 +128,11 @@ loom providers create \
 The connection still defaults to `pricing_source='tokens-only'` for
 OpenAI-compatible endpoints; switch it to `rate-card` only when the
 service rate-card table has rows for that provider/model pair.
+Rate-card metadata is optional for launch selection: BYO provider model
+discovery and manual model ids are exposed through `/api/v1/models`
+even when no matching rate-card entry exists. Missing facade pricing is
+reported with `rate_card_hash='facade:rate-card:missing'` rather than
+blocking evaluation.
 
 The managed-vLLM launcher (`--model hf:<id>` / `--model /path/`)
 registers as provider `local:_auto_vllm`. Rate-card rows for that

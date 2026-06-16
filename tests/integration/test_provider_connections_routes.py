@@ -904,6 +904,63 @@ def test_models_list_initially_empty(app_setup) -> None:
     assert r.json() == {"items": []}
 
 
+def test_models_manual_entry_is_tied_to_connection_with_metadata(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+        json={"model_id": "my-lab-checkpoint-20260616"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["model_id"] == "my-lab-checkpoint-20260616"
+    assert body["source"] == "manual"
+    assert body["visible"] is True
+    assert body["upstream_present"] is False
+    assert body["agent_capable"] is True
+    assert body["recommended"] is True
+    assert body["visibility"] == "default"
+    assert body["hidden_reason"] is None
+
+    listed = c.get(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert listed.status_code == 200
+    assert listed.json()["items"] == [body]
+
+
+def test_models_manual_entry_survives_refresh_when_absent_upstream(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    created = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+        json={"model_id": "my-offline-vllm-model"},
+    )
+    assert created.status_code == 201, created.text
+
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    refreshed = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    rows = {it["model_id"]: it for it in refreshed.json()["items"]}
+    manual = rows["my-offline-vllm-model"]
+    assert manual["source"] == "manual"
+    assert manual["visible"] is True
+    assert manual["upstream_present"] is False
+    assert manual["hidden_reason"] is None
+    assert manual["recommended"] is True
+
+
 def test_models_refresh_populates_cache_then_list_returns_it(
     app_setup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

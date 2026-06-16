@@ -26,6 +26,14 @@ over cluster DNS. `deploy/k8s/ingress.yaml` exposes only
 For operator-side admin curls, port-forward CP:
 `kubectl port-forward deploy/loom-control-plane 8080:8080`.
 
+The SPA's launch model picker is BYO-provider aware. It reads
+`GET /api/v1/provider-connections` for the connection list and
+`GET /api/v1/models` for the default, classifier-filtered model catalog.
+`GET /api/v1/models?view=raw` preserves noisy provider entries with
+`hidden_reason` metadata for debugging. Manual model ids are stored with
+`POST /api/v1/provider-connections/{id}/models` and are submitted on
+Trial/Batch payloads as `provider_connection_id` + `provider_model_id`.
+
 ## Process model
 
 ```

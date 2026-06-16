@@ -137,6 +137,30 @@ export interface CreateBatchBody {
   trial_config: Record<string, unknown>;
   combinations?: Combination[];
   n_per_task?: number;
+  provider_connection_id?: string;
+  provider_model_id?: string;
+}
+
+export interface ModelEntry {
+  provider: string;
+  name: string;
+  source?: string;
+  provider_connection_id?: string;
+  provider_connection_name?: string;
+  provider_connection_type?: string;
+  agent_capable?: boolean;
+  recommended?: boolean;
+  visibility?: string;
+  hidden_reason?: string | null;
+  last_seen_at?: string | null;
+}
+
+export interface ProviderConnectionEntry {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+  rate_card_provider?: string | null;
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -153,7 +177,12 @@ export const api = {
     apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
   getTrial: (id: string) =>
     apiFetch<TrialDetail>(`/api/v1/trials/${id}`),
-  submitTrial: (body: { task_id: string; config: Record<string, unknown> }) =>
+  submitTrial: (body: {
+    task_id: string;
+    config: Record<string, unknown>;
+    provider_connection_id?: string;
+    provider_model_id?: string;
+  }) =>
     apiFetch<{ trial_id: string; state: string }>("/api/v1/trials", {
       method: "POST",
       body: JSON.stringify(body),
@@ -203,10 +232,22 @@ export const api = {
         description: string | null;
       }[];
     }>("/api/v1/local-servers"),
-  listModels: () =>
-    apiFetch<{
-      items: { provider: string; name: string }[];
-    }>("/api/v1/models"),
+  listModels: (view?: "default" | "raw") =>
+    apiFetch<{ items: ModelEntry[] }>(
+      `/api/v1/models${qs({ view })}`,
+    ),
+  listProviderConnections: () =>
+    apiFetch<{ items: ProviderConnectionEntry[] }>(
+      "/api/v1/provider-connections",
+    ),
+  createProviderConnectionModel: (
+    connectionId: string,
+    body: { model_id: string },
+  ) =>
+    apiFetch<ModelEntry>(
+      `/api/v1/provider-connections/${encodeURIComponent(connectionId)}/models`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   listTokens: () => apiFetch<TokenList>("/api/v1/tokens"),
   createToken: (body: {
     type: string;
