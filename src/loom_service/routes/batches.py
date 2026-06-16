@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, cast, func, or_, select, update
+from sqlalchemy import and_, cast, false, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -150,6 +150,8 @@ async def _resolve_task_filter(
             )
         if benchmark_ids_raw:
             stmt = stmt.where(Task.benchmark_id.in_(list(benchmark_ids_raw)))
+        else:
+            stmt = stmt.where(false())
     elif "benchmark_id" in task_filter:
         stmt = stmt.where(Task.benchmark_id == task_filter["benchmark_id"])
     tag_filters_raw = task_filter.get("tag_filters")

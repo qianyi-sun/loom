@@ -108,6 +108,17 @@ async def test_benchmark_ids_takes_precedence_over_benchmark_id(
     assert len(out) == 3
 
 
+async def test_empty_benchmark_ids_matches_no_tasks(
+    session: AsyncSession,
+) -> None:
+    """An empty benchmark multi-select is an intentional empty slate,
+    not a request for every task in the catalog."""
+    out = await _resolve_task_filter(session, {
+        "benchmark_ids": [],
+    })
+    assert out == []
+
+
 async def test_tag_filters_AND_across_keys_OR_within_value_list(  # noqa: N802
     session: AsyncSession,
 ) -> None:
