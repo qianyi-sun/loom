@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     ARRAY,
+    Boolean,
     Float,
     ForeignKey,
     Integer,
@@ -24,7 +25,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
+from sqlalchemy.dialects.postgresql import INET, JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import (
     UUID as PgUUID,  # noqa: N811  (UUID is a type, not a constant)
 )
@@ -289,4 +290,123 @@ class LlmCall(Base):
     rate_card_hash: Mapped[str] = mapped_column(Text, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class Secret(Base):
+    """One row per encrypted secret value managed by the `local-encrypted`
+    SecretStore impl (cluster-deploy.md §Secrets). The `ref` is an opaque
+    string of the form "loom://<namespace>/<uuid>" that callers store
+    as the encrypted_api_key_ref on the consuming row (e.g.,
+    provider_connections). master_key_version is bumped by the rotation
+    walker when LOOM_SECRET_STORE_MASTER_KEY changes; pre-rotation rows
+    are re-encrypted in place inside the rotation transaction."""
+    __tablename__ = "secrets"
+    ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # 12-byte AES-GCM nonce.
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    master_key_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class ProviderConnection(Base):
+    """Per-team record for a user-supplied LLM provider endpoint
+    (cluster-deploy.md §Schema additions). Soft-deleted via `deleted_at`
+    so in-flight trials' FKs stay valid for billing/audit; the partial
+    UNIQUE index on (team_id, display_name) WHERE deleted_at IS NULL
+    lets the operator reuse a name after deletion.
+
+    `resolved_egress_ips` is the union (with bounded 24h window) of
+    IPs the upstream_host has resolved to recently; populated by the
+    re-resolver background task (advisory-lock-protected leader). The
+    egress proxy gates outbound traffic to `target_ip ∈
+    resolved_egress_ips[connection_id]`.
+
+    `encrypted_api_key_ref` is opaque to the application: for the
+    local-encrypted impl it's "loom://..."; for k8s-secret it's
+    "k8s://ns/name". SecretStore.dispatch routes by URL scheme.
+    """
+    __tablename__ = "provider_connections"
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider_type: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    upstream_host: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_egress_ips: Mapped[list[str]] = mapped_column(
+        ARRAY(INET), nullable=False, server_default=text("ARRAY[]::inet[]"),
+    )
+    egress_ips_refreshed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    egress_ips_min_ttl_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("300"),
+    )
+    encrypted_api_key_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_models: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'pending'"),
+    )
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    last_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pricing_source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'tokens-only'"),
+    )
+    pricing_data: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True,
+    )
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    # Maintained by the trigger created in migration 0018 — updates
+    # automatically on every UPDATE. Don't set explicitly in app code.
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class ProviderModelCache(Base):
+    """Per-connection enumeration of upstream models. Refreshed on a 1h
+    TTL on read; not hard-deleted when a model disappears upstream —
+    `upstream_present` flips to false (audit trail). Operator can
+    override visibility independently via `visible` + `hidden_reason`.
+    """
+    __tablename__ = "provider_models_cache"
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    model_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    family: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    capabilities: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+    )
+    visible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"),
+    )
+    hidden_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    upstream_present: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"),
     )

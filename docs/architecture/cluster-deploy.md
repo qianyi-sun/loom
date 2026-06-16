@@ -214,7 +214,7 @@ created_at            timestamptz NOT NULL DEFAULT now()
 
 ```
 id                          UUID PK
-team_id                     UUID FK → teams.id  ON DELETE CASCADE
+team_id                     UUID FK → teams.id  ON DELETE RESTRICT
 provider_type               text       -- 'openai-compatible' | 'anthropic' | 'google' | 'custom'
 display_name                text       -- UNIQUE per (team_id, display_name) WHERE deleted_at IS NULL
 base_url                    text
