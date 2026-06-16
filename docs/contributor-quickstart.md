@@ -67,7 +67,9 @@ cd web && npm install && npm run dev
 
 ## Tests
 
-CI gates the fast tier on every push + PR:
+CI gates the fast tier on every push + PR. PRs that change only docs or repo
+metadata still report the required `repository-checks` status, but skip the
+heavy install/test/coverage steps:
 
 ```bash
 pytest tests/unit tests/contract tests/property tests/loom_cli \

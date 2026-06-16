@@ -7,15 +7,6 @@ on:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
     types: [opened, synchronize, reopened, labeled]
-    # Skip CI on changes that can't break the build — docs, gitignore,
-    # editor configs. PRs touching only these get an instant green
-    # status check instead of paying minutes for ruff/mypy/pytest.
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - ".gitignore"
-      - "LICENSE"
-      - ".editorconfig"
   workflow_dispatch:
     inputs:
       integration:
@@ -47,6 +38,8 @@ jobs:
     name: repository-checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      docs_only: ${{ steps.docs_only.outputs.docs_only }}
     # Skip on push to dev: every squash-merge to dev carries the same
     # content the PR CI just validated, so re-running burns minutes
     # for no signal. Push to main still runs (release-branch safety
@@ -56,8 +49,48 @@ jobs:
       github.ref != 'refs/heads/dev'
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only PR
+        id: docs_only
+        shell: bash
+        run: |
+          set -euo pipefail
+          docs_only=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            docs_only=true
+            changed_files=$(git diff --name-only \
+              "${{ github.event.pull_request.base.sha }}" \
+              "$GITHUB_SHA")
+            if [[ -z "$changed_files" ]]; then
+              docs_only=false
+            else
+              while IFS= read -r path; do
+                case "$path" in
+                  *.md|docs/*|.gitignore|LICENSE|.editorconfig)
+                    ;;
+                  *)
+                    docs_only=false
+                    break
+                    ;;
+                esac
+              done <<< "$changed_files"
+            fi
+          fi
+          echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## repository-checks input"
+            echo ""
+            echo "docs_only=${docs_only}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Docs-only fast path
+        if: steps.docs_only.outputs.docs_only == 'true'
+        run: echo "Only docs/repo metadata changed; heavy checks skipped."
 
       - name: Install uv
+        if: steps.docs_only.outputs.docs_only != 'true'
         uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
@@ -67,17 +100,21 @@ jobs:
             uv.lock
 
       - name: Set up Python 3.11
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv python install 3.11
 
       - name: Cache .venv
         id: cache-venv
+        if: steps.docs_only.outputs.docs_only != 'true'
         uses: actions/cache@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
 
       - name: Install project + dev deps + sibling packages
-        if: steps.cache-venv.outputs.cache-hit != 'true'
+        if: >-
+          steps.docs_only.outputs.docs_only != 'true' &&
+          steps.cache-venv.outputs.cache-hit != 'true'
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"
@@ -86,12 +123,15 @@ jobs:
           uv pip install -e packages/loom-benchmark-terminal-bench-2
 
       - name: Ruff
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run ruff check src tests
 
       - name: Mypy (strict)
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run mypy
 
       - name: Pytest — unit + contract + property + loom_cli
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           uv run pytest \
             tests/unit tests/contract tests/property tests/loom_cli \
@@ -99,6 +139,7 @@ jobs:
             --cov-report=term --cov-report=xml
 
       - name: Pytest — sibling packages
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           uv run pytest \
             packages/loom-launcher/tests \
@@ -108,7 +149,7 @@ jobs:
             --cov-report=term --cov-report=xml
 
       - name: Upload coverage.xml
-        if: always()
+        if: always() && steps.docs_only.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-xml-fast
@@ -118,7 +159,7 @@ jobs:
       # Binary .coverage data file (SQLite) consumed by coverage-summary
       # job to combine with integration-tier coverage.
       - name: Upload fast-tier coverage data
-        if: always()
+        if: always() && steps.docs_only.outputs.docs_only != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-data-fast
@@ -132,6 +173,7 @@ jobs:
       # grows. Combined-tier baseline collection (Phase 3) happens in
       # the `coverage-summary` job; no combined-tier gate yet.
       - name: Coverage gate (fast tier)
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run coverage report --fail-under=70
 
   # Fast integration tier — testcontainers Postgres + MinIO only.
@@ -259,7 +301,8 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
-      needs.repository-checks.result == 'success'
+      needs.repository-checks.result == 'success' &&
+      needs.repository-checks.outputs.docs_only != 'true'
     permissions:
       contents: read
     steps:
