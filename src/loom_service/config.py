@@ -8,6 +8,8 @@ across the 6-plan service-layer arc.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -26,6 +28,7 @@ class LoomServiceSettings(BaseSettings):
     minio_region: str = "us-east-1"
     control_plane_url: HttpUrl
     gateway_url: HttpUrl
+    admin_secret_file: Path | None = None
 
     bind_host: str = "0.0.0.0"
     bind_port: int = 8090

@@ -56,7 +56,14 @@ async def authed_session(
     the generator).
     """
     async with request.app.state.session_factory() as session:
-        ctx_optional = await verify_bearer_token(session, authorization)
+        admin_verifier = getattr(
+            request.app.state, "admin_secret_verifier", None,
+        )
+        ctx_optional = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=admin_verifier,
+        )
         ctx = require_human_or_admin(ctx_optional)
         yield session, ctx
 

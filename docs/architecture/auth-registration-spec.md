@@ -242,8 +242,10 @@ production UX/security issues and must not block the singleton-admin backend.
 1. **Spec and docs:** this document plus links from docs index, service-mode,
    operator runbook, and security docs.
 2. **Admin secret verifier:** settings, file validation, in-memory verifier,
-   auth integration, and production startup guard. Keep DB-admin fallback only
-   for development until the migration slice.
+   `loom_service` auth integration, Kubernetes secret mount, and production
+   startup guard. Keep DB-admin fallback only for development until the
+   migration slice. Control Plane admin-route integration may land as a
+   follow-up if the worker-token route is still served directly by CP.
 3. **Team registration API:** migration for `pending_team_registrations`, public
    register endpoint, admin list/approve/reject endpoint, and token mint once.
 4. **Audit events:** migration for `admin_audit_events`, audit writer helper,

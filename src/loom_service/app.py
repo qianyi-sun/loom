@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import boto3
 import httpx
@@ -19,6 +21,11 @@ from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.admin_secret import (
+    AdminSecretConfigError,
+    AdminSecretVerifier,
+    load_admin_secret_file,
+)
 from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import (
@@ -41,11 +48,34 @@ from loom_service.routes import (
 )
 
 
+def _load_admin_secret_verifier(
+    settings: LoomServiceSettings,
+) -> AdminSecretVerifier | None:
+    """Load singleton admin auth material for loom_service startup."""
+    production = os.environ.get("LOOM_ENV", "").lower() == "production"
+    configured_path = settings.admin_secret_file
+    default_path = Path.home() / ".config" / "loom" / "secrets.toml"
+    secret_path = configured_path
+    if secret_path is None and default_path.is_file():
+        secret_path = default_path
+    if secret_path is None:
+        if production:
+            raise AdminSecretConfigError(
+                "admin secret file is required when LOOM_ENV=production",
+            )
+        return None
+    return load_admin_secret_file(
+        secret_path,
+        require_safe_permissions=production,
+    )
+
+
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(str(settings.db_url))
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        admin_secret_verifier = _load_admin_secret_verifier(settings)
 
         minio_client = boto3.client(
             "s3",
@@ -81,6 +111,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
         app.state.settings = settings
         app.state.session_factory = session_factory
+        app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client

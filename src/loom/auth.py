@@ -26,6 +26,7 @@ import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import Token
 
 _STEP_JWT_PREFIX = "loom_step_"
@@ -121,6 +122,7 @@ async def verify_bearer_token(
     header_value: str | None,
     *,
     signing_key: str | None = None,
+    admin_verifier: AdminSecretVerifier | None = None,
 ) -> AuthContext | None:
     """Validate a Bearer token. Returns an AuthContext or None.
 
@@ -133,6 +135,15 @@ async def verify_bearer_token(
     raw = header_value.split(" ", 1)[1].strip()
     if not raw:
         return None
+
+    if admin_verifier is not None and admin_verifier.verify(raw):
+        return AuthContext(
+            token_hash=admin_verifier.token_hash,
+            type="admin",
+            scopes=["admin:tokens", "admin:rate_cards"],
+            team_id=None,
+            expires_at=None,
+        )
 
     # JWT branch
     if raw.startswith(_STEP_JWT_PREFIX):

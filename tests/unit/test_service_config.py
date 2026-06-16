@@ -44,6 +44,19 @@ def test_dev_reload_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.dev_reload is True
 
 
+def test_admin_secret_file_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv(
+        "LOOM_SVC_ADMIN_SECRET_FILE",
+        "/var/run/loom/secrets/admin/secrets.toml",
+    )
+
+    s = LoomServiceSettings(_env_file=None)
+
+    assert str(s.admin_secret_file).endswith("/secrets.toml")
+
+
 def test_extra_forbid_on_dict_init(monkeypatch: pytest.MonkeyPatch) -> None:
     """`extra="forbid"` rejects unknown fields passed to the constructor.
 

@@ -14,10 +14,14 @@ spec:
         - name: loom-service
           image: loom-service:0.7
           env:
+            - name: LOOM_ENV
+              value: production
             # Reuses the cp-db-url secret — loom_service + CP share
             # the same Postgres database.
             - name: LOOM_SVC_DB_URL
               valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
+            - name: LOOM_SVC_ADMIN_SECRET_FILE
+              value: /var/run/loom/secrets/admin/secrets.toml
             - name: LOOM_SVC_MINIO_ENDPOINT
               value: http://loom-minio:9000
             - name: LOOM_SVC_MINIO_ACCESS_KEY
@@ -43,6 +47,10 @@ spec:
                   name: loom-secrets
                   key: svc-campaign-runner-cp-token
                   optional: true
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/secrets/admin
+              readOnly: true
           ports:
             - containerPort: 8090
           readinessProbe:
@@ -51,6 +59,11 @@ spec:
           resources:
             requests: { cpu: 200m, memory: 256Mi }
             limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0400
 ---
 apiVersion: v1
 kind: Service

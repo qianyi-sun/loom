@@ -33,6 +33,24 @@ top-level README + `deploy/docker-compose.dev.yml`.
    ```
    The `worker-token` value is overwritten in step 5.
 
+   Create the singleton admin secret file separately. This first #10 slice
+   lets `loom_service` read the file, while later #10 slices add
+   `loom service init-admin` and rotation commands. Until then, generate a
+   high-entropy token manually and mount it as `loom-admin-secret`:
+
+   ```bash
+   ADMIN_TOKEN="loom_admin_$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+   cat > secrets.toml <<EOF
+[admin]
+token = "$ADMIN_TOKEN"
+created_at = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+version = 1
+EOF
+   chmod 0600 secrets.toml
+   kubectl create secret generic loom-admin-secret \
+     --from-file=secrets.toml=./secrets.toml
+   ```
+
 3. **Apply manifests in dependency order:**
    ```bash
    kubectl apply -f deploy/k8s/postgres.yaml
@@ -51,18 +69,21 @@ top-level README + `deploy/docker-compose.dev.yml`.
    kubectl exec deploy/loom-control-plane -- alembic upgrade head
    ```
 
-5. **Mint an admin + worker token** via the admin API. This is the
-   current pre-#10 bootstrap path. The target production model is a
-   singleton admin secret file plus admin-approved team registration;
-   see [architecture/auth-registration-spec.md](architecture/auth-registration-spec.md).
-   Until that lands, an admin token has scope `admin:tokens` and is
-   created by inserting one row into `tokens` directly (bootstrap
-   problem):
+5. **Mint a worker token** via the admin API. The admin credential for
+   `loom_service` now comes from `loom-admin-secret`. The direct Control Plane
+   worker-token route has not yet been migrated to the singleton verifier, so
+   this bootstrap step still uses the legacy temporary DB-admin row until the
+   CP integration and DB-admin removal slices land. Hash the same
+   `ADMIN_TOKEN` generated in step 2:
    ```sql
    INSERT INTO tokens (token_hash, type, scopes, issued_at)
-   VALUES (decode(sha256_hex('admin_TOKEN_RAW_VALUE'), 'hex'),
+   VALUES (decode(sha256_hex('ADMIN_TOKEN_RAW_VALUE'), 'hex'),
            'admin', ARRAY['admin:tokens'], now());
    ```
+   Treat this SQL bootstrap as a remaining #10 gap: use it only to mint the
+   worker token for current alpha deployments, then remove or revoke the row.
+   Full production go-live remains blocked until the CP route and DB-admin
+   removal slices are complete.
    The Control Plane's `POST /admin/worker-tokens` route is
    intentionally NOT exposed via Ingress (see
    `deploy/k8s/ingress.yaml`). Reach it via port-forward:
