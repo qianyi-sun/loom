@@ -1,6 +1,10 @@
 # Cluster deployment
 
-**Status: design** — the target architecture for `loom cluster`. Not yet implemented; see [PR #50](https://github.com/carinrc/loom/pull/50) for the implementation plan.
+**Status: design with first CLI slice** — this is the target architecture for
+`loom cluster`. The read-only `loom cluster status` inspector is implemented as
+Phase 1A of [#76](https://github.com/carinrc/loom/issues/76); render, preflight,
+up, and down remain planned follow-up slices. See
+[PR #50](https://github.com/carinrc/loom/pull/50) for the implementation plan.
 
 `loom cluster` is the multi-node deployment mode. A control node runs the API services + storage; worker nodes spawn trial sandboxes via `docker.sock` onto per-trial Docker bridges. Users supply OpenAI-compatible model endpoints via the per-team `provider_connections` API; `loom-llm-gateway` mediates every LLM call.
 
@@ -150,11 +154,50 @@ MinIO bucket lifecycle: `AbortIncompleteMultipartUpload after 7 days` for non-tr
 
 ## CLI surface
 
-### Deployment verbs
+Cluster commands use the optional Kubernetes client dependency so normal laptop
+or library users do not pay for it:
+
+```bash
+pip install "loom[cluster]"
+# or, in a uv-managed checkout:
+uv sync --extra cluster
+```
+
+### Read-only status inspector
+
+Implemented Phase 1A:
+
+```bash
+loom cluster status [--context NAME] [--namespace NS] [--format table|json]
+```
+
+`status` reads the target kube context and reports readiness for the component
+map above:
+
+- Deployments: `loom-service`, `loom-control-plane`, `loom-llm-gateway`,
+  `loom-web`.
+- DaemonSet: `loom-worker`.
+- StatefulSets: `postgres`, `minio`.
+- Ingress host/path/TLS visibility.
+- Warning when the `loom-secrets` Secret is absent.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Cluster is reachable and every expected component is ready. |
+| `1` | Cluster is reachable but at least one expected component is not ready. |
+| `2` | Cluster is unreachable, kubeconfig/context is invalid, or the optional `kubernetes` package is not installed. |
+
+A `0/0` workload, including the default paused `loom-web`, is reported as
+not-ready instead of ready. Missing workloads are shown as `not-found` rows so
+operators see which deployment slice has not been applied yet.
+
+### Planned deployment verbs
 
 ```
 loom service {up,down,status,logs}                               # single-box (compose; existing)
-loom cluster {up,down,status} --nodes HOSTFILE
+loom cluster {render,preflight,up,down} --nodes HOSTFILE
     [--control-node HOST] [--kubeconfig PATH] [--namespace NS]
     [--storage embedded|external]
     [--postgres-url URL] [--s3-endpoint URL] [--s3-bucket NAME]   # required if --storage external

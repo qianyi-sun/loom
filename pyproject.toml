@@ -45,6 +45,14 @@ dependencies = [
 modal = [
   "modal>=0.66.55,<0.80",
 ]
+# `loom cluster {status, render, up, down}` — k8s deployment path.
+# Optional because most users (dev / single-box / library consumers)
+# don't need it, and the python kubernetes client adds ~10 MB of
+# transitive deps. Lazy-imported in `loom_cli.cluster_cmd` with a
+# friendly install hint on ModuleNotFoundError.
+cluster = [
+  "kubernetes>=28.1,<32.0",
+]
 # `loom run --model hf:<id>` / `--model file:<path>` launches vLLM as a
 # managed subprocess. Optional because vLLM has GPU requirements + heavy
 # CUDA wheels that most users don't need.
