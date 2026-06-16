@@ -55,6 +55,11 @@ class LoomConfig:
 
     tokens: dict[str, str] = field(default_factory=dict)
     server_url: str | None = None
+    # Bearer token for `server_url` API calls (set by `loom auth login`).
+    # Stored in plain TOML — operators with shared-machine concerns should
+    # either restrict $XDG_CONFIG_HOME/loom/config.toml permissions or use
+    # env-var-only auth (LOOM_TOKEN, set per-shell, never persisted).
+    auth_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
     def to_toml_dict(self) -> dict[str, object]:
@@ -63,6 +68,8 @@ class LoomConfig:
             out["tokens"] = dict(self.tokens)
         if self.server_url is not None:
             out["server_url"] = self.server_url
+        if self.auth_token is not None:
+            out["auth_token"] = self.auth_token
         if self.local_providers:
             local: dict[str, dict[str, str]] = {}
             for name, p in self.local_providers.items():
@@ -88,6 +95,9 @@ def load_config() -> LoomConfig:
     server_url = raw.get("server_url")
     if server_url is not None and not isinstance(server_url, str):
         raise ValueError(f"{path}: server_url must be a string")
+    auth_token = raw.get("auth_token")
+    if auth_token is not None and not isinstance(auth_token, str):
+        raise ValueError(f"{path}: auth_token must be a string")
     local_raw = raw.get("local_providers", {})
     if not isinstance(local_raw, dict):
         raise ValueError(f"{path}: [local_providers] must be a table")
@@ -120,7 +130,10 @@ def load_config() -> LoomConfig:
             served_model_name=served_model_name,
         )
     return LoomConfig(
-        tokens=tokens, server_url=server_url, local_providers=local_providers,
+        tokens=tokens,
+        server_url=server_url,
+        auth_token=auth_token,
+        local_providers=local_providers,
     )
 
 

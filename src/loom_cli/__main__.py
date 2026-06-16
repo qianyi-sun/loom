@@ -249,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "datasets":
         from loom_cli.datasets_cmd import dispatch as datasets_dispatch
         return datasets_dispatch(raw[1:])
+    if raw and raw[0] == "auth":
+        from loom_cli.auth_cmd import dispatch as auth_dispatch
+        return auth_dispatch(raw[1:])
     parser = _build_parser()
     args = parser.parse_args(raw)
     return cast(int, args.handler(args))
