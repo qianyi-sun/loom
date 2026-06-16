@@ -13,18 +13,16 @@ Routes:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, cast, false, func, or_, select, update
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, func, or_, select, update
 
-from loom.db.schema import Batch, Task, Trial
+from loom.db.schema import Batch, Trial
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
@@ -39,6 +37,7 @@ from loom_service.auth_guards import (
 from loom_service.dependencies import SessionAndCtx
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.task_filter import resolve_task_filter
 from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
@@ -68,178 +67,6 @@ class _CreateBatch(BaseModel):
     # before insertion.
     provider_connection_id: UUID | None = None
     provider_model_id: str | None = None
-
-
-# Recognized task_filter keys. Anything else is rejected so a typo
-# (`liscense` instead of `license`) doesn't silently match nothing.
-# Plan 28 PR-3 adds the subset_kind / n / seed keys for richer task
-# selection (all / first_n / last_n / random_n / explicit).
-_FILTER_KEYS: frozenset[str] = frozenset({
-    "license", "task_ids", "benchmark_id",
-    "subset_kind", "n", "seed",
-    # PR-2 series/tags: multi-select benchmarks (union of slates) +
-    # dict tag filter applied across the matched set. `benchmark_ids`
-    # takes precedence when both are sent — handy for the SPA's
-    # group-select on a series.
-    "benchmark_ids", "tag_filters",
-})
-
-_SUBSET_KINDS: frozenset[str] = frozenset(
-    {"all", "first_n", "last_n", "random_n", "explicit"},
-)
-
-
-async def _resolve_task_filter(
-    session: AsyncSession, task_filter: Mapping[str, Any],
-) -> list[str]:
-    """Materialize a task_filter into a list of Task.id strings.
-
-    Honors `subset_kind` (Plan 28 PR-3):
-    - `"all"` (default): every matching task.
-    - `"first_n"`: first N task ids sorted ascending.
-    - `"last_n"`: last N task ids sorted ascending.
-    - `"random_n"`: N randomly-chosen task ids. Requires `seed`
-      so the same call reproduces the same selection. Random
-      uses Python's seeded `random.sample` on the materialized
-      candidate list — same id set produces the same answer
-      for the same seed.
-    - `"explicit"`: returns `task_ids` verbatim (after the
-      existence check below).
-
-    Note: in the real v0.7 schema Task.id is a string (e.g.
-    `humaneval/HumanEval/0`), not a UUID — the plan-doc drift.
-    """
-    unknown = set(task_filter.keys()) - _FILTER_KEYS
-    if unknown:
-        raise HTTPException(
-            status_code=400,
-            detail=f"unknown task_filter keys: {sorted(unknown)}",
-        )
-    subset_kind = task_filter.get("subset_kind", "all")
-    if subset_kind not in _SUBSET_KINDS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"unknown subset_kind {subset_kind!r}. valid: "
-                f"{sorted(_SUBSET_KINDS)}"
-            ),
-        )
-
-    # Build the candidate query using the predicate keys. subset_kind /
-    # n / seed are then applied to the candidate set in Python.
-    #
-    # PR-2 series/tags: `benchmark_ids` (list) takes precedence over
-    # the singular `benchmark_id` for multi-select / group-select UX.
-    # `tag_filters` is a dict like `{"verified": ["true"]}` applied
-    # as a JSONB containment predicate per key — `AND` across keys,
-    # `OR` within each key's value list.
-    stmt = select(Task.id).order_by(Task.id.asc())
-    if "license" in task_filter:
-        stmt = stmt.where(Task.license == task_filter["license"])
-    if "task_ids" in task_filter:
-        ids = [str(x) for x in task_filter["task_ids"]]
-        stmt = stmt.where(Task.id.in_(ids))
-    benchmark_ids_raw = task_filter.get("benchmark_ids")
-    if benchmark_ids_raw is not None:
-        if not isinstance(benchmark_ids_raw, (list, tuple)) or not all(
-            isinstance(x, str) for x in benchmark_ids_raw
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="task_filter.benchmark_ids must be a list of strings",
-            )
-        if benchmark_ids_raw:
-            stmt = stmt.where(Task.benchmark_id.in_(list(benchmark_ids_raw)))
-        else:
-            stmt = stmt.where(false())
-    elif "benchmark_id" in task_filter:
-        stmt = stmt.where(Task.benchmark_id == task_filter["benchmark_id"])
-    tag_filters_raw = task_filter.get("tag_filters")
-    if tag_filters_raw is not None:
-        if not isinstance(tag_filters_raw, dict):
-            raise HTTPException(
-                status_code=400,
-                detail="task_filter.tag_filters must be a JSON object",
-            )
-        for tag_key, tag_values in tag_filters_raw.items():
-            if not isinstance(tag_key, str) or not tag_key:
-                raise HTTPException(
-                    status_code=400,
-                    detail="tag_filters keys must be non-empty strings",
-                )
-            if not isinstance(tag_values, list) or not all(
-                isinstance(v, str) for v in tag_values
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"tag_filters[{tag_key!r}] must be a list of strings"
-                    ),
-                )
-            if not tag_values:
-                continue
-            # OR within a key: any of the listed values matches.
-            # Composes a jsonb @> predicate per value, then ORs them.
-            value_clauses = [
-                Task.tags.op("@>")(
-                    cast({tag_key: v}, JSONB),
-                )
-                for v in tag_values
-            ]
-            stmt = stmt.where(or_(*value_clauses))
-    candidates: list[str] = [
-        row[0] for row in (await session.execute(stmt)).all()
-    ]
-
-    if subset_kind == "all":
-        return candidates
-    if subset_kind == "explicit":
-        # Explicit mode REQUIRES `task_ids` to be supplied AND the
-        # existence check above runs via the `Task.id.in_(ids)`
-        # predicate. The returned `candidates` is the intersection
-        # of the supplied list and the live tasks table; any
-        # supplied id not present in the table is silently dropped
-        # (the higher route layer checks for empty-result).
-        return candidates
-
-    n_raw = task_filter.get("n")
-    try:
-        n = int(n_raw) if n_raw is not None else None
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400, detail="task_filter.n must be an integer",
-        ) from exc
-    if n is None or n < 1:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"task_filter.n is required and must be ≥ 1 when "
-                f"subset_kind={subset_kind!r}"
-            ),
-        )
-
-    if subset_kind == "first_n":
-        return candidates[:n]
-    if subset_kind == "last_n":
-        return candidates[-n:] if n <= len(candidates) else candidates
-    # random_n
-    seed_raw = task_filter.get("seed")
-    if seed_raw is None:
-        raise HTTPException(
-            status_code=400,
-            detail="task_filter.seed is required when subset_kind='random_n'",
-        )
-    try:
-        seed = int(seed_raw)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400, detail="task_filter.seed must be an integer",
-        ) from exc
-    import random as _random
-    rng = _random.Random(seed)
-    if n >= len(candidates):
-        return candidates
-    return sorted(rng.sample(candidates, n))
 
 
 def _serialize(
@@ -396,7 +223,7 @@ async def create_batch(
             ),
         )
 
-    task_ids = await _resolve_task_filter(s, payload.task_filter)
+    task_ids = await resolve_task_filter(s, payload.task_filter)
     # Audit M2: a filter materializing to zero tasks creates a
     # batch stuck in `submitted` forever — reject up front.
     if not task_ids:

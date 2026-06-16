@@ -636,8 +636,11 @@ export default function NewBatch(): JSX.Element {
 
   // PR-2 backend takes the candidate count from a real query; the SPA
   // gets a "good enough" estimate by summing per-benchmark task_count
-  // from /benchmarks. When tag_filters are active we show this as an
-  // upper bound — the submit-time count is authoritative.
+  // from /benchmarks. When tag_filters are active the estimate is a
+  // pure upper bound, so we now also issue a real count via
+  // POST /api/v1/tasks/count (issue #28) and prefer that when it's
+  // ready. The estimate stays as the live display while the count
+  // query is in flight.
   const hasTagFilter = Object.values(tagFilters).some((v) => v.size > 0);
   const sumOfSelectedTasks = useMemo(() => {
     if (!benchmarks.data || selectedBenchmarks.size === 0) return undefined;
@@ -654,14 +657,68 @@ export default function NewBatch(): JSX.Element {
     return allKnown ? total : undefined;
   }, [benchmarks.data, selectedBenchmarks]);
 
+  // Build the same `task_filter` the submit handler would send so the
+  // count endpoint returns identical numbers to what POST /batches
+  // would materialize. Keyed by the filter shape so React Query dedupes
+  // and refetches only when the filter actually changes.
+  const benchmarkIdsSorted = useMemo(
+    () => Array.from(selectedBenchmarks).sort(),
+    [selectedBenchmarks],
+  );
+  const tagFiltersPayload = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const [k, vs] of Object.entries(tagFilters)) {
+      if (vs.size > 0) out[k] = Array.from(vs).sort();
+    }
+    return out;
+  }, [tagFilters]);
+  const countTaskFilter = useMemo<Record<string, unknown> | null>(() => {
+    if (subsetKind === "explicit") return null; // explicit ⇒ count is local
+    if (selectedBenchmarks.size === 0) return null;
+    const f: Record<string, unknown> = {
+      subset_kind: subsetKind,
+      benchmark_ids: benchmarkIdsSorted,
+    };
+    if (Object.keys(tagFiltersPayload).length > 0) {
+      f.tag_filters = tagFiltersPayload;
+    }
+    if (subsetKind !== "all") {
+      const n = Number.parseInt(subsetN, 10);
+      if (Number.isFinite(n) && n > 0) f.n = n;
+    }
+    if (subsetKind === "random_n") {
+      const seed = Number.parseInt(subsetSeed, 10);
+      if (Number.isFinite(seed)) f.seed = seed;
+    }
+    return f;
+  }, [
+    subsetKind, selectedBenchmarks.size, benchmarkIdsSorted,
+    tagFiltersPayload, subsetN, subsetSeed,
+  ]);
+  // Only issue the count call when a tag filter is active — without
+  // one the estimate from sumOfSelectedTasks is exact and a network
+  // round-trip is wasted. Keyed on JSON-stringified filter so the
+  // cache key is stable for identical shapes.
+  const exactCount = useQuery({
+    queryKey: ["tasks-count", JSON.stringify(countTaskFilter)],
+    queryFn: () =>
+      api.countTasks({ task_filter: countTaskFilter ?? {} }),
+    enabled: countTaskFilter !== null && hasTagFilter,
+    staleTime: 30 * 1000,
+  });
+
   const matchedTaskCount: number | undefined = (() => {
     if (subsetKind === "explicit") return parsed.ids.length;
+    // When a tag filter is active and we have a real count, use it.
+    // Otherwise fall back to the upper-bound estimate.
+    if (hasTagFilter && exactCount.data !== undefined) {
+      return exactCount.data.count;
+    }
     if (sumOfSelectedTasks === undefined) return undefined;
-    const cap = hasTagFilter ? sumOfSelectedTasks : sumOfSelectedTasks;
-    if (subsetKind === "all") return cap;
+    if (subsetKind === "all") return sumOfSelectedTasks;
     const n = Number.parseInt(subsetN, 10);
     if (!Number.isFinite(n)) return undefined;
-    return Math.min(cap, Math.max(0, n));
+    return Math.min(sumOfSelectedTasks, Math.max(0, n));
   })();
 
   const create = useMutation({
@@ -791,11 +848,18 @@ export default function NewBatch(): JSX.Element {
         setLocalError("Still counting matching tasks — try again in a moment.");
         return;
       }
-      // Submit-time check only when no tag filters could narrow the set.
-      // With tag_filters the upper-bound count can be nonzero while the
-      // filtered count is zero — the backend resolver catches that.
-      if (matchedTaskCount === 0 && !hasTagFilter) {
-        setLocalError("No tasks match the current benchmark + subset.");
+      // Issue #28: with tag_filters active the SPA used to skip this
+      // check because the local estimate was a pure upper bound; the
+      // user could submit a batch that resolved to zero tasks and got
+      // a confusing late 400. Now `matchedTaskCount` comes from the
+      // real `/tasks/count` endpoint when `hasTagFilter`, so the gate
+      // applies uniformly.
+      if (matchedTaskCount === 0) {
+        setLocalError(
+          hasTagFilter
+            ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
+            : "No tasks match the current benchmark + subset.",
+        );
         return;
       }
     }
@@ -865,13 +929,21 @@ export default function NewBatch(): JSX.Element {
     countSummary = "";
   } else if (selectedBenchmarks.size === 0) {
     countSummary = "Pick at least one benchmark to count matching tasks.";
+  } else if (hasTagFilter && exactCount.isLoading) {
+    // Real count is in flight; show the running upper-bound while we
+    // wait so the page stays responsive.
+    countSummary =
+      sumOfSelectedTasks !== undefined
+        ? `Counting tasks under tag filters (up to ${sumOfSelectedTasks})…`
+        : "Counting matching tasks…";
   } else if (matchedTaskCount === undefined) {
     countSummary = "Counting matching tasks…";
   } else if (matchedTaskCount === 0) {
-    countSummary =
-      "No tasks registered for the selected benchmarks. Run `python -m loom_benchmark_tool import <benchmark>` to populate, or pick a different benchmark.";
+    countSummary = hasTagFilter
+      ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
+      : "No tasks registered for the selected benchmarks. Run `python -m loom_benchmark_tool import <benchmark>` to populate, or pick a different benchmark.";
   } else if (hasTagFilter) {
-    countSummary = `Up to ${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match before tag filtering — exact count is determined at submit.`;
+    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match the current benchmark + tag filters.`;
   } else {
     const benchN = selectedBenchmarks.size;
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${benchN} benchmark${benchN === 1 ? "" : "s"}.`;

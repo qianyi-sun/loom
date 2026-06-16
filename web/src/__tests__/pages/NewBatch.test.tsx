@@ -120,13 +120,16 @@ const BATCH_RESPONSE = {
   created_at: "2026-06-08T00:00:00Z",
 };
 
-function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
-  typeof vi.spyOn
-> {
+function mockEndpoints(opts: {
+  matchingTasks?: number;
+  /**
+   * Override for `POST /api/v1/tasks/count`. When set, the count
+   * endpoint returns this value regardless of body. Used by the
+   * issue-#28 tests to simulate "tag filter narrows to zero".
+   */
+  tasksCount?: number;
+} = {}): ReturnType<typeof vi.spyOn> {
   const matching = opts.matchingTasks ?? 12;
-  // Override humaneval's task_count with the matching value so the
-  // count summary (driven by benchmark.task_count) matches what the
-  // test wants.
   const benchmarksResponse = {
     ...BENCHMARKS_RESPONSE,
     items: BENCHMARKS_RESPONSE.items.map((b) =>
@@ -154,6 +157,11 @@ function mockEndpoints(opts: { matchingTasks?: number } = {}): ReturnType<
       }
       if (url.includes("/api/v1/benchmarks")) return json(benchmarksResponse);
       if (url.includes("/api/v1/backends")) return json(BACKENDS_RESPONSE);
+      // `/tasks/count` MUST be checked before `/tasks` since the
+      // substring match would otherwise route both to the list stub.
+      if (url.includes("/api/v1/tasks/count")) {
+        return json({ count: opts.tasksCount ?? matching });
+      }
       if (url.includes("/api/v1/tasks")) return json(tasksResponse(matching));
       if (url.includes("/api/v1/batches")) return json(BATCH_RESPONSE, 201);
       return Promise.reject(new Error(`unexpected fetch ${url}`));
@@ -479,24 +487,25 @@ describe("NewBatch", () => {
     });
   });
 
-  it("emits tag_filters when the user picks values in the tag-filter card", async () => {
-    const spy = mockEndpoints();
+  it("emits tag_filters and surfaces the real count from /tasks/count", async () => {
+    // Issue #28: with tag filters active the count summary now reflects
+    // the exact filtered count (via POST /api/v1/tasks/count) instead
+    // of the pre-filter upper bound.
+    const spy = mockEndpoints({ tasksCount: 14 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
     await user.type(screen.getByPlaceholderText(/run 7/i), "filtered");
     await pickBackend();
     await pickBenchmark("aime-22");
-    // Card auto-opens once the schema loads; tap 2024 under `year`.
     await user.click(
       await screen.findByRole("button", { name: "2024", pressed: false }),
     );
     await user.click(
       await screen.findByRole("button", { name: "I", pressed: false }),
     );
-    // With tag filters active, the count summary switches to the
-    // "Up to N tasks … determined at submit" message.
-    await screen.findByText(/Up to 90 tasks match before tag filtering/i);
+    // Real count from the mocked /tasks/count endpoint.
+    await screen.findByText(/14 tasks match the current benchmark \+ tag filters/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.task_filter).toEqual({
@@ -504,6 +513,32 @@ describe("NewBatch", () => {
       benchmark_ids: ["aime-22"],
       tag_filters: { exam: ["I"], year: ["2024"] },
     });
+  });
+
+  it("gates submit when tag filters narrow the slate to zero (issue #28)", async () => {
+    // Previously the SPA let the user submit a tag-filtered batch
+    // whose resolved set was empty, and the backend would 400 late.
+    // Now /tasks/count returns 0 and the local gate fires with a
+    // tag-filter-specific error message.
+    const spy = mockEndpoints({ tasksCount: 0 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    await user.type(screen.getByPlaceholderText(/run 7/i), "narrowed-to-zero");
+    await pickBackend();
+    await pickBenchmark("aime-22");
+    await user.click(
+      await screen.findByRole("button", { name: "2024", pressed: false }),
+    );
+    // Wait for the zero-result count summary to land — proves
+    // /tasks/count drove the message, not the local upper bound.
+    await screen.findByText(/Tag filters narrow the slate to zero tasks/i);
+    // Submitting should NOT POST a batch.
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    // Give React time to re-render after the click; if a batch POST
+    // was about to happen it'd be captured by the spy.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(batchCall(spy)).toBeNull();
   });
 
   it("drops tag_filters whose key vanished after deselecting the only benchmark with that key", async () => {

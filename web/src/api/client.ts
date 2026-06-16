@@ -164,6 +164,17 @@ export const api = {
     ),
   listTasks: (q: Record<string, string | undefined> = {}) =>
     apiFetch<TaskList>(`/api/v1/tasks${qs(q)}`),
+  /**
+   * POST /api/v1/tasks/count — returns the exact materialized count
+   * for a given task_filter. Used by NewBatch to gate submit on the
+   * real filtered count instead of an upper-bound estimate when
+   * tag_filters are active. Closes #28.
+   */
+  countTasks: (body: { task_filter: Record<string, unknown> }) =>
+    apiFetch<{ count: number }>("/api/v1/tasks/count", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listBenchmarks: (q: Record<string, string | undefined> = {}) =>
     apiFetch<BenchmarkList>(`/api/v1/benchmarks${qs(q)}`),
   listBenchmarkTags: (id: string) =>

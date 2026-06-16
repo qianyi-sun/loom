@@ -282,3 +282,182 @@ async def test_unauthenticated_401(tasks_setup: tuple[FastAPI, str]) -> None:
     ) as ac:
         r = await ac.get("/api/v1/tasks")
     assert r.status_code == 401
+
+
+# ──────────────────────────────────────────────────────────────────────
+# POST /tasks/count — closes #28 (zero-task batch with tag_filters)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_count_empty_filter_returns_all(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """No filter ⇒ count = every task in the catalog."""
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {}},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 3}
+
+
+async def test_count_benchmark_id_filter(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"benchmark_id": "humaneval"}},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 2}
+
+
+async def test_count_no_match_returns_zero_not_error(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """Issue #28 acceptance: count returns 0 (not 400) on a filter
+    that materializes to zero. The SPA needs to distinguish "no
+    rows matched" from "invalid filter"."""
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"benchmark_id": "no-such-benchmark"}},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 0}
+
+
+async def test_count_tag_filter_narrows_to_zero(
+    tasks_setup: tuple[FastAPI, str], postgres_url: str,
+) -> None:
+    """The user-facing #28 scenario: benchmark_id has matches, but
+    tag_filters narrow to zero. count returns 0 — the SPA gates submit
+    on this, preventing the empty-batch confusion."""
+    app, raw = tasks_setup
+    # Annotate one humaneval task with a tag; query for a value
+    # that doesn't match.
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        from sqlalchemy import update as sa_update
+        s.execute(
+            sa_update(Task)
+            .where(Task.id == "humaneval/HumanEval/0")
+            .values(tags={"verified": "true"}),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {
+                "benchmark_id": "humaneval",
+                "tag_filters": {"verified": ["unverified-value"]},
+            }},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 0}
+
+
+async def test_count_tag_filter_narrows_to_some(
+    tasks_setup: tuple[FastAPI, str], postgres_url: str,
+) -> None:
+    """Same setup as above but the tag value matches — proves the
+    filter pipeline materializes the right count, not just zero."""
+    app, raw = tasks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        from sqlalchemy import update as sa_update
+        s.execute(
+            sa_update(Task)
+            .where(Task.id == "humaneval/HumanEval/0")
+            .values(tags={"verified": "true"}),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {
+                "benchmark_id": "humaneval",
+                "tag_filters": {"verified": ["true"]},
+            }},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 1}
+
+
+async def test_count_rejects_unknown_filter_key(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """Same validation contract as `POST /batches`: typos in the
+    task_filter shape 400 with a clear message."""
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"liscense": "MIT"}},
+        )
+    assert r.status_code == 400
+    assert "unknown task_filter keys" in r.json()["detail"]
+
+
+async def test_count_subset_kind_first_n_truncates(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    """The route uses the same materialization as `POST /batches`,
+    so subset_kind='first_n' trims to the requested size."""
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"subset_kind": "first_n", "n": 1}},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"count": 1}
+
+
+async def test_count_unauthenticated(tasks_setup: tuple[FastAPI, str]) -> None:
+    app, _raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post("/api/v1/tasks/count", json={"task_filter": {}})
+    assert r.status_code == 401

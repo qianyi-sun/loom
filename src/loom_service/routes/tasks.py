@@ -11,12 +11,24 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 
 from loom.db.schema import Task
 from loom_service.dependencies import SessionAndCtx
+from loom_service.task_filter import resolve_task_filter
 
 router = APIRouter()
+
+
+class _CountReq(BaseModel):
+    """Body shape for `POST /tasks/count` — matches the `task_filter`
+    field of `POST /batches` exactly so the SPA can use the same payload
+    shape for both endpoints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_filter: dict[str, Any] = Field(default_factory=dict)
 
 
 def _task_row(t: Task) -> dict[str, Any]:
@@ -94,6 +106,32 @@ async def list_tasks(
         "next_cursor": next_cursor,
         "total": int(total),
     }
+
+
+@router.post("/tasks/count")
+async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, int]:
+    """Return the exact count of tasks matching `task_filter`.
+
+    Backs the SPA's NewBatch real-count check (issue #28). Uses the
+    same materialization path the batch creator runs (`resolve_task_filter`)
+    so the count is identical to what `POST /batches` would produce —
+    no upper-bound estimation drift when tag_filters are active.
+
+    Returns 0 (not 400) for filters that match no rows; the SPA needs
+    to distinguish "no match" from "invalid filter". The downstream
+    `POST /batches` keeps its empty-rejection so a creator can't
+    accidentally produce a stuck batch.
+
+    Note: this route reads the full materialized id list and returns
+    `len()` rather than `SELECT COUNT(*)`. That matches the batch
+    creator's semantics exactly (including the subset_kind /
+    first_n / last_n / random_n trimming). For very large filters
+    the cost is dominated by the candidate query that COUNT(*) would
+    do anyway; the in-Python trim is O(N) on top.
+    """
+    s, _ctx = sc
+    task_ids = await resolve_task_filter(s, payload.task_filter)
+    return {"count": len(task_ids)}
 
 
 @router.get("/tasks/{task_id:path}")
