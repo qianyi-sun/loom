@@ -4,6 +4,10 @@ Service mode runs Loom as a distributed cluster: a FastAPI Control
 Plane owns trial state, Workers poll for work and execute trials,
 an LLM Gateway centralizes provider calls + cost attribution, and a
 REST `loom_service` + React SPA give researchers and admins a UI.
+The current development auth path still uses database-backed bearer
+tokens; the production target for singleton admin auth and
+admin-approved team registration is specified in
+[auth-registration-spec.md](auth-registration-spec.md).
 
 Postgres + MinIO are the only stateful services.
 

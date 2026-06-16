@@ -51,9 +51,13 @@ top-level README + `deploy/docker-compose.dev.yml`.
    kubectl exec deploy/loom-control-plane -- alembic upgrade head
    ```
 
-5. **Mint an admin + worker token** via the admin API. An admin token
-   has scope `admin:tokens` and is created by inserting one row into
-   `tokens` directly (bootstrap problem):
+5. **Mint an admin + worker token** via the admin API. This is the
+   current pre-#10 bootstrap path. The target production model is a
+   singleton admin secret file plus admin-approved team registration;
+   see [architecture/auth-registration-spec.md](architecture/auth-registration-spec.md).
+   Until that lands, an admin token has scope `admin:tokens` and is
+   created by inserting one row into `tokens` directly (bootstrap
+   problem):
    ```sql
    INSERT INTO tokens (token_hash, type, scopes, issued_at)
    VALUES (decode(sha256_hex('admin_TOKEN_RAW_VALUE'), 'hex'),

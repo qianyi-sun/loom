@@ -45,7 +45,9 @@ For public repository operation:
 
 - Team and project-level access model; see
   [`docs/architecture/auth-threat-model.md`](docs/architecture/auth-threat-model.md)
-  for the #10 admin/team-registration baseline.
+  for the #10 admin/team-registration baseline and
+  [`docs/architecture/auth-registration-spec.md`](docs/architecture/auth-registration-spec.md)
+  for the target implementation contract.
 - Secret injection into sandboxed jobs.
 - Network egress policy for execution environments.
 - Artifact retention and deletion rules.

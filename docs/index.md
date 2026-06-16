@@ -55,6 +55,9 @@ Start with the overview, drill into the area you care about:
 - **[architecture/auth-threat-model.md](architecture/auth-threat-model.md)** —
   threat model for singleton admin auth, team registration, audit,
   rotation, and production rollout gates
+- **[architecture/auth-registration-spec.md](architecture/auth-registration-spec.md)** —
+  implementation spec for #10: singleton admin secret, team registration,
+  audit events, rotation commands, and DB-admin removal
 - **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
   — the single-SQL claim query; DRF tie-break + priority + FIFO;
   caps eligibility; crash recovery
