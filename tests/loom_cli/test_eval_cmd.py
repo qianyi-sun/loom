@@ -433,6 +433,74 @@ def test_batch_list_table_and_state_filter_param(
     assert mock_server[0].url.params.get("state") == "running,queued"
 
 
+def test_batch_list_warns_on_truncation(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #67: non-null `next_cursor` triggers a stderr hint so
+    operators know they're seeing a partial result. Stdout still
+    contains just the table so `| awk` pipelines keep working."""
+    mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
+        200, json={"items": [{
+            "id": _BATCH_ID, "team_id": "x", "name": "b1",
+            "description": None, "task_filter": {}, "trial_config": {},
+            "state": "running", "result_status": None,
+            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
+            "created_by_token_prefix": "abc",
+            "expected_trial_count": 7, "n_per_task": 1,
+            "backend": "docker", "combinations": [],
+        }], "next_cursor": "opaque-cursor-token"},
+    )
+    rc = main(["eval", "batch", "list"])
+    assert rc == 0
+    out_err = capsys.readouterr()
+    # Hint on stderr only.
+    assert "more" in out_err.err
+    assert "--limit" in out_err.err
+    assert "more" not in out_err.out  # stdout stays clean
+
+
+def test_batch_list_no_warning_when_not_truncated(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`next_cursor=None` means full result; no hint."""
+    mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
+        200, json={"items": [{
+            "id": _BATCH_ID, "team_id": "x", "name": "b1",
+            "description": None, "task_filter": {}, "trial_config": {},
+            "state": "running", "result_status": None,
+            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
+            "created_by_token_prefix": "abc",
+            "expected_trial_count": 7, "n_per_task": 1,
+            "backend": "docker", "combinations": [],
+        }], "next_cursor": None},
+    )
+    rc = main(["eval", "batch", "list"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "more" not in err
+
+
+def test_trial_list_warns_on_truncation(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #67: matching hint on trial list."""
+    mock_server.canned[("GET", "/api/v1/trials")] = httpx.Response(
+        200, json={"items": [{
+            "id": _TRIAL_ID, "task_id": "t", "team_id": "x",
+            "state": "succeeded", "failure_reason": None,
+            "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
+            "finished_at": None, "attempt_count": 1,
+            "aggregate_reward": 0.5, "cost_usd": 0.01,
+            "agent_name": "claude-code", "model": None,
+        }], "next_cursor": "opaque-cursor-token"},
+    )
+    rc = main(["eval", "trial", "list"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "more" in err
+    assert "--task-id" in err  # trial list mentions task-id filter
+
+
 def test_batch_show_renders_rollup(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:

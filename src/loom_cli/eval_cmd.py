@@ -258,6 +258,15 @@ def _batch_list(args: argparse.Namespace) -> int:
                 f"n={it.get('expected_trial_count', '?'):<5}  "
                 f"{it.get('name', '')}",
             )
+        # Issue #67: surface the truncation. Server default is 50;
+        # without this hint a team with >50 batches saw silent loss.
+        # Stderr keeps the table on stdout pipeable while still
+        # warning interactive users.
+        if body.get("next_cursor"):
+            sys.stderr.write(
+                f"(more — {len(items)} shown; pass --limit N for more "
+                "or filter with --state)\n",
+            )
         return 0
 
     return _run_with_error_handling(_body)
@@ -324,6 +333,13 @@ def _trial_list(args: argparse.Namespace) -> int:
             print(
                 f"{it['id']:<38}  {it['state']:<10}  "
                 f"reward={reward_s:<6}  {it.get('task_id', '')}",
+            )
+        # Issue #67: same truncation hint as batch list. Stderr keeps
+        # stdout pipeable; interactive users still see the warning.
+        if body.get("next_cursor"):
+            sys.stderr.write(
+                f"(more — {len(items)} shown; pass --limit N for more "
+                "or filter with --state / --task-id)\n",
             )
         return 0
 
