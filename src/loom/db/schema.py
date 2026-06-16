@@ -60,6 +60,15 @@ class TeamQuota(Base):
             "ARRAY['MIT', 'Apache-2.0', 'BSD-3-Clause', 'CC-BY-4.0']::text[]",
         ),
     )
+    # SSRF defense layer 3 opt-in (cluster-deploy.md §Secrets/SSRF).
+    # When False (default for `loom cluster`), `POST /provider-connections`
+    # rejects RFC1918 / IPv6 ULA / loopback / link-local IPs. When True
+    # (default for `loom service` single-box mode, set at bootstrap),
+    # RFC1918 + ULA are permitted; loopback + link-local stay rejected
+    # unconditionally.
+    allow_private_endpoints: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"),
+    )
 
 
 class Task(Base):

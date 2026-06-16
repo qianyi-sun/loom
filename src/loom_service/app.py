@@ -30,6 +30,7 @@ from loom_service.routes import (
     health,
     local_servers,
     models,
+    provider_connections,
     rate_cards,
     tasks,
     teams,
@@ -167,4 +168,5 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(models.router, prefix="/api/v1")
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
+    app.include_router(provider_connections.router, prefix="/api/v1")
     return app
