@@ -38,6 +38,7 @@ from loom_service.auth_guards import (
 )
 from loom_service.dependencies import SessionAndCtx
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
+from loom_service.provider_connection_lookup import validate_provider_connection
 
 router = APIRouter()
 
@@ -59,6 +60,13 @@ class _CreateBatch(BaseModel):
     # ⇒ single-combination behavior (agent + model come from
     # trial_config).
     combinations: list[Combination] = Field(default_factory=list)
+    # cluster-deploy.md §Schema additions: batch-level provider
+    # override. Carries through fan-out into Trial.provider_connection_id
+    # for every trial spawned from this batch (unless overridden on
+    # a per-trial basis at submission). Validated against the team
+    # before insertion.
+    provider_connection_id: UUID | None = None
+    provider_model_id: str | None = None
 
 
 # Recognized task_filter keys. Anything else is rejected so a typo
@@ -392,6 +400,13 @@ async def create_batch(
         expected = len(task_ids) * payload.n_per_task
         combinations_jsonb = []
 
+    # Validate provider_connection_id BEFORE constructing the Batch
+    # row so we 400 on bad input rather than 500 on FK violation.
+    if payload.provider_connection_id is not None and ctx.team_id is not None:
+        await validate_provider_connection(
+            s, payload.provider_connection_id, team_id=ctx.team_id,
+        )
+
     b = Batch(
         team_id=ctx.team_id,
         name=payload.name,
@@ -404,6 +419,8 @@ async def create_batch(
         n_per_task=payload.n_per_task,
         backend=payload.backend,
         combinations=combinations_jsonb,
+        provider_connection_id=payload.provider_connection_id,
+        provider_model_id=payload.provider_model_id,
     )
     s.add(b)
     await s.commit()

@@ -39,6 +39,7 @@ from loom_service.auth_guards import (
 from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
+from loom_service.provider_connection_lookup import validate_provider_connection
 
 router = APIRouter()
 
@@ -232,6 +233,12 @@ async def get_trial(
 class _SubmitReq(BaseModel):
     task_id: str
     config: dict[str, Any]
+    # cluster-deploy.md §Schema additions: optional per-trial provider
+    # override. When set, gateway uses this connection's decrypted
+    # api_key + base_url; otherwise platform default. UUID is
+    # validated against the caller's team before forwarding.
+    provider_connection_id: UUID | None = None
+    provider_model_id: str | None = None
 
 
 def _validate_agent_name(config: dict[str, Any]) -> None:
@@ -282,9 +289,19 @@ async def submit_trial(
     Control Plane's POST /trials. The CP runs the canonical license-
     allowlist + team-quota checks; this route just keeps unauthorized
     requests from touching the upstream at all."""
-    _, ctx = sc
+    s, ctx = sc
     require_scope(ctx, "submit")
     _validate_agent_name(payload.config)
+
+    # Validate the optional provider_connection_id before forwarding.
+    # Doing this in loom_service (not control-plane) avoids a
+    # round-trip + keeps the user-facing error close to the user-
+    # supplied input.
+    if payload.provider_connection_id is not None and ctx.team_id is not None:
+        await validate_provider_connection(
+            s, payload.provider_connection_id, team_id=ctx.team_id,
+        )
+
     resp = await forward(
         request.app.state.http_client,
         method="POST", path="/trials",

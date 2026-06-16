@@ -133,6 +133,13 @@ async def submit_trial(
         # Defaults to 0 (single-combination batches + hand-submitted
         # trials).
         combination_idx = int(payload.get("combination_idx") or 0)
+        # cluster-deploy.md §Schema additions: per-trial provider
+        # override. loom_service validated team-scope before forwarding;
+        # control-plane trusts the validated payload (it doesn't have
+        # a session_factory wired to provider_connections specifically,
+        # and the FK enforces existence at INSERT time).
+        provider_connection_id = payload.get("provider_connection_id")
+        provider_model_id = payload.get("provider_model_id")
         insert_values: dict[str, Any] = {
             "id": trial_id, "team_id": ctx.team_id, "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
@@ -143,6 +150,8 @@ async def submit_trial(
             "idempotency_key": idempotency_key,
             "sample_idx": sample_idx,
             "combination_idx": combination_idx,
+            "provider_connection_id": provider_connection_id,
+            "provider_model_id": provider_model_id,
         }
         if idempotency_key is not None:
             # The partial unique index is `WHERE idempotency_key IS NOT
