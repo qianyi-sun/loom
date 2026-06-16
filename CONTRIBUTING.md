@@ -61,6 +61,15 @@ Before declaring work shipped:
   architectural surface changed
 - All affected Markdown docs were scanned and updated for code,
   workflow, deployment, runtime, dependency, or contract changes
+- **Architecture changes that depend on Docker / k8s / CNI / kernel
+  primitive behavior**: add or update a corresponding spike under
+  `docs/architecture/<topic>-spikes/` so CI can empirically verify
+  the mechanism. See
+  [`docs/architecture/cluster-deploy-spikes/README.md`](docs/architecture/cluster-deploy-spikes/README.md)
+  for the pattern and "when to add a spike" guidance. The cluster-deploy
+  spec went through 11 revs catching mechanisms that didn't compose
+  with the underlying primitives — spikes turn that 5-min test into
+  a CI gate
 - Post-ship self-audit pass (re-read each touched file once more for
   regressions, edge cases, type drift) - separate commit if anything
   surfaces

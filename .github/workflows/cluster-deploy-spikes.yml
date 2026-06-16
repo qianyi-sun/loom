@@ -1,0 +1,61 @@
+name: cluster-deploy-spikes
+
+# Runs the executable proofs that the cluster-deploy.md design's
+# load-bearing mechanisms compose with Docker / k8s primitives.
+#
+# See docs/architecture/cluster-deploy-spikes/README.md for why this
+# exists and which claims each spike verifies.
+
+on:
+  pull_request:
+    paths:
+      - "docs/architecture/cluster-deploy.md"
+      - "docs/architecture/cluster-deploy-spikes/**"
+      - ".github/workflows/cluster-deploy-spikes.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-only-spikes:
+    name: spikes 01 + 04 + 05 (Docker only, ~30 s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify Docker is available
+        run: docker version
+      - name: Run spike 01 (sandbox bridge)
+        run: bash docs/architecture/cluster-deploy-spikes/01-sandbox-bridge.sh
+      - name: Run spike 04 (JWT bind-mount rotation)
+        run: bash docs/architecture/cluster-deploy-spikes/04-jwt-fsnotify-rotation.sh
+      - name: Run spike 05 (add-host + SSL_CERT_FILE round-trip)
+        run: bash docs/architecture/cluster-deploy-spikes/05-add-host-ssl-cert-file.sh
+
+  k8s-spikes:
+    name: spikes 02 + 03 (kind cluster, ~3 min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install kind
+        run: |
+          curl -sSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind --version
+
+      - name: Install kubectl
+        run: |
+          curl -sSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -s -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          sudo mv /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client=true
+
+      - name: Run spike 02 (preflight hostPath + topology spread)
+        run: bash docs/architecture/cluster-deploy-spikes/02-preflight-hostpath.sh
+
+      - name: Run spike 03 (hostPort from Docker bridge)
+        run: bash docs/architecture/cluster-deploy-spikes/03-hostport-from-bridge.sh
