@@ -97,6 +97,8 @@ def _print_connection_summary(item: dict[str, Any]) -> None:
         )
     else:
         print()
+    if item.get("rate_card_provider"):
+        print(f"rate_card:     {item['rate_card_provider']}")
     if item.get("allowed_models"):
         print(f"allowed:       {', '.join(item['allowed_models'])}")
     if item.get("last_validation_error"):
@@ -168,6 +170,8 @@ def _create(args: argparse.Namespace) -> int:
         }
         if args.allowed_models:
             payload["allowed_models"] = args.allowed_models
+        if args.rate_card_provider is not None:
+            payload["rate_card_provider"] = args.rate_card_provider
         pricing_data = _pricing_dict_or_none(
             args.input_usd_per_1m, args.output_usd_per_1m,
         )
@@ -247,6 +251,8 @@ def _update(args: argparse.Namespace) -> int:
             )
         if args.allowed_models is not None:
             patch["allowed_models"] = args.allowed_models
+        if args.rate_card_provider is not None:
+            patch["rate_card_provider"] = args.rate_card_provider
         pricing_data = _pricing_dict_or_none(
             args.input_usd_per_1m, args.output_usd_per_1m,
         )
@@ -257,8 +263,8 @@ def _update(args: argparse.Namespace) -> int:
         if not patch:
             sys.stderr.write(
                 "error: `update` requires at least one of --base-url / "
-                "--api-key / --allowed-models / --input-usd-per-1m + "
-                "--output-usd-per-1m.\n",
+                "--api-key / --allowed-models / --rate-card-provider / "
+                "--input-usd-per-1m + --output-usd-per-1m.\n",
             )
             return 2
 
@@ -489,6 +495,13 @@ def dispatch(argv: list[str]) -> int:
         help="Restrict the connection to specific upstream model ids.",
     )
     _add_pricing_args(p_create)
+    p_create.add_argument(
+        "--rate-card-provider", default=None,
+        help=(
+            "Rate-card provider namespace for facade cost lookup "
+            "(e.g. openai, together, fireworks)."
+        ),
+    )
     p_create.set_defaults(handler=_create)
 
     # --- list ---
@@ -524,6 +537,13 @@ def dispatch(argv: list[str]) -> int:
         help="Replace the allowed-model list (NOT append).",
     )
     _add_pricing_args(p_update)
+    p_update.add_argument(
+        "--rate-card-provider", default=None,
+        help=(
+            "Set the rate-card provider namespace used when "
+            "pricing_source='rate-card'."
+        ),
+    )
     p_update.set_defaults(handler=_update)
 
     # --- delete ---

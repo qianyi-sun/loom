@@ -44,6 +44,7 @@ from loom_service.provider_connections_service import (
     SsrfRejectedError,
     UpstreamModelFetchError,
     default_pricing_source_for,
+    default_rate_card_provider_for,
     fetch_upstream_models,
     probe_connection,
     resolve_and_validate,
@@ -81,6 +82,9 @@ class ProviderConnectionCreate(BaseModel):
     pricing_source: str | None = Field(default=None)
     # Required if pricing_source='operator-supplied'; rejected otherwise.
     pricing_data: dict[str, float] | None = Field(default=None)
+    # Optional rate-card provider namespace used by facade-routed calls
+    # when pricing_source='rate-card' (e.g. openai, together, fireworks).
+    rate_card_provider: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ProviderConnectionUpdate(BaseModel):
@@ -97,6 +101,7 @@ class ProviderConnectionUpdate(BaseModel):
     allowed_models: list[str] | None = None
     pricing_source: str | None = None
     pricing_data: dict[str, float] | None = None
+    rate_card_provider: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ProviderConnectionResponse(BaseModel):
@@ -115,6 +120,7 @@ class ProviderConnectionResponse(BaseModel):
     last_validation_error: str | None
     pricing_source: str
     pricing_data: dict[str, float] | None
+    rate_card_provider: str | None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -209,6 +215,7 @@ def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
         last_validation_error=row.last_validation_error,
         pricing_source=row.pricing_source,
         pricing_data=row.pricing_data,
+        rate_card_provider=row.rate_card_provider,
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -289,6 +296,11 @@ async def create_connection(
 
     # Pricing defaults by provider type if not explicitly set.
     pricing_source = payload.pricing_source or default_pricing_source_for(payload.type)
+    rate_card_provider = (
+        payload.rate_card_provider
+        if payload.rate_card_provider is not None
+        else default_rate_card_provider_for(payload.type)
+    )
     try:
         validate_pricing(pricing_source, payload.pricing_data)
     except InvalidPricingError as e:
@@ -335,6 +347,7 @@ async def create_connection(
         status="pending",  # /test route flips to 'valid' / 'invalid'
         pricing_source=pricing_source,
         pricing_data=payload.pricing_data,
+        rate_card_provider=rate_card_provider,
         # Per spec audit format: "<token-type>:<token-id-suffix>".
         # token_hash is bytes (sha256 digest); hex-encode the prefix
         # for a stable printable suffix without leaking the full hash.
@@ -456,6 +469,9 @@ async def update_connection(
 
     if payload.allowed_models is not None:
         row.allowed_models = payload.allowed_models
+
+    if payload.rate_card_provider is not None:
+        row.rate_card_provider = payload.rate_card_provider
 
     # API key rotation: encrypt new value, swap ref, queue old ref for
     # delete. The old ref's secret can't be deleted in this request

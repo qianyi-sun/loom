@@ -299,7 +299,8 @@ def test_orm_models_match_migration_schema(postgres_url: str) -> None:
         "egress_ips_min_ttl_seconds", "encrypted_api_key_ref",
         "allowed_models", "status", "last_validated_at",
         "last_validation_error", "pricing_source", "pricing_data",
-        "created_by", "deleted_at", "created_at", "updated_at",
+        "rate_card_provider", "created_by", "deleted_at", "created_at",
+        "updated_at",
     }
     actual_pc_cols = {c.name for c in ProviderConnection.__table__.columns}
     assert actual_pc_cols == expected_pc_cols, (

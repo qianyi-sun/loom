@@ -25,6 +25,21 @@ from sqlalchemy import select
 
 from loom.auth import AuthContext, verify_bearer_token
 from loom.db.schema import ProviderConnection
+from loom.models.types import ModelSpec
+from loom_llm_gateway.dialect import TokenUsage
+from loom_llm_gateway.errors import RateCardNotFoundError
+from loom_llm_gateway.rate_card import (
+    RateCardCache,
+    compute_cost_usd,
+    hash_table,
+    lookup_entry,
+)
+
+_TYPE_TO_DEFAULT_RATE_CARD_PROVIDER = {
+    "anthropic": "anthropic",
+    "google": "google",
+    "openai-compatible": "openai",
+}
 
 
 async def verify_facade_auth(
@@ -175,27 +190,58 @@ async def resolve_facade_connection(
     return row
 
 
-def compute_facade_cost_usd(
-    row: ProviderConnection, input_tokens: int, output_tokens: int,
-) -> float:
-    """Cost compute for facade calls — operator-supplied pricing only.
+async def compute_facade_cost_usd(
+    row: ProviderConnection,
+    model_name: str,
+    usage: TokenUsage,
+    *,
+    rate_card_cache: RateCardCache | None,
+) -> tuple[float, str]:
+    """Compute facade call cost and the audit hash/marker.
 
-    - `operator-supplied`: per-1M token rates from `pricing_data`.
-    - `tokens-only` / `rate-card`: 0.0 (rate-card lookup wiring for
-      facades is tracked in #71; operators today fall back to
-      `operator-supplied` for facade-routed cost attribution).
+    `operator-supplied` and `tokens-only` keep the existing marker
+    contract. `rate-card` looks up the connection's explicit
+    `rate_card_provider`, falling back to safe provider-type defaults
+    where possible. Missing provider/model rows degrade to cost=0 with
+    an explainable marker for downstream billing audits.
     """
-    if row.pricing_source != "operator-supplied":
-        return 0.0
-    data = row.pricing_data or {}
+    if row.pricing_source == "operator-supplied":
+        data = row.pricing_data or {}
+        try:
+            in_per_1m = float(data.get("input_usd_per_1m", 0) or 0)
+            out_per_1m = float(data.get("output_usd_per_1m", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0, "facade:operator-supplied"
+        cost = (usage.input_tokens / 1_000_000.0) * in_per_1m
+        cost += (usage.output_tokens / 1_000_000.0) * out_per_1m
+        return cost, "facade:operator-supplied"
+
+    if row.pricing_source != "rate-card":
+        return 0.0, f"facade:{row.pricing_source}"
+
+    lookup_provider = (
+        row.rate_card_provider
+        or _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER.get(row.provider_type)
+    )
+    if lookup_provider is None or rate_card_cache is None:
+        return 0.0, "facade:rate-card:missing"
+
     try:
-        in_per_1m = float(data.get("input_usd_per_1m", 0) or 0)
-        out_per_1m = float(data.get("output_usd_per_1m", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    cost = (input_tokens / 1_000_000.0) * in_per_1m
-    cost += (output_tokens / 1_000_000.0) * out_per_1m
-    return cost
+        table = await rate_card_cache.get()
+        entry = lookup_entry(
+            table, ModelSpec(provider=lookup_provider, name=model_name),
+        )
+    except RateCardNotFoundError:
+        return 0.0, "facade:rate-card:missing"
+
+    cost = compute_cost_usd(
+        entry,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+    )
+    return cost, hash_table(table)
 
 
 def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:

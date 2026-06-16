@@ -86,6 +86,7 @@ def _make_connection(
     *, name: str = "openai-prod", type_: str = "openai-compatible",
     pricing_source: str = "tokens-only",
     pricing_data: dict | None = None,
+    rate_card_provider: str | None = "openai",
     status: str = "pending",
     allowed_models: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -103,6 +104,7 @@ def _make_connection(
         "last_validation_error": None,
         "pricing_source": pricing_source,
         "pricing_data": pricing_data,
+        "rate_card_provider": rate_card_provider,
         "created_by": "admin:abc12345",
         "created_at": "2026-06-16T00:00:00Z",
         "updated_at": "2026-06-16T00:00:00Z",
@@ -177,6 +179,27 @@ def test_create_with_operator_pricing_sends_pricing_data(
         "input_usd_per_1m": 2.5,
         "output_usd_per_1m": 10.0,
     }
+
+
+def test_create_with_rate_card_provider_sends_field(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer,
+) -> None:
+    monkeypatch.setenv("K", "k123")
+    mock_server.canned[("POST", "/api/v1/provider-connections")] = httpx.Response(
+        201, json=_make_connection(rate_card_provider="together"),
+    )
+
+    rc = main([
+        "providers", "create",
+        "--name", "together-prod", "--type", "openai-compatible",
+        "--base-url", "https://api.together.xyz/v1",
+        "--api-key", "env:K",
+        "--rate-card-provider", "together",
+    ])
+    assert rc == 0
+    body = json.loads(mock_server[0].content)
+    assert body["rate_card_provider"] == "together"
 
 
 def test_create_half_set_pricing_rejected(
@@ -298,7 +321,9 @@ def test_show_resolves_by_name_then_prints(
     )
     rc = main(["providers", "show", "openai-prod"])
     assert rc == 0
-    assert "name:          openai-prod" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "name:          openai-prod" in out
+    assert "rate_card:     openai" in out
 
 
 def test_show_unknown_name_returns_1_with_helpful_message(
@@ -336,6 +361,27 @@ def test_update_patches_by_resolved_id(
     assert mock_server[1].method == "PATCH"
     patch_body = json.loads(mock_server[1].content)
     assert patch_body == {"base_url": "https://api.openai.com/v2"}
+
+
+def test_update_rate_card_provider_patches_by_resolved_id(
+    mock_server: MockServer,
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    updated = _make_connection(name="openai-prod", rate_card_provider="fireworks")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{conn['id']}")
+    ] = httpx.Response(200, json=updated)
+
+    rc = main([
+        "providers", "update", "openai-prod",
+        "--rate-card-provider", "fireworks",
+    ])
+    assert rc == 0
+    patch_body = json.loads(mock_server[1].content)
+    assert patch_body == {"rate_card_provider": "fireworks"}
 
 
 def test_update_with_no_changes_errors(

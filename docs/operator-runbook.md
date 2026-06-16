@@ -181,6 +181,34 @@ curl -X POST https://loom.example.com/api/v1/tokens \
 Recognized `scopes`: `read:own`, `submit`, `admin:tokens`,
 `admin:rate_cards`. Unrecognized scopes 400 at the route.
 
+## Provider connection cost attribution
+
+BYO provider connections default conservatively:
+
+- `anthropic` and `google` default to `pricing_source='rate-card'` with
+  matching rate-card provider namespaces.
+- `openai-compatible` and `custom` default to token-only accounting.
+
+For hosted OpenAI-compatible services such as Together or Fireworks, set
+the rate-card namespace explicitly when registering or updating the
+connection:
+
+```bash
+loom providers create \
+  --name together-prod \
+  --type openai-compatible \
+  --base-url https://api.together.xyz/v1 \
+  --api-key env:TOGETHER_API_KEY \
+  --rate-card-provider together
+
+loom providers update together-prod --rate-card-provider together
+```
+
+Then switch `pricing_source` to `rate-card` only after the Gateway's
+`rate_cards` table has matching `(provider, model)` entries. Facade calls
+with a missing entry still record tokens and use
+`rate_card_hash='facade:rate-card:missing'` with `cost_usd=0`.
+
 ## Alarm response (troubleshooting matrix)
 
 | Symptom | Likely cause | First check |

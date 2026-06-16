@@ -271,6 +271,7 @@ last_validated_at           timestamptz | NULL
 last_validation_error       text | NULL
 pricing_source              text       -- 'rate-card' | 'tokens-only' | 'operator-supplied'
 pricing_data                jsonb | NULL
+rate_card_provider          text | NULL -- rate-card namespace override for facade calls
 deleted_at                  timestamptz | NULL
 created_by                  text
 created_at, updated_at      timestamptz
@@ -315,8 +316,8 @@ Rewrap during master-key rotation bumps `provider_connections.updated_at` for ev
 
 | `pricing_source` | Behavior |
 |---|---|
-| `rate-card` | Look up `(provider_type, model_id)` in the seeded rate card. Eligible for `provider_type ∈ {anthropic, google}` only — stable model names. |
-| `tokens-only` | Record tokens; `cost_usd = NULL`. Default for `openai-compatible` and `custom`. |
+| `rate-card` | Look up `(rate_card_provider, model_id)` for facade-routed calls, falling back to safe type defaults (`anthropic`, `google`, `openai` for `openai-compatible`). Missing entries record `cost_usd=0` with a missing-rate-card marker. |
+| `tokens-only` | Record tokens; `cost_usd = 0`. Default for `openai-compatible` and `custom`. |
 | `operator-supplied` | Use `pricing_data.{input_usd_per_1m, output_usd_per_1m}`; route-validates non-null + non-negative. |
 
 ## Worker concurrency

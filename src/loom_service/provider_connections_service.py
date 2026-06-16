@@ -241,6 +241,23 @@ def default_pricing_source_for(provider_type: str) -> str:
     return "tokens-only"
 
 
+def default_rate_card_provider_for(provider_type: str) -> str | None:
+    """Default rate-card provider namespace for new connections.
+
+    OpenAI-compatible endpoints are protocol-compatible with many hosted
+    providers. The default preserves the common OpenAI-hosted path, and
+    operators can override it per connection for Together, Fireworks, or
+    other OpenAI-compatible upstreams.
+    """
+    if provider_type == "anthropic":
+        return "anthropic"
+    if provider_type == "google":
+        return "google"
+    if provider_type == "openai-compatible":
+        return "openai"
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Connection probe (used by /test route)
 # ──────────────────────────────────────────────────────────────────────

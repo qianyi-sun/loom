@@ -39,9 +39,6 @@ Out of scope for this route (explicit follow-ups):
   (each provider's dialect needs its own request/response shape).
 - Egress proxy routing (the upstream POST goes direct from the
   gateway pod today; egress-proxy IP allowlisting is Phase 3).
-- Rate-card pricing lookup on facade calls (operator-supplied
-  pricing is the cost path today; rate-card lookup is bound to the
-  legacy `provider/name` routing and migrating it is its own PR).
 """
 
 from __future__ import annotations
@@ -199,11 +196,16 @@ async def openai_chat_facade(
     else:
         input_tokens = output_tokens = 0
 
-    cost_usd = compute_facade_cost_usd(row, input_tokens, output_tokens)
     usage = TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         provider_extras={},
+    )
+    cost_usd, rate_card_hash = await compute_facade_cost_usd(
+        row,
+        payload["model"],
+        usage,
+        rate_card_cache=request.app.state.rate_card_cache,
     )
 
     # Audit. We use a fresh session so the upstream call's latency
@@ -220,7 +222,7 @@ async def openai_chat_facade(
             model=payload["model"],
             usage=usage,
             cost_usd=cost_usd,
-            rate_card_hash=f"facade:{row.pricing_source}",
+            rate_card_hash=rate_card_hash,
         )
 
     return body

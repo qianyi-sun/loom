@@ -29,7 +29,6 @@ Wire shape (MVP):
 Out of scope for this route:
 - Streaming (`stream=true` returns 501 — Anthropic streams via SSE
   and the final `usage` block is needed for cost attribution).
-- Rate-card pricing lookup (#71).
 - Egress proxy routing (Phase 3).
 """
 
@@ -186,8 +185,11 @@ async def anthropic_messages_facade(
             ),
         )
 
-    cost_usd = compute_facade_cost_usd(
-        row, usage.input_tokens, usage.output_tokens,
+    cost_usd, rate_card_hash = await compute_facade_cost_usd(
+        row,
+        payload["model"],
+        usage,
+        rate_card_cache=request.app.state.rate_card_cache,
     )
 
     async with request.app.state.session_factory() as audit_session:
@@ -200,7 +202,7 @@ async def anthropic_messages_facade(
             model=payload["model"],
             usage=usage,
             cost_usd=cost_usd,
-            rate_card_hash=f"facade:{row.pricing_source}",
+            rate_card_hash=rate_card_hash,
         )
 
     return body

@@ -192,6 +192,10 @@ def test_create_returns_201_with_public_response(app_setup) -> None:
     # openai-compatible defaults to tokens-only.
     assert body["pricing_source"] == "tokens-only"
     assert body["pricing_data"] is None
+    # openai-compatible is ambiguous at the protocol layer, but the
+    # default rate-card provider preserves the common OpenAI-hosted path
+    # and can be corrected per connection for Together/Fireworks/etc.
+    assert body["rate_card_provider"] == "openai"
     # api_key MUST NOT round-trip; the response only carries opaque
     # public fields.
     assert "api_key" not in body
@@ -210,6 +214,38 @@ def test_create_anthropic_defaults_to_rate_card(app_setup) -> None:
                })
     assert r.status_code == 201
     assert r.json()["pricing_source"] == "rate-card"
+    assert r.json()["rate_card_provider"] == "anthropic"
+
+
+def test_create_custom_defaults_to_no_rate_card_provider(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+               json={
+                   "name": "lab-vllm",
+                   "type": "custom",
+                   "base_url": "https://api.openai.com/",
+                   "api_key": "sk-custom-XXXX",
+               })
+    assert r.status_code == 201
+    body = r.json()
+    assert body["pricing_source"] == "tokens-only"
+    assert body["rate_card_provider"] is None
+
+
+def test_create_accepts_explicit_rate_card_provider(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    r = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+               json={
+                   "name": "together-prod",
+                   "type": "openai-compatible",
+                   "base_url": "https://api.openai.com/",
+                   "api_key": "sk-together-XXXX",
+                   "rate_card_provider": "together",
+               })
+    assert r.status_code == 201
+    assert r.json()["rate_card_provider"] == "together"
 
 
 def test_create_operator_supplied_requires_pricing_data(app_setup) -> None:
@@ -506,6 +542,26 @@ def test_update_api_key_rotates_ref(app_setup) -> None:
     assert new_ref != orig_ref
     # Both refs are in the secrets table (Phase 5 will GC the orphan).
     assert len(secret_count) == 2
+
+
+def test_update_rate_card_provider(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+        json={"name": "n", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/", "api_key": "k"},
+    )
+    conn_id = create.json()["id"]
+    assert create.json()["rate_card_provider"] == "openai"
+
+    r = c.patch(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+        json={"rate_card_provider": "together"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["rate_card_provider"] == "together"
 
 
 def test_update_cross_team_returns_404(app_setup) -> None:

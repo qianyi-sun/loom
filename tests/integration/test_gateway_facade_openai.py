@@ -26,6 +26,7 @@ from loom.auth import mint_step_jwt
 from loom.db.schema import (
     LlmCall,
     ProviderConnection,
+    RateCard,
     Secret,
     Team,
     TeamQuota,
@@ -167,6 +168,7 @@ async def facade_setup(
         await async_engine.dispose()
         with session_local() as s:
             s.execute(delete(LlmCall))
+            s.execute(delete(RateCard))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
@@ -247,6 +249,101 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     #                       = 0.0005 + 0.00075 = 0.00125
     assert float(row["cost_usd"]) == pytest.approx(0.00125, abs=1e-7)
     assert "operator-supplied" in row["rate_card_hash"]
+
+
+async def test_facade_rate_card_pricing_uses_connection_provider(
+    facade_setup, postgres_url: str,
+) -> None:
+    app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE provider_connections "
+                "SET pricing_source='rate-card', "
+                "rate_card_provider='together', pricing_data=NULL "
+                "WHERE id = :id"
+            ),
+            {"id": conn_id},
+        )
+        conn.execute(insert(RateCard).values(
+            id="card-together",
+            captured_at=datetime.now(UTC),
+            table={
+                "entries": [{
+                    "provider": "together",
+                    "model": "gpt-4o",
+                    "input_per_mtok": 2.0,
+                    "output_per_mtok": 8.0,
+                    "cache_read_per_mtok": 0.0,
+                    "cache_write_per_mtok": 0.0,
+                }],
+            },
+        ))
+    sync_engine.dispose()
+
+    r = await _post(
+        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 200, r.text
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    # rate-card cost: 100/1M * $2 + 50/1M * $8
+    #                 = 0.0002 + 0.0004 = 0.0006
+    assert float(row["cost_usd"]) == pytest.approx(0.0006, abs=1e-7)
+    assert row["rate_card_hash"] != "facade:rate-card"
+    assert len(row["rate_card_hash"]) == 64
+
+
+async def test_facade_rate_card_missing_entry_records_missing_marker(
+    facade_setup, postgres_url: str,
+) -> None:
+    app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE provider_connections "
+                "SET pricing_source='rate-card', "
+                "rate_card_provider='together', pricing_data=NULL "
+                "WHERE id = :id"
+            ),
+            {"id": conn_id},
+        )
+        conn.execute(insert(RateCard).values(
+            id="card-no-match",
+            captured_at=datetime.now(UTC),
+            table={
+                "entries": [{
+                    "provider": "together",
+                    "model": "not-gpt-4o",
+                    "input_per_mtok": 2.0,
+                    "output_per_mtok": 8.0,
+                    "cache_read_per_mtok": 0.0,
+                    "cache_write_per_mtok": 0.0,
+                }],
+            },
+        ))
+    sync_engine.dispose()
+
+    r = await _post(
+        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 200, r.text
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "facade:rate-card:missing"
 
 
 # ──────────────────────────────────────────────────────────────────────

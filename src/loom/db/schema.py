@@ -410,6 +410,7 @@ class ProviderConnection(Base):
     pricing_data: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True,
     )
+    rate_card_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,

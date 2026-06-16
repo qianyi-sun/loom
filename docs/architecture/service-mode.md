@@ -212,6 +212,8 @@ configurations.
   passthrough for dialect-specific routes
 - Bearer auth (team-scoped or step-scoped JWT)
 - Rate-card lookup (`rate_cards` table) per (provider, model)
+- Provider-connection facade cost lookup via
+  `provider_connections.rate_card_provider` for BYO endpoints
 - Cost compute at request time; row inserted into `llm_calls` BEFORE
   the response returns (so finalize can fetch a guaranteed-complete
   set)

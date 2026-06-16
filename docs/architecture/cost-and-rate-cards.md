@@ -82,6 +82,17 @@ Service: missing row → `RateCardNotFoundError` (HTTP 422 from the
 Gateway), so a misconfigured provider fails fast instead of silently
 recording $0.
 
+Provider-connection facade routes use the same service table, but the
+lookup key comes from the connection rather than the legacy
+`provider/model` routing string. `provider_connections.rate_card_provider`
+stores the provider namespace to use with the raw request model id. Safe
+defaults are `anthropic`, `google`, and `openai` for
+`openai-compatible`; `custom` has no default. When a facade connection is
+set to `pricing_source='rate-card'` and no matching entry exists, the
+gateway records tokens with `cost_usd=0` and
+`rate_card_hash='facade:rate-card:missing'` so billing audits can flag
+the gap without losing call attribution.
+
 ## Local / self-hosted rates
 
 Provider key uses a `local:<server>` prefix to match the model spec
@@ -100,6 +111,23 @@ cache_write_per_mtok = 0.0
 Local trials default to **$0** if no row matches — they don't
 incur a real upstream cost. Add a row to attribute internal GPU
 budget; leave it absent to ignore.
+
+For BYO OpenAI-compatible services registered through
+`loom providers create`, set `--rate-card-provider PROVIDER` when the
+endpoint should use a hosted provider's rate-card namespace:
+
+```bash
+loom providers create \
+  --name together-prod \
+  --type openai-compatible \
+  --base-url https://api.together.xyz/v1 \
+  --api-key env:TOGETHER_API_KEY \
+  --rate-card-provider together
+```
+
+The connection still defaults to `pricing_source='tokens-only'` for
+OpenAI-compatible endpoints; switch it to `rate-card` only when the
+service rate-card table has rows for that provider/model pair.
 
 The managed-vLLM launcher (`--model hf:<id>` / `--model /path/`)
 registers as provider `local:_auto_vllm`. Rate-card rows for that
