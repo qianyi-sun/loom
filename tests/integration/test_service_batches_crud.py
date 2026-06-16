@@ -361,6 +361,45 @@ async def test_post_rejects_when_only_worker_is_inactive(
     assert "no active workers" in r.json()["detail"]
 
 
+async def test_post_rejects_when_worker_heartbeat_is_stale(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """Issue #68: a worker that crashed without SIGTERM keeps
+    status='active' forever (no CP-side reaper flips it). The
+    freshness predicate on `last_seen_at` ensures we don't keep
+    handing batches to a dead worker. Heartbeat older than 30s
+    ⇒ excluded from the catalog."""
+    from datetime import timedelta
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    # Age the fixture worker's heartbeat past the 30s freshness
+    # window. `status` stays 'active' — that's the bug we're guarding
+    # against (no reaper updates status today).
+    with sl() as s:
+        s.execute(Worker.__table__.update().values(
+            last_seen_at=datetime.now(UTC) - timedelta(seconds=120),
+        ))
+        s.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "stale-hb", "task_filter": {"license": "MIT"},
+                "trial_config": {}, "backend": "docker",
+            },
+        )
+    sync_engine.dispose()
+    assert r.status_code == 400
+    assert "no active workers" in r.json()["detail"]
+
+
 async def test_post_requires_submit_scope(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

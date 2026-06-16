@@ -62,3 +62,22 @@ def test_non_string_backend_value_skipped() -> None:
     assert parse_backends_from_capabilities([
         [{"backend": 123}, {"backend": "docker"}],
     ]) == {"docker"}
+
+
+def test_heartbeat_freshness_window_documented_value() -> None:
+    """Regression guard for issue #68: the freshness window must be
+    a finite small value. Bumping past the CP crash-detector expiry
+    (worker_heartbeat_expiry_sec=15) defeats the point — once the
+    detector flips trials to queued, the worker should already be
+    out of the catalog.
+
+    The actual freshness predicate lives in `get_active_backends`
+    (DB-touching, covered by integration tests). This unit test pins
+    the constant so a future tuning change is intentional, not silent.
+    """
+    from loom_service.worker_backends import _HEARTBEAT_FRESHNESS_SEC
+    assert 10 <= _HEARTBEAT_FRESHNESS_SEC <= 60, (
+        f"freshness window {_HEARTBEAT_FRESHNESS_SEC}s is outside the "
+        "expected 10-60s range; bumping past the CP crash-detector "
+        "expiry defeats the point"
+    )

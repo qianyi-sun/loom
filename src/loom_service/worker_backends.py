@@ -5,25 +5,37 @@ Used by:
 - `POST /api/v1/batches` — reject when the requested backend has no
   active worker (cluster-deploy.md §POST /batches).
 
-A backend is "active" iff at least one row in `workers` with
-`status='active'` advertises that backend in its capabilities JSONB.
+A backend is "active" iff at least one row in `workers` satisfies BOTH:
+1. `status = 'active'` — set on register, flipped to 'shutting-down' on
+   SIGTERM via the worker's own teardown path.
+2. `last_seen_at >= now() - 30 seconds` — heartbeat freshness check.
+   The worker beats every 5s (`worker_heartbeat_expiry_sec` default 15s
+   on CP's crash detector). Without this predicate, a worker that
+   crashes without SIGTERM keeps `status='active'` forever, defeating
+   PR #63's reject-when-no-worker check (issue #68).
+
 Workers registered before Plan 28 PR-3 omit the `backend` key in each
 capability dict — those rows fall back to "docker" since that was the
 only backend the worker pool shipped before that PR.
-
-Stale heartbeats are not considered here — the schema field
-`status` is the source of truth (the worker flips itself to
-'shutting-down' on SIGTERM; a CP-side reaper transitions long-stale
-rows to 'dead'). This matches `GET /backends` behavior exactly so
-the SPA's catalog and the batch-creation check stay consistent.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Worker
+
+# Freshness window — 30s = 6 heartbeat intervals. Generous enough to
+# ride out network blips without keeping a dead worker in the catalog
+# longer than the crash detector keeps its trials reserved.
+# Kept here (not a setting) because the value should match the CP's
+# crash-detector expiry; tuning both in lockstep would require a
+# coordinated env-var change anyway. Bump if heartbeat interval
+# changes (`loom_worker.config.heartbeat_interval_sec`).
+_HEARTBEAT_FRESHNESS_SEC = 30
 
 
 def parse_backends_from_capabilities(
@@ -55,8 +67,19 @@ def parse_backends_from_capabilities(
 async def get_active_backends(session: AsyncSession) -> set[str]:
     """Return the set of backend names served by at least one active
     worker. Empty set means no active workers (or none advertising any
-    backend), which the batch route translates to a 400."""
+    backend), which the batch route translates to a 400.
+
+    "Active" = `status='active'` AND heartbeat within the last
+    `_HEARTBEAT_FRESHNESS_SEC` seconds. The status-only predicate is
+    insufficient because workers that crash without SIGTERM leave the
+    row at 'active' (issue #68); using `last_seen_at` ensures stale
+    workers stop counting toward the catalog within ~6 heartbeats.
+    """
+    cutoff = datetime.now(UTC) - timedelta(seconds=_HEARTBEAT_FRESHNESS_SEC)
     rows = (await session.execute(
-        select(Worker.capabilities).where(Worker.status == "active"),
+        select(Worker.capabilities).where(
+            Worker.status == "active",
+            Worker.last_seen_at >= cutoff,
+        ),
     )).scalars().all()
     return parse_backends_from_capabilities(list(rows))
