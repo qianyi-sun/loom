@@ -7,12 +7,31 @@ flushed-chunk streaming. ATIF docs are uploaded via single-shot put_object.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 import boto3
+import botocore.handlers
 from botocore.config import Config
+
+_DEFAULT_S3_MAX_POOL_CONNECTIONS = 64
+_DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 5.0
+_DEFAULT_S3_READ_TIMEOUT_SECONDS = 30.0
+_DEFAULT_S3_OPERATION_TIMEOUT_SECONDS = 30.0
+_DEFAULT_S3_OPERATION_ATTEMPTS = 2
+_T = TypeVar("_T")
+
+
+def _remove_expect_header(*, params: dict[str, Any], **_kwargs: Any) -> None:
+    headers = params.get("headers")
+    if headers is None:
+        return
+    headers.pop("Expect", None)
+    headers.pop(b"Expect", None)
 
 
 def _has_traversal(rel: str) -> bool:
@@ -197,42 +216,105 @@ class MinioObjectStore:
         access_key: str,
         secret_key: str,
         region: str = "us-east-1",
+        max_pool_connections: int = _DEFAULT_S3_MAX_POOL_CONNECTIONS,
+        connect_timeout: float = _DEFAULT_S3_CONNECT_TIMEOUT_SECONDS,
+        read_timeout: float = _DEFAULT_S3_READ_TIMEOUT_SECONDS,
+        operation_timeout: float = _DEFAULT_S3_OPERATION_TIMEOUT_SECONDS,
+        operation_attempts: int = _DEFAULT_S3_OPERATION_ATTEMPTS,
     ) -> None:
-        self._client = boto3.client(
-            "s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 3}),
+        self._client_kwargs = {
+            "service_name": "s3",
+            "endpoint_url": endpoint_url,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+            "region_name": region,
+            "config": Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 3},
+                max_pool_connections=max_pool_connections,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                tcp_keepalive=True,
+            ),
+        }
+        self._operation_timeout = operation_timeout
+        self._operation_attempts = max(1, operation_attempts)
+        self._client_lock = threading.Lock()
+        self._client = self._build_client()
+
+    def _build_client(self) -> Any:
+        client = boto3.client(**self._client_kwargs)
+        self._configure_client_events(client)
+        return client
+
+    @staticmethod
+    def _configure_client_events(client: Any) -> None:
+        client.meta.events.unregister(
+            "before-call.s3", botocore.handlers.add_expect_header,
         )
+        client.meta.events.register_last("before-call.s3", _remove_expect_header)
+
+    def _replace_client(self, stale_client: Any) -> None:
+        with self._client_lock:
+            with contextlib.suppress(Exception):
+                stale_client.close()
+            if self._client is stale_client:
+                self._client = self._build_client()
+
+    async def _run_client_call(
+        self,
+        operation: str,
+        call: Callable[[Any], _T],
+    ) -> _T:
+        last_timeout: TimeoutError | None = None
+        for attempt in range(self._operation_attempts):
+            client = self._client
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(call, client),
+                    timeout=self._operation_timeout,
+                )
+            except TimeoutError as exc:
+                last_timeout = exc
+                self._replace_client(client)
+                if attempt + 1 == self._operation_attempts:
+                    break
+        raise TimeoutError(
+            f"S3 {operation} timed out after "
+            f"{self._operation_timeout:g}s "
+            f"and {self._operation_attempts} attempt(s)",
+        ) from last_timeout
+
+    @property
+    def _client_config(self) -> Config:
+        return cast(Config, self._client_kwargs["config"])
 
     async def create_multipart_upload(
         self, *, bucket: str, key: str,
     ) -> MultipartUpload:
-        def _do() -> str:
-            return cast(str, self._client.create_multipart_upload(
+        def _do(client: Any) -> str:
+            return cast(str, client.create_multipart_upload(
                 Bucket=bucket, Key=key,
             )["UploadId"])
-        upload_id = await asyncio.to_thread(_do)
+        upload_id = await self._run_client_call("create_multipart_upload", _do)
         return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id)
 
     async def upload_part(
         self, upload: MultipartUpload, *, part_number: int, body: bytes,
     ) -> None:
-        def _do() -> str:
-            resp = self._client.upload_part(
+        def _do(client: Any) -> str:
+            resp = client.upload_part(
                 Bucket=upload.bucket, Key=upload.key,
                 PartNumber=part_number, UploadId=upload.upload_id,
                 Body=body,
             )
             return cast(str, resp["ETag"])
-        etag = await asyncio.to_thread(_do)
+        etag = await self._run_client_call("upload_part", _do)
         upload.parts.append((part_number, etag))
 
     async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
-        def _do() -> None:
-            self._client.complete_multipart_upload(
+        def _do(client: Any) -> None:
+            client.complete_multipart_upload(
                 Bucket=upload.bucket, Key=upload.key,
                 UploadId=upload.upload_id,
                 MultipartUpload={
@@ -242,38 +324,38 @@ class MinioObjectStore:
                     ],
                 },
             )
-        await asyncio.to_thread(_do)
+        await self._run_client_call("complete_multipart_upload", _do)
         return f"s3://{upload.bucket}/{upload.key}"
 
     async def abort_multipart_upload(self, upload: MultipartUpload) -> None:
-        def _do() -> None:
-            self._client.abort_multipart_upload(
+        def _do(client: Any) -> None:
+            client.abort_multipart_upload(
                 Bucket=upload.bucket, Key=upload.key, UploadId=upload.upload_id,
             )
-        await asyncio.to_thread(_do)
+        await self._run_client_call("abort_multipart_upload", _do)
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
-        def _do() -> None:
-            self._client.put_object(Bucket=bucket, Key=key, Body=body)
-        await asyncio.to_thread(_do)
+        def _do(client: Any) -> None:
+            client.put_object(Bucket=bucket, Key=key, Body=body)
+        await self._run_client_call("put_object", _do)
         return f"s3://{bucket}/{key}"
 
     async def get_object(self, *, bucket: str, key: str) -> bytes:
-        def _do() -> bytes:
-            resp = self._client.get_object(Bucket=bucket, Key=key)
+        def _do(client: Any) -> bytes:
+            resp = client.get_object(Bucket=bucket, Key=key)
             return cast(bytes, resp["Body"].read())
-        return await asyncio.to_thread(_do)
+        return await self._run_client_call("get_object", _do)
 
     async def presign_put(
         self, *, bucket: str, key: str, expires_sec: int,
     ) -> str:
-        def _do() -> str:
-            return cast(str, self._client.generate_presigned_url(
+        def _do(client: Any) -> str:
+            return cast(str, client.generate_presigned_url(
                 "put_object",
                 Params={"Bucket": bucket, "Key": key},
                 ExpiresIn=expires_sec,
             ))
-        return await asyncio.to_thread(_do)
+        return await self._run_client_call("presign_put", _do)
 
     async def list_task_prefixes(
         self, *, bucket: str, benchmark: str,
@@ -283,8 +365,8 @@ class MinioObjectStore:
         Delimiter listing because some benchmarks have multi-segment
         instance_ids (HumanEval is `HumanEval/0`); we walk all keys
         and group by `task.toml`'s parent prefix."""
-        def _do() -> list[str]:
-            paginator = self._client.get_paginator("list_objects_v2")
+        def _do(client: Any) -> list[str]:
+            paginator = client.get_paginator("list_objects_v2")
             base = f"{benchmark}/"
             seen: set[str] = set()
             for page in paginator.paginate(Bucket=bucket, Prefix=base):
@@ -294,7 +376,7 @@ class MinioObjectStore:
                         continue
                     seen.add(key[: -len("task.toml")])
             return sorted(seen)
-        return await asyncio.to_thread(_do)
+        return await self._run_client_call("list_task_prefixes", _do)
 
     async def download_prefix(
         self, *, bucket: str, prefix: str, out_dir: Path,
@@ -308,8 +390,8 @@ class MinioObjectStore:
                 "download_prefix requires a non-empty prefix; refusing "
                 "to drain entire bucket",
             )
-        def _do() -> int:
-            paginator = self._client.get_paginator("list_objects_v2")
+        def _do(client: Any) -> int:
+            paginator = client.get_paginator("list_objects_v2")
             count = 0
             out_dir.mkdir(parents=True, exist_ok=True)
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -320,7 +402,7 @@ class MinioObjectStore:
                         continue
                     dest = out_dir / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    self._client.download_file(bucket, key, str(dest))
+                    client.download_file(bucket, key, str(dest))
                     count += 1
             return count
-        return await asyncio.to_thread(_do)
+        return await self._run_client_call("download_prefix", _do)
