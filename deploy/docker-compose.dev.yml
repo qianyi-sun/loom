@@ -185,11 +185,15 @@ services:
         condition: service_healthy
     restart: on-failure
 
-  # React SPA — Vite dev server with HMR. `npm install` runs on first
-  # boot (the named volume preserves node_modules across restarts).
+  # React SPA — Vite dev server with HMR. `npm ci` installs from the
+  # lockfile while keeping node_modules on a named volume instead of
+  # the bind-mounted source tree.
+  # Keep this Node image pinned: the web package-lock.json is
+  # bind-mounted, so floating Node/npm tags can create developer-only
+  # lockfile churn if this moves back to `npm install`.
   # Edits to web/ files reload in the browser instantly.
   web:
-    image: node:20-slim
+    image: node:20.19.5-slim
     working_dir: /app
     # VITE_API_PROXY_TARGET overrides the default (localhost:8090)
     # because inside the docker network `localhost` is the web
@@ -197,7 +201,7 @@ services:
     # service name.
     environment:
       VITE_API_PROXY_TARGET: http://loom-service:8090
-    command: ["sh", "-c", "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173"]
+    command: ["sh", "-c", "npm ci --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173"]
     volumes:
       - ../web:/app
       - web_node_modules:/app/node_modules

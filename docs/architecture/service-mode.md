@@ -316,7 +316,11 @@ React Router paths.
 For local dev: `cd web && npm run dev` runs Vite's dev server on
 :5173 with HMR. Vite's `server.proxy` config sends `/api/*` to
 `localhost:8090`, which is what `docker-compose.dev.yml` exposes
-`loom-service` at — no separate proxy config needed.
+`loom-service` at — no separate proxy config needed. The compose web
+service pins `node:20.19.5-slim` and uses `npm ci` because
+`web/package-lock.json` is bind-mounted; avoid switching back to
+`npm install` or a floating Node tag unless lockfile stability has
+been re-verified.
 
 ## Cross-cutting concerns
 
