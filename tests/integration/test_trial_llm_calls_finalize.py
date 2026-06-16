@@ -105,6 +105,21 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
                 "cost_usd": 0.0001,
                 "rate_card_hash": "facade:operator-supplied",
             },
+            # Anthropic facade row — same projection guard, different
+            # dialect string. Was unknown before PR adding
+            # "anthropic_facade": "anthropic" to the map.
+            {
+                "captured_at": "2026-06-07T00:00:03Z",
+                "trial_id": str(tid),
+                "step_id": "main",
+                "model": "claude-opus-4-7",
+                "dialect": "anthropic_facade",
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "provider_extras": {},
+                "cost_usd": 0.00007,
+                "rate_card_hash": "facade:operator-supplied",
+            },
         ]
 
     store = FakeObjectStore()
@@ -135,17 +150,23 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
         line for line in lines
         if json.loads(line).get("kind") == "llm_call"
     ]
-    assert len(llm_call_lines) == 3
+    assert len(llm_call_lines) == 4
     parsed = [json.loads(line) for line in llm_call_lines]
     assert parsed[0]["input_tokens"] == 100
     assert parsed[1]["input_tokens"] == 80
     assert parsed[2]["input_tokens"] == 10
+    assert parsed[3]["input_tokens"] == 7
     # Dialect is encoded as ModelSpec.provider on the synthetic event.
     assert parsed[0]["model"]["provider"] == "anthropic"
     # Regression: openai_facade dialect → provider="openai" (was
-    # "unknown" before the projection-map fix in this PR).
+    # "unknown" before the projection-map fix in PR #65).
     assert parsed[2]["model"]["provider"] == "openai"
     assert parsed[2]["model"]["name"] == "gpt-4o"
+    # Regression: anthropic_facade dialect → provider="anthropic" (was
+    # "unknown" before adding the entry in this PR's projection-map
+    # update; same gotcha that PR #65 surfaced for openai_facade).
+    assert parsed[3]["model"]["provider"] == "anthropic"
+    assert parsed[3]["model"]["name"] == "claude-opus-4-7"
     assert parsed[0]["cached_input_tokens"] == 20
     assert parsed[0]["cost_usd_snapshot"] == 0.001
 

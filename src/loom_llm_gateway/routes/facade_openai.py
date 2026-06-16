@@ -47,17 +47,20 @@ Out of scope for this route (explicit follow-ups):
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import select
 
-from loom.db.schema import ProviderConnection
 from loom.security.secret_store import LocalEncryptedSecretStore
-from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.routes._facade_common import (
+    compute_facade_cost_usd,
+    parse_connection_id_header,
+    redact_api_key,
+    resolve_facade_connection,
+    verify_facade_auth,
+)
 
 router = APIRouter()
 
@@ -82,52 +85,6 @@ _OPENAI_SHAPED_TYPES = frozenset({"openai-compatible", "custom"})
 _FACADE_DIALECT = "openai_facade"
 
 
-async def _resolve_connection(
-    session: Any, connection_id: UUID, team_id: UUID,
-) -> ProviderConnection:
-    """Lookup by id, restrict to caller's team, exclude soft-deleted.
-    404 (not 403) on cross-team to match loom_service's convention —
-    existence shouldn't leak across teams.
-    """
-    row: ProviderConnection | None = (await session.execute(
-        select(ProviderConnection).where(
-            ProviderConnection.id == connection_id,
-            ProviderConnection.deleted_at.is_(None),
-        ),
-    )).scalar_one_or_none()
-    if row is None or row.team_id != team_id:
-        raise HTTPException(
-            status_code=404, detail="provider_connection not found",
-        )
-    return row
-
-
-def _compute_cost_usd(
-    row: ProviderConnection, input_tokens: int, output_tokens: int,
-) -> float:
-    """Cost compute for facade calls.
-
-    - `operator-supplied`: per-1M token rates from `pricing_data`.
-    - `tokens-only`: 0 (no pricing data is available — operators who
-      want USD numbers set `operator-supplied`).
-    - `rate-card`: 0 (the rate-card lookup path is bound to the legacy
-      `provider/name` routing; wiring it into the facade is a separate
-      concern. Operators today fall back to `operator-supplied` for
-      facade-routed connections needing cost attribution).
-    """
-    if row.pricing_source != "operator-supplied":
-        return 0.0
-    data = row.pricing_data or {}
-    try:
-        in_per_1m = float(data.get("input_usd_per_1m", 0) or 0)
-        out_per_1m = float(data.get("output_usd_per_1m", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    cost = (input_tokens / 1_000_000.0) * in_per_1m
-    cost += (output_tokens / 1_000_000.0) * out_per_1m
-    return cost
-
-
 @router.post("/openai/v1/chat/completions")
 async def openai_chat_facade(
     request: Request,
@@ -143,32 +100,13 @@ async def openai_chat_facade(
     # Step-scoped JWT auth — same path as /v1/messages so the trial_id
     # + step_id + team_id are pulled from the JWT (not the body).
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(
-            session, authorization, signing_key=signing_key,
+        ctx = await verify_facade_auth(
+            session, authorization, signing_key,
         )
-    if ctx is None or "llm:call" not in ctx.scopes:
-        raise HTTPException(status_code=401, detail="not authorized")
-    if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:
-        raise HTTPException(
-            status_code=403,
-            detail="step-scoped token required (loom_step_<jwt>)",
-        )
-
-    if not x_loom_provider_connection_id:
-        raise HTTPException(
-            status_code=400,
-            detail="x-loom-provider-connection-id header is required",
-        )
-    try:
-        connection_id = UUID(x_loom_provider_connection_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "x-loom-provider-connection-id is not a valid UUID: "
-                f"{exc}"
-            ),
-        ) from exc
+    assert ctx.team_id is not None  # narrowed by verify_facade_auth
+    assert ctx.trial_id is not None
+    assert ctx.step_id is not None
+    connection_id = parse_connection_id_header(x_loom_provider_connection_id)
 
     # Streaming is rejected (501) for the same reason /v1/messages
     # rejects it: cost attribution requires the final usage block,
@@ -191,16 +129,11 @@ async def openai_chat_facade(
     # Resolve + decrypt. Both happen inside one session so the
     # SecretStore.get sees the same transaction the lookup did.
     async with request.app.state.session_factory() as session:
-        row = await _resolve_connection(session, connection_id, ctx.team_id)
-        if row.provider_type not in _OPENAI_SHAPED_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"provider_connection.type={row.provider_type!r} is "
-                    f"not served by /openai/v1/chat/completions; use the "
-                    f"dialect-matched facade for this provider type."
-                ),
-            )
+        row = await resolve_facade_connection(
+            session, connection_id, ctx.team_id,
+            supported_types=_OPENAI_SHAPED_TYPES,
+            dialect_label="/openai/v1/chat/completions",
+        )
         store = LocalEncryptedSecretStore(session)
         api_key = await store.get(row.encrypted_api_key_ref)
 
@@ -233,15 +166,7 @@ async def openai_chat_facade(
         ) from e
 
     if upstream_response.status_code >= 400:
-        # Redact the api_key from the upstream body before surfacing.
-        # Some operator-side endpoints echo `Authorization` headers
-        # in 4xx debug pages; without this, a single bad upstream call
-        # leaks the credential back to the (less-trusted) caller via
-        # the HTTP detail. 4-char minimum keeps short keys from
-        # over-redacting the body.
-        excerpt = upstream_response.text[:500]
-        if api_key and len(api_key) >= 4:
-            excerpt = excerpt.replace(api_key, "[REDACTED]")
+        excerpt = redact_api_key(upstream_response.text, api_key)
         raise HTTPException(
             status_code=upstream_response.status_code,
             detail=(
@@ -272,7 +197,7 @@ async def openai_chat_facade(
     else:
         input_tokens = output_tokens = 0
 
-    cost_usd = _compute_cost_usd(row, input_tokens, output_tokens)
+    cost_usd = compute_facade_cost_usd(row, input_tokens, output_tokens)
     usage = TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
