@@ -251,3 +251,134 @@ def test_write_env_tokens_appends_missing_keys(tmp_path) -> None:
     assert "LOOM_TEAM_TOKEN=loom_team_new" in content
     assert "LOOM_WORKER_TOKEN=loom_w_new" in content
     assert "LOOM_ADMIN_TOKEN=loom_admin_new" in content
+
+
+def test_up_recreates_worker_after_seeding_fresh_tokens(
+    tmp_path: Path,
+) -> None:
+    """After `_seed_test_data` mints fresh tokens and `_write_env_tokens`
+    persists them to .env, the worker container is still running with
+    the STALE token it booted with — `docker restart` reuses the old env,
+    only `up --force-recreate` re-reads .env. `loom service up` MUST issue
+    that recreate, otherwise the worker keeps rejecting control-plane
+    requests with 401 until the operator notices.
+    """
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+
+    captured_run_calls: list[list[str]] = []
+
+    def _capture_run(argv, *_args, **_kwargs):
+        captured_run_calls.append(list(argv))
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {
+        "team": "loom_team_fresh",
+        "worker": "loom_w_fresh",
+        "admin": "loom_admin_fresh",
+    }
+
+    with patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)):
+        rc = main([
+            "service", "up",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+    assert env_file.exists(), "env_file should have been written"
+
+    # Find the recreate call — must come after the initial `up -d` and
+    # carry --force-recreate + --no-deps + worker target.
+    recreate_calls = [
+        argv for argv in captured_run_calls
+        if "--force-recreate" in argv and "worker" in argv
+    ]
+    assert len(recreate_calls) == 1, (
+        f"expected exactly one --force-recreate worker call; "
+        f"got {len(recreate_calls)} of {len(captured_run_calls)} _run calls. "
+        f"All argvs: {captured_run_calls!r}"
+    )
+    recreate_argv = recreate_calls[0]
+    assert "up" in recreate_argv
+    assert "-d" in recreate_argv
+    assert "--no-deps" in recreate_argv
+
+    # Order check: the recreate must come AFTER _write_env_tokens
+    # has run (i.e., after the .env file has the new token). We assert
+    # this by confirming the recreate is the LAST _run call (since
+    # _write_env_tokens is between _seed_test_data and the recreate
+    # in _up).
+    assert captured_run_calls[-1] == recreate_argv, (
+        "worker recreate must be the last subprocess call, AFTER "
+        "_write_env_tokens has persisted fresh tokens"
+    )
+
+
+def test_up_skips_worker_recreate_when_no_env_file(
+    tmp_path: Path,
+) -> None:
+    """When operator runs without --env-file, _write_env_tokens is
+    skipped — there's no .env to update, so there's no stale token to
+    flush. Recreating the worker would be pointless work.
+    """
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+
+    captured_run_calls: list[list[str]] = []
+
+    def _capture_run(argv, *_args, **_kwargs):
+        captured_run_calls.append(list(argv))
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {
+        "team": "loom_team_fresh",
+        "worker": "loom_w_fresh",
+        "admin": "loom_admin_fresh",
+    }
+
+    with patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)):
+        # argparse defaults --env-file to <compose_dir>/.env if not
+        # explicitly None, so we have to pass --env-file pointing
+        # somewhere AND ensure the loader treats it as "absent".
+        # The CLI doesn't actually have a "no env file" mode — it
+        # defaults to .env next to the compose file. So this test
+        # documents that "env_file is None" is actually an internal
+        # branch reachable only via the API, not the CLI flag set.
+        import argparse
+
+        from loom_cli.service_cmd import _up
+        args = argparse.Namespace(
+            compose_file=compose,
+            env_file=None,
+            db_url="postgresql://x/y",
+        )
+        rc = _up(args)
+
+    assert rc == 0
+    # No recreate should have happened.
+    recreate_calls = [
+        argv for argv in captured_run_calls
+        if "--force-recreate" in argv
+    ]
+    assert recreate_calls == [], (
+        f"unexpected --force-recreate when env_file is None: "
+        f"{recreate_calls!r}"
+    )

@@ -215,6 +215,21 @@ def _up(args: argparse.Namespace) -> int:
         _write_env_tokens(env_file, tokens)
         print(f"→ updated {env_file} with fresh tokens")
 
+        # The worker container booted in the earlier `compose up` with
+        # whatever LOOM_WORKER_TOKEN was in .env BEFORE the seed ran —
+        # stale on a fresh `down -v` cycle. `docker restart` reuses
+        # the old env; only `up --force-recreate` re-reads .env. Skip
+        # this step when env_file is None (operator chose not to
+        # persist; nothing to re-read).
+        print("→ recreating worker so it picks up the fresh LOOM_WORKER_TOKEN")
+        _run(
+            [
+                *_compose_args(compose_file, env_file),
+                "up", "-d", "--force-recreate", "--no-deps", "worker",
+            ],
+            check=False,
+        )
+
     _print_summary(tokens)
     return 0
 
