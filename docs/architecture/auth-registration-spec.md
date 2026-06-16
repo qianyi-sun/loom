@@ -163,7 +163,9 @@ Request:
 Closed mode is the default: create a pending row and return `202 Accepted` with
 the registration id and status. Open mode is explicitly enabled by
 `LOOM_SVC_TEAM_REGISTRATION_OPEN=true`; open mode still requires rate limiting
-and a challenge hook before it can return an approved team token.
+and a challenge hook before it can return an approved team token. Until that
+challenge hook ships, the backend accepts the setting but returns an explicit
+`501` for open-registration attempts instead of silently issuing credentials.
 
 ### Admin Review
 
@@ -173,15 +175,17 @@ Returns pending registration summaries. Requires admin auth.
 
 `POST /api/v1/admin/team-registrations/{id}/approve`
 
-Creates `teams`, `team_quotas`, and one `tokens` row with `type='team'`, then
-returns the raw team token exactly once in the approval response. The raw token
-is not stored after hashing. If the admin UI loses the response, the admin must
-mint a replacement team token and revoke the lost hash prefix.
+Requires admin auth plus `X-Loom-Admin-Actor`. Creates `teams`, `team_quotas`,
+and one `tokens` row with `type='team'`, then returns the raw team token
+exactly once in the approval response. The raw token is not stored after
+hashing. If the admin UI loses the response, the admin must mint a replacement
+team token and revoke the lost hash prefix.
 
 `POST /api/v1/admin/team-registrations/{id}/reject`
 
-Marks the request rejected and records audit metadata. It does not delete the
-request row.
+Requires admin auth plus `X-Loom-Admin-Actor`. Marks the request rejected and
+records review metadata on the registration row. It does not delete the request
+row.
 
 ### Admin Audit
 
@@ -250,6 +254,7 @@ production UX/security issues and must not block the singleton-admin backend.
    fallback only for development until the migration slice.
 3. **Team registration API:** migration for `pending_team_registrations`, public
    register endpoint, admin list/approve/reject endpoint, and token mint once.
+   The backend portion is implemented before the SPA table/action wiring.
 4. **Audit events:** migration for `admin_audit_events`, audit writer helper,
    and admin mutation hooks for registration approval/rejection and token
    mint/revoke.

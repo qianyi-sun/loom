@@ -71,6 +71,38 @@ class TeamQuota(Base):
     )
 
 
+class PendingTeamRegistration(Base):
+    __tablename__ = "pending_team_registrations"
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    contact_email: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    reviewed_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_team_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=True,
+    )
+    source_ip_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+
+
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String, primary_key=True)

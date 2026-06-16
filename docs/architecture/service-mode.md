@@ -34,6 +34,7 @@ For operator-side admin curls, port-forward CP:
                         │  /api/v1/{trials, batches,         │
                         │     benchmarks, tasks, tokens,       │
                         │     usage, rate-cards, teams,        │
+                        │     team registrations,              │
                         │     trajectory, atif, health}        │
                         └────┬──────────────────┬──────────────┘
                              │                  │
@@ -271,12 +272,13 @@ state before propagating:
 | `llm_calls` | Gateway | Per-call cost attribution; FK to trial |
 | `tasks` + `benchmarks` | Operator CLI | Cluster task catalog |
 | `team_quotas` | CP | DRF weights + license allowlists |
+| `pending_team_registrations` | Service | Default-closed team onboarding queue and admin review state |
 | `tokens` | Service / CP | Bearer tokens (all 4 kinds) |
 | `batches` | Service | Batch grouping + idempotency keys |
 | `cloud_compute_records` | Cloud drivers | Per-sandbox lifetime + cost; `cloud_provider` column |
 
 Migrations: `migrations/versions/0001_initial_schema.py` through
-`0008_cloud_compute_records.py`. Run via
+`0022_pending_team_registrations.py`. Run via
 `alembic -c migrations/alembic.ini upgrade head`.
 
 ## SPA

@@ -113,6 +113,26 @@ EOF
    kubectl rollout restart deploy/loom-service
    ```
 
+7. **Approve team registration requests.** Public registration is
+   default-closed. A researcher can submit a request without a bearer token:
+   ```bash
+   curl -X POST https://loom.example.com/api/v1/teams/register \
+     -H "Content-Type: application/json" \
+     -d '{"name":"latent-reasoning", "contact_email":"owner@example.com"}'
+   ```
+   An admin lists and approves pending requests through `loom_service`:
+   ```bash
+   curl https://loom.example.com/api/v1/admin/team-registrations?status=pending \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+
+   curl -X POST https://loom.example.com/api/v1/admin/team-registrations/$REG_ID/approve \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Loom-Admin-Actor: qianyi"
+   ```
+   The approval response reveals the raw `loom_team_...` token exactly once;
+   store or deliver it through an operator-approved secure channel. Reject
+   accidental requests with `POST .../$REG_ID/reject` and the same actor header.
+
 ## Upgrade
 
 ```bash

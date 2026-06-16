@@ -57,6 +57,29 @@ def test_admin_secret_file_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     assert str(s.admin_secret_file).endswith("/secrets.toml")
 
 
+def test_team_registration_defaults_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+
+    s = LoomServiceSettings(_env_file=None)
+
+    assert s.team_registration_open is False
+
+
+def test_team_registration_open_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("LOOM_SVC_TEAM_REGISTRATION_OPEN", "1")
+
+    s = LoomServiceSettings(_env_file=None)
+
+    assert s.team_registration_open is True
+
+
 def test_extra_forbid_on_dict_init(monkeypatch: pytest.MonkeyPatch) -> None:
     """`extra="forbid"` rejects unknown fields passed to the constructor.
 

@@ -29,6 +29,7 @@ class LoomServiceSettings(BaseSettings):
     control_plane_url: HttpUrl
     gateway_url: HttpUrl
     admin_secret_file: Path | None = None
+    team_registration_open: bool = False
 
     bind_host: str = "0.0.0.0"
     bind_port: int = 8090
