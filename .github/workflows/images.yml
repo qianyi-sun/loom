@@ -1,0 +1,124 @@
+name: images
+
+# Builds and (on push to dev/main) pushes multi-arch container images
+# for the 5 cluster-deploy components: worker, service, control-plane,
+# llm-gateway, web. Three more images (llm-gateway-sandbox,
+# gateway-router, preflight) join the matrix when the corresponding
+# Go binaries land in Phase 2/3.
+#
+# Why multi-arch: cluster-deploy target includes ASUS Ascent GX10
+# (ARM v9.2-A). See docs/architecture/cluster-deploy.md.
+#
+# Implementation note: we don't use docker/setup-qemu-action +
+# docker/setup-buildx-action + docker/build-push-action because the
+# carinrc org's GitHub Actions allowed-actions policy blocks the
+# docker/* marketplace actions (confirmed via startup_failure when
+# any of them is `uses:`-d). Instead we drive `docker buildx` directly
+# via the CLI (built into ubuntu-latest runners since Docker 23) and
+# pull `tonistiigi/binfmt` to install QEMU emulators — both are plain
+# docker operations, not marketplace actions.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/Dockerfile.*"
+      - "deploy/nginx-spa.conf"
+      - "src/**"
+      - "packages/**"
+      - "pyproject.toml"
+      - "web/package*.json"
+      - "web/src/**"
+      - ".github/workflows/images.yml"
+  push:
+    branches: [dev, main]
+    paths:
+      - "deploy/Dockerfile.*"
+      - "deploy/nginx-spa.conf"
+      - "src/**"
+      - "packages/**"
+      - "pyproject.toml"
+      - "web/package*.json"
+      - "web/src/**"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.image }} (multi-arch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: worker
+            dockerfile: deploy/Dockerfile.worker
+          - image: service
+            dockerfile: deploy/Dockerfile.service
+          - image: control-plane
+            dockerfile: deploy/Dockerfile.control-plane
+          - image: llm-gateway
+            dockerfile: deploy/Dockerfile.gateway
+          - image: web
+            dockerfile: deploy/Dockerfile.web
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install QEMU + create buildx builder
+        # tonistiigi/binfmt is what docker/setup-qemu-action wraps;
+        # `docker buildx create --use` is what docker/setup-buildx-action
+        # wraps. No marketplace actions needed.
+        run: |
+          docker run --privileged --rm tonistiigi/binfmt --install all
+          docker buildx create --name loom-builder --use --bootstrap
+          docker buildx inspect
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        # Plain `docker login`, not docker/login-action.
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Compute image reference
+        id: ref
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner}/loom-${{ matrix.image }}"
+          sha_short=$(echo "${{ github.sha }}" | cut -c1-12)
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "tag_args=--tag ${image}:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
+            echo "push_flag=" >> "$GITHUB_OUTPUT"
+          else
+            branch=$(echo "${{ github.ref_name }}")
+            echo "tag_args=--tag ${image}:${sha_short} --tag ${image}:${branch}" >> "$GITHUB_OUTPUT"
+            echo "push_flag=--push" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (+ push on dev/main)
+        # `docker buildx build` with explicit platforms. The buildx
+        # builder created above is the default; --platform triggers
+        # the cross-arch build via QEMU emulation.
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file ${{ matrix.dockerfile }} \
+            ${{ steps.ref.outputs.tag_args }} \
+            ${{ steps.ref.outputs.push_flag }} \
+            --cache-from type=gha,scope=images-${{ matrix.image }} \
+            --cache-to type=gha,scope=images-${{ matrix.image }},mode=max \
+            --provenance false \
+            .
+        env:
+          # `--cache-to type=gha` requires these env vars; buildx
+          # picks them up to talk to the GHA cache service.
+          ACTIONS_CACHE_URL: ${{ env.ACTIONS_CACHE_URL }}
+          ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
