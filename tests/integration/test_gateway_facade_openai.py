@@ -524,3 +524,83 @@ async def test_facade_returns_504_on_upstream_timeout(
     )
     assert r.status_code == 504
     assert "timeout" in r.json()["detail"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #72 — JWT scope as the source of connection_id
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_facade_routes_using_jwt_scope_without_header(
+    facade_setup,
+) -> None:
+    """Issue #72: a JWT minted with provider_connection_id in scope
+    routes correctly even when the x-loom-provider-connection-id
+    header is absent. Forward-compatible with the Phase 3 sandbox
+    SDK path."""
+    app, _jwt, team_id, trial_id, conn_id, captures = facade_setup
+    settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
+    # Mint a JWT whose scope includes the connection_id.
+    scoped_jwt = mint_step_jwt(
+        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        ttl_sec=60,
+        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=conn_id,
+    )
+    # Call WITHOUT the x-loom-provider-connection-id header.
+    r = await _post(app, scoped_jwt)
+    assert r.status_code == 200, r.text
+    # Upstream got the decrypted key — proving the JWT-scoped
+    # connection_id reached the resolution path.
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+    assert len(requests) == 1
+    assert requests[0].headers["Authorization"] == "Bearer sk-upstream-XYZ"
+
+
+async def test_facade_400s_when_jwt_and_header_mismatch(
+    facade_setup,
+) -> None:
+    """Issue #72: JWT scope is authoritative. If a caller supplies
+    both a scoped JWT and a header pointing at a different id, the
+    facade 400s and points the operator at the canonical source."""
+    app, _jwt, team_id, trial_id, conn_id, captures = facade_setup
+    settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
+    scoped_jwt = mint_step_jwt(
+        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        ttl_sec=60,
+        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=conn_id,
+    )
+    bogus_header = str(uuid4())
+    r = await _post(
+        app, scoped_jwt,
+        **{"x-loom-provider-connection-id": bogus_header},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "JWT scope is authoritative" in detail
+    assert str(conn_id) in detail
+    assert bogus_header in detail
+    # Upstream MUST NOT have been called.
+    assert len(captures["requests"]) == 0  # type: ignore[arg-type]
+
+
+async def test_facade_accepts_matching_jwt_scope_and_header(
+    facade_setup,
+) -> None:
+    """During the transition, the sandbox SDK can safely send both —
+    the route accepts when they agree."""
+    app, _jwt, team_id, trial_id, conn_id, captures = facade_setup
+    settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
+    scoped_jwt = mint_step_jwt(
+        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        ttl_sec=60,
+        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=conn_id,
+    )
+    r = await _post(
+        app, scoped_jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 200
+    assert len(captures["requests"]) == 1  # type: ignore[arg-type]

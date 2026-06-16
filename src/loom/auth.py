@@ -42,6 +42,15 @@ class AuthContext:
     # remain None for DB-backed tokens.
     trial_id: UUID | None = None
     step_id: str | None = None
+    # cluster-deploy.md §Authentication / issue #72: per-trial step
+    # JWTs additionally scope to a `provider_connection_id` so a
+    # compromised gateway can only target the connection bound at
+    # mint time. Remains None for:
+    # - DB-backed tokens (team/worker/admin)
+    # - Step JWTs minted before the field was added (graceful fallback)
+    # - Trials whose Trial.provider_connection_id is NULL (e.g. local
+    #   adapters that don't route through the gateway facade)
+    provider_connection_id: UUID | None = None
 
 
 def mint_step_jwt(
@@ -51,13 +60,19 @@ def mint_step_jwt(
     step_id: str,
     ttl_sec: int,
     signing_key: str,
+    provider_connection_id: UUID | None = None,
 ) -> str:
-    """Mint a step-scoped JWT carrying `(team_id, trial_id, step_id)`.
-    Used by the Control Plane's POST /admin/step-tokens (Task 4); the
-    returned string is the bearer token the agent presents at the
-    Gateway."""
+    """Mint a step-scoped JWT carrying `(team_id, trial_id, step_id)`
+    and optionally `provider_connection_id` (cluster-deploy.md /
+    issue #72). Used by the Control Plane's POST /admin/step-tokens.
+
+    When `provider_connection_id` is set, the JWT scope binds the
+    bearer to one specific connection — the facade routes prefer the
+    JWT-supplied value over the `x-loom-provider-connection-id`
+    header (and 400 on mismatch). When None, the field is omitted
+    from the payload so legacy verifiers see no change."""
     now = datetime.now(UTC)
-    payload = {
+    payload: dict[str, object] = {
         "iss": "loom-control-plane",
         "sub": "step-session",
         "team_id": str(team_id),
@@ -67,6 +82,8 @@ def mint_step_jwt(
         "iat": int(now.timestamp()),
         "scopes": ["llm:call"],
     }
+    if provider_connection_id is not None:
+        payload["provider_connection_id"] = str(provider_connection_id)
     body = jwt.encode(payload, signing_key, algorithm="HS256")
     return _STEP_JWT_PREFIX + body
 
@@ -74,11 +91,19 @@ def mint_step_jwt(
 def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     """Verify a step-scoped JWT. Raises `jwt.PyJWTError` subclasses on
     failure (ExpiredSignatureError, InvalidSignatureError,
-    InvalidTokenError, etc.) — caller decides how to surface them."""
+    InvalidTokenError, etc.) — caller decides how to surface them.
+
+    `provider_connection_id` is decoded when present; a missing
+    claim leaves the field None so JWTs minted before issue #72
+    keep verifying (graceful rollout)."""
     if not token.startswith(_STEP_JWT_PREFIX):
         raise jwt.InvalidTokenError("not a step JWT")
     body = token[len(_STEP_JWT_PREFIX):]
     payload = jwt.decode(body, signing_key, algorithms=["HS256"])
+    raw_conn_id = payload.get("provider_connection_id")
+    provider_connection_id: UUID | None = (
+        UUID(raw_conn_id) if isinstance(raw_conn_id, str) else None
+    )
     return AuthContext(
         token_hash=b"",                       # synthetic — no DB row
         type="step_session",
@@ -87,6 +112,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
         trial_id=UUID(payload["trial_id"]),
         step_id=payload["step_id"],
+        provider_connection_id=provider_connection_id,
     )
 
 

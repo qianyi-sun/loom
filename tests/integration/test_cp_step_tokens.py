@@ -44,8 +44,13 @@ def seed(postgres_url: str) -> Iterator[dict]:
     try:
         yield {"token": raw, "team_id": team_id, "trial_id": trial_id}
     finally:
+        from loom.db.schema import ProviderConnection
         with session_local() as s:
             s.execute(delete(Trial))
+            # Tests in this file may seed a ProviderConnection to
+            # exercise issue #72; clean it up before Team to satisfy
+            # the FK.
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -209,3 +214,120 @@ def test_round_trip_with_jwt_can_be_decoded(app, seed):  # type: ignore[no-untyp
         assert claims["sub"] == "step-session"
         assert claims["step_id"] == "phase-2"
         assert claims["scopes"] == ["llm:call"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #72 — JWT scope carries provider_connection_id from Trial row
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_step_token_omits_provider_connection_id_when_trial_has_none(
+    app, seed,
+):  # type: ignore[no-untyped-def]
+    """Trial.provider_connection_id IS NULL (e.g. local adapter trial)
+    ⇒ JWT must NOT carry a provider_connection_id claim, and
+    ctx.provider_connection_id is None on verify."""
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "main",
+                "ttl_sec": 30,
+            },
+        )
+        assert r.status_code == 201
+        ctx = verify_step_jwt(
+            r.json()["token"],
+            signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+        )
+        assert ctx.provider_connection_id is None
+
+
+def test_step_token_carries_trial_provider_connection_id(
+    app, seed, postgres_url,
+):  # type: ignore[no-untyped-def]
+    """Issue #72: CP pulls provider_connection_id from the Trial row at
+    mint time (defense against a compromised worker forging a different
+    connection_id). Verify the JWT scope contains the right id."""
+    from sqlalchemy import update as sa_update
+
+    from loom.db.schema import ProviderConnection
+    conn_id = uuid4()
+    engine = create_engine(postgres_url)
+    session_local = sessionmaker(engine)
+    with session_local() as s:
+        # FK trial → provider_connections requires the connection row
+        # to exist. Seed a minimal one for this team.
+        s.execute(insert(ProviderConnection).values(
+            id=conn_id,
+            team_id=seed["team_id"],
+            provider_type="openai-compatible",
+            display_name=f"test-conn-{conn_id}",
+            base_url="https://api.openai.com/v1",
+            upstream_host="api.openai.com",
+            encrypted_api_key_ref=f"loom://team:{seed['team_id']}/{conn_id}",
+            created_by="admin:fixture",
+        ))
+        s.execute(
+            sa_update(Trial)
+            .where(Trial.id == seed["trial_id"])
+            .values(provider_connection_id=conn_id),
+        )
+        s.commit()
+    engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "main",
+                "ttl_sec": 30,
+            },
+        )
+        assert r.status_code == 201
+        ctx = verify_step_jwt(
+            r.json()["token"],
+            signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+        )
+        assert ctx.provider_connection_id == conn_id
+
+
+def test_step_token_does_not_accept_provider_connection_id_in_payload(
+    app, seed,
+):  # type: ignore[no-untyped-def]
+    """Defense in depth (#72): the worker MUST NOT be able to supply
+    a different provider_connection_id in the request payload — the
+    CP looks it up from the trial row regardless. Pydantic's
+    extra="ignore" default silently drops the field; the issued JWT
+    carries the trial's value (or None), not the payload's."""
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/step-tokens",
+            headers={"Authorization": f"Bearer {seed['token']}"},
+            json={
+                "team_id": str(seed["team_id"]),
+                "trial_id": str(seed["trial_id"]),
+                "step_id": "main",
+                "ttl_sec": 30,
+                # Attempt at forgery — trial has NULL connection_id.
+                "provider_connection_id": str(uuid4()),
+            },
+        )
+        # Either 201 (extras silently ignored — current Pydantic default
+        # for the route) or 422 (extras forbidden). Both are safe; the
+        # critical assertion is the JWT scope.
+        assert r.status_code in (201, 422)
+        if r.status_code == 201:
+            ctx = verify_step_jwt(
+                r.json()["token"],
+                signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+            )
+            # MUST be None — trial has no connection_id; payload-supplied
+            # value was ignored.
+            assert ctx.provider_connection_id is None

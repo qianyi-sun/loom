@@ -45,9 +45,9 @@ from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
-    parse_connection_id_header,
     redact_api_key,
     resolve_facade_connection,
+    resolve_provider_connection_id,
     verify_facade_auth,
 )
 
@@ -91,7 +91,9 @@ async def anthropic_messages_facade(
     assert ctx.team_id is not None
     assert ctx.trial_id is not None
     assert ctx.step_id is not None
-    connection_id = parse_connection_id_header(x_loom_provider_connection_id)
+    connection_id = resolve_provider_connection_id(
+        ctx, x_loom_provider_connection_id,
+    )
 
     # Same rationale as openai facade: SSE breaks cost attribution
     # because the final `usage` block needs to be visible at the route

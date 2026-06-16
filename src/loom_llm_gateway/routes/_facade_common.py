@@ -50,7 +50,12 @@ async def verify_facade_auth(
 
 def parse_connection_id_header(raw: str | None) -> UUID:
     """Validate the `x-loom-provider-connection-id` header. Raises 400
-    on missing or non-UUID values."""
+    on missing or non-UUID values.
+
+    Kept for callers that still want pure-header resolution. New code
+    should prefer `resolve_provider_connection_id` which honors the
+    JWT-scoped value when present (issue #72).
+    """
     if not raw:
         raise HTTPException(
             status_code=400,
@@ -66,6 +71,70 @@ def parse_connection_id_header(raw: str | None) -> UUID:
                 f"{exc}"
             ),
         ) from exc
+
+
+def resolve_provider_connection_id(
+    ctx: AuthContext, header_value: str | None,
+) -> UUID:
+    """Resolve the connection_id from EITHER the step-JWT scope
+    (``ctx.provider_connection_id``) OR the
+    ``x-loom-provider-connection-id`` header.
+
+    Precedence rules (issue #72):
+    - **Both set + match** ⇒ use the value (canonical case during
+      transition; sandbox SDK can send both safely).
+    - **Both set + mismatch** ⇒ 400. The JWT scope is authoritative;
+      the response message says so explicitly so operators know to
+      drop the header or align it.
+    - **JWT only** ⇒ use the JWT value (forward-compatible: post-
+      transition path).
+    - **Header only** ⇒ use the header value (legacy callers; will
+      keep working until the header is sunset in a follow-up).
+    - **Neither** ⇒ 400. The facade has nothing to route against.
+
+    The JWT scope binds at mint time (CP looks it up from the trial
+    row); the header is operator-supplied. When they agree, the
+    request is unambiguous regardless of trust level.
+    """
+    header_uuid: UUID | None = None
+    if header_value:
+        try:
+            header_uuid = UUID(header_value)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "x-loom-provider-connection-id is not a valid "
+                    f"UUID: {exc}"
+                ),
+            ) from exc
+
+    jwt_uuid = ctx.provider_connection_id
+
+    if jwt_uuid is not None and header_uuid is not None:
+        if jwt_uuid != header_uuid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "provider_connection_id mismatch: JWT scope says "
+                    f"{jwt_uuid}, header says {header_uuid}. The JWT "
+                    "scope is authoritative — drop the header or align "
+                    "it to the JWT value."
+                ),
+            )
+        return jwt_uuid
+    if jwt_uuid is not None:
+        return jwt_uuid
+    if header_uuid is not None:
+        return header_uuid
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "provider_connection_id is required: pass via the "
+            "x-loom-provider-connection-id header or mint a step-JWT "
+            "with provider_connection_id in scope (issue #72)."
+        ),
+    )
 
 
 async def resolve_facade_connection(

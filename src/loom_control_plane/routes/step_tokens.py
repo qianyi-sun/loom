@@ -50,14 +50,22 @@ async def issue_step_token(
     # buggy/compromised worker could mint step tokens for fictional
     # trial_ids and the Gateway would silently attribute orphan
     # llm_calls rows.
+    #
+    # Issue #72: also pull `provider_connection_id` from the trial row
+    # so the JWT scope binds the bearer to one specific connection.
+    # The worker doesn't supply it — the CP is the source of truth
+    # (defense against a compromised worker forging an unrelated
+    # connection_id and routing through another team's credentials).
     async with request.app.state.session_factory() as session:
-        trial_team = (await session.execute(
-            select(TrialRow.team_id).where(TrialRow.id == payload.trial_id),
-        )).scalar_one_or_none()
-    if trial_team is None:
+        trial_row = (await session.execute(
+            select(TrialRow.team_id, TrialRow.provider_connection_id)
+            .where(TrialRow.id == payload.trial_id),
+        )).one_or_none()
+    if trial_row is None:
         raise HTTPException(
             status_code=404, detail=f"trial {payload.trial_id} not found",
         )
+    trial_team, trial_provider_connection_id = trial_row
     if trial_team != payload.team_id:
         raise HTTPException(
             status_code=400,
@@ -71,6 +79,7 @@ async def issue_step_token(
         step_id=payload.step_id,
         ttl_sec=payload.ttl_sec,
         signing_key=signing_key,
+        provider_connection_id=trial_provider_connection_id,
     )
     expires_at = datetime.now(UTC) + timedelta(seconds=payload.ttl_sec)
     return {

@@ -71,3 +71,63 @@ def test_authcontext_backwards_compat_fields_present() -> None:
     assert ctx.token_hash == b""   # synthetic for JWT branch — no DB row
     assert isinstance(ctx.scopes, list)
     assert ctx.expires_at is not None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #72 — provider_connection_id in step-JWT scope
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_mint_without_provider_connection_id_omits_claim() -> None:
+    """Default mint (no provider_connection_id) → claim absent, verify
+    returns ctx.provider_connection_id is None. Backwards compat: JWTs
+    minted before issue #72 still verify cleanly."""
+    token = mint_step_jwt(
+        team_id=uuid4(), trial_id=uuid4(), step_id="main",
+        ttl_sec=60, signing_key=_KEY,
+    )
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+    assert ctx.provider_connection_id is None
+
+
+def test_mint_with_provider_connection_id_roundtrips() -> None:
+    """Issue #72: connection_id passed at mint surfaces on verify."""
+    conn = uuid4()
+    token = mint_step_jwt(
+        team_id=uuid4(), trial_id=uuid4(), step_id="main",
+        ttl_sec=60, signing_key=_KEY,
+        provider_connection_id=conn,
+    )
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+    assert ctx.provider_connection_id == conn
+
+
+def test_mint_with_provider_connection_id_does_not_affect_other_claims() -> None:
+    """Adding the new claim mustn't break the existing
+    team/trial/step/scope fields."""
+    team_id = uuid4()
+    trial_id = uuid4()
+    conn = uuid4()
+    token = mint_step_jwt(
+        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        ttl_sec=60, signing_key=_KEY,
+        provider_connection_id=conn,
+    )
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+    assert ctx.team_id == team_id
+    assert ctx.trial_id == trial_id
+    assert ctx.step_id == "step-1"
+    assert "llm:call" in ctx.scopes
+    assert ctx.provider_connection_id == conn
+
+
+def test_explicit_none_provider_connection_id_equivalent_to_omitted() -> None:
+    """Passing None explicitly should produce the same shape as
+    omitting the kwarg entirely (no claim in payload, None on verify)."""
+    a = mint_step_jwt(
+        team_id=uuid4(), trial_id=uuid4(), step_id="s",
+        ttl_sec=60, signing_key=_KEY,
+        provider_connection_id=None,
+    )
+    ctx = verify_step_jwt(a, signing_key=_KEY)
+    assert ctx.provider_connection_id is None
