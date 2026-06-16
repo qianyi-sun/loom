@@ -293,6 +293,37 @@ def _delete(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _test(args: argparse.Namespace) -> int:
+    """`loom providers test NAME` — probe the connection's base_url with
+    the stored credentials. The server route persists the outcome on
+    the row, so subsequent `loom providers show` reflects it."""
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            row = _resolve_by_name(c, args.name)
+            resp = c.post(
+                f"/api/v1/provider-connections/{row['id']}/test",
+                # extend default timeout to cover the upstream probe;
+                # the server caps at 5s but +5s for round-trip on top.
+                timeout=20.0,
+            )
+        body = assert_2xx(
+            resp, action=f"test provider connection {args.name!r}",
+        )
+        # status is 'valid' or 'invalid'; rc=0 for valid, rc=1 for
+        # invalid so this is greppable from CI.
+        print(f"name:                  {args.name}")
+        print(f"status:                {body['status']}")
+        if body.get("http_status") is not None:
+            print(f"http_status:           {body['http_status']}")
+        if body.get("last_validation_error"):
+            print(f"last_validation_error: {body['last_validation_error']}")
+        print(f"last_validated_at:     {body['last_validated_at']}")
+        return 0 if body["status"] == "valid" else 1
+
+    return _run_with_error_handling(_body)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Dispatch
 # ──────────────────────────────────────────────────────────────────────
@@ -396,6 +427,17 @@ def dispatch(argv: list[str]) -> int:
     p_delete = sub.add_parser("delete", help="Soft-delete a connection.")
     p_delete.add_argument("name", help="Display name to delete.")
     p_delete.set_defaults(handler=_delete)
+
+    # --- test ---
+    p_test = sub.add_parser(
+        "test",
+        help=(
+            "Probe the connection's base_url with the stored credentials. "
+            "Updates status + last_validated_at on the server."
+        ),
+    )
+    p_test.add_argument("name", help="Display name to test.")
+    p_test.set_defaults(handler=_test)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

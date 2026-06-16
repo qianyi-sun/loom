@@ -388,6 +388,102 @@ def test_delete_resolves_then_calls_delete(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# test
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_test_valid_returns_0(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A valid probe response → rc=0 with status printed."""
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/test")
+    ] = httpx.Response(200, json={
+        "connection_id": conn["id"],
+        "status": "valid",
+        "http_status": 200,
+        "last_validation_error": None,
+        "last_validated_at": "2026-06-16T12:00:00Z",
+    })
+    rc = main(["providers", "test", "openai-prod"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "status:                valid" in out
+    assert "http_status:           200" in out
+    # 1 GET (resolution) + 1 POST (test).
+    assert mock_server[1].method == "POST"
+    assert mock_server[1].url.path == (
+        f"/api/v1/provider-connections/{conn['id']}/test"
+    )
+
+
+def test_test_invalid_returns_1_and_prints_error(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`invalid` status → rc=1 + error printed; CI-greppable."""
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/test")
+    ] = httpx.Response(200, json={
+        "connection_id": conn["id"],
+        "status": "invalid",
+        "http_status": 401,
+        "last_validation_error": "HTTP 401 from .../models; body excerpt: 'invalid api key'",
+        "last_validated_at": "2026-06-16T12:00:00Z",
+    })
+    rc = main(["providers", "test", "openai-prod"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status:                invalid" in out
+    assert "http_status:           401" in out
+    assert "invalid api key" in out
+
+
+def test_test_unreachable_omits_http_status(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When the probe never reached an HTTP server, http_status=None;
+    rendering should NOT print a `http_status:` line."""
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{conn['id']}/test")
+    ] = httpx.Response(200, json={
+        "connection_id": conn["id"],
+        "status": "invalid",
+        "http_status": None,
+        "last_validation_error": "timeout after 5.0s",
+        "last_validated_at": "2026-06-16T12:00:00Z",
+    })
+    rc = main(["providers", "test", "openai-prod"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "http_status:" not in out
+    assert "timeout" in out
+
+
+def test_test_unknown_name_returns_1(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": []},
+    )
+    rc = main(["providers", "test", "nope"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no provider connection named 'nope'" in err
+
+
+# ──────────────────────────────────────────────────────────────────────
 # not-logged-in path
 # ──────────────────────────────────────────────────────────────────────
 

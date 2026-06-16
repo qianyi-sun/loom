@@ -239,3 +239,118 @@ def default_pricing_source_for(provider_type: str) -> str:
     if provider_type in ("anthropic", "google"):
         return "rate-card"
     return "tokens-only"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Connection probe (used by /test route)
+# ──────────────────────────────────────────────────────────────────────
+
+# Probe timeout — short on purpose; legitimate provider models endpoints
+# answer in under a second from anywhere on the public internet. Stretching
+# this only makes the route easier to use as a slow-loris vector against
+# loom_service itself.
+_PROBE_TIMEOUT_SEC = 5.0
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Outcome of a connection probe. `http_status` is None when the
+    request never reached a server (DNS/connect/timeout); otherwise the
+    upstream's response code."""
+
+    status: str  # 'valid' | 'invalid'
+    http_status: int | None
+    error: str | None
+
+
+def _probe_url_and_headers(
+    provider_type: str, base_url: str, api_key: str,
+) -> tuple[str, dict[str, str]]:
+    """Map (type, base_url, api_key) → (probe URL, headers). Every probe
+    is GET; bodies stay zero-byte so a misconfigured provider can't bill
+    us for tokens.
+
+    - openai-compatible / custom: `GET <base>/models` with Bearer
+    - anthropic: `GET <base>/models` with `x-api-key` + version header
+    - google: `GET <base>/models?key=<API_KEY>` (Google API style)
+    """
+    base = base_url.rstrip("/")
+    if provider_type == "anthropic":
+        return (
+            f"{base}/models",
+            {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+    if provider_type == "google":
+        return (
+            f"{base}/models?key={api_key}",
+            {},
+        )
+    # openai-compatible + custom (defensible default)
+    return (
+        f"{base}/models",
+        {"Authorization": f"Bearer {api_key}"},
+    )
+
+
+async def probe_connection(
+    provider_type: str, base_url: str, api_key: str,
+    *, _client_factory: object = None,
+) -> ProbeResult:
+    """Probe a provider connection's reachability + credential validity.
+
+    Issues a single GET to the provider's `/models` listing endpoint
+    with a short timeout, no redirects (a 3xx to an internal host
+    would re-introduce SSRF). 2xx → valid; anything else → invalid
+    with the http_status + a 200-char body excerpt for diagnosis.
+
+    `_client_factory` is a test seam — must be a callable returning an
+    `httpx.AsyncClient`-like object exposing `.get(url, headers=...)`.
+    Default constructs a fresh AsyncClient per call so settings stay
+    explicit (timeout + no redirects).
+    """
+    import httpx
+
+    url, headers = _probe_url_and_headers(provider_type, base_url, api_key)
+
+    if _client_factory is None:
+        client_cm = httpx.AsyncClient(
+            timeout=_PROBE_TIMEOUT_SEC, follow_redirects=False,
+        )
+    else:
+        client_cm = _client_factory()  # type: ignore[operator]
+
+    try:
+        async with client_cm as client:
+            try:
+                resp = await client.get(url, headers=headers)
+            except httpx.TimeoutException as e:
+                return ProbeResult(
+                    status="invalid", http_status=None,
+                    error=f"timeout after {_PROBE_TIMEOUT_SEC}s: {e}",
+                )
+            except httpx.RequestError as e:
+                return ProbeResult(
+                    status="invalid", http_status=None,
+                    error=f"{type(e).__name__}: {e}",
+                )
+    except Exception as e:
+        # Some test doubles raise at __aenter__ instead of .get; surface
+        # as invalid rather than 500 the route.
+        return ProbeResult(
+            status="invalid", http_status=None,
+            error=f"{type(e).__name__}: {e}",
+        )
+
+    if 200 <= resp.status_code < 300:
+        return ProbeResult(
+            status="valid", http_status=resp.status_code, error=None,
+        )
+    excerpt = (resp.text or "")[:200]
+    return ProbeResult(
+        status="invalid",
+        http_status=resp.status_code,
+        error=f"HTTP {resp.status_code} from {url}; body excerpt: {excerpt!r}",
+    )

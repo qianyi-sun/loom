@@ -380,3 +380,173 @@ def test_validate_pricing_rejects_unknown_source() -> None:
 ])
 def test_default_pricing_source(provider_type: str, expected: str) -> None:
     assert default_pricing_source_for(provider_type) == expected
+
+
+# ──────────────────────────────────────────────────────────────────────
+# probe_connection (uses httpx.MockTransport — no real network)
+# ──────────────────────────────────────────────────────────────────────
+
+import httpx  # noqa: E402
+
+from loom_service.provider_connections_service import (  # noqa: E402
+    probe_connection,
+)
+
+
+def _client_factory(transport: httpx.MockTransport) -> object:
+    """Return a zero-arg callable producing an AsyncClient bound to
+    the supplied MockTransport. `probe_connection._client_factory`
+    expects exactly this shape (no args)."""
+
+    def _factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport)
+
+    return _factory
+
+
+async def test_probe_openai_compatible_uses_bearer_and_models_path() -> None:
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200, json={"data": [{"id": "gpt-4o"}, {"id": "gpt-3.5"}]},
+        )
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "valid"
+    assert result.http_status == 200
+    assert result.error is None
+    assert len(captured) == 1
+    req = captured[0]
+    assert req.method == "GET"
+    assert str(req.url) == "https://api.openai.com/v1/models"
+    assert req.headers["Authorization"] == "Bearer sk-XYZ"
+
+
+async def test_probe_anthropic_uses_xapikey_and_version_header() -> None:
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    result = await probe_connection(
+        "anthropic", "https://api.anthropic.com", "ant-XYZ",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "valid"
+    req = captured[0]
+    assert str(req.url) == "https://api.anthropic.com/models"
+    assert req.headers["x-api-key"] == "ant-XYZ"
+    assert req.headers["anthropic-version"] == "2023-06-01"
+    assert "Authorization" not in req.headers
+
+
+async def test_probe_google_uses_query_string_api_key() -> None:
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"models": []})
+
+    result = await probe_connection(
+        "google", "https://generativelanguage.googleapis.com/v1beta", "g-XYZ",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "valid"
+    req = captured[0]
+    assert "key=g-XYZ" in str(req.url)
+    assert "/models" in str(req.url)
+
+
+async def test_probe_custom_falls_back_to_openai_shape() -> None:
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={})
+
+    result = await probe_connection(
+        "custom", "https://gw.example.com/v1", "k-XYZ",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "valid"
+    assert captured[0].headers["Authorization"] == "Bearer k-XYZ"
+
+
+async def test_probe_401_marks_invalid_with_excerpt() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401, text='{"error": {"message": "Invalid API key"}}',
+        )
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", "wrong",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "invalid"
+    assert result.http_status == 401
+    assert "HTTP 401" in (result.error or "")
+    assert "Invalid API key" in (result.error or "")
+
+
+async def test_probe_500_truncates_body_excerpt_to_200_chars() -> None:
+    long_body = "x" * 2000
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=long_body)
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", "k",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "invalid"
+    # Repr-quoted excerpt → ≤ 200 chars of x's. Sanity-check the
+    # truncation didn't pull the full 2000 chars.
+    assert result.error is not None
+    assert len(result.error) < 500
+
+
+async def test_probe_timeout_returns_invalid_with_no_http_status() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("connect timeout")
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", "k",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "invalid"
+    assert result.http_status is None
+    assert "timeout" in (result.error or "").lower()
+
+
+async def test_probe_connect_error_returns_invalid() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", "k",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    assert result.status == "invalid"
+    assert result.http_status is None
+    assert "ConnectError" in (result.error or "")
+
+
+async def test_probe_strips_trailing_slash_in_base_url() -> None:
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={})
+
+    await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1/", "k",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    # No `//models` — single slash.
+    assert str(captured[0].url) == "https://api.openai.com/v1/models"

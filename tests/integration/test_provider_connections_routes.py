@@ -615,3 +615,181 @@ def test_delete_cross_team_returns_404(app_setup) -> None:
         headers=_auth(tokens["team_a"]),
     )
     assert r.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test (probe)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_test_valid_persists_status_and_returns_summary(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: probe succeeds → row.status='valid',
+    last_validation_error cleared, last_validated_at set."""
+    from loom_service.provider_connections_service import ProbeResult
+
+    captured_args: dict[str, object] = {}
+
+    async def _fake_probe(
+        provider_type: str, base_url: str, api_key: str,
+        *, _client_factory: object = None,
+    ) -> ProbeResult:
+        captured_args["provider_type"] = provider_type
+        captured_args["base_url"] = base_url
+        captured_args["api_key"] = api_key
+        return ProbeResult(status="valid", http_status=200, error=None)
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, _ = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+        json={"name": "openai-prod", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/v1",
+              "api_key": "sk-XYZ"},
+    )
+    conn_id = create.json()["id"]
+    assert create.json()["status"] == "pending"
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["connection_id"] == conn_id
+    assert body["status"] == "valid"
+    assert body["http_status"] == 200
+    assert body["last_validation_error"] is None
+
+    # The decrypted secret reached the probe — not the encrypted ref.
+    assert captured_args["api_key"] == "sk-XYZ"
+    assert captured_args["provider_type"] == "openai-compatible"
+    assert captured_args["base_url"] == "https://api.openai.com/v1"
+
+    # Row state now reflects the probe outcome — GET /show should
+    # surface 'valid' + last_validated_at.
+    show = c.get(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    ).json()
+    assert show["status"] == "valid"
+    assert show["last_validated_at"] is not None
+    assert show["last_validation_error"] is None
+
+
+def test_test_invalid_persists_error_message(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.provider_connections_service import ProbeResult
+
+    async def _fake_probe(*args, **kwargs) -> ProbeResult:  # type: ignore[no-untyped-def]
+        return ProbeResult(
+            status="invalid", http_status=401,
+            error="HTTP 401 from .../models; body excerpt: 'bad key'",
+        )
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, _ = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+        json={"name": "n", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/", "api_key": "wrong"},
+    )
+    conn_id = create.json()["id"]
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "invalid"
+    assert body["http_status"] == 401
+    assert "bad key" in body["last_validation_error"]
+
+    show = c.get(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    ).json()
+    assert show["status"] == "invalid"
+    assert "bad key" in show["last_validation_error"]
+
+
+def test_test_cross_team_returns_404(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-team /test mirrors the GET / PATCH / DELETE behavior: 404,
+    not 403 — and crucially BEFORE we decrypt the api_key. The fake
+    probe asserts it was never called."""
+    from loom_service.provider_connections_service import ProbeResult
+
+    called = {"count": 0}
+
+    async def _fake_probe(*args, **kwargs) -> ProbeResult:  # type: ignore[no-untyped-def]
+        called["count"] += 1
+        return ProbeResult(status="valid", http_status=200, error=None)
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, _ = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_b"]),
+        json={"name": "n", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/", "api_key": "k"},
+    )
+    conn_id = create.json()["id"]
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 404
+    assert called["count"] == 0
+
+
+def test_test_returns_404_for_soft_deleted_connection(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.provider_connections_service import ProbeResult
+
+    async def _fake_probe(*args, **kwargs) -> ProbeResult:  # type: ignore[no-untyped-def]
+        return ProbeResult(status="valid", http_status=200, error=None)
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, _ = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+        json={"name": "n", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/", "api_key": "k"},
+    )
+    conn_id = create.json()["id"]
+    c.delete(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert r.status_code == 404

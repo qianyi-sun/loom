@@ -42,6 +42,7 @@ from loom_service.provider_connections_service import (
     InvalidPricingError,
     SsrfRejectedError,
     default_pricing_source_for,
+    probe_connection,
     resolve_and_validate,
     validate_pricing,
 )
@@ -120,6 +121,23 @@ class ProviderConnectionListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[ProviderConnectionResponse]
+
+
+class ProviderConnectionTestResponse(BaseModel):
+    """Result of POST /provider-connections/{id}/test.
+
+    Mirrors the row columns updated by the route so the CLI can render
+    a useful summary without a second GET. `http_status=None` means the
+    request never reached an HTTP server (DNS, connect, timeout).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: UUID
+    status: str  # 'valid' | 'invalid'
+    http_status: int | None
+    last_validation_error: str | None
+    last_validated_at: datetime
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -412,6 +430,55 @@ async def update_connection(
     await session.flush()  # trigger touches updated_at
     await session.commit()
     return _row_to_response(row)
+
+
+@router.post(
+    "/provider-connections/{connection_id}/test",
+    response_model=ProviderConnectionTestResponse,
+)
+async def test_connection(
+    connection_id: UUID, sc: SessionAndCtx,
+) -> ProviderConnectionTestResponse:
+    """Probe the configured base_url with the stored (decrypted) api_key.
+
+    Decrypts the api_key from SecretStore, issues a single short-timeout
+    GET to the provider's `/models` endpoint (`?key=...` for google),
+    and persists the outcome on the row: `status` ∈ {'valid', 'invalid'},
+    `last_validated_at`, `last_validation_error`. Redirects are NOT
+    followed — a 3xx to an internal host would re-introduce SSRF
+    despite the create-time IP validation.
+
+    The api_key never leaves loom_service; it is decrypted in-process
+    and passed only in the probe request's headers.
+    """
+    session, ctx = sc
+    row = await _get_active_connection(session, connection_id, ctx)
+
+    secret_store = _make_secret_store(session)
+    api_key = await secret_store.get(row.encrypted_api_key_ref)
+
+    result = await probe_connection(
+        row.provider_type, row.base_url, api_key,
+    )
+
+    now = datetime.now(UTC)
+    await session.execute(
+        update(ProviderConnection)
+        .where(ProviderConnection.id == row.id)
+        .values(
+            status=result.status,
+            last_validated_at=now,
+            last_validation_error=result.error,
+        ),
+    )
+    await session.commit()
+    return ProviderConnectionTestResponse(
+        connection_id=row.id,
+        status=result.status,
+        http_status=result.http_status,
+        last_validation_error=result.error,
+        last_validated_at=now,
+    )
 
 
 @router.delete(
