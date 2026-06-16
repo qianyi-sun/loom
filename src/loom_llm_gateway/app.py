@@ -14,6 +14,7 @@ from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
     admin,
     chat,
+    facade_openai,
     gemini,
     health,
     messages,
@@ -51,6 +52,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app.include_router(messages.router)
     app.include_router(responses.router)
     app.include_router(gemini.router)
+    app.include_router(facade_openai.router)
     app.include_router(admin.router)
     return app
 
