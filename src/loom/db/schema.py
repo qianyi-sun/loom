@@ -202,6 +202,20 @@ class Batch(Base):
     result_status: Mapped[str | None] = mapped_column(
         Text, nullable=True,
     )
+    # cluster-deploy.md §Schema additions: per-batch provider override.
+    # When set, the gateway uses this connection (decrypts its API key,
+    # forwards to base_url) for every trial in this batch instead of
+    # the platform default. NULL = use platform default. The Trial
+    # row's same-named column overrides this if both are set (per-trial
+    # specificity wins).
+    provider_connection_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id"),
+        nullable=True,
+    )
+    provider_model_id: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+    )
 
 
 class Trial(Base):
@@ -250,6 +264,25 @@ class Trial(Base):
     # the pre-migration behaviour exactly).
     combination_idx: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0,
+    )
+    # cluster-deploy.md §Schema additions: per-trial provider override.
+    # When set, the gateway uses this connection's decrypted API key
+    # + base_url instead of the platform default. NULL = inherit from
+    # parent Batch (also nullable) or platform default. Wins over the
+    # Batch.provider_connection_id when both are set (per-trial
+    # specificity).
+    #
+    # No cascade rule: provider_connections never hard-deletes today
+    # (team_id FK is ON DELETE RESTRICT per migration 0018 self-
+    # review). Soft-delete on the parent leaves this FK valid;
+    # historical trials retain attribution for billing/audit.
+    provider_connection_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id"),
+        nullable=True,
+    )
+    provider_model_id: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
     )
 
 
