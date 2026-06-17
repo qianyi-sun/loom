@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
     Batch,
+    Benchmark,
     ProviderConnection,
     Task,
     Team,
@@ -69,11 +70,22 @@ async def runner_setup(
             type="team", scopes=["submit"], team_id=team_id,
             issued_at=datetime.now(UTC),
         ))
+        s.execute(insert(Benchmark).values(
+            id="runner-benchmark",
+            display_name="Runner Benchmark",
+            upstream_kind="fixture",
+            upstream_locator="local",
+            upstream_revision="",
+            license_spdx="MIT",
+            license_url="https://example/license",
+            splits=["test"],
+        ))
         for tid in task_ids:
             s.execute(insert(Task).values(
                 id=tid, checksum="x" * 64,
                 config=_valid_task_config(tid),
                 source="local", license="MIT",
+                benchmark_id="runner-benchmark",
             ))
         s.commit()
     sync_engine.dispose()
@@ -160,6 +172,7 @@ async def runner_setup(
             s.execute(delete(Batch))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
+            s.execute(delete(Benchmark))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.commit()
@@ -198,7 +211,9 @@ async def test_runner_fans_out_5_trials(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         trials = s.execute(
-            select(Trial).where(Trial.batch_id == cid),
+            select(Trial)
+            .where(Trial.batch_id == cid)
+            .order_by(Trial.task_id.asc()),
         ).scalars().all()
         batch_row = s.execute(
             select(Batch).where(Batch.id == cid),
@@ -251,7 +266,9 @@ async def test_runner_is_idempotent(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         trials = s.execute(
-            select(Trial).where(Trial.batch_id == cid),
+            select(Trial)
+            .where(Trial.batch_id == cid)
+            .order_by(Trial.task_id.asc()),
         ).scalars().all()
     sync_engine.dispose()
     assert len(trials) == 5
@@ -368,6 +385,166 @@ async def test_runner_fans_out_n_samples_per_task(
         == _idempotency_key(cid, t.task_id, t.sample_idx)
         for t in trials
     )
+
+
+async def test_runner_honors_benchmark_ids_first_n_filter(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, _captured = runner_setup
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="C",
+            task_filter={
+                "benchmark_ids": ["runner-benchmark"],
+                "subset_kind": "first_n",
+                "n": 1,
+            },
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=1,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial)
+            .where(Trial.batch_id == cid)
+            .order_by(Trial.task_id.asc()),
+        ).scalars().all()
+    sync_engine.dispose()
+
+    assert [t.task_id for t in trials] == [task_ids[0]]
+
+
+async def test_runner_honors_subset_filter_variants(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, _captured = runner_setup
+    cases = [
+        (
+            "last",
+            {
+                "benchmark_ids": ["runner-benchmark"],
+                "subset_kind": "last_n",
+                "n": 2,
+            },
+            task_ids[-2:],
+        ),
+        (
+            "random",
+            {
+                "benchmark_ids": ["runner-benchmark"],
+                "subset_kind": "random_n",
+                "n": 2,
+                "seed": 42,
+            },
+            ["local/runner-0", "local/runner-4"],
+        ),
+        (
+            "explicit",
+            {
+                "task_ids": [task_ids[3], task_ids[1]],
+                "subset_kind": "explicit",
+            },
+            [task_ids[1], task_ids[3]],
+        ),
+    ]
+
+    created: list[tuple[UUID, list[str]]] = []
+    async with session_factory() as s:
+        for name, task_filter, expected in cases:
+            c = Batch(
+                team_id=team_id,
+                name=name,
+                task_filter=task_filter,
+                trial_config={},
+                state="submitted",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=len(expected),
+            )
+            s.add(c)
+            await s.flush()
+            created.append((c.id, expected))
+        await s.commit()
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        for batch_id, expected in created:
+            trials = s.execute(
+                select(Trial)
+                .where(Trial.batch_id == batch_id)
+                .order_by(Trial.task_id.asc()),
+            ).scalars().all()
+            assert [t.task_id for t in trials] == expected
+    sync_engine.dispose()
+
+
+async def test_runner_honors_empty_benchmark_ids_filter(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, _task_ids, _captured = runner_setup
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="empty",
+            task_filter={"benchmark_ids": []},
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=0,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial).where(Trial.batch_id == cid),
+        ).scalars().all()
+    sync_engine.dispose()
+
+    assert trials == []
 
 
 async def test_runner_forwards_batch_provider_connection_fields(

@@ -586,8 +586,9 @@ Four additions in one migration:
 
 - Task subset rules (first/last/random/explicit) live in the
   existing `task_filter` JSONB blob with a `subset_kind`
-  discriminator. The route's `_resolve_task_filter` gains a
-  switch on `subset_kind`. No new column.
+  discriminator. `loom_service.task_filter.resolve_task_filter`
+  is the shared materializer for count/create and batch-runner
+  fan-out. No new column.
 - Backend catalog (`GET /api/v1/backends`) is derived from the
   `workers` table's `capabilities` JSONB at request time. No new
   column or table.
@@ -785,7 +786,8 @@ has no production users.
   advance — when transitioning to `finished`, derive from
   trial reward rollup; when transitioning to `cancelled`, set
   `result_status = "cancelled"`.
-- `_resolve_task_filter` honors `subset_kind`.
+- Shared `resolve_task_filter` honors `subset_kind`; batch
+  creation/count and batch-runner fan-out use the same resolver.
 - Backend + integration tests for everything.
 
 ### PR-4: SPA — segmented Monitor + new submit form

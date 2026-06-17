@@ -33,11 +33,12 @@ import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom.db.schema import Batch, Task, Trial
+from loom.db.schema import Batch, Trial
 from loom_service.task_config_validation import (
     expected_trial_count,
     split_valid_task_configs,
 )
+from loom_service.task_filter import resolve_task_filter
 
 logger = logging.getLogger(__name__)
 
@@ -73,28 +74,6 @@ def next_batch_state(
     if in_flight > 0 or terminal_count > 0:
         return "running"
     return current
-
-
-# ---------------------------------------------------------------------
-# Runner implementation (Plan 19 Task 5)
-# ---------------------------------------------------------------------
-
-
-async def _resolve_task_filter(
-    session: AsyncSession, task_filter: Mapping[str, Any],
-) -> list[str]:
-    """Same shape as routes/batches.py._resolve_task_filter — kept
-    duplicated here so the runner has no dependency on the route
-    module (lifespan can spawn runner without importing routes)."""
-    stmt = select(Task.id)
-    if "license" in task_filter:
-        stmt = stmt.where(Task.license == task_filter["license"])
-    if "task_ids" in task_filter:
-        ids = [str(x) for x in task_filter["task_ids"]]
-        stmt = stmt.where(Task.id.in_(ids))
-    if "benchmark_id" in task_filter:
-        stmt = stmt.where(Task.benchmark_id == task_filter["benchmark_id"])
-    return [row[0] for row in (await session.execute(stmt)).all()]
 
 
 def _idempotency_key(
@@ -313,7 +292,7 @@ async def run_once(
             .with_for_update(skip_locked=True),
         )).scalars().all()
         for b in batches_to_process:
-            task_ids = await _resolve_task_filter(s, b.task_filter)
+            task_ids = await resolve_task_filter(s, b.task_filter)
             task_ids, invalid_tasks = await split_valid_task_configs(
                 s, task_ids,
             )

@@ -1,9 +1,9 @@
 """task_filter.benchmark_ids + task_filter.tag_filters resolution.
 
 Exercises the new multi-benchmark + tag filter knobs PR-2 added to
-the resolver in routes/batches.py. Doesn't go through the full POST
+the shared resolver. Doesn't go through the full POST
 /batches path (which also runs subset_kind, dedup, validation, etc.)
-— here we call `_resolve_task_filter` directly with seeded tasks to
+— here we call `resolve_task_filter` directly with seeded tasks to
 keep the contract surface narrow."""
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Benchmark, Task
-from loom_service.routes.batches import _resolve_task_filter
+from loom_service.task_filter import resolve_task_filter
 
 
 @pytest.fixture
@@ -84,7 +84,7 @@ async def test_benchmark_ids_unions_two_benchmarks(
 ) -> None:
     """Group-select of an `aime` series → both benchmarks resolved
     in one call. Total 5 tasks across both."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_ids": ["aime-22", "aime-25"],
     })
     assert len(out) == 5
@@ -100,7 +100,7 @@ async def test_benchmark_ids_takes_precedence_over_benchmark_id(
     """Backwards compat: clients that send both keep working but
     the plural list wins so the SPA's group-select path is the
     authoritative one."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_id": "humaneval",  # nonexistent here
         "benchmark_ids": ["aime-22"],
     })
@@ -113,7 +113,7 @@ async def test_empty_benchmark_ids_matches_no_tasks(
 ) -> None:
     """An empty benchmark multi-select is an intentional empty slate,
     not a request for every task in the catalog."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_ids": [],
     })
     assert out == []
@@ -123,7 +123,7 @@ async def test_tag_filters_AND_across_keys_OR_within_value_list(  # noqa: N802
     session: AsyncSession,
 ) -> None:
     """`{year: ["2024"], exam: ["I"]}` → only the 2024 AIME I row."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_ids": ["aime-22", "aime-25"],
         "tag_filters": {
             "year": ["2024"], "exam": ["I"],
@@ -136,7 +136,7 @@ async def test_tag_filters_value_list_is_OR(  # noqa: N802
     session: AsyncSession,
 ) -> None:
     """Two values for the same key → union (OR semantics)."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_ids": ["aime-22", "aime-25"],
         "tag_filters": {"year": ["2023", "2025"]},
     })
@@ -152,7 +152,7 @@ async def test_tag_filters_empty_value_list_is_no_op(
 ) -> None:
     """SPA may send `{year: []}` while the user is mid-edit; that
     shouldn't drop the result set to empty."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_ids": ["aime-22"],
         "tag_filters": {"year": []},
     })
@@ -163,7 +163,7 @@ async def test_invalid_benchmark_ids_type_400s(
     session: AsyncSession,
 ) -> None:
     with pytest.raises(HTTPException) as exc:
-        await _resolve_task_filter(session, {
+        await resolve_task_filter(session, {
             "benchmark_ids": "aime-22",  # str not list
         })
     assert exc.value.status_code == 400
@@ -174,7 +174,7 @@ async def test_invalid_tag_filter_value_type_400s(
     session: AsyncSession,
 ) -> None:
     with pytest.raises(HTTPException) as exc:
-        await _resolve_task_filter(session, {
+        await resolve_task_filter(session, {
             "benchmark_ids": ["aime-22"],
             "tag_filters": {"year": "2024"},  # str not list
         })
@@ -187,7 +187,7 @@ async def test_benchmark_ids_combined_with_subset_random_n(
 ) -> None:
     """Union of benchmarks, then random_n across the union — verifies
     the subset_kind path still works on the multi-benchmark slate."""
-    out = await _resolve_task_filter(session, {
+    out = await resolve_task_filter(session, {
         "benchmark_ids": ["aime-22", "aime-25"],
         "subset_kind": "random_n", "n": 2, "seed": 42,
     })
