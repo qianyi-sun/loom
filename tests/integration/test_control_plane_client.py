@@ -229,6 +229,42 @@ async def test_get_task_bundle_returns_config(  # type: ignore[no-untyped-def]
         await http.aclose()
 
 
+async def test_get_task_bundle_returns_slash_task_id_config(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        task_id = "humaneval/HumanEval/26"
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Task).values(
+                id=task_id,
+                checksum="cd" * 32,
+                config={
+                    "schema_version": "1",
+                    "task": {"id": task_id, "name": "HumanEval/26"},
+                    "environment": {
+                        "os": "linux",
+                        "docker_image": "alpine",
+                    },
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+                source="fixture://humaneval/HumanEval/26",
+            ))
+        engine.dispose()
+
+        bundle = await cp.get_task_bundle(task_id)
+        assert bundle["id"] == task_id
+        assert bundle["checksum"] == "cd" * 32
+        assert bundle["config"]["task"]["id"] == task_id
+        assert bundle["source"] == "fixture://humaneval/HumanEval/26"
+    finally:
+        await http.aclose()
+
+
 async def test_mint_step_token_returns_loom_step_jwt(  # type: ignore[no-untyped-def]
     cp_setup, postgres_url,
 ):

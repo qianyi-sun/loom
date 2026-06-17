@@ -360,6 +360,15 @@ been re-verified.
 - **Idempotency** — batches + trials accept an `idempotency_key`;
   partial unique index `WHERE NOT NULL` on `trials.idempotency_key`.
   Cross-team collisions return 409.
+- **Task config validation** — `POST /trials` and
+  `POST /api/v1/batches` validate the stored `TaskConfig` before
+  queueing work. The batch runner filters legacy invalid task rows out
+  of existing batches, lowers `expected_trial_count` to the valid slate,
+  marks mixed slates `partial_failed`, and finishes all-invalid slates as
+  `all_failed` instead of retrying forever.
+- **Task bundle lookup** — workers fetch the full task body from
+  `GET /tasks/{task_id}/bundle`; task ids may include slashes such as
+  `humaneval/HumanEval/26`.
 - **Worker shutdown ordering** — stop heartbeat thread first
   (prevents fence-bump races); then drain in-flight trials with a
   configurable budget (default 5 min); then exit.

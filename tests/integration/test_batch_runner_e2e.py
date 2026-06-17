@@ -37,6 +37,17 @@ from loom_service.batch_runner import (
 )
 
 
+def _valid_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
 @pytest.fixture
 async def runner_setup(
     postgres_url: str,
@@ -60,7 +71,8 @@ async def runner_setup(
         ))
         for tid in task_ids:
             s.execute(insert(Task).values(
-                id=tid, checksum="x" * 64, config={},
+                id=tid, checksum="x" * 64,
+                config=_valid_task_config(tid),
                 source="local", license="MIT",
             ))
         s.commit()
@@ -422,6 +434,118 @@ async def test_runner_forwards_batch_provider_connection_fields(
     sync_engine.dispose()
     assert {t.provider_connection_id for t in trials} == {conn_id}
     assert {t.provider_model_id for t in trials} == {"deepseek-chat"}
+
+
+async def test_runner_skips_invalid_task_configs_and_adjusts_expected(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, captured = runner_setup
+    bad_task_id = "local/runner-broken"
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Task).values(
+            id=bad_task_id,
+            checksum="b" * 64,
+            config={},
+            source="local",
+            license="MIT",
+        ))
+    sync_engine.dispose()
+
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="C",
+            task_filter={"license": "MIT"},
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=6,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    submitted_task_ids = {body["task_id"] for body in captured}
+    assert submitted_task_ids == set(task_ids)
+    assert bad_task_id not in submitted_task_ids
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == cid),
+        ).scalar_one()
+    sync_engine.dispose()
+    assert batch_row.expected_trial_count == 5
+    assert batch_row.result_status == "partial_failed"
+    assert batch_row.state == "running"
+
+
+async def test_runner_finishes_batch_when_all_task_configs_are_invalid(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, _task_ids, captured = runner_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        for idx in range(2):
+            conn.execute(insert(Task).values(
+                id=f"local/all-broken-{idx}",
+                checksum=str(idx) * 64,
+                config={},
+                source="local",
+                license="BrokenOnly",
+            ))
+    sync_engine.dispose()
+
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="C",
+            task_filter={"license": "BrokenOnly"},
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=2,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    assert captured == []
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == cid),
+        ).scalar_one()
+    sync_engine.dispose()
+    assert batch_row.expected_trial_count == 0
+    assert batch_row.state == "finished"
+    assert batch_row.result_status == "all_failed"
+    assert batch_row.finished_at is not None
 
 
 # Sanity import to keep `next_batch_state` referenced.

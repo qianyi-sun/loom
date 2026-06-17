@@ -32,6 +32,17 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
 
+def _valid_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
 @pytest.fixture
 async def setup(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str,
@@ -81,10 +92,11 @@ async def setup(
         ))
         # Seed 10 deterministic tasks under benchmark "humaneval".
         for i in range(10):
+            task_id = f"humaneval/HumanEval/{i}"
             s.execute(insert(Task).values(
-                id=f"humaneval/HumanEval/{i}",
+                id=task_id,
                 checksum="x" * 64,
-                config={},
+                config=_valid_task_config(task_id),
                 source="local",
                 license="MIT",
                 benchmark_id=None,

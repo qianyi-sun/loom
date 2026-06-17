@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -82,8 +83,22 @@ async def submit_trial(
                 detail=f"unknown batch {batch_id}",
             )
 
-    task_config = normalize_steps(TaskConfig.model_validate(task_row.config))
-    trial_config = TrialConfig.model_validate(payload.get("config") or {})
+    try:
+        task_config = normalize_steps(
+            TaskConfig.model_validate(task_row.config),
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid task config for {task_id}: {exc}",
+        ) from exc
+    try:
+        trial_config = TrialConfig.model_validate(payload.get("config") or {})
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid trial config: {exc}",
+        ) from exc
     requires_caps = derive_requires_caps(task_config)
 
     trial_id = uuid4()

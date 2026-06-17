@@ -27,7 +27,7 @@ from loom.db.schema import Task as TaskRow
 router = APIRouter()
 
 
-@router.get("/tasks/{task_id}/bundle")
+@router.get("/tasks/{task_id:path}/bundle")
 async def get_task_bundle(
     task_id: str,
     request: Request,

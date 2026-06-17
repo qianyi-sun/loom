@@ -26,6 +26,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
+from pydantic import ValidationError
 
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
@@ -34,6 +35,7 @@ from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
 from loom.driver.docker import DockerDriver
 from loom.errors import AgentError
+from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
@@ -215,20 +217,30 @@ async def _spawn_trial(
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
-    bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
-    task_config = TaskConfig.model_validate(bundle["config"])
-    task_checksum = str(bundle["checksum"])
-    trial_config = TrialConfig.model_validate(payload.get("config") or {})
+    try:
+        bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+        task_config = TaskConfig.model_validate(bundle["config"])
+        task_checksum = str(bundle["checksum"])
+        trial_config = TrialConfig.model_validate(payload.get("config") or {})
 
-    # Plan 13 Task 3: materialize the fixture content from bundle["source"]
-    # when it's an s3:// URL (benchmark-imported tasks). Hand-authored
-    # tasks with source=None or git+... still get an empty tempdir; the
-    # operator runbook documents the volume-mount / git-clone alternatives.
-    task_dir = await _materialize_task_dir(
-        bundle=bundle, object_store=object_store, trial_id=trial_id,
-        fixtures_root=settings.fixtures_root,
-        benchmark_cache=settings.benchmark_cache,
-    )
+        # Plan 13 Task 3: materialize the fixture content from
+        # bundle["source"] when it's an s3:// URL (benchmark-imported
+        # tasks). Hand-authored tasks with source=None or git+... still
+        # get an empty tempdir; the operator runbook documents the
+        # volume-mount / git-clone alternatives.
+        task_dir = await _materialize_task_dir(
+            bundle=bundle, object_store=object_store, trial_id=trial_id,
+            fixtures_root=settings.fixtures_root,
+            benchmark_cache=settings.benchmark_cache,
+        )
+    except (httpx.HTTPError, ValidationError, OSError, ValueError) as exc:
+        await _mark_setup_failed(
+            cp_client=cp_client,
+            trial_id=trial_id,
+            worker_id=worker_id,
+            detail=str(exc),
+        )
+        return
 
     async def _state_patch(state: str, fr: str | None) -> bool:
         return await cp_client.patch_state(
@@ -275,6 +287,40 @@ async def _spawn_trial(
             shutil.rmtree(task_dir, ignore_errors=True)
 
     await pool.spawn(_run_and_cleanup())
+
+
+async def _mark_setup_failed(
+    *,
+    cp_client: HttpControlPlaneClient,
+    trial_id: UUID,
+    worker_id: UUID,
+    detail: str,
+) -> None:
+    logger.warning(
+        "trial_setup_failed trial_id=%s worker_id=%s detail=%s",
+        trial_id,
+        worker_id,
+        detail,
+    )
+    try:
+        ok = await cp_client.patch_state(
+            trial_id=trial_id,
+            worker_id=worker_id,
+            state="failed",
+            failure_reason=FailureReason.INTERNAL_ERROR.value,
+        )
+    except Exception:
+        logger.exception(
+            "trial_setup_failed_state_patch_error trial_id=%s",
+            trial_id,
+        )
+        return
+    if not ok:
+        logger.warning(
+            "trial_setup_failed_state_patch_fenced trial_id=%s worker_id=%s",
+            trial_id,
+            worker_id,
+        )
 
 
 async def _materialize_task_dir(

@@ -22,6 +22,17 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
 
+def _valid_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
 @pytest.fixture
 async def camp_setup(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str,
@@ -66,13 +77,17 @@ async def camp_setup(
         ))
         # 3 MIT tasks + 2 Apache to test license-filter materialization.
         for i in range(3):
+            tid = f"local/mit-{i}"
             s.execute(insert(Task).values(
-                id=f"local/mit-{i}", checksum="x" * 64, config={},
+                id=tid, checksum="x" * 64,
+                config=_valid_task_config(tid),
                 source="local", license="MIT",
             ))
         for i in range(2):
+            tid = f"local/apache-{i}"
             s.execute(insert(Task).values(
-                id=f"local/apache-{i}", checksum="x" * 64, config={},
+                id=tid, checksum="x" * 64,
+                config=_valid_task_config(tid),
                 source="local", license="Apache-2.0",
             ))
         # Live worker advertising every backend Loom ships drivers for —
@@ -250,6 +265,41 @@ async def test_post_rejects_empty_filter_match(
         )
     assert r.status_code == 400
     assert "zero tasks" in r.json()["detail"]
+
+
+async def test_post_rejects_invalid_task_config(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Task).values(
+            id="local/broken-config",
+            checksum="b" * 64,
+            config={},
+            source="local",
+            license="BrokenFixture",
+        ))
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "broken-task",
+                "task_filter": {"task_ids": ["local/broken-config"]},
+                "trial_config": {},
+            },
+        )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "invalid task config" in detail
+    assert "local/broken-config" in detail
 
 
 async def test_post_rejects_when_no_worker_advertises_backend(

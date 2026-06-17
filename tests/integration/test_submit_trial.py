@@ -38,6 +38,9 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
                 "steps": [{"name": "main"}],
             },
         ))
+        s.execute(insert(Task).values(
+            id="broken-config", checksum="1" * 64, config={},
+        ))
         s.commit()
     try:
         yield team_id, raw
@@ -92,6 +95,22 @@ def test_submit_rejects_unknown_task(app, seed_team):  # type: ignore[no-untyped
             json={"task_id": "nope", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 404
+
+
+def test_submit_rejects_invalid_task_config(app, seed_team):  # type: ignore[no-untyped-def]
+    _, raw = seed_team
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "broken-config",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+        assert r.status_code == 400
+        assert "invalid task config" in r.json()["detail"]
+        assert "broken-config" in r.json()["detail"]
 
 
 def test_submit_rejects_unauth(app, seed_team):  # type: ignore[no-untyped-def]

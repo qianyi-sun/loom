@@ -34,6 +34,10 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import Batch, Task, Trial
+from loom_service.task_config_validation import (
+    expected_trial_count,
+    split_valid_task_configs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +247,13 @@ async def _advance_batch_state(
                     rewards.append(float(val) if val is not None else None)
                 except (TypeError, ValueError):
                     rewards.append(None)
-            values["result_status"] = _compute_result_status(rewards)
+            computed = _compute_result_status(rewards)
+            if batch.result_status == "partial_failed" and (
+                computed == "succeeded"
+            ):
+                values["result_status"] = "partial_failed"
+            else:
+                values["result_status"] = computed
 
     if values:
         await session.execute(
@@ -304,6 +314,48 @@ async def run_once(
         )).scalars().all()
         for b in batches_to_process:
             task_ids = await _resolve_task_filter(s, b.task_filter)
+            task_ids, invalid_tasks = await split_valid_task_configs(
+                s, task_ids,
+            )
+            if invalid_tasks:
+                adjusted_expected = expected_trial_count(
+                    task_count=len(task_ids),
+                    n_per_task=b.n_per_task,
+                    combinations=b.combinations,
+                )
+                values: dict[str, Any] = {
+                    "expected_trial_count": adjusted_expected,
+                }
+                if adjusted_expected == 0:
+                    values.update({
+                        "state": "finished",
+                        "result_status": "all_failed",
+                        "finished_at": datetime.now(UTC),
+                    })
+                elif b.result_status is None:
+                    values["result_status"] = "partial_failed"
+                if (
+                    b.expected_trial_count != adjusted_expected
+                    or any(
+                        getattr(b, key) != value
+                        for key, value in values.items()
+                        if hasattr(b, key)
+                    )
+                ):
+                    await s.execute(
+                        update(Batch).where(Batch.id == b.id).values(**values),
+                    )
+                logger.warning(
+                    "batch %s skipped %d invalid task configs: %s",
+                    b.id,
+                    len(invalid_tasks),
+                    [item.task_id for item in invalid_tasks],
+                )
+                b.expected_trial_count = adjusted_expected
+                if adjusted_expected == 0:
+                    continue
+                if b.result_status is None:
+                    b.result_status = "partial_failed"
             if b.combinations:
                 # Multi-combination: existing key is
                 # (task_id, combination_idx, sample_idx).

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -128,8 +129,9 @@ class HttpControlPlaneClient:
         """Fetch full TaskConfig + checksum + source by `task_id`."""
         client, owned = self._http()
         try:
+            encoded_task_id = quote(task_id, safe="/")
             r = await client.get(
-                f"/tasks/{task_id}/bundle", headers=self._headers,
+                f"/tasks/{encoded_task_id}/bundle", headers=self._headers,
             )
             r.raise_for_status()
             return r.json()  # type: ignore[no-any-return]

@@ -37,6 +37,11 @@ from loom_service.auth_guards import (
 from loom_service.dependencies import SessionAndCtx
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.task_config_validation import (
+    expected_trial_count,
+    invalid_task_config_detail,
+    split_valid_task_configs,
+)
 from loom_service.task_filter import resolve_task_filter
 from loom_service.worker_backends import get_active_backends
 
@@ -235,20 +240,35 @@ async def create_batch(
             ),
         )
 
+    valid_task_ids, invalid_tasks = await split_valid_task_configs(
+        s, task_ids,
+    )
+    if invalid_tasks:
+        raise HTTPException(
+            status_code=400,
+            detail=invalid_task_config_detail(invalid_tasks),
+        )
+
     token_prefix = (
         ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     )
 
     # expected_trial_count = sum over combinations × tasks.
     if payload.combinations:
-        expected = sum(
-            len(task_ids) * c.n_per_task for c in payload.combinations
-        )
         combinations_jsonb = [
             c.model_dump(mode="json") for c in payload.combinations
         ]
+        expected = expected_trial_count(
+            task_count=len(valid_task_ids),
+            n_per_task=payload.n_per_task,
+            combinations=combinations_jsonb,
+        )
     else:
-        expected = len(task_ids) * payload.n_per_task
+        expected = expected_trial_count(
+            task_count=len(valid_task_ids),
+            n_per_task=payload.n_per_task,
+            combinations=None,
+        )
         combinations_jsonb = []
 
     # Validate provider_connection_id BEFORE constructing the Batch

@@ -14,14 +14,17 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+import httpx
 import pytest
 
+from loom.models.result import FailureReason
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 
 
 class _FakeCPClient:
     def __init__(self) -> None:
+        self.patch_calls: list[dict[str, object]] = []
         self.bundle = {
             "id": "fake",
             "checksum": "0" * 64,
@@ -41,6 +44,37 @@ class _FakeCPClient:
 
     async def get_trial_llm_calls(self, _trial_id) -> list:  # type: ignore[no-untyped-def]
         return []
+
+    async def patch_state(
+        self,
+        *,
+        trial_id,
+        worker_id,
+        state: str,
+        failure_reason: str | None = None,
+    ) -> bool:  # type: ignore[no-untyped-def]
+        self.patch_calls.append({
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+            "state": state,
+            "failure_reason": failure_reason,
+        })
+        return True
+
+
+class _Bundle404CPClient(_FakeCPClient):
+    async def get_task_bundle(self, task_id: str) -> dict:
+        request = httpx.Request(
+            "GET", f"http://cp/tasks/{task_id}/bundle",
+        )
+        response = httpx.Response(
+            404, request=request, json={"detail": "task not found"},
+        )
+        raise httpx.HTTPStatusError(
+            "404 task bundle not found",
+            request=request,
+            response=response,
+        )
 
 
 class _FakeSettings:
@@ -163,6 +197,41 @@ async def test_tempdir_cleaned_on_cancellation() -> None:
     assert not captured[0].exists(), (
         f"task_dir {captured[0]} leaked after cancellation"
     )
+
+
+async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _Bundle404CPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    await ml._spawn_trial(
+        pool=pool,
+        settings=settings,  # type: ignore[arg-type]
+        cp_client=cp,  # type: ignore[arg-type]
+        gateway_client=None,  # type: ignore[arg-type]
+        object_store=None,  # type: ignore[arg-type]
+        worker_id=worker_id,
+        payload={
+            "trial_id": str(trial_id),
+            "team_id": str(uuid4()),
+            "task_id": "humaneval/HumanEval/26",
+            "config": {"agent_name": "oracle", "agent_model": None},
+        },
+        vllm_registry=WorkerVLLMRegistry(enabled=False),
+    )
+
+    await pool.wait_all(timeout=0.1)
+    assert pool.in_flight == 0
+    assert cp.patch_calls == [{
+        "trial_id": trial_id,
+        "worker_id": worker_id,
+        "state": "failed",
+        "failure_reason": FailureReason.INTERNAL_ERROR.value,
+    }]
 
 
 # Suppress pytest's "unused" warning on the helper.

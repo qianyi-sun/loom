@@ -157,6 +157,13 @@ that lives somewhere else than `tests/fixtures/tasks/`, fork the
 script — the SQL is short and the schema is at
 `src/loom/db/schema.py:Task`.
 
+Stored task rows must keep `config` valid against `TaskConfig`.
+`POST /trials` and `POST /api/v1/batches` reject invalid task config
+with HTTP 400, and the batch runner excludes legacy invalid rows from
+older batches so they do not retry forever. Task ids may contain `/`
+segments, for example `humaneval/HumanEval/26`; workers fetch those
+through the normal bundle endpoint.
+
 Once registered, submit a trial:
 
 ```bash

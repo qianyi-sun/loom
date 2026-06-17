@@ -38,6 +38,21 @@ def task_seed(postgres_url: str) -> Iterator[str]:
             },
             source="git+https://example.com/tasks/hello",
         ))
+        s.execute(insert(Task).values(
+            id="humaneval/HumanEval/26", checksum="cafe" * 16,
+            config={
+                "schema_version": "1",
+                "task": {
+                    "id": "humaneval/HumanEval/26",
+                    "name": "HumanEval/26",
+                },
+                "environment": {"os": "linux", "docker_image": "alpine"},
+                "agent": {"name": "oracle"},
+                "verifier": {"name": "pytest"},
+                "steps": [{"name": "main"}],
+            },
+            source="fixture://humaneval/HumanEval/26",
+        ))
         s.commit()
     try:
         yield raw
@@ -83,6 +98,19 @@ def test_get_task_bundle_404(app, task_seed):  # type: ignore[no-untyped-def]
             headers={"Authorization": f"Bearer {task_seed}"},
         )
         assert r.status_code == 404
+
+
+def test_get_task_bundle_supports_slash_task_id(app, task_seed):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        r = client.get(
+            "/tasks/humaneval/HumanEval/26/bundle",
+            headers={"Authorization": f"Bearer {task_seed}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["id"] == "humaneval/HumanEval/26"
+        assert body["config"]["task"]["id"] == "humaneval/HumanEval/26"
+        assert body["source"] == "fixture://humaneval/HumanEval/26"
 
 
 def test_get_task_bundle_unauthorized(app, task_seed):  # type: ignore[no-untyped-def]
