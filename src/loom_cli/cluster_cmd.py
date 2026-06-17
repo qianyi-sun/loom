@@ -1038,6 +1038,189 @@ def _up(args: argparse.Namespace) -> int:
     return 1
 
 
+@dataclass
+class DeleteResult:
+    """Outcome of `kubectl delete -f -`. `summary_lines` carries
+    kubectl's own per-object reporting; `--ignore-not-found` keeps
+    re-runs after a partial delete idempotent."""
+
+    returncode: int
+    summary_lines: list[str]
+    stderr: str
+
+
+def delete_manifests(
+    yaml_text: str, namespace: str, *, context: str | None,
+    extra_args: tuple[str, ...] = (),
+) -> DeleteResult:
+    """Pipe rendered manifests into
+    `kubectl delete -f - --ignore-not-found`. Mirrors `apply_manifests`
+    so operators see symmetric output. `--ignore-not-found` lets a
+    second `down` run finish cleanly after a previous teardown
+    partially completed."""
+    import shutil
+    import subprocess
+
+    if shutil.which("kubectl") is None:
+        raise RuntimeError(
+            "kubectl is required for `loom cluster down`. install from "
+            "https://kubernetes.io/docs/tasks/tools/ and ensure it's "
+            "on PATH.",
+        )
+
+    cmd: list[str] = [
+        "kubectl", "delete", "-n", namespace, "-f", "-",
+        "--ignore-not-found",
+    ]
+    if context:
+        cmd.extend(["--context", context])
+    cmd.extend(extra_args)
+
+    proc = subprocess.run(
+        cmd, input=yaml_text, capture_output=True, text=True, check=False,
+    )
+    summary_lines = [
+        line for line in proc.stdout.splitlines() if line.strip()
+    ]
+    return DeleteResult(
+        returncode=proc.returncode,
+        summary_lines=summary_lines,
+        stderr=proc.stderr,
+    )
+
+
+def delete_pvcs(
+    core_v1: Any, namespace: str,
+) -> list[str]:
+    """Delete every PVC in the namespace. StatefulSet
+    volumeClaimTemplates create PVCs (`data-loom-postgres-0`, etc.)
+    that survive StatefulSet deletion — operators have to drop them
+    explicitly to reclaim disk. Returns the list of deleted PVC
+    names so the caller can report what got wiped."""
+    pvcs = core_v1.list_namespaced_persistent_volume_claim(
+        namespace=namespace,
+    )
+    deleted: list[str] = []
+    for pvc in pvcs.items:
+        name = pvc.metadata.name
+        core_v1.delete_namespaced_persistent_volume_claim(
+            name=name, namespace=namespace,
+        )
+        deleted.append(name)
+    return deleted
+
+
+def delete_namespace_resource(
+    core_v1: Any, namespace: str,
+) -> None:
+    """Delete the namespace itself. Cascades to every resource in it,
+    including any objects not produced by `render_manifests` (operator
+    one-offs, ad-hoc Secrets). Use with `--delete-namespace` when the
+    operator wants the slate fully clean."""
+    core_v1.delete_namespace(name=namespace)
+
+
+def _down(args: argparse.Namespace) -> int:
+    try:
+        _, _, core_v1, _ = _load_clients(args.context)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except Exception as exc:
+        sys.stderr.write(
+            f"error: cannot connect to cluster: "
+            f"{type(exc).__name__}: {exc}\n",
+        )
+        return 2
+
+    # 1. Render manifests so we know what to delete. Doing this from
+    # the same config keeps `up` and `down` symmetric — if the
+    # operator changed cluster-config.toml between the two calls,
+    # `down` only removes objects the *current* config would have
+    # produced. The `--ignore-not-found` flag on kubectl forgives
+    # objects that have already been deleted manually.
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+        manifests = render_manifests(config)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+
+    # 2. Confirm. Teardown is destructive; require explicit `--yes`
+    # or an interactive y/N prompt before touching anything.
+    if not args.yes:
+        prompt = (
+            f"This will delete Loom resources in namespace "
+            f"'{args.namespace}'"
+        )
+        if args.with_volumes:
+            prompt += " AND its PersistentVolumeClaims (data loss)"
+        if args.delete_namespace:
+            prompt += f" AND the '{args.namespace}' namespace itself"
+        prompt += ". Continue? [y/N]: "
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        try:
+            reply = sys.stdin.readline().strip().lower()
+        except KeyboardInterrupt:
+            sys.stdout.write("\naborted.\n")
+            return 1
+        if reply not in ("y", "yes"):
+            sys.stdout.write("aborted.\n")
+            return 1
+
+    # 3. Delete manifests.
+    try:
+        result = delete_manifests(
+            manifests, args.namespace, context=args.context,
+        )
+    except RuntimeError as exc:
+        # kubectl missing.
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"error: kubectl delete failed (exit {result.returncode}):\n"
+            f"{result.stderr}\n",
+        )
+        return 1
+    for line in result.summary_lines:
+        sys.stdout.write(f"  {line}\n")
+
+    # 4. Optional volume teardown.
+    if args.with_volumes:
+        try:
+            deleted_pvcs = delete_pvcs(core_v1, args.namespace)
+        except Exception as exc:
+            sys.stderr.write(
+                f"error: failed to delete PVCs: "
+                f"{type(exc).__name__}: {exc}\n",
+            )
+            return 1
+        for name in deleted_pvcs:
+            sys.stdout.write(f"  persistentvolumeclaim/{name} deleted\n")
+        if not deleted_pvcs:
+            sys.stdout.write(
+                f"  (no PVCs found in namespace '{args.namespace}')\n",
+            )
+
+    # 5. Optional namespace teardown.
+    if args.delete_namespace:
+        try:
+            delete_namespace_resource(core_v1, args.namespace)
+        except Exception as exc:
+            sys.stderr.write(
+                f"error: failed to delete namespace: "
+                f"{type(exc).__name__}: {exc}\n",
+            )
+            return 1
+        sys.stdout.write(f"  namespace/{args.namespace} deleted\n")
+
+    sys.stdout.write("Cluster down: complete.\n")
+    return 0
+
+
 def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom cluster",
@@ -1164,6 +1347,56 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_up.set_defaults(handler=_up)
+
+    p_down = sub.add_parser(
+        "down",
+        help=(
+            "Tear down a Loom cluster: kubectl delete of the rendered "
+            "manifests. PVCs and the namespace itself are preserved "
+            "unless `--with-volumes` / `--delete-namespace` are passed."
+        ),
+    )
+    p_down.add_argument(
+        "--context", default=None,
+        help="kubeconfig context (default: current context).",
+    )
+    p_down.add_argument(
+        "--namespace", default="loom",
+        help="Kubernetes namespace (default: loom).",
+    )
+    p_down.add_argument(
+        "--config", default=None,
+        help=(
+            "Path to cluster-config.toml. Must match the config used "
+            "for `loom cluster up`; resources outside the rendered set "
+            "are not touched (use --delete-namespace to nuke them all)."
+        ),
+    )
+    p_down.add_argument(
+        "--yes", "-y", dest="yes", action="store_true",
+        help=(
+            "Skip the destructive-action confirmation prompt. Intended "
+            "for CI/scripted teardowns; production operators should "
+            "leave the prompt on."
+        ),
+    )
+    p_down.add_argument(
+        "--with-volumes", dest="with_volumes", action="store_true",
+        help=(
+            "Also delete PersistentVolumeClaims in the namespace. "
+            "StatefulSet PVCs survive normal teardown; pass this when "
+            "you want to wipe the database + object store too. "
+            "DESTRUCTIVE — data is unrecoverable."
+        ),
+    )
+    p_down.add_argument(
+        "--delete-namespace", dest="delete_namespace", action="store_true",
+        help=(
+            "Also delete the namespace. Cascades to every resource in "
+            "it, including objects not produced by `cluster render`."
+        ),
+    )
+    p_down.set_defaults(handler=_down)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
