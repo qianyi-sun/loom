@@ -193,6 +193,19 @@ class HttpControlPlaneClient:
         worker_id: UUID,
         **fields: Any,
     ) -> bool:
+        return await self._patch_trajectory_index_payload(
+            trial_id=trial_id,
+            worker_id=worker_id,
+            fields=fields,
+        )
+
+    async def _patch_trajectory_index_payload(
+        self,
+        *,
+        trial_id: UUID,
+        worker_id: UUID,
+        fields: dict[str, Any],
+    ) -> bool:
         client, owned = self._http()
         try:
             r = await client.patch(
@@ -215,9 +228,8 @@ class HttpControlPlaneClient:
         result: dict[str, Any],
         trajectory_index: dict[str, Any],
     ) -> bool:
-        return await self.patch_trajectory_index(
+        return await self._patch_trajectory_index_payload(
             trial_id=trial_id,
             worker_id=worker_id,
-            result=result,
-            **trajectory_index,
+            fields={"result": result, **trajectory_index},
         )

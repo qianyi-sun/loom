@@ -429,3 +429,77 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
         )
     finally:
         await http.aclose()
+
+
+async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    """Worker-built trajectory indexes include trial_id/team_id/task_id.
+
+    The higher-level output projection client must not expand those metadata
+    fields as duplicate Python kwargs before it reaches the CP endpoint.
+    """
+
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        wid = UUID(info["worker_id"])
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="succeeded",
+                worker_id=wid,
+            ))
+
+        result_payload = {
+            "schema_version": "1",
+            "state": "succeeded",
+            "aggregate_reward": 1.0,
+        }
+        trajectory_index = {
+            "schema_version": "1",
+            "trial_id": str(trial_id),
+            "team_id": str(team_id),
+            "task_id": "t",
+            "trajectory_uri": f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
+            "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+            "atif_schema_version": "1.7",
+            "artifacts": [{
+                "step_name": "main",
+                "bucket": "artifacts",
+                "key": f"{team_id}/{trial_id}/main/result.txt",
+                "size": 5,
+            }],
+        }
+        assert await cp.patch_output_projection(
+            trial_id=trial_id,
+            worker_id=wid,
+            result=result_payload,
+            trajectory_index=trajectory_index,
+        ) is True
+
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(Trial.result, Trial.trajectory_index).where(
+                    Trial.id == trial_id,
+                ),
+            ).one()
+        engine.dispose()
+
+        assert row.result == result_payload
+        assert row.trajectory_index["trial_id"] == str(trial_id)
+        assert row.trajectory_index["artifacts"][0]["key"].endswith(
+            "/main/result.txt",
+        )
+    finally:
+        await http.aclose()
