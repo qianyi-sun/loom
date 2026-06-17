@@ -61,6 +61,11 @@ function SegmentedToggle({
             type="button"
             onClick={() => onChange(v)}
             aria-pressed={active}
+            title={
+              v === "batches"
+                ? "Show aggregate batch rows and their overall state."
+                : "Show individual trial rows across batches."
+            }
             className={
               "rounded-md px-3 py-1 text-sm font-medium transition-colors " +
               (active
@@ -211,6 +216,7 @@ function BatchesView({
                     <td className="px-4 py-3">
                       <Link
                         to={`/batches/${c.id}`}
+                        title="Open this batch's detail page."
                         className="font-medium text-accent hover:text-accent-hover"
                       >
                         {c.name}
@@ -352,6 +358,7 @@ function TrialsView({
                     <td className="px-4 py-3">
                       <Link
                         to={`/trials/${t.id}`}
+                        title="Open this trial's detail page, logs, and artifacts."
                         className="font-mono text-xs text-accent hover:text-accent-hover"
                       >
                         {t.id.slice(0, 8)}
@@ -439,6 +446,11 @@ export default function Monitor(): JSX.Element {
           placeholder={view === "batches" ? "Search by name or id…" : "Search by task id or trial id…"}
           className="max-w-sm"
           aria-label="search"
+          title={
+            view === "batches"
+              ? "Filter batches by name or id."
+              : "Filter trials by task id or trial id."
+          }
         />
         <label className="flex items-center gap-2 text-sm text-slate-600">
           <span className="text-xs uppercase tracking-wider text-slate-400">State</span>
@@ -447,6 +459,7 @@ export default function Monitor(): JSX.Element {
             onChange={(e) => setStateFilter(e.target.value)}
             className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
             aria-label="filter by state"
+            title="Limit the table to one lifecycle state, or choose all."
           >
             <option value="">all</option>
             {stateOptions.map((s) => (
@@ -462,6 +475,7 @@ export default function Monitor(): JSX.Element {
             <button
               type="button"
               className="ml-2 text-slate-500 hover:text-slate-900"
+              title="Remove this batch_id filter and show trials from all batches."
               onClick={() => {
                 const next = new URLSearchParams(searchParams);
                 next.delete("batch_id");

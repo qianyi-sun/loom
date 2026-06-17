@@ -193,6 +193,7 @@ const BATCH_RESPONSE = {
 
 function mockEndpoints(opts: {
   matchingTasks?: number;
+  emptyBenchmark?: boolean;
   /**
    * Override for `POST /api/v1/tasks/count`. When set, the count
    * endpoint returns this value regardless of body. Used by the
@@ -204,7 +205,11 @@ function mockEndpoints(opts: {
   const benchmarksResponse = {
     ...BENCHMARKS_RESPONSE,
     items: BENCHMARKS_RESPONSE.items.map((b) =>
-      b.id === "humaneval" ? { ...b, task_count: matching } : b,
+      b.id === "humaneval"
+        ? { ...b, task_count: matching }
+        : opts.emptyBenchmark && b.id === "mbpp"
+          ? { ...b, task_count: 0 }
+          : b,
     ),
   };
   return vi
@@ -330,6 +335,18 @@ describe("NewBatch", () => {
     expect(
       await screen.findByText(/12 tasks match across 1 benchmark/i),
     ).toBeInTheDocument();
+  });
+
+  it("explains why an empty benchmark is marked needs publish", async () => {
+    mockEndpoints({ emptyBenchmark: true });
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+
+    const marker = await screen.findByText(/0 tasks — needs publish/i);
+    expect(marker.closest("label")).toHaveAttribute(
+      "title",
+      "This benchmark has no imported tasks yet. Publish or import tasks before selecting it.",
+    );
   });
 
   it("POSTs the minimal body (backend + single-combo) when only required fields are set", async () => {

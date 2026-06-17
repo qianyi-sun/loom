@@ -54,6 +54,23 @@ describe("Modal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("explains both modal close targets on hover", async () => {
+    render(
+      <Modal open onClose={() => undefined} title="X">
+        <p>body</p>
+      </Modal>,
+    );
+
+    expect(screen.getByRole("button", { name: "close modal" })).toHaveAttribute(
+      "title",
+      "Close this dialog without applying additional changes.",
+    );
+    expect(screen.getByRole("button", { name: "close" })).toHaveAttribute(
+      "title",
+      "Close this dialog without applying additional changes.",
+    );
+  });
+
   it("dialog has aria-modal and aria-labelledby pointing at the title", () => {
     render(
       <Modal open onClose={() => undefined} title="X" description="Y">

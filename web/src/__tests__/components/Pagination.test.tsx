@@ -1,6 +1,8 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import {
+  default as Pagination,
   initialPage,
   nextPage,
   prevPage,
@@ -36,5 +38,25 @@ describe("Pagination helpers", () => {
   it("prevPage is no-op when the stack is empty", () => {
     const s = prevPage(initialPage);
     expect(s).toEqual(initialPage);
+  });
+
+  it("explains previous and next page controls on hover", () => {
+    render(
+      <Pagination
+        state={{ current: "cursor-2", stack: [null, "cursor-1"] }}
+        hasNext
+        onNext={() => undefined}
+        onPrev={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveAttribute(
+      "title",
+      "Go back to the previous page of results.",
+    );
+    expect(screen.getByRole("button", { name: /next page/i })).toHaveAttribute(
+      "title",
+      "Load the next page of results.",
+    );
   });
 });

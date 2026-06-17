@@ -14,6 +14,7 @@
 import { forwardRef, type HTMLAttributes } from "react";
 
 import { cn } from "../lib/cn";
+import { helpForState } from "../lib/helpText";
 
 export type StatusVariant =
   | "success"
@@ -41,10 +42,11 @@ export interface StatusPillProps extends HTMLAttributes<HTMLSpanElement> {
 }
 
 export const StatusPill = forwardRef<HTMLSpanElement, StatusPillProps>(
-  function StatusPill({ variant, className, children, ...rest }, ref) {
+  function StatusPill({ variant, className, children, title, ...rest }, ref) {
     return (
       <span
         ref={ref}
+        title={title ?? helpForState(children)}
         className={cn(
           "inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium",
           VARIANT_CLASSES[variant],

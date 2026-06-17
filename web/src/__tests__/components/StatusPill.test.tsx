@@ -49,6 +49,28 @@ describe("StatusPill", () => {
     expect(span.getAttribute("aria-label")).toBe("state: running");
     expect(span.getAttribute("data-state")).toBe("running");
   });
+
+  it("adds contextual hover help for known lifecycle states", () => {
+    render(<StatusPill variant="queued">queued</StatusPill>);
+
+    expect(screen.getByText("queued")).toHaveAttribute(
+      "title",
+      "Waiting for a worker to claim and start this item.",
+    );
+  });
+
+  it("preserves caller-provided title text", () => {
+    render(
+      <StatusPill variant="queued" title="Custom state explanation">
+        queued
+      </StatusPill>,
+    );
+
+    expect(screen.getByText("queued")).toHaveAttribute(
+      "title",
+      "Custom state explanation",
+    );
+  });
 });
 
 describe("trialStateVariant", () => {

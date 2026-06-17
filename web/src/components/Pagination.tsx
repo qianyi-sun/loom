@@ -4,6 +4,7 @@
  * so the user can go back without reloading.
  */
 import { Button } from "./Button";
+import { PAGINATION_NEXT_HELP, PAGINATION_PREV_HELP } from "../lib/helpText";
 
 export type PageState = {
   current: string | null;
@@ -41,6 +42,7 @@ export default function Pagination({
         onClick={onPrev}
         disabled={state.stack.length === 0}
         aria-label="previous page"
+        title={PAGINATION_PREV_HELP}
       >
         ← Prev
       </Button>
@@ -49,6 +51,7 @@ export default function Pagination({
         onClick={onNext}
         disabled={!hasNext}
         aria-label="next page"
+        title={PAGINATION_NEXT_HELP}
       >
         Next →
       </Button>

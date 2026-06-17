@@ -43,6 +43,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import { Input, Textarea } from "../components/Input";
+import { EMPTY_BENCHMARK_HELP } from "../lib/helpText";
 import { parseTaskIds } from "../lib/parseTaskIds";
 
 interface BenchmarkItem {
@@ -351,6 +352,11 @@ function BenchmarkPicker({
                 onChange={() => toggleGroup(rows)}
                 disabled={populated === 0}
                 aria-label={`Select all in series ${seriesLabel}`}
+                title={
+                  populated > 0
+                    ? `Select or clear all populated benchmarks in the ${seriesLabel} series.`
+                    : `The ${seriesLabel} series has no populated benchmarks to select.`
+                }
                 className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <span
@@ -386,11 +392,7 @@ function BenchmarkPicker({
                       ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
                       : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                   }
-                  title={
-                    empty
-                      ? "0 tasks imported — publish or import the benchmark to enable"
-                      : undefined
-                  }
+                  title={empty ? EMPTY_BENCHMARK_HELP : undefined}
                 >
                   <input
                     type="checkbox"
@@ -495,6 +497,7 @@ function TagFiltersCard({
                   <button
                     type="button"
                     onClick={() => clearKey(key)}
+                    title={`Clear selected ${key} tag values.`}
                     className="text-xs text-indigo-600 hover:underline"
                   >
                     clear
@@ -510,6 +513,11 @@ function TagFiltersCard({
                       type="button"
                       onClick={() => toggle(key, v)}
                       aria-pressed={on}
+                      title={
+                        on
+                          ? `Remove ${key}=${v} from the task filter.`
+                          : `Add ${key}=${v} to the task filter.`
+                      }
                       className={
                         on
                           ? "rounded-md border border-indigo-500 bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700"
@@ -1192,6 +1200,7 @@ export default function NewBatch(): JSX.Element {
                           variant="secondary"
                           size="sm"
                           onClick={() => setSubsetSeed(String(freshSeed()))}
+                          title="Generate a new random seed for this random subset."
                         >
                           Reroll
                         </Button>
@@ -1427,6 +1436,7 @@ export default function NewBatch(): JSX.Element {
                                 new Set(RETRY_REASONS.map((r) => r.value)),
                               )
                             }
+                            title="Retry on every listed transient failure reason."
                             className="font-medium text-accent hover:text-accent-hover"
                           >
                             Select all
@@ -1435,6 +1445,7 @@ export default function NewBatch(): JSX.Element {
                           <button
                             type="button"
                             onClick={() => setAdv("retryOn", new Set())}
+                            title="Disable retry reasons so retries will not run."
                             className="font-medium text-slate-500 hover:text-slate-700"
                           >
                             Clear
@@ -1561,6 +1572,7 @@ export default function NewBatch(): JSX.Element {
                 size="sm"
                 onClick={addRow}
                 disabled={rows.length >= MAX_COMBINATIONS}
+                title="Add another agent/model combination to run on the same task slate."
               >
                 + Add combination
               </Button>
@@ -1580,6 +1592,7 @@ export default function NewBatch(): JSX.Element {
                         variant="secondary"
                         size="sm"
                         onClick={() => removeRow(i)}
+                        title={`Remove combination ${i + 1} from this batch.`}
                       >
                         Remove
                       </Button>
@@ -1705,6 +1718,11 @@ export default function NewBatch(): JSX.Element {
             void submit();
           }}
           disabled={create.isPending || totalTrials === 0}
+          title={
+            totalTrials === 0
+              ? "Pick benchmarks and a valid agent/model combination before submitting."
+              : `Create this batch with ${totalTrials} planned trial${totalTrials === 1 ? "" : "s"}.`
+          }
         >
           {submitButtonLabel}
         </Button>

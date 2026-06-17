@@ -62,6 +62,7 @@ export default function Settings(): JSX.Element {
             onChange={(e) => setPasted(e.target.value)}
             rows={3}
             aria-label="bearer token"
+            title="Paste a Loom team or admin bearer token."
           />
           <Button
             variant="primary"
@@ -71,6 +72,7 @@ export default function Settings(): JSX.Element {
               if (t) setToken(t);
             }}
             disabled={!pasted.trim()}
+            title="Use this token for API requests from this browser."
           >
             Sign in
           </Button>
@@ -100,7 +102,11 @@ export default function Settings(): JSX.Element {
           title="Bearer token"
           description="Currently signed in."
           actions={
-            <Button variant="secondary" onClick={clearToken}>
+            <Button
+              variant="secondary"
+              onClick={clearToken}
+              title="Remove this browser's saved token and return to sign in."
+            >
               Sign out
             </Button>
           }
@@ -185,6 +191,7 @@ export default function Settings(): JSX.Element {
                               variant="danger"
                               onClick={() => revoke.mutate(t.token_hash_prefix)}
                               disabled={revoke.isPending}
+                              title="Revoke this token so it can no longer call the API."
                             >
                               Revoke
                             </Button>

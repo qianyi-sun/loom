@@ -102,9 +102,15 @@ function TrialHeader({
               href={trial.atif_url}
               target="_blank"
               rel="noreferrer"
+              title="Download the finalized ATIF artifact for this trial."
               className="contents"
             >
-              <Button variant="secondary">Download ATIF</Button>
+              <Button
+                variant="secondary"
+                title="Download the finalized ATIF artifact for this trial."
+              >
+                Download ATIF
+              </Button>
             </a>
           ) : (
             <Button
@@ -120,9 +126,15 @@ function TrialHeader({
               href={trial.trajectory_url}
               target="_blank"
               rel="noreferrer"
+              title="Download the raw trajectory events for this trial."
               className="contents"
             >
-              <Button variant="secondary">Download trajectory</Button>
+              <Button
+                variant="secondary"
+                title="Download the raw trajectory events for this trial."
+              >
+                Download trajectory
+              </Button>
             </a>
           ) : (
             <Button
@@ -177,6 +189,7 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
           <Button
             onClick={() => page.refetch()}
             disabled={page.isFetching}
+            title="Retry loading trajectory events after the previous request failed."
           >
             {page.isFetching ? "Retrying…" : "Retry"}
           </Button>
@@ -184,6 +197,7 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
           <Button
             onClick={() => page.refetch()}
             disabled={page.isFetching}
+            title="Load the next page of trajectory events."
           >
             {page.isFetching ? "Loading…" : "Load more"}
           </Button>
@@ -231,12 +245,14 @@ export default function TrialDetail(): JSX.Element {
       <div className="flex items-center justify-between gap-4">
         <Link
           to="/trials"
+          title="Return to the trial monitor table."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
           ← All trials
         </Link>
         <Link
           to={`/trials/compare?a=${trialId}`}
+          title="Start a side-by-side comparison using this trial."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
           Compare with another trial →

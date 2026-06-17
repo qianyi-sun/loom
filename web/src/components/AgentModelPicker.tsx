@@ -322,6 +322,7 @@ export function AgentModelPicker({
         </span>
         <select
           aria-label="Provider connection"
+          title="Choose which team provider connection should serve model requests."
           className={SELECT_CLS}
           value={value.providerConnectionId ?? ""}
           disabled={disabled || providerConnections.isPending}
@@ -363,9 +364,13 @@ export function AgentModelPicker({
             onChange={(e) => setModelSearch(e.target.value)}
             placeholder="deepseek, qwen, llama"
             disabled={disabled}
+            title="Filter discovered models by name."
           />
         </label>
-        <label className="flex items-center gap-2 pb-2 text-sm text-slate-700">
+        <label
+          className="flex items-center gap-2 pb-2 text-sm text-slate-700"
+          title="Include raw discovered models that may be hidden from the default picker."
+        >
           <input
             type="checkbox"
             checked={showRaw}
@@ -383,6 +388,7 @@ export function AgentModelPicker({
         </span>
         <select
           aria-label="Model"
+          title="Choose a discovered model, or switch to Manual model for an ad-hoc id."
           className={SELECT_CLS}
           value={selectedModelKey}
           disabled={
@@ -493,6 +499,7 @@ export function AgentModelPicker({
             variant="secondary"
             onClick={leaveCustomMode}
             disabled={disabled}
+            title="Return to the discovered model dropdown."
           >
             Back to discovered models
           </Button>
@@ -579,6 +586,7 @@ export function AgentModelPicker({
             className={SELECT_CLS}
             value={value.localServer ?? ""}
             disabled={disabled || localServers.isPending}
+            title="Choose an operator-configured local server target."
             onChange={(e) =>
               onChange({ ...value, localServer: e.target.value })
             }
@@ -635,6 +643,7 @@ export function AgentModelPicker({
         </span>
         <select
           aria-label="Agent"
+          title="Choose which agent implementation will run each task."
           className={SELECT_CLS}
           value={value.agentName}
           disabled={disabled || agents.isPending}
@@ -692,6 +701,7 @@ export function AgentModelPicker({
                     type="button"
                     role="tab"
                     aria-selected={active}
+                    title={`Use ${sourceLabel(s)} as the model source for this agent.`}
                     onClick={() =>
                       onChange({
                         ...value,

@@ -21,6 +21,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "../lib/cn";
+import { MODAL_CLOSE_HELP } from "../lib/helpText";
 
 export interface ModalProps {
   open: boolean;
@@ -92,6 +93,7 @@ export function Modal({
         type="button"
         onClick={onClose}
         aria-label="close modal"
+        title={MODAL_CLOSE_HELP}
         className="absolute inset-0 modal-backdrop"
         tabIndex={-1}
       />
@@ -127,6 +129,7 @@ export function Modal({
             type="button"
             onClick={onClose}
             aria-label="close"
+            title={MODAL_CLOSE_HELP}
             className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
           >
             <svg

@@ -76,6 +76,7 @@ export default function BatchDetail(): JSX.Element {
       <div>
         <Link
           to="/monitor?view=batches"
+          title="Return to the batch monitor table."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
           ← All batches
@@ -163,6 +164,7 @@ export default function BatchDetail(): JSX.Element {
                 variant="danger"
                 onClick={() => cancel.mutate()}
                 disabled={cancel.isPending}
+                title="Stop queued or running trials in this batch."
               >
                 {cancel.isPending ? "Cancelling…" : "Cancel batch"}
               </Button>
@@ -174,11 +176,15 @@ export default function BatchDetail(): JSX.Element {
 
       <Card>
         <details className="group">
-          <summary className="flex cursor-pointer items-center gap-2 border-b border-slate-200 px-5 py-4 text-sm font-semibold text-slate-800">
+          <summary
+            className="flex cursor-pointer items-center gap-2 border-b border-slate-200 px-5 py-4 text-sm font-semibold text-slate-800"
+            title="Expand the per-state trial counts for this batch."
+          >
             <span className="flex-1">Show trials in this batch</span>
             <Link
               to={`/monitor?view=trials&batch_id=${c.id}`}
               className="text-xs font-medium text-accent hover:text-accent-hover"
+              title="Open the Monitor filtered to this batch's trials."
               onClick={(e) => e.stopPropagation()}
             >
               Open in Monitor →
