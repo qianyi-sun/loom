@@ -1,0 +1,184 @@
+# Prometheus alert rules for Loom (#81 slice A).
+#
+# Targets the metrics currently emitted by loom_control_plane only
+# (see src/loom_control_plane/metrics.py). Gateway, service, and
+# worker metric instrumentation is slice B; rules for those land
+# alongside.
+#
+# Requires prometheus-operator (the PrometheusRule CRD), or the
+# kube-prometheus-stack chart. If you ship prometheus differently,
+# extract the `groups` block into your `prometheus.yml` /
+# `rules.yml` directly — the rule expressions are stack-agnostic.
+#
+# Thresholds are starting points, not finals. Tune per your team's
+# trial volume + workload shape. The "for:" durations are picked to
+# avoid paging on transient blips; cut them in half for staging.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: loom-alerts
+  labels:
+    # If your prometheus-operator instance uses ruleSelector with
+    # `prometheus: kube-prometheus`, add the corresponding label here.
+    app: loom
+    component: alerts
+spec:
+  groups:
+    - name: loom.platform.health
+      interval: 30s
+      rules:
+        # No worker is heartbeating. Platform is dead — no trial can
+        # progress. Pages immediately.
+        - alert: LoomNoWorkersActive
+          expr: loom_workers_active == 0
+          for: 2m
+          labels:
+            severity: critical
+            component: worker
+          annotations:
+            summary: "No active workers — platform cannot run trials"
+            description: |
+              `loom_workers_active` has been 0 for 2 minutes. Every queued
+              trial is blocked.
+
+              Triage:
+                kubectl get pods -n loom -l app=loom-worker
+                kubectl logs -n loom -l app=loom-worker --tail=200 --previous
+
+              If pods are CrashLoopBackOff, check worker-token in
+              `loom-secrets` and the upstream CP/Postgres reachability.
+            runbook_url: "https://github.com/carinrc/loom/blob/dev/docs/operator-runbook.md#production-alerts"
+
+        # Queue is growing without trials advancing. Either workers
+        # are saturated or trials are arriving faster than workers
+        # can claim.
+        - alert: LoomQueueBacklog
+          expr: sum(loom_queue_depth) > 100
+          for: 10m
+          labels:
+            severity: warning
+            component: control-plane
+          annotations:
+            summary: "Loom queue depth > 100 for 10m"
+            description: |
+              Pending trials exceed 100 for 10 minutes.
+
+              Triage:
+                - Check loom_workers_active — if low, scale workers.
+                - Check loom_claim_latency_sec_bucket p95 — if high, DRF
+                  scan is slow (postgres tuning).
+                - Inspect per-team breakdown:
+                    sum by (team_id) (loom_queue_depth)
+
+        # Trials enter `claimed` but never `running` — worker crashed
+        # mid-spawn, or the agent runtime image is broken.
+        - alert: LoomTrialsStuckClaimed
+          expr: |
+            sum by (team_id) (
+              loom_trials_inflight{state="claimed"}
+            ) > 5
+          for: 15m
+          labels:
+            severity: warning
+            component: worker
+          annotations:
+            summary: "Trials stuck in claimed state"
+            description: |
+              At least 5 trials per team have been claimed but not
+              advanced to running for 15 minutes.
+
+              Triage:
+                - kubectl logs -n loom -l app=loom-worker --since=20m
+                  | grep -i "claim\|spawn\|runtime"
+                - Check if a recent image push broke the agent runtime.
+
+        # Crash detector is reclaiming trials. Workers are dying.
+        - alert: LoomWorkerReclaimsSpiking
+          expr: rate(loom_worker_reclaim_total[5m]) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            component: worker
+          annotations:
+            summary: "Worker reclaim rate > 0.5/sec for 10m"
+            description: |
+              The crash detector is reclaiming > 30 trials/min. Workers
+              are dying mid-trial — OOMs, host losses, or worker code
+              regressions.
+
+              Triage:
+                kubectl describe pod -n loom -l app=loom-worker \
+                  | grep -A2 "Last State\|OOMKilled\|Reason"
+                kubectl logs -n loom -l app=loom-worker --previous
+
+    - name: loom.platform.latency
+      interval: 30s
+      rules:
+        # State-PATCH timeouts surface a slow CP or a DB lock storm.
+        - alert: LoomStatePatchTimeouts
+          expr: |
+            sum(rate(
+              loom_state_patch_total{result="timeout"}[5m]
+            )) > 0
+          for: 5m
+          labels:
+            severity: warning
+            component: control-plane
+          annotations:
+            summary: "State PATCH timeouts > 0 for 5m"
+            description: |
+              The fenced state-PATCH path is timing out. Workers see
+              409/504 and retry; eventually they give up + the crash
+              detector reclaims.
+
+              Triage:
+                - kubectl exec deploy/loom-control-plane -- \
+                    pg_isready -h loom-postgres
+                - Check postgres connections + active queries.
+                - Roll back any recent CP image.
+
+        # Claim path is slow → workers spend their time spinning on
+        # claim instead of running trials.
+        - alert: LoomClaimLatencyP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(loom_claim_latency_sec_bucket[5m]))
+            ) > 1.0
+          for: 15m
+          labels:
+            severity: warning
+            component: control-plane
+          annotations:
+            summary: "Claim latency p95 > 1s for 15m"
+            description: |
+              POST /trials/claim p95 latency exceeds 1 second. The
+              DRF scan is slow, usually a postgres-side issue.
+
+              Triage:
+                - Verify the trials(state, submitted_at) index is hot.
+                - Check pg_stat_statements for the claim query.
+
+    - name: loom.deploy.health
+      interval: 60s
+      rules:
+        # If the CP scrape itself goes down for 5+ minutes, every
+        # other alert is silently inert. Page on the scrape itself.
+        - alert: LoomControlPlaneDown
+          expr: up{job=~".*loom-control-plane.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: control-plane
+          annotations:
+            summary: "Control Plane scrape down"
+            description: |
+              Prometheus has been unable to scrape loom-control-plane
+              for 5 minutes. Every other loom alert is inert until
+              this clears.
+
+              Triage:
+                kubectl get pods -n loom -l app=loom-control-plane
+                kubectl describe svc -n loom loom-control-plane
+                Check ServiceMonitor / PodMonitor label selectors.

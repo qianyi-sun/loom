@@ -449,6 +449,36 @@ model id for a batch; the current backend contract stores that override
 at batch level, so all BYO-provider combinations in one batch must share
 the same connection/model.
 
+## Production alerts
+
+`deploy/k8s/prometheus-rules.yaml` ships a `PrometheusRule` resource
+with seven alerts covering the Control Plane metrics emitted by
+`src/loom_control_plane/metrics.py`. Gateway / service / worker
+instrumentation is a follow-up slice; their alerts land alongside
+the metrics.
+
+Apply with:
+```bash
+kubectl apply -f deploy/k8s/prometheus-rules.yaml
+```
+
+Requires `prometheus-operator` (the `PrometheusRule` CRD) or
+`kube-prometheus-stack`. If you ship Prometheus differently, copy
+the `groups` block into your `prometheus.yml`.
+
+| Alert | Severity | Threshold | What it means | First triage |
+|---|---|---|---|---|
+| `LoomControlPlaneDown` | **critical** | `up{job=~".*loom-control-plane.*"} == 0` for 5m | Prometheus can't scrape CP. Every other alert below is silently inert. | `kubectl get pods -n loom -l app=loom-control-plane`; verify ServiceMonitor selectors. |
+| `LoomNoWorkersActive` | **critical** | `loom_workers_active == 0` for 2m | Every queued trial is blocked. | `kubectl logs -n loom -l app=loom-worker --tail=200 --previous`. CrashLoopBackOff → check `worker-token` in `loom-secrets` + CP / Postgres reachability. |
+| `LoomQueueBacklog` | warning | `sum(loom_queue_depth) > 100` for 10m | Trials arriving faster than workers claim them. | Inspect per-team breakdown `sum by (team_id) (loom_queue_depth)`; scale workers or DRF-tune Postgres. |
+| `LoomTrialsStuckClaimed` | warning | `loom_trials_inflight{state="claimed"} > 5` per team for 15m | Trials entered `claimed` but never `running` — worker crashed mid-spawn or agent runtime image is broken. | `kubectl logs -n loom -l app=loom-worker --since=20m \| grep -i "claim\|spawn\|runtime"`; check for recent image push. |
+| `LoomWorkerReclaimsSpiking` | warning | `rate(loom_worker_reclaim_total[5m]) > 0.5` for 10m | Crash detector is reclaiming > 30 trials/min. Workers are dying mid-trial. | `kubectl describe pod -n loom -l app=loom-worker \| grep -A2 "Last State\|OOMKilled\|Reason"`. |
+| `LoomStatePatchTimeouts` | warning | `rate(loom_state_patch_total{result="timeout"}[5m]) > 0` for 5m | Fenced state-PATCH is timing out; workers retry, eventually the crash detector reclaims. | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres`; check Postgres connections + active queries; consider rolling back recent CP image. |
+| `LoomClaimLatencyP95High` | warning | `histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m]))) > 1.0` for 15m | DRF claim scan p95 > 1 second. Workers spinning instead of running. | Verify `trials(state, submitted_at)` index is hot; check `pg_stat_statements` for the claim query. |
+
+Thresholds are starting points — tune per team's trial volume +
+workload shape. Halve the `for:` durations for staging.
+
 ## Alarm response (troubleshooting matrix)
 
 | Symptom | Likely cause | First check |
