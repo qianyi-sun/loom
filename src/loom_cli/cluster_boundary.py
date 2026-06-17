@@ -100,7 +100,11 @@ def _audit_ingress(
     doc: dict[str, Any], name: str, allowlist: set[str],
 ) -> list[BoundaryViolation]:
     out: list[BoundaryViolation] = []
-    for rule in doc.get("spec", {}).get("rules", []):
+    spec = doc.get("spec", {}) or {}
+    # `rules` may be missing entirely (defaultBackend-only Ingress is
+    # legal) or null. Treat both as "no rules" — the defaultBackend
+    # check below still runs.
+    for rule in spec.get("rules") or []:
         http = rule.get("http") or {}
         for path in http.get("paths", []):
             backend = path.get("backend", {}).get("service", {})
@@ -117,6 +121,23 @@ def _audit_ingress(
                         f"the public Ingress."
                     ),
                 ))
+    # `defaultBackend` catches every request that doesn't match a
+    # rule — pointing it at an internal service is the same boundary
+    # violation as listing one under `rules`.
+    default = spec.get("defaultBackend") or {}
+    default_svc = default.get("service", {}).get("name")
+    if default_svc and default_svc not in allowlist:
+        out.append(BoundaryViolation(
+            kind="ingress-backend",
+            object_kind="Ingress",
+            object_name=name,
+            detail=(
+                f"Ingress defaultBackend {default_svc!r} is not on "
+                f"the public allowlist {sorted(allowlist)}. "
+                f"defaultBackend catches every unmatched request — "
+                f"internal services must not appear here."
+            ),
+        ))
     return out
 
 
@@ -127,22 +148,28 @@ def _audit_pod_template(
     pod_spec = (
         doc.get("spec", {}).get("template", {}).get("spec", {})
     )
-    for container in pod_spec.get("containers", []):
-        c_name = container.get("name", "<unnamed>")
-        for port in container.get("ports") or []:
-            if "hostPort" in port:
-                out.append(BoundaryViolation(
-                    kind="host-port",
-                    object_kind=kind,
-                    object_name=name,
-                    detail=(
-                        f"container {c_name!r} declares "
-                        f"hostPort={port['hostPort']}; a hostPort "
-                        f"binds the container to a node interface "
-                        f"(equivalent to NodePort but easier to miss "
-                        f"in review)."
-                    ),
-                ))
+    # initContainers are scheduled BEFORE containers and run in the
+    # same pod network namespace — a hostPort declared there binds
+    # the node interface just like in a regular container, but is
+    # easier to miss in a code review. Audit both lists.
+    for container_list_key in ("containers", "initContainers"):
+        for container in pod_spec.get(container_list_key) or []:
+            c_name = container.get("name", "<unnamed>")
+            for port in container.get("ports") or []:
+                if "hostPort" in port:
+                    out.append(BoundaryViolation(
+                        kind="host-port",
+                        object_kind=kind,
+                        object_name=name,
+                        detail=(
+                            f"container {c_name!r} (in "
+                            f"{container_list_key}) declares "
+                            f"hostPort={port['hostPort']}; a hostPort "
+                            f"binds the container to a node interface "
+                            f"(equivalent to NodePort but easier to miss "
+                            f"in review)."
+                        ),
+                    ))
     return out
 
 

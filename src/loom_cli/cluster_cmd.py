@@ -1119,25 +1119,47 @@ def delete_manifests(
     )
 
 
+@dataclass
+class PVCDeleteResult:
+    """Outcome of `delete_pvcs`. Split so the caller can report what
+    succeeded even when something later in the list fails — operators
+    need to know whether postgres got wiped before minio failed."""
+
+    deleted: list[str]
+    failed: list[tuple[str, str]]  # (name, error-message)
+
+
 def delete_pvcs(
     core_v1: Any, namespace: str,
-) -> list[str]:
+) -> PVCDeleteResult:
     """Delete every PVC in the namespace. StatefulSet
     volumeClaimTemplates create PVCs (`data-loom-postgres-0`, etc.)
     that survive StatefulSet deletion — operators have to drop them
-    explicitly to reclaim disk. Returns the list of deleted PVC
-    names so the caller can report what got wiped."""
+    explicitly to reclaim disk.
+
+    Per-PVC errors are caught so a failure on one PVC doesn't hide
+    what was actually wiped before it. The caller decides whether
+    `failed` is fatal (it usually is — partial-wipe state is the
+    operator's problem to resolve)."""
     pvcs = core_v1.list_namespaced_persistent_volume_claim(
         namespace=namespace,
     )
     deleted: list[str] = []
+    failed: list[tuple[str, str]] = []
     for pvc in pvcs.items:
         name = pvc.metadata.name
-        core_v1.delete_namespaced_persistent_volume_claim(
-            name=name, namespace=namespace,
-        )
-        deleted.append(name)
-    return deleted
+        try:
+            core_v1.delete_namespaced_persistent_volume_claim(
+                name=name, namespace=namespace,
+            )
+            deleted.append(name)
+        except Exception as exc:
+            # Catch broadly: the k8s client can raise ApiException,
+            # connection errors, or programming bugs in the underlying
+            # client lib. The caller surfaces (name, repr) to the
+            # operator either way.
+            failed.append((name, f"{type(exc).__name__}: {exc}"))
+    return PVCDeleteResult(deleted=deleted, failed=failed)
 
 
 def delete_namespace_resource(
@@ -1193,7 +1215,10 @@ def _down(args: argparse.Namespace) -> int:
         sys.stdout.flush()
         try:
             reply = sys.stdin.readline().strip().lower()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
+            # EOFError covers `stdin=None` edge cases; closed-pipe
+            # stdin (the common CI case without --yes) returns "" from
+            # readline() which falls through to the abort path below.
             sys.stdout.write("\naborted.\n")
             return 1
         if reply not in ("y", "yes"):
@@ -1221,19 +1246,33 @@ def _down(args: argparse.Namespace) -> int:
     # 4. Optional volume teardown.
     if args.with_volumes:
         try:
-            deleted_pvcs = delete_pvcs(core_v1, args.namespace)
+            pvc_result = delete_pvcs(core_v1, args.namespace)
         except Exception as exc:
+            # The initial `list_namespaced_persistent_volume_claim` call
+            # failed — we never got to per-PVC deletes. Per-PVC failures
+            # are reported below via pvc_result.failed.
             sys.stderr.write(
-                f"error: failed to delete PVCs: "
-                f"{type(exc).__name__}: {exc}\n",
+                f"error: failed to list PVCs in namespace "
+                f"'{args.namespace}': {type(exc).__name__}: {exc}\n",
             )
             return 1
-        for name in deleted_pvcs:
+        for name in pvc_result.deleted:
             sys.stdout.write(f"  persistentvolumeclaim/{name} deleted\n")
-        if not deleted_pvcs:
+        for name, err in pvc_result.failed:
+            sys.stderr.write(
+                f"  persistentvolumeclaim/{name} FAILED: {err}\n",
+            )
+        if not pvc_result.deleted and not pvc_result.failed:
             sys.stdout.write(
                 f"  (no PVCs found in namespace '{args.namespace}')\n",
             )
+        if pvc_result.failed:
+            sys.stderr.write(
+                f"error: {len(pvc_result.failed)} PVC(s) failed to "
+                f"delete; namespace '{args.namespace}' is now in a "
+                f"partial-wipe state.\n",
+            )
+            return 1
 
     # 5. Optional namespace teardown.
     if args.delete_namespace:

@@ -142,8 +142,11 @@ def test_delete_pvcs_deletes_every_pvc_in_namespace() -> None:
     core = _FakeCoreV1(
         ["data-loom-postgres-0", "data-loom-minio-0"],
     )
-    deleted = delete_pvcs(core, "loom")
-    assert deleted == ["data-loom-postgres-0", "data-loom-minio-0"]
+    result = delete_pvcs(core, "loom")
+    assert result.deleted == [
+        "data-loom-postgres-0", "data-loom-minio-0",
+    ]
+    assert result.failed == []
     assert core.deleted == [
         ("loom", "data-loom-postgres-0"),
         ("loom", "data-loom-minio-0"),
@@ -152,7 +155,49 @@ def test_delete_pvcs_deletes_every_pvc_in_namespace() -> None:
 
 def test_delete_pvcs_returns_empty_when_no_pvcs() -> None:
     core = _FakeCoreV1([])
-    assert delete_pvcs(core, "loom") == []
+    result = delete_pvcs(core, "loom")
+    assert result.deleted == []
+    assert result.failed == []
+
+
+def test_delete_pvcs_continues_past_mid_loop_failure() -> None:
+    """One PVC failing must not abort the whole sweep — the operator
+    needs to know which PVCs got wiped before the failure so they
+    can manually finish the teardown."""
+
+    class _PartiallyFailingCore(_FakeCoreV1):
+        def __init__(self, pvc_names: list[str], fail_on: str) -> None:
+            super().__init__(pvc_names)
+            self._fail_on = fail_on
+
+        def delete_namespaced_persistent_volume_claim(
+            self, *, name: str, namespace: str,
+        ) -> None:
+            if name == self._fail_on:
+                raise RuntimeError(
+                    "Forbidden: storage finalizer not ready",
+                )
+            super().delete_namespaced_persistent_volume_claim(
+                name=name, namespace=namespace,
+            )
+
+    core = _PartiallyFailingCore(
+        [
+            "data-loom-postgres-0",
+            "data-loom-minio-0",
+            "data-loom-worker-0",
+        ],
+        fail_on="data-loom-minio-0",
+    )
+    result = delete_pvcs(core, "loom")
+    # postgres + worker succeeded; minio failed; the loop did NOT
+    # abort early.
+    assert result.deleted == [
+        "data-loom-postgres-0", "data-loom-worker-0",
+    ]
+    assert len(result.failed) == 1
+    assert result.failed[0][0] == "data-loom-minio-0"
+    assert "RuntimeError" in result.failed[0][1]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -296,6 +341,114 @@ def test_cli_down_with_volumes_omitted_by_default(
     main(["cluster", "down", "--yes"])
     # PVCs untouched.
     assert captures["core"].deleted == []
+
+
+def test_cli_down_partial_pvc_failure_reports_and_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When one PVC fails mid-loop, operator sees what got deleted +
+    what failed + a partial-wipe warning, exit 1."""
+
+    class _PartiallyFailingCore(_FakeCoreV1):
+        def delete_namespaced_persistent_volume_claim(
+            self, *, name: str, namespace: str,
+        ) -> None:
+            if name == "data-loom-minio-0":
+                raise RuntimeError("Forbidden: finalizer not ready")
+            super().delete_namespaced_persistent_volume_claim(
+                name=name, namespace=namespace,
+            )
+
+    core = _PartiallyFailingCore(
+        ["data-loom-postgres-0", "data-loom-minio-0"],
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _ctx: (object(), object(), core, object()),
+    )
+
+    def _delete(yaml_text, ns, *, context, extra_args=()):  # type: ignore[no-untyped-def]
+        from loom_cli.cluster_cmd import DeleteResult
+        return DeleteResult(
+            returncode=0,
+            summary_lines=["deployment.apps/loom-service deleted"],
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.delete_manifests", _delete)
+
+    rc = main(["cluster", "down", "--yes", "--with-volumes"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    # The successful PVC is reported.
+    assert "data-loom-postgres-0 deleted" in captured.out
+    # The failed PVC is reported on stderr with the error.
+    assert "data-loom-minio-0 FAILED" in captured.err
+    assert "RuntimeError" in captured.err
+    assert "partial-wipe" in captured.err
+
+
+def test_cli_down_pvc_list_call_failure_returns_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If the initial list_namespaced_persistent_volume_claim itself
+    raises (auth, network), we never get to per-PVC deletes — surface
+    the listing failure clearly."""
+
+    class _ListFailsCore(_FakeCoreV1):
+        def list_namespaced_persistent_volume_claim(
+            self, *, namespace: str,
+        ) -> Any:
+            raise PermissionError("Forbidden")
+
+    core = _ListFailsCore([])
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _ctx: (object(), object(), core, object()),
+    )
+
+    def _delete(yaml_text, ns, *, context, extra_args=()):  # type: ignore[no-untyped-def]
+        from loom_cli.cluster_cmd import DeleteResult
+        return DeleteResult(returncode=0, summary_lines=[], stderr="")
+
+    monkeypatch.setattr("loom_cli.cluster_cmd.delete_manifests", _delete)
+
+    rc = main(["cluster", "down", "--yes", "--with-volumes"])
+    assert rc == 1
+    assert "failed to list PVCs" in capsys.readouterr().err
+
+
+def test_cli_down_prompts_and_aborts_on_eof(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Closed stdin (the common CI case without --yes) returns "" from
+    readline(); the empty reply must abort cleanly, NOT hang."""
+    _patch_full_down_path(monkeypatch)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    rc = main(["cluster", "down"])
+    assert rc == 1
+    assert "aborted" in capsys.readouterr().out.lower()
+
+
+def test_cli_down_prompts_and_aborts_on_eof_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When stdin raises (e.g., sys.stdin is detached), catch and
+    abort instead of crashing."""
+    _patch_full_down_path(monkeypatch)
+
+    class _RaisingStdin:
+        def readline(self) -> str:
+            raise EOFError("stdin not available")
+
+    monkeypatch.setattr("sys.stdin", _RaisingStdin())
+    rc = main(["cluster", "down"])
+    assert rc == 1
+    assert "aborted" in capsys.readouterr().out.lower()
 
 
 def test_cli_down_kubectl_delete_failure_returns_1(

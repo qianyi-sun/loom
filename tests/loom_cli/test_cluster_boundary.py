@@ -207,6 +207,82 @@ spec:
     assert violations == []
 
 
+def test_audit_flags_default_backend_off_allowlist() -> None:
+    """An Ingress with defaultBackend (catch-all for unmatched
+    requests) pointing at an internal service is the same boundary
+    violation as listing it under `rules`. The `rules` field can be
+    absent entirely on a defaultBackend-only Ingress."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: catchall }
+spec:
+  defaultBackend:
+    service:
+      name: loom-control-plane
+      port: { number: 8080 }
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.kind == "ingress-backend"
+    assert "defaultBackend" in v.detail
+    assert "loom-control-plane" in v.detail
+
+
+def test_audit_flags_default_backend_alongside_rules() -> None:
+    """An Ingress can have both rules (specific paths) AND a
+    defaultBackend (catch-all). Flag the defaultBackend even when
+    rules are clean."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: mixed }
+spec:
+  defaultBackend:
+    service:
+      name: loom-llm-gateway
+      port: { number: 9100 }
+  rules:
+    - host: loom.example.com
+      http:
+        paths:
+          - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    assert "defaultBackend" in violations[0].detail
+    assert "loom-llm-gateway" in violations[0].detail
+
+
+def test_audit_default_backend_allowlisted_passes() -> None:
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: catchall }
+spec:
+  defaultBackend:
+    service: { name: loom-web, port: { number: 80 } }
+"""
+    assert audit_boundary(yaml_text) == []
+
+
+def test_audit_default_backend_gateway_opted_in() -> None:
+    """gateway_public_host opt-in covers defaultBackend just like
+    rules."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: gw }
+spec:
+  defaultBackend:
+    service: { name: loom-llm-gateway, port: { number: 9100 } }
+"""
+    assert audit_boundary(
+        yaml_text, gateway_public_host="gateway.example.com",
+    ) == []
+
+
 def test_audit_accepts_allowlisted_ingress_backends() -> None:
     """loom-service + loom-web are both on the default allowlist."""
     yaml_text = """\
@@ -249,6 +325,34 @@ spec:
     assert v.kind == "host-port"
     assert v.object_kind == "Deployment"
     assert "30080" in v.detail
+
+
+def test_audit_flags_host_port_on_init_container() -> None:
+    """initContainers run in the pod's network namespace just like
+    regular containers — a hostPort declared there binds the node
+    interface and must be caught."""
+    yaml_text = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sneaky-init }
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: init
+          ports:
+            - containerPort: 5000
+              hostPort: 5000
+      containers:
+        - name: main
+          ports: [{ containerPort: 8080 }]
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.kind == "host-port"
+    assert "init" in v.detail
+    assert "initContainers" in v.detail
 
 
 def test_audit_flags_host_port_on_daemonset() -> None:
