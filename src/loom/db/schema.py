@@ -281,6 +281,7 @@ class Trial(Base):
     requires_caps: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     state: Mapped[str] = mapped_column(String, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     submit_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     submitted_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,

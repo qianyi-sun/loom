@@ -253,10 +253,10 @@ async def _spawn_trial(
         )
         return
 
-    async def _state_patch(state: str, fr: str | None) -> bool:
+    async def _state_patch(state: str, fr: str | None, fm: str | None = None) -> bool:
         return await cp_client.patch_state(
             trial_id=trial_id, worker_id=worker_id,
-            state=state, failure_reason=fr,
+            state=state, failure_reason=fr, failure_message=fm,
         )
 
     async def _output_projection(

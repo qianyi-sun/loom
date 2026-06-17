@@ -35,6 +35,8 @@ class FailureReason(StrEnum):
     EXHAUSTED_RETRIES = "exhausted_retries"
     WORKER_LOST_CLAIM = "worker_lost_claim"
     INTERNAL_ERROR = "internal_error"
+    PROVIDER_ERROR = "provider_error"   # upstream provider returned 4xx
+    GATEWAY_ERROR = "gateway_error"     # loom gateway itself returned 5xx
 
 
 class AgentInfo(BaseModel):
@@ -84,6 +86,7 @@ class TrialResult(BaseModel):
     config: TrialConfig
     state: TrialState
     failure_reason: FailureReason | None = None
+    failure_message: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     reward: dict[str, float] | None = None

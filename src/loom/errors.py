@@ -95,24 +95,85 @@ class CapabilityMismatchError(ConfigError):
 
 # Failure classification ──────────────────────────────────────────────────────
 
+import re  # noqa: E402
+
 from loom.models.result import FailureReason  # noqa: E402
 
+# Patterns for internal URLs that must NOT appear in user-facing messages.
+_INTERNAL_URL_RE = re.compile(
+    r"https?://[^ ]*loom-llm-gateway[^ ]*"
+    r"|https?://[^ ]*loom-control-plane[^ ]*",
+    re.IGNORECASE,
+)
+_MAX_MSG_LEN = 200
 
-def classify_failure(exc: BaseException) -> FailureReason:
-    """Map an uncaught exception in `Trial.run()` to a `FailureReason`.
 
-    Phase-local handlers (in `_run_step`) catch and record `StepError` before
-    this is reached, so most calls here are for env failures, framework
-    crashes, or the rare trial-level timeout. See spec §5.2.
+def _redact_body(raw: str) -> str:
+    """Strip internal URLs, collapse whitespace, and truncate to 200 chars."""
+    cleaned = _INTERNAL_URL_RE.sub("[redacted]", raw)
+    # Replace newlines / CR so the message is single-line in logs + UI.
+    cleaned = cleaned.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    cleaned = cleaned.strip()
+    if len(cleaned) > _MAX_MSG_LEN:
+        cleaned = cleaned[:_MAX_MSG_LEN]
+    return cleaned
+
+
+def _classify_http_status_error(exc: BaseException) -> tuple[FailureReason, str | None] | None:
+    """Return a classified tuple if *exc* is an httpx.HTTPStatusError, else None.
+
+    Imported lazily so that loom-core doesn't hard-depend on httpx being
+    installed; in practice every worker environment has it, but unit tests
+    for the pure-loom package should not require it.
     """
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+
+    status = exc.response.status_code
+    if 400 <= status <= 499:
+        try:
+            body_text = exc.response.text
+        except Exception:
+            body_text = ""
+        excerpt = _redact_body(body_text)
+        msg = f"Provider returned HTTP {status}."
+        if excerpt:
+            msg = f"Provider returned HTTP {status}. {excerpt}"
+        return FailureReason.PROVIDER_ERROR, msg
+    if 500 <= status <= 599:
+        return FailureReason.GATEWAY_ERROR, f"Loom gateway returned HTTP {status}."
+    return None
+
+
+def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
+    """Map an uncaught exception in ``Trial.run()`` to a ``(FailureReason,
+    optional user-facing message)`` tuple.
+
+    Phase-local handlers (in ``_run_step``) catch and record ``StepError``
+    before this is reached, so most calls here are for env failures, framework
+    crashes, or the rare trial-level timeout. See spec §5.2.
+
+    The second element of the tuple is a short, redacted, single-line string
+    safe to display directly to end-users.  It is ``None`` for failure reasons
+    that have no actionable user-facing detail.
+    """
+    http_result = _classify_http_status_error(exc)
+    if http_result is not None:
+        return http_result
+
     if isinstance(exc, AgentSetupTimeoutError):
-        return FailureReason.AGENT_ERROR
+        return FailureReason.AGENT_ERROR, None
     if isinstance(exc, DriverError):
-        return FailureReason.ENV_START_FAILURE
+        return FailureReason.ENV_START_FAILURE, None
     if isinstance(exc, VerifierError):
-        return FailureReason.VERIFIER_ERROR
+        return FailureReason.VERIFIER_ERROR, None
     if isinstance(exc, TrajectoryFlushFailedError):
-        return FailureReason.TRAJECTORY_FLUSH_FAILED
+        return FailureReason.TRAJECTORY_FLUSH_FAILED, None
     if isinstance(exc, TimeoutError):
-        return FailureReason.AGENT_TIMEOUT
-    return FailureReason.INTERNAL_ERROR
+        return FailureReason.AGENT_TIMEOUT, None
+    return FailureReason.INTERNAL_ERROR, None

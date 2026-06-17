@@ -88,6 +88,7 @@ def _trial_row(t: Trial) -> dict[str, Any]:
         "team_id": str(t.team_id),
         "state": t.state,
         "failure_reason": t.failure_reason,
+        "failure_message": t.failure_message,
         "submitted_at": t.submitted_at.isoformat(),
         "started_at": t.started_at.isoformat() if t.started_at else None,
         "finished_at": (

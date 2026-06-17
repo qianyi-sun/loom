@@ -103,6 +103,7 @@ class HttpControlPlaneClient:
         worker_id: UUID,
         state: str,
         failure_reason: str | None = None,
+        failure_message: str | None = None,
     ) -> bool:
         """True on accepted, False if the trial is no longer ours (409)."""
         client, owned = self._http()
@@ -113,6 +114,8 @@ class HttpControlPlaneClient:
             }
             if failure_reason is not None:
                 payload["failure_reason"] = failure_reason
+            if failure_message is not None:
+                payload["failure_message"] = failure_message
             r = await client.patch(
                 f"/trials/{trial_id}/state", headers=self._headers,
                 json=payload,

@@ -132,6 +132,8 @@ async def test_list_my_trials(
     assert items[1]["aggregate_reward"] is None
     # Agent name pulled from config.
     assert items[0]["agent_name"] == "oracle"
+    # failure_message field present in list response (issue #164).
+    assert "failure_message" in items[0]
 
 
 async def test_filter_by_state_succeeded_only(
@@ -273,6 +275,8 @@ async def test_trial_detail_returns_presigned_urls(
     assert f"/{trial_ids[0]}/atif.json" in body["atif_url"]
     assert f"/{trial_ids[0]}/events.jsonl" in body["trajectory_url"]
     assert body["artifacts"] == []
+    # failure_message field present in response (issue #164).
+    assert "failure_message" in body
 
 
 async def test_trial_detail_exposes_projected_artifacts(

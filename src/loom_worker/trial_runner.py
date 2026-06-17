@@ -30,9 +30,9 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 logger = logging.getLogger(__name__)
 
 
-# (state, failure_reason) → bool: True if the Control Plane accepted the
-# transition, False if the worker has lost its claim (fenced).
-StatePatchCallback = Callable[[str, str | None], Awaitable[bool]]
+# (state, failure_reason, failure_message) → bool: True if the Control Plane
+# accepted the transition, False if the worker has lost its claim (fenced).
+StatePatchCallback = Callable[[str, str | None, str | None], Awaitable[bool]]
 OutputProjectionCallback = Callable[
     [dict[str, object], dict[str, object]], Awaitable[bool]
 ]
@@ -112,13 +112,13 @@ class LocalTrialRunner:
             llm_calls_fetcher=self.llm_calls_fetcher,
         )
 
-        async def _patch(state: str, fr: str | None) -> None:
+        async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
             # Trial expects an `Awaitable[None]` callback. We adapt our
             # bool-returning callback by logging when the Control Plane
             # rejects with a fence (False) and swallowing other errors so a
             # transient PATCH failure doesn't crash the trial body.
             try:
-                ok = await self.state_patch_callback(state, fr)
+                ok = await self.state_patch_callback(state, fr, fm)
                 if not ok:
                     logger.warning(
                         "state_patch_fenced trial=%s state=%s — "
@@ -151,6 +151,7 @@ class LocalTrialRunner:
                 await _patch(
                     result.state.value,
                     result.failure_reason.value if result.failure_reason else None,
+                    result.failure_message,
                 )
                 return result
             raise

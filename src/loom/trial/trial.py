@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 _FINALIZE_TIMEOUT_SEC = 60.0
 _STATE_PATCH_TIMEOUT_SEC = 15.0
 
-StatePatchCallback = Callable[[str, str | None], Awaitable[None]]
+StatePatchCallback = Callable[[str, str | None, str | None], Awaitable[None]]
 
 
 @dataclass
@@ -121,7 +121,7 @@ class Trial:
             # Plan 6's worker has its own reclaim/retry — losing one heartbeat
             # is recoverable; raising here orphans the local state machine.
             try:
-                await self.state_patch("running", None)
+                await self.state_patch("running", None, None)
             except Exception:
                 logger.exception("state PATCH (running) failed; continuing")
 
@@ -192,7 +192,9 @@ class Trial:
                         logger.exception("failed to append TrialCancelledEvent")
                 except Exception as exc:
                     result.state = TrialState.FAILED
-                    result.failure_reason = classify_failure(exc)
+                    reason, message = classify_failure(exc)
+                    result.failure_reason = reason
+                    result.failure_message = message
                     try:
                         await writer.append(TrialErrorEvent(
                             emitted_at=datetime.now(UTC),
@@ -275,6 +277,7 @@ class Trial:
                         asyncio.shield(self.state_patch(
                             result.state.value,
                             result.failure_reason.value if result.failure_reason else None,
+                            result.failure_message,
                         )),
                         timeout=_STATE_PATCH_TIMEOUT_SEC,
                     )

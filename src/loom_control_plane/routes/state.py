@@ -41,6 +41,9 @@ _PATCH_SQL = text("""
 UPDATE trials
    SET state = (:new_state)::text,
        failure_reason = (:failure_reason)::text,
+       failure_message = CASE WHEN (:failure_message)::text IS NOT NULL
+                               THEN (:failure_message)::text
+                               ELSE failure_message END,
        finished_at = CASE WHEN (:is_terminal)::boolean
                            THEN NOW() ELSE finished_at END,
        started_at = CASE WHEN (:new_state)::text = 'running' AND started_at IS NULL
@@ -102,6 +105,13 @@ async def patch_state(
                 detail=f"invalid failure_reason {failure_reason_str!r}",
             ) from exc
 
+    failure_message_str = payload.get("failure_message")
+    if failure_message_str is not None and not isinstance(failure_message_str, str):
+        raise HTTPException(
+            status_code=400,
+            detail="failure_message must be a string",
+        )
+
     allowed_from = sorted(s.value for s in _ALLOWED_FROM[new_state])
 
     async with request.app.state.session_factory() as session:
@@ -110,6 +120,7 @@ async def patch_state(
             "worker_id": worker_id,
             "new_state": new_state.value,
             "failure_reason": failure_reason_str,
+            "failure_message": failure_message_str,
             "is_terminal": new_state in _TERMINAL,
             "allowed_from": allowed_from,
         })).mappings().one_or_none()
