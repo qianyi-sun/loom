@@ -22,7 +22,7 @@ import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 
 export default function Settings(): JSX.Element {
-  const { token, setToken, clearToken, isAdmin } = useAuth();
+  const { token, setToken, clearToken, isAdmin, tokenError } = useAuth();
   const [pasted, setPasted] = useState("");
 
   const queryClient = useQueryClient();
@@ -64,6 +64,14 @@ export default function Settings(): JSX.Element {
             aria-label="bearer token"
             title="Paste a Loom team or admin bearer token."
           />
+          {tokenError && (
+            <p
+              role="alert"
+              className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+            >
+              {tokenError}
+            </p>
+          )}
           <Button
             variant="primary"
             className="w-full"
