@@ -14,6 +14,7 @@ from sqlalchemy import insert, update
 from loom.auth import verify_bearer_token
 from loom.db.schema import Worker
 from loom.models.capabilities import Capabilities
+from loom_control_plane.metrics import CLAIM_LATENCY_SEC
 from loom_control_plane.scheduler.claim import claim_one
 
 router = APIRouter()
@@ -44,6 +45,8 @@ async def claim_trial(
         p for c in caps for p in c["network_policies"]
     })
 
+    import time as _time
+    t0 = _time.perf_counter()
     async with request.app.state.session_factory() as session:
         row = await claim_one(
             session,
@@ -52,9 +55,12 @@ async def claim_trial(
             worker_network_policies=worker_network,
         )
         await session.commit()
+    elapsed = _time.perf_counter() - t0
 
     if row is None:
+        CLAIM_LATENCY_SEC.labels(result="miss").observe(elapsed)
         return Response(status_code=204)
+    CLAIM_LATENCY_SEC.labels(result="hit").observe(elapsed)
 
     return JSONResponse({
         "trial_id": str(row["id"]),

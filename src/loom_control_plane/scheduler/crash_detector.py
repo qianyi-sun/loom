@@ -16,6 +16,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_control_plane.metrics import WORKER_RECLAIM_TOTAL
+
 logger = logging.getLogger(__name__)
 
 _RECLAIM_SQL = text("""
@@ -59,6 +61,7 @@ async def run_crash_detector_loop(
                 await session.commit()
             if count:
                 logger.info("crash_detector_reclaimed", extra={"count": count})
+                WORKER_RECLAIM_TOTAL.inc(count)
         except asyncio.CancelledError:
             return
         except Exception as exc:

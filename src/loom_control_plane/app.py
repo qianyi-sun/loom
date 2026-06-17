@@ -11,10 +11,12 @@ from contextlib import asynccontextmanager
 import boto3
 from botocore.config import Config
 from fastapi import FastAPI
+from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom_control_plane.config import ControlPlaneSettings
+from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
 from loom_control_plane.routes import (
     admin,
     artifacts,
@@ -69,20 +71,33 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             ),
             name="loom-cp-crash-detector",
         )
+        # Background refresher for gauge metrics (workers_active,
+        # queue_depth, trials_inflight). See metrics_refresher.py
+        # for the cadence rationale.
+        metrics_refresher_task = asyncio.create_task(
+            run_metrics_refresher_loop(
+                session_factory=session_factory,
+                expiry_sec=settings.worker_heartbeat_expiry_sec,
+                interval_sec=30,
+            ),
+            name="loom-cp-metrics-refresher",
+        )
         try:
             yield
         finally:
             crash_detector_task.cancel()
+            metrics_refresher_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
             # cancellation arrives, asyncpg connection takes a moment
             # to release) doesn't block the entire lifespan shutdown —
             # which then blocks `TestClient.__exit__`, which then
             # blocks the test. Five seconds is generous for a task
             # that should respond to cancel in microseconds.
-            with contextlib.suppress(
-                asyncio.CancelledError, asyncio.TimeoutError,
-            ):
-                await asyncio.wait_for(crash_detector_task, timeout=5.0)
+            for t in (crash_detector_task, metrics_refresher_task):
+                with contextlib.suppress(
+                    asyncio.CancelledError, asyncio.TimeoutError,
+                ):
+                    await asyncio.wait_for(t, timeout=5.0)
             await engine.dispose()
 
     app = FastAPI(
@@ -97,4 +112,10 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(tasks.router)
     app.include_router(admin.router)
     app.include_router(step_tokens.router)
+    # /metrics: standard prometheus_client ASGI app. Mounted at the
+    # top-level for prometheus scrapers (operator-supplied
+    # ServiceMonitor / PodMonitor uses the default `/metrics` path).
+    # The CP service is internal (not exposed via Ingress); scrapers
+    # reach it through cluster DNS.
+    app.mount("/metrics", make_asgi_app())
     return app

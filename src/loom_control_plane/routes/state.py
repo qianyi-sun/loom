@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from loom.auth import verify_bearer_token
 from loom.models.result import FailureReason, TrialState
+from loom_control_plane.metrics import STATE_PATCH_TOTAL
 
 router = APIRouter()
 
@@ -115,6 +116,7 @@ async def patch_state(
         await session.commit()
 
     if row is None:
+        STATE_PATCH_TOTAL.labels(endpoint="state", result="fenced").inc()
         raise HTTPException(
             status_code=409,
             detail=(
@@ -123,4 +125,5 @@ async def patch_state(
             ),
         )
 
+    STATE_PATCH_TOTAL.labels(endpoint="state", result="ok").inc()
     return {"trial_id": str(row["id"]), "state": row["state"]}
