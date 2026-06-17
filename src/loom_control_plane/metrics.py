@@ -48,3 +48,8 @@ WORKER_RECLAIM_TOTAL = Counter(
     "loom_worker_reclaim_total",
     "Trials reclaimed by crash detector",
 )
+
+RETRY_EXHAUSTED_TOTAL = Counter(
+    "loom_retry_exhausted_total",
+    "Trials transitioned to failed because attempt_count >= max_attempts",
+)

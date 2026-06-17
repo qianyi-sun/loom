@@ -17,6 +17,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
+from loom_control_plane.retry_exhausted_sweeper import (
+    run_retry_exhausted_sweeper_loop,
+)
 from loom_control_plane.routes import (
     admin,
     artifacts,
@@ -82,18 +85,34 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             ),
             name="loom-cp-metrics-refresher",
         )
+        # Background sweep that transitions queued trials with
+        # attempt_count >= max_attempts to state='failed' with
+        # failure_reason='retry_exhausted'. Runs at the same cadence
+        # as the crash detector so the two sweeps are in lock-step.
+        retry_exhausted_task = asyncio.create_task(
+            run_retry_exhausted_sweeper_loop(
+                session_factory=session_factory,
+                interval_sec=settings.worker_reclaim_sweep_interval_sec,
+            ),
+            name="loom-cp-retry-exhausted-sweeper",
+        )
         try:
             yield
         finally:
             crash_detector_task.cancel()
             metrics_refresher_task.cancel()
+            retry_exhausted_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
             # cancellation arrives, asyncpg connection takes a moment
             # to release) doesn't block the entire lifespan shutdown —
             # which then blocks `TestClient.__exit__`, which then
             # blocks the test. Five seconds is generous for a task
             # that should respond to cancel in microseconds.
-            for t in (crash_detector_task, metrics_refresher_task):
+            for t in (
+                crash_detector_task,
+                metrics_refresher_task,
+                retry_exhausted_task,
+            ):
                 with contextlib.suppress(
                     asyncio.CancelledError, asyncio.TimeoutError,
                 ):

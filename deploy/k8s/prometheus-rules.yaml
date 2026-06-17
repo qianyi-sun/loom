@@ -111,6 +111,33 @@ spec:
                   | grep -A2 "Last State\|OOMKilled\|Reason"
                 kubectl logs -n loom -l app=loom-worker --previous
 
+        # Retry budget exhausted at high rate — something is structurally
+        # wrong (broken benchmark, too-low max_attempts, or a provider
+        # outage burning retries fast).
+        - alert: LoomRetryExhaustedSpiking
+          expr: rate(loom_retry_exhausted_total[5m]) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            component: control-plane
+          annotations:
+            summary: "Retry-exhausted rate > 0.1/sec for 10m"
+            description: |
+              More than 6 trials/min are exhausting their retry budget and
+              being moved to failed='retry_exhausted' for 10 minutes.
+
+              Triage:
+                - Inspect recent batch results:
+                    loom batch ls --state running
+                - Check loom_gateway_llm_calls_total for provider errors;
+                  a provider outage burns retries fast.
+                - Look at trial failure_reason distribution in the DB:
+                    SELECT failure_reason, count(*) FROM trials
+                     WHERE state='failed' GROUP BY 1 ORDER BY 2 DESC;
+                - Consider raising max_attempts on the affected batch or
+                  switching to a healthy provider connection.
+            runbook_url: "https://github.com/carinrc/loom/blob/dev/docs/operator-runbook.md#production-alerts"
+
     - name: loom.platform.latency
       interval: 30s
       rules:
