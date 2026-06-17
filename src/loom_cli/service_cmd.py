@@ -167,7 +167,11 @@ def _print_summary(tokens: dict[str, str]) -> None:
             "Admin token (DEV-ONLY; file-backed singleton; "
             "SPA login as admin):",
         )
-        print(f"  {tokens['admin']}")
+        print("  raw token not printed by `loom service up`")
+        print(
+            "  reveal explicitly: loom service reveal-admin "
+            "--secret-file .loom/admin/secrets.toml --yes",
+        )
         print()
     if tokens.get("team"):
         print("Try it:")

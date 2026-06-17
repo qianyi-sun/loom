@@ -196,7 +196,8 @@ loom service up                  # docker compose + migrations + token bootstrap
 `loom service up` brings up the full stack (Postgres + MinIO + LLM
 Gateway + Control Plane + loom_service + Worker + React SPA), ensures
 the dev singleton admin secret exists, runs migrations, seeds team/worker
-tokens, and prints the useful bearers + endpoint URLs.
+tokens, prints the team bearer + endpoint URLs, and writes the admin token to
+the ignored local env file for explicit `reveal-admin` use.
 
 URLs printed at the end of `loom service up`:
 

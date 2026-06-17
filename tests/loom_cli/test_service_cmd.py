@@ -178,15 +178,16 @@ def test_seed_test_data_invokes_dev_mode(
 def test_print_summary_labels_admin_as_file_backed_dev_singleton(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The summary must call out that admin comes from the dev secret file."""
+    """The summary must not print the raw admin secret."""
     from loom_cli.service_cmd import _print_summary
 
     _print_summary({"team": "loom_team_x", "admin": "loom_admin_y"})
     out = capsys.readouterr().out
     assert "loom_team_x" in out
-    assert "loom_admin_y" in out
+    assert "loom_admin_y" not in out
     assert "DEV-ONLY" in out
     assert "file-backed" in out
+    assert "reveal-admin" in out
 
 
 def test_ensure_dev_admin_secret_creates_0600_and_returns_token(
