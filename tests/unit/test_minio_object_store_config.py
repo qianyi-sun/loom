@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import botocore.handlers
 import pytest
+from botocore.exceptions import ClientError
 
 from loom.trajectory.storage import MinioObjectStore, _remove_expect_header
 
@@ -95,3 +96,53 @@ async def test_put_object_reconnects_and_retries_once_after_client_timeout() -> 
     assert slow_client.put_calls == 1
     assert slow_client.closed is True
     assert fast_client.put_calls == 1
+
+
+class _BucketClient:
+    def __init__(self, *, head_code: str | None = None) -> None:
+        self.head_code = head_code
+        self.head_calls: list[str] = []
+        self.create_calls: list[str] = []
+
+    def head_bucket(self, *, Bucket: str) -> None:  # noqa: N803
+        self.head_calls.append(Bucket)
+        if self.head_code is not None:
+            raise ClientError(
+                {"Error": {"Code": self.head_code}},
+                "HeadBucket",
+            )
+
+    def create_bucket(self, *, Bucket: str) -> None:  # noqa: N803
+        self.create_calls.append(Bucket)
+
+
+@pytest.mark.asyncio
+async def test_ensure_bucket_noops_when_bucket_exists() -> None:
+    store = MinioObjectStore(
+        endpoint_url="http://127.0.0.1:9000",
+        access_key="minioadmin",
+        secret_key="minioadmin",
+    )
+    client = _BucketClient()
+    store._client = client
+
+    await store.ensure_bucket("trajectories")
+
+    assert client.head_calls == ["trajectories"]
+    assert client.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_bucket_creates_missing_bucket() -> None:
+    store = MinioObjectStore(
+        endpoint_url="http://127.0.0.1:9000",
+        access_key="minioadmin",
+        secret_key="minioadmin",
+    )
+    client = _BucketClient(head_code="NoSuchBucket")
+    store._client = client
+
+    await store.ensure_bucket("trajectories")
+
+    assert client.head_calls == ["trajectories"]
+    assert client.create_calls == ["trajectories"]

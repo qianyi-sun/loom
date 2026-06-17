@@ -13,7 +13,7 @@ from loom.agent.gateway_client import FakeLLMGatewayClient
 from loom.agent.oracle import OracleAgent
 from loom.driver.fake import FakeDriver, command_table_handler
 from loom.models.exec import ExecResult
-from loom.models.result import TrialState
+from loom.models.result import FailureReason, TrialState
 from loom.models.task import (
     AgentDefaults,
     EnvironmentConfig,
@@ -140,6 +140,58 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
     assert result.state == TrialState.SUCCEEDED
     assert ("running", None) in calls
     assert ("succeeded", None) in calls
+
+
+async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type: ignore[no-untyped-def]
+    hello_task, tmp_path: Path,
+):
+    """A missing trajectories bucket makes multipart upload creation fail.
+
+    The worker-facing runner must convert that into a terminal failed
+    state instead of letting the background task crash and leave the CP
+    row stuck in running.
+    """
+
+    class MissingBucketStore(FakeObjectStore):
+        async def create_multipart_upload(self, *, bucket: str, key: str):  # type: ignore[no-untyped-def]
+            raise RuntimeError(f"NoSuchBucket: {bucket}/{key}")
+
+        async def put_object(self, *, bucket: str, key: str, body: bytes):  # type: ignore[no-untyped-def]
+            raise RuntimeError(f"NoSuchBucket: {bucket}/{key}")
+
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+        calls.append((state, failure_reason))
+        return True
+
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    trial_id = uuid4()
+    runner = LocalTrialRunner(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=_task_config(), task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=_driver_factory(handler),
+        agent_factory=lambda task_dir, _gw, _model, _name:
+            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=MissingBucketStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.TRAJECTORY_FLUSH_FAILED
+    assert ("failed", FailureReason.TRAJECTORY_FLUSH_FAILED.value) in calls
 
 
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]

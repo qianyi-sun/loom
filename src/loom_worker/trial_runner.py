@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -17,7 +18,7 @@ from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient
 from loom.agent.local_vllm_client import LocalVLLMGatewayClient
 from loom.driver.base import Driver
-from loom.models.result import TrialResult
+from loom.models.result import FailureReason, TrialResult, TrialState
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
@@ -127,7 +128,26 @@ class LocalTrialRunner:
                 )
 
         trial = Trial(ctx=ctx, state_patch=_patch)
-        return await trial.run()
+        try:
+            return await trial.run()
+        except Exception:
+            logger.exception("trial_runner_uncaught_exception trial=%s", self.trial_id)
+            if trial.result is None:
+                raise
+            result = trial.result
+            if result.state != TrialState.CANCELLED:
+                result.state = TrialState.FAILED
+                result.failure_reason = (
+                    result.failure_reason
+                    or FailureReason.TRAJECTORY_FLUSH_FAILED
+                )
+                result.finished_at = datetime.now(UTC)
+                await _patch(
+                    result.state.value,
+                    result.failure_reason.value if result.failure_reason else None,
+                )
+                return result
+            raise
 
     async def _resolve_gateway(self) -> LLMGatewayClient:
         """Pick the gateway client for this trial.

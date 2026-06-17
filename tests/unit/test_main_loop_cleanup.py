@@ -234,5 +234,22 @@ async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> No
     }]
 
 
+async def test_runtime_bucket_bootstrap_creates_missing_trajectory_bucket() -> None:
+    class _RuntimeBucketStore:
+        def __init__(self) -> None:
+            self.created: list[str] = []
+
+        async def ensure_bucket(self, bucket: str) -> None:
+            if bucket not in self.created:
+                self.created.append(bucket)
+
+    store = _RuntimeBucketStore()
+
+    await ml._ensure_runtime_buckets(store)
+    await ml._ensure_runtime_buckets(store)
+
+    assert store.created == ["trajectories"]
+
+
 # Suppress pytest's "unused" warning on the helper.
 _ = pytest

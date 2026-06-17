@@ -68,3 +68,16 @@ async def test_trajectory_writer_writes_to_minio(
 
     fetched = await store.get_object(bucket=bucket_name, key=key)
     assert fetched.count(b"\n") == 5
+
+
+async def test_minio_object_store_ensure_bucket_creates_missing_bucket(
+    store: MinioObjectStore,
+    minio: MinioContainer,
+) -> None:
+    bucket_name = f"trajectories-{uuid4().hex}"
+    client = minio.get_client()
+    assert not client.bucket_exists(bucket_name)
+
+    await store.ensure_bucket(bucket_name)
+
+    assert client.bucket_exists(bucket_name)

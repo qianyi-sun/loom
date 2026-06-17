@@ -26,6 +26,9 @@ class LocalDiskObjectStore:
     def _path(self, bucket: str, key: str) -> Path:
         return self.root / bucket / key
 
+    async def ensure_bucket(self, bucket: str) -> None:
+        (self.root / bucket).mkdir(parents=True, exist_ok=True)
+
     async def create_multipart_upload(
         self, *, bucket: str, key: str,
     ) -> MultipartUpload:

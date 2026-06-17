@@ -17,6 +17,7 @@ from typing import Any, Protocol, TypeVar, cast
 import boto3
 import botocore.handlers
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 _DEFAULT_S3_MAX_POOL_CONNECTIONS = 64
 _DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 5.0
@@ -63,6 +64,10 @@ class ObjectStore(Protocol):
     async def create_multipart_upload(
         self, *, bucket: str, key: str,
     ) -> MultipartUpload: ...
+
+    async def ensure_bucket(self, bucket: str) -> None:
+        """Create the bucket when missing; no-op when it already exists."""
+        ...
 
     async def upload_part(
         self, upload: MultipartUpload, *, part_number: int, body: bytes,
@@ -119,8 +124,12 @@ class FakeObjectStore:
     """In-memory ObjectStore for unit tests. Maps (bucket, key) → bytes."""
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    buckets: set[str] = field(default_factory=set)
     _multiparts: dict[str, list[tuple[int, bytes]]] = field(default_factory=dict)
     _next_upload_id: int = 0
+
+    async def ensure_bucket(self, bucket: str) -> None:
+        self.buckets.add(bucket)
 
     async def create_multipart_upload(
         self, *, bucket: str, key: str,
@@ -288,6 +297,34 @@ class MinioObjectStore:
     @property
     def _client_config(self) -> Config:
         return cast(Config, self._client_kwargs["config"])
+
+    async def ensure_bucket(self, bucket: str) -> None:
+        """Idempotently create a MinIO/S3 bucket.
+
+        Dev and test stacks can retain MinIO data across restarts; a
+        partially-initialized object store should not leave worker
+        trials stuck before trajectory upload starts.
+        """
+
+        def _do(client: Any) -> None:
+            try:
+                client.head_bucket(Bucket=bucket)
+                return
+            except ClientError as exc:
+                code = str(exc.response.get("Error", {}).get("Code", ""))
+                if code not in {"404", "NoSuchBucket", "NotFound"}:
+                    raise
+            try:
+                client.create_bucket(Bucket=bucket)
+            except ClientError as exc:
+                code = str(exc.response.get("Error", {}).get("Code", ""))
+                if code not in {
+                    "BucketAlreadyExists",
+                    "BucketAlreadyOwnedByYou",
+                }:
+                    raise
+
+        await self._run_client_call("ensure_bucket", _do)
 
     async def create_multipart_upload(
         self, *, bucket: str, key: str,

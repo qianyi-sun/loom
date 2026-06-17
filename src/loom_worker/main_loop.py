@@ -123,6 +123,7 @@ async def run_worker(settings: WorkerSettings) -> None:
                 secret_key=settings.minio_secret_key.get_secret_value(),
                 region=settings.minio_region,
             )
+            await _ensure_runtime_buckets(object_store)
             # PR-E: per-worker vLLM registry. Opt-in via settings; the
             # `enabled=False` path still constructs the object so the
             # trial runner gets a deterministic AgentError instead of
@@ -202,6 +203,16 @@ def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
         owned_worker_id=worker_id,
         state_and_owner_lookup=_lookup,
     )
+
+
+async def _ensure_runtime_buckets(object_store: ObjectStore) -> None:
+    for bucket in ("trajectories",):
+        try:
+            await object_store.ensure_bucket(bucket)
+        except Exception:
+            logger.exception("runtime_bucket_ensure_failed bucket=%s", bucket)
+            raise
+        logger.info("runtime_bucket_ensured bucket=%s", bucket)
 
 
 async def _spawn_trial(
@@ -421,5 +432,3 @@ def _default_agent_factory(
             )
         return agent
     return make
-
-

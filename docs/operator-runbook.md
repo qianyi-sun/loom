@@ -480,15 +480,16 @@ workload shape. Halve the `for:` durations for staging.
 | 502 from Control Plane | Postgres unreachable | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres` |
 | Trials stuck queued | No worker matches `requires_caps` | Inspect `trials.requires_caps` vs registered `workers.capabilities` |
 | 429 from Gateway | Provider rate limit | Check `loom_llm_calls_total{provider,result}` panel |
-| Trajectory uploads failing | MinIO credentials wrong or bucket missing | `mc alias set` against `loom-minio:9000` and `mc ls loom-minio/trajectories` |
+| Trajectory uploads failing | MinIO credentials wrong or runtime bucket bootstrap failed | `kubectl logs deploy/loom-worker --tail=200` for `ensure_bucket` / `trajectory_flush_failed`; verify `mc ls loom-minio/trajectories` |
 
 ## Backup + restore
 
 - **Postgres:** standard `pg_dump` of the `loom` DB on a cron. Restore
   via `pg_restore` into a fresh StatefulSet; bump the deployment to
   pick up the new ReadWriteOnce volume.
-- **MinIO:** the `trajectories` and `artifacts` buckets are immutable
-  once a trial reaches a terminal state. Mirror with
+- **MinIO:** workers create the `trajectories` bucket idempotently at
+  startup; artifact buckets are provisioned by deployment/bootstrap.
+  Both buckets are immutable once a trial reaches a terminal state. Mirror with
   `mc mirror loom-minio/trajectories backup-store/trajectories` on a
   cron. Restore: re-create the buckets and `mc mirror` back.
 
