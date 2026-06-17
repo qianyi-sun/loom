@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-service
+spec:
+  replicas: {{ replicas.service }}
+  selector:
+    matchLabels: { app: loom-service }
+  template:
+    metadata:
+      labels: { app: loom-service }
+    spec:
+      containers:
+        - name: loom-service
+          image: loom-service:{{ image_tag }}
+          env:
+            - name: LOOM_ENV
+              value: production
+            # Reuses the cp-db-url secret — loom_service + CP share
+            # the same Postgres database.
+            - name: LOOM_SVC_DB_URL
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
+            - name: LOOM_SVC_ADMIN_SECRET_FILE
+              value: /var/run/loom/secrets/admin/secrets.toml
+            - name: LOOM_SVC_MINIO_ENDPOINT
+              value: http://loom-minio:9000
+            - name: LOOM_SVC_MINIO_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
+            - name: LOOM_SVC_MINIO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+            # Internal cluster DNS — CP is no longer externally exposed
+            # (see ingress.yaml comment); loom_service forwards trial
+            # CRUD here over the pod network.
+            - name: LOOM_SVC_CONTROL_PLANE_URL
+              value: http://loom-control-plane:8080/
+            - name: LOOM_SVC_GATEWAY_URL
+              value: http://loom-llm-gateway:9100/
+            # Campaign-runner needs a submit-scoped service token.
+            # Provision via:
+            #   kubectl create secret generic loom-secrets \
+            #     --from-literal=svc-campaign-runner-cp-token=$(./scripts/mint-submit-token.sh)
+            # If absent, the runner skips its tick with a warning —
+            # campaigns will not fan out until the operator sets this.
+            - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-campaign-runner-cp-token
+                  optional: true
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/secrets/admin
+              readOnly: true
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            httpGet: { path: /api/v1/health, port: 8090 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-service
+spec:
+  selector: { app: loom-service }
+  ports:
+    - port: 8090
+      targetPort: 8090

@@ -8,7 +8,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
 spec:
   rules:
-    # On `loom.example.com`:
+    # On `{{ ingress_host }}`:
     #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
     #   anything else → loom_web (React SPA; nginx falls back to
     #                   index.html for client-side React Router paths)
@@ -16,7 +16,7 @@ spec:
     # Path order matters: more-specific `/api/v1` MUST precede the
     # catch-all `/`. Nginx ingress evaluates Prefix paths longest-first
     # by default, but listing in this order keeps it obvious to humans.
-    - host: loom.example.com
+    - host: {{ ingress_host }}
       http:
         paths:
           - path: /api/v1
@@ -33,15 +33,23 @@ spec:
                 name: loom-web
                 port:
                   number: 80
-  # NOTE: per cluster-deploy.md §Public/Private Boundary, the LLM
-  # Gateway is internal-only by default. Operators who need
-  # direct browser access to `/v1/*` for ad-hoc testing opt in via
-  # `loom cluster render --config ... gateway_public_host=...`
-  # (or `kubectl apply -f` against the rendered manifest with
-  # `[gateway_public_host]` set in cluster-config.toml). The
-  # rationale and #77 boundary enforcement notes live in the
-  # template comment.
-  #
+{% if gateway_public_host %}
+    # LLM Gateway is exposed at its own host because agents inside
+    # sandboxes need a stable URL to call from outside the cluster.
+    # Bearer auth is enforced at the route level.
+    # Opt-in via `gateway_public_host` config; default install keeps
+    # the gateway internal-only (#77 boundary enforcement).
+    - host: {{ gateway_public_host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-llm-gateway
+                port:
+                  number: 9100
+{% endif %}
   # NOTE: the Control Plane (`loom-control-plane:8080`) is intentionally
   # NOT exposed via Ingress. It carries worker-only routes
   # (`POST /trials/claim`, `PATCH /trials/{id}/state`) and admin

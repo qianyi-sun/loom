@@ -7,7 +7,7 @@ spec:
   # scale up when work resumes. Scaling: `kubectl scale deploy/loom-web
   # --replicas=2` (or set `[replicas].web = 2` in cluster-config.toml +
   # re-render).
-  replicas: 0
+  replicas: {{ replicas.web }}
   selector:
     matchLabels: { app: loom-web }
   template:
@@ -22,7 +22,7 @@ spec:
         runAsUser: 101
       containers:
         - name: loom-web
-          image: loom-web:0.7
+          image: loom-web:{{ image_tag }}
           ports:
             - containerPort: 8080
           readinessProbe:

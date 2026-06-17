@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-control-plane
+spec:
+  replicas: {{ replicas.control_plane }}
+  selector:
+    matchLabels: { app: loom-control-plane }
+  template:
+    metadata:
+      labels: { app: loom-control-plane }
+    spec:
+      containers:
+        - name: control-plane
+          image: loom-control-plane:{{ image_tag }}
+          env:
+            - name: LOOM_ENV
+              value: production
+            - name: LOOM_CP_DB_URL
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
+            - name: LOOM_CP_ADMIN_SECRET_FILE
+              value: /var/run/loom/secrets/admin/secrets.toml
+            - name: LOOM_CP_MINIO_ENDPOINT
+              value: http://loom-minio:9000
+            - name: LOOM_CP_MINIO_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
+            - name: LOOM_CP_MINIO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+            - name: LOOM_CP_LLM_GATEWAY_URL
+              value: http://loom-llm-gateway:9100
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/secrets/admin
+              readOnly: true
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-control-plane
+spec:
+  selector: { app: loom-control-plane }
+  ports:
+    - port: 8080
+      targetPort: 8080

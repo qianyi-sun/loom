@@ -20,7 +20,11 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
+from importlib import resources
+from pathlib import Path
 from typing import Any, cast
+
+from loom_cli.cluster_config import ClusterConfig, load_cluster_config
 
 # These are the Deployments cluster-deploy.md §Component map lists as
 # the in-cluster surface. The status command renders one row per
@@ -358,6 +362,88 @@ def _secret_present(api: Any, namespace: str, name: str) -> bool:
         return False
 
 
+# ──────────────────────────────────────────────────────────────────────
+# render (#76 Phase 1B)
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Order matters: Postgres + MinIO come before the workloads that
+# depend on them so `kubectl apply -f - < render` brings the cluster
+# up in a topologically sound order. Ingress is last so it doesn't
+# accept traffic until the backing Services exist.
+_TEMPLATE_ORDER: tuple[str, ...] = (
+    "postgres.yaml.j2",
+    "minio.yaml.j2",
+    "control-plane.yaml.j2",
+    "loom-service.yaml.j2",
+    "llm-gateway.yaml.j2",
+    "worker.yaml.j2",
+    "web.yaml.j2",
+    "ingress.yaml.j2",
+)
+
+
+def render_manifests(config: ClusterConfig) -> str:
+    """Render every template and join with `---` separators. Output is
+    valid YAML that can be piped directly into `kubectl apply -f -`.
+
+    Templates are loaded from `loom_cli.templates.k8s` via the
+    `importlib.resources` API so packaging (sdist + wheel) picks them
+    up without needing a separate MANIFEST.in entry.
+    """
+    try:
+        from jinja2 import Environment, StrictUndefined
+    except ModuleNotFoundError as exc:
+        # jinja2 is a core dep in pyproject.toml; this should never
+        # fire in a correctly-installed environment but the error
+        # message helps developers running a partial install.
+        raise RuntimeError(
+            "the 'jinja2' package is required for `loom cluster render`. "
+            "if you installed Loom in development mode, run `uv sync` "
+            "(or `pip install -e .`) to pick up dependencies.",
+        ) from exc
+
+    env = Environment(
+        # StrictUndefined makes a missing variable error LOUDLY instead
+        # of rendering an empty string. Better to fail at render time
+        # than silently emit a manifest with `image: loom-service:`
+        # (no tag) that operators chase for an hour.
+        undefined=StrictUndefined,
+        keep_trailing_newline=True,
+        trim_blocks=False,
+        lstrip_blocks=False,
+    )
+    ctx = config.to_render_context()
+    chunks: list[str] = []
+    pkg = resources.files("loom_cli.templates.k8s")
+    for name in _TEMPLATE_ORDER:
+        template_text = (pkg / name).read_text(encoding="utf-8")
+        rendered = env.from_string(template_text).render(**ctx)
+        # Each rendered file is itself one-or-more YAML docs. Splice
+        # with `---\n` between files. Files that already end with a
+        # trailing newline merge cleanly; the join trims any
+        # double-blank-line drift.
+        chunks.append(rendered.rstrip() + "\n")
+    return "\n---\n".join(chunks)
+
+
+def _render(args: argparse.Namespace) -> int:
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    try:
+        manifests = render_manifests(config)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    sys.stdout.write(manifests)
+    return 0
+
+
 def _status(args: argparse.Namespace) -> int:
     try:
         apps_v1, net_v1, core_v1 = _load_clients(args.context)
@@ -425,6 +511,22 @@ def dispatch(argv: list[str]) -> int:
         help="Output format. JSON for CI/scripting.",
     )
     p_status.set_defaults(handler=_status)
+
+    p_render = sub.add_parser(
+        "render",
+        help=(
+            "Render Kubernetes manifests to stdout from a "
+            "cluster-config.toml. Apply with `kubectl apply -f -`."
+        ),
+    )
+    p_render.add_argument(
+        "--config", default=None,
+        help=(
+            "Path to cluster-config.toml. Omit for all defaults "
+            "(produces the same shape as deploy/k8s/*.yaml)."
+        ),
+    )
+    p_render.set_defaults(handler=_render)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

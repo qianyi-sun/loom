@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loom-minio
+spec:
+  serviceName: loom-minio
+  replicas: 1
+  selector:
+    matchLabels: { app: loom-minio }
+  template:
+    metadata:
+      labels: { app: loom-minio }
+    spec:
+      containers:
+        - name: minio
+          image: {{ minio_image }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        resources: { requests: { storage: {{ minio_storage_gi }}Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-minio
+spec:
+  selector: { app: loom-minio }
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
