@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom_llm_gateway.config import GatewaySettings
@@ -58,6 +59,9 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app.include_router(facade_anthropic.router)
     app.include_router(facade_google.router)
     app.include_router(admin.router)
+    # /metrics: prometheus_client ASGI app. Gateway is internal-only
+    # per #77 boundary — scrapers reach it via cluster DNS.
+    app.mount("/metrics", make_asgi_app())
     return app
 
 

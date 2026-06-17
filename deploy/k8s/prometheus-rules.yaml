@@ -182,3 +182,55 @@ spec:
                 kubectl get pods -n loom -l app=loom-control-plane
                 kubectl describe svc -n loom loom-control-plane
                 Check ServiceMonitor / PodMonitor label selectors.
+
+    - name: loom.gateway.health
+      interval: 30s
+      rules:
+        - alert: LoomLLMGatewayDown
+          expr: up{job=~".*loom-llm-gateway.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: llm-gateway
+          annotations:
+            summary: "LLM Gateway scrape down"
+            description: |
+              Prometheus can't scrape loom-llm-gateway for 5 minutes.
+              Provider-call metrics are unobserved.
+
+              Triage:
+                kubectl get pods -n loom -l app=loom-llm-gateway
+                kubectl logs -n loom -l app=loom-llm-gateway --tail=200
+
+        # Per-provider failure rate. Triggers when a single provider
+        # is returning errors faster than 5% of total traffic for
+        # 10 minutes.
+        - alert: LoomGatewayProviderErrorRate
+          expr: |
+            (
+              sum by (provider) (
+                rate(loom_gateway_llm_calls_total{
+                  result!="ok"
+                }[5m])
+              )
+              /
+              sum by (provider) (
+                rate(loom_gateway_llm_calls_total[5m])
+              )
+            ) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            component: llm-gateway
+          annotations:
+            summary: "Provider error rate > 5% for 10m"
+            description: |
+              A specific provider is failing > 5% of calls for 10
+              minutes. Could be the provider itself, an expired API
+              key, or a regional outage.
+
+              Triage:
+                kubectl logs -n loom -l app=loom-llm-gateway --since=15m \
+                  | grep -i "provider=$LABEL\|upstream"
+                loom providers test <connection-name>
+                Check provider status page.

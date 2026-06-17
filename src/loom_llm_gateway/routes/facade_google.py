@@ -202,6 +202,7 @@ async def google_generate_content_facade(
             usage=usage,
             cost_usd=cost_usd,
             rate_card_hash=rate_card_hash,
+            provider=row.provider_type,
         )
 
     return body

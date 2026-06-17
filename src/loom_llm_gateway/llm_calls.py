@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import LlmCall
 from loom_llm_gateway.dialect import TokenUsage
+from loom_llm_gateway.metrics import COST_USD_TOTAL, LLM_CALLS_TOTAL
 
 
 async def record_call(
@@ -23,11 +24,19 @@ async def record_call(
     usage: TokenUsage,
     cost_usd: float,
     rate_card_hash: str,
+    provider: str | None = None,
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
     (chat / messages / responses / gemini) AFTER the upstream provider
     returns successfully. The trial's worker reads these rows at finalize
-    (via the CP endpoint) and projects each into an LLMCallEvent."""
+    (via the CP endpoint) and projects each into an LLMCallEvent.
+
+    Side effect (#81 slice B-2): emits prometheus counters for
+    `loom_gateway_llm_calls_total{result="ok"}` and
+    `loom_gateway_cost_usd_total`. `provider` is the connection's
+    `provider_type` (openai, anthropic, google, openai-compatible,
+    custom) — defaults to `dialect` if not supplied for backwards
+    compatibility with callers that haven't been updated."""
     await session.execute(insert(LlmCall).values(
         team_id=team_id,
         trial_id=trial_id,
@@ -41,3 +50,11 @@ async def record_call(
         rate_card_hash=rate_card_hash,
     ))
     await session.commit()
+    provider_label = provider if provider is not None else dialect
+    LLM_CALLS_TOTAL.labels(
+        provider=provider_label, dialect=dialect, result="ok",
+    ).inc()
+    if cost_usd > 0:
+        COST_USD_TOTAL.labels(
+            team_id=str(team_id), provider=provider_label,
+        ).inc(cost_usd)

@@ -203,6 +203,7 @@ async def anthropic_messages_facade(
             usage=usage,
             cost_usd=cost_usd,
             rate_card_hash=rate_card_hash,
+            provider=row.provider_type,
         )
 
     return body
