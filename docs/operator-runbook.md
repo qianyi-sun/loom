@@ -466,6 +466,27 @@ model id for a batch; the current backend contract stores that override
 at batch level, so all BYO-provider combinations in one batch must share
 the same connection/model.
 
+## Observability: dashboards
+
+Five Grafana dashboards ship in `deploy/grafana/dashboards/`. When you run
+`loom cluster render` (and then `loom cluster up`), they are bundled into a
+`ConfigMap` (`loom-grafana-dashboards`) with the `grafana_dashboard: "1"` label
+so the **kube-prometheus-stack** Grafana sidecar auto-discovers and imports them.
+
+If you're not using kube-prometheus-stack, import each JSON file manually:
+**Grafana UI → Dashboards → Import → upload JSON file**.
+
+| Dashboard | File | What it answers |
+|---|---|---|
+| Operator Overview | `deploy/grafana/dashboards/operator-overview.json` | Is anything broken? Service-up, queue, workers, latency, error rates, top-5 cost |
+| Control Plane | `deploy/grafana/dashboards/control-plane.json` | Scheduling deep dive: transitions, queue depth, claim latency, state-PATCH timeouts |
+| LLM Gateway | `deploy/grafana/dashboards/llm-gateway.json` | Provider call rates, latency, error rates, cost by team |
+| Loom Service | `deploy/grafana/dashboards/loom-service.json` | HTTP request rate/latency, batch runner, token issuance |
+| Worker Fleet | `deploy/grafana/dashboards/worker.json` | Trial throughput, duration, failure rates, heartbeats |
+
+For the on-call alert → dashboard mapping, see
+[`docs/architecture/observability.md`](architecture/observability.md).
+
 ## Production alerts
 
 `deploy/k8s/prometheus-rules.yaml` ships a `PrometheusRule` resource

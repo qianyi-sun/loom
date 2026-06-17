@@ -29,7 +29,7 @@ _GOLDEN_FILES = (
     "postgres.yaml", "minio.yaml", "control-plane.yaml",
     "loom-service.yaml", "llm-gateway.yaml", "worker.yaml",
     "web.yaml", "ingress.yaml", "gateway-router.yaml",
-    "network-policies.yaml",
+    "network-policies.yaml", "grafana-dashboards.yaml",
 )
 
 
@@ -123,8 +123,8 @@ def test_load_config_path_none_returns_defaults() -> None:
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     """Smoke: every document parses, the set covers the 5 Deployments
     + 1 DaemonSet + 6 Services + 2 StatefulSets + 1 PVC + 1 Ingress
-    + 8 NetworkPolicies expected by cluster-deploy.md §Component
-    map + sandbox-isolation.md."""
+    + 8 NetworkPolicies + 1 ConfigMap (Grafana dashboards) expected
+    by cluster-deploy.md §Component map + sandbox-isolation.md."""
     text = render_manifests(ClusterConfig())
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
@@ -137,6 +137,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
     # + web + gateway-router = 8.
     assert kinds.count("NetworkPolicy") == 8
+    # Grafana dashboards ConfigMap (kube-prometheus-stack sidecar).
+    assert kinds.count("ConfigMap") == 1
 
 
 def test_render_default_matches_deploy_k8s_yamls() -> None:

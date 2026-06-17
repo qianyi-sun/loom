@@ -455,6 +455,10 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # and listing them after the workloads keeps the rendered output
     # naturally ordered for human review (workload, then its policy).
     "network-policies.yaml.j2",
+    # Grafana dashboards ConfigMap — auto-discovered by the
+    # kube-prometheus-stack sidecar (grafana_dashboard: "1" label).
+    # Listed last so removal doesn't break the core apply ordering.
+    "grafana-dashboards.yaml.j2",
 )
 
 
@@ -502,6 +506,16 @@ def render_manifests(config: ClusterConfig) -> str:
     )
     ctx = config.to_render_context()
     ctx["schema"] = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    # Load dashboard JSON for the grafana-dashboards.yaml.j2 template.
+    # The JSON is read from deploy/grafana/dashboards/ and passed as
+    # pre-serialised strings so the Jinja2 `indent` filter can embed
+    # them cleanly inside the ConfigMap data block.
+    _dashboards_dir = _REPO_ROOT / "deploy" / "grafana" / "dashboards"
+    ctx["operator_overview_json"] = (_dashboards_dir / "operator-overview.json").read_text()
+    ctx["control_plane_json"] = (_dashboards_dir / "control-plane.json").read_text()
+    ctx["llm_gateway_json"] = (_dashboards_dir / "llm-gateway.json").read_text()
+    ctx["loom_service_json"] = (_dashboards_dir / "loom-service.json").read_text()
+    ctx["worker_json"] = (_dashboards_dir / "worker.json").read_text()
     chunks: list[str] = []
     for name in _TEMPLATE_ORDER:
         rendered = env.get_template(name).render(**ctx)

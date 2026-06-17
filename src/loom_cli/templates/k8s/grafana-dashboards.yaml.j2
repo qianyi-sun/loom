@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loom-grafana-dashboards
+  namespace: {{ namespace }}
+  labels:
+    # kube-prometheus-stack sidecar auto-discovers ConfigMaps with this label
+    # and imports them into Grafana. See:
+    # https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-dashboards
+    grafana_dashboard: "1"
+data:
+  operator-overview.json: |
+    {{ operator_overview_json | indent(4) }}
+  control-plane.json: |
+    {{ control_plane_json | indent(4) }}
+  llm-gateway.json: |
+    {{ llm_gateway_json | indent(4) }}
+  loom-service.json: |
+    {{ loom_service_json | indent(4) }}
+  worker.json: |
+    {{ worker_json | indent(4) }}

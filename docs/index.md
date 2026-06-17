@@ -78,6 +78,9 @@ Start with the overview, drill into the area you care about:
 - **[architecture/cost-and-rate-cards.md](architecture/cost-and-rate-cards.md)**
   — usage frozen, cost derived; rate-card shape; CLI vs. service
   storage; re-pricing history
+- **[architecture/observability.md](architecture/observability.md)** —
+  metric naming convention; the 5 Grafana dashboards + what each covers;
+  Prometheus alert rules; on-call triage path per alert
 ## I want to know how Loom compares to Harbor
 
 - **[loom-vs-harbor.md](loom-vs-harbor.md)** — what Loom does better,
