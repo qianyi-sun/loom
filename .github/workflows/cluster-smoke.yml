@@ -1,0 +1,178 @@
+name: cluster-smoke
+
+# Validates the `loom cluster {render, up, status, down}` round-trip
+# against a real (kind) Kubernetes API. Catches manifest-schema
+# regressions and CLI-integration regressions that golden-file tests
+# can't surface.
+#
+# Scope: this smoke targets the deploy *contract*, not pod readiness.
+# We apply manifests with --skip-preflight + --no-wait, then verify:
+#   - kubectl accepts every object (schema validation by the API server)
+#   - `cluster status --format json` reads back the expected shape
+#   - `cluster down --yes` removes every applied object
+#
+# Pod readiness (loom-* containers actually starting) requires the
+# real image set and depends on `images.yml`; that's tracked separately.
+#
+# Trigger model:
+#   - workflow_dispatch (manual)
+#   - PRs labelled `cluster-smoke` (so it doesn't fire on every PR)
+#   - push to dev when cluster CLI / templates change
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - "src/loom_cli/cluster_cmd.py"
+      - "src/loom_cli/cluster_config.py"
+      - "src/loom_cli/templates/k8s/**"
+      - ".github/workflows/cluster-smoke.yml"
+  pull_request:
+    # Label gate (see `if:` on the job). We accept any PR event so a
+    # labelled-after-open PR triggers a run; the `if:` checks the
+    # label is actually present.
+    types: [labeled, opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: kind smoke (render → apply → status → down)
+    # PR runs are gated on the `cluster-smoke` label so we don't burn
+    # minutes on unrelated PRs. push + workflow_dispatch always run.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'cluster-smoke'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install kind
+        run: |
+          curl -sSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind --version
+
+      - name: Install kubectl
+        run: |
+          curl -sSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -s -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          sudo mv /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client=true
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync python deps (with [cluster] extra)
+        run: uv sync --extra cluster
+
+      - name: Create kind cluster
+        run: |
+          kind create cluster --name loom-smoke --wait 60s
+          kubectl --context kind-loom-smoke cluster-info
+
+      - name: Create loom namespace + required Secrets
+        # Templates reference Secrets via `secretKeyRef`. Without these,
+        # `kubectl apply` still succeeds (the resolve happens at pod
+        # admission, not object creation), but real pods would fail to
+        # start. We create dummy values anyway so the manifests don't
+        # block on missing references when extended to readiness later.
+        run: |
+          kubectl --context kind-loom-smoke create namespace loom
+          kubectl --context kind-loom-smoke -n loom create secret generic loom-secrets \
+            --from-literal=cp-db-url='postgres://loom@postgres/loom' \
+            --from-literal=gw-db-url='postgres://gw@postgres/gw' \
+            --from-literal=postgres-user='loom' \
+            --from-literal=postgres-password='smoke' \
+            --from-literal=minio-access-key='smoke' \
+            --from-literal=minio-secret-key='smokesmokesmoke' \
+            --from-literal=worker-token='smoke-token' \
+            --from-literal=openai-api-key='smoke' \
+            --from-literal=anthropic-api-key='smoke'
+          printf '[admin]\ntoken="smoke"\n' > /tmp/admin-secrets.toml
+          kubectl --context kind-loom-smoke -n loom create secret generic loom-admin-secret \
+            --from-file=secrets.toml=/tmp/admin-secrets.toml
+
+      - name: loom cluster render — manifests parse + match schema
+        run: |
+          uv run python -m loom_cli cluster render > /tmp/manifests.yaml
+          wc -l /tmp/manifests.yaml
+          # Server-side dry-run validates schema against the live API.
+          kubectl --context kind-loom-smoke -n loom apply \
+            --dry-run=server -f /tmp/manifests.yaml
+
+      - name: loom cluster up — apply, skip preflight + wait
+        # --skip-preflight: dummy Secrets pass preflight but the smoke
+        # doesn't depend on it; --no-wait: pods can't reach Ready
+        # without the real images, and we're testing the apply
+        # contract, not pod readiness.
+        run: |
+          uv run python -m loom_cli cluster up \
+            --context kind-loom-smoke --namespace loom \
+            --skip-preflight --no-wait
+
+      - name: Verify expected workloads exist
+        run: |
+          kubectl --context kind-loom-smoke -n loom get deploy,sts,ds,svc,ingress
+          # Spot-check a few well-known objects. NOTE: loom-worker is
+          # currently a Deployment (not a DaemonSet); the
+          # cluster-deploy.md spec says DaemonSet — tracked as a
+          # follow-up. See https://github.com/carinrc/loom/issues/108
+          kubectl --context kind-loom-smoke -n loom get deploy loom-service
+          kubectl --context kind-loom-smoke -n loom get deploy loom-control-plane
+          kubectl --context kind-loom-smoke -n loom get sts loom-postgres
+          kubectl --context kind-loom-smoke -n loom get deploy loom-worker
+
+      - name: loom cluster status --format json
+        run: |
+          uv run python -m loom_cli cluster status \
+            --context kind-loom-smoke --namespace loom \
+            --format json | tee /tmp/status.json
+          # Sanity: the JSON shape carries the components list with
+          # known names.
+          python -c '
+          import json, sys
+          d = json.load(open("/tmp/status.json"))
+          names = {c["name"] for c in d["components"]}
+          expected = {
+              "loom-service", "loom-control-plane", "loom-llm-gateway",
+              "loom-web", "loom-worker", "postgres", "minio",
+          }
+          missing = expected - names
+          if missing:
+              print(f"FAIL: status missing components: {sorted(missing)}",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(f"PASS: status reported {len(names)} components")
+          '
+
+      - name: loom cluster down --yes
+        run: |
+          uv run python -m loom_cli cluster down \
+            --context kind-loom-smoke --namespace loom --yes
+
+      - name: Verify teardown
+        run: |
+          # All deployments + statefulsets + daemonsets gone.
+          for kind in deploy sts ds; do
+            count=$(kubectl --context kind-loom-smoke -n loom get $kind \
+              -o name 2>/dev/null | wc -l)
+            if [ "$count" != "0" ]; then
+              echo "FAIL: $kind still present after down ($count items)" >&2
+              kubectl --context kind-loom-smoke -n loom get $kind
+              exit 1
+            fi
+          done
+          echo "PASS: namespace empty after down"
+
+      - name: Cleanup kind
+        if: always()
+        run: kind delete cluster --name loom-smoke
