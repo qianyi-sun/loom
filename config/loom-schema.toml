@@ -194,6 +194,25 @@ used_by     = ["loom-service"]
 python_type = "str"
 default     = "{}"
 
+# Secret-store master-key rotation (closes #80).
+# LOOM_SECRET_STORE_MASTER_KEYS (plural): comma-separated base64 AES-256 keys.
+#   First key = PRIMARY (new encrypts + rewrap target).
+#   Remaining keys = FALLBACKS (decrypt-only for rows encrypted under an older key).
+# LOOM_SECRET_STORE_MASTER_KEY (singular, legacy): single key at version 1.
+# Both set simultaneously → startup error. Loaded directly via
+# load_master_keys_from_env() rather than as a Pydantic field (keeps them
+# out of settings validation errors that could log values). The bootstrap-
+# secrets flow generates the singular key for new clusters; operators switch
+# to the plural form during online rotation.
+#
+# [service_config.secret_store_master_keys]
+# used_by     = ["loom-service"]
+# python_type = "str"
+# required    = true
+# secret      = { key = "secret-store-master-keys" }
+# description = "Comma-separated base64 AES-256 keys. First=PRIMARY; rest=FALLBACKS."
+# NOTE: not yet emitted by codegen (env-only field, see secret_store.py).
+
 # ─── worker only ───
 
 [service_config.token]

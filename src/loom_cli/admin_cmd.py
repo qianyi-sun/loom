@@ -1,21 +1,17 @@
-"""`loom admin tokens worker {mint, revoke, rotate}` — operator token
-rotation for the Control Plane's worker-bearer admin endpoints (#80).
+"""`loom admin` — operator-only admin operations (#80).
 
-Wraps the existing CP endpoints (`POST /admin/worker-tokens`,
-`DELETE /admin/worker-tokens/{prefix}`) so operators have a tested
-CLI instead of curl recipes. The CP admin surface is NOT exposed via
-Ingress on production deploys — operators reach it through a
-port-forward (`kubectl port-forward deploy/loom-control-plane
-8080:8080`); `--cp-url` defaults to `http://localhost:8080` to match.
+Subcommands:
 
-Auth: the CP admin scope (`admin:tokens`) is gated on the singleton
-admin token in `loom-admin-secret`. Per the argv-hygiene rule the
-raw token isn't a literal flag; pass it via `--admin-token env:VAR`
-(default `env:LOOM_ADMIN_TOKEN`).
+- ``loom admin tokens worker {mint,revoke,rotate}`` — worker-token
+  rotation via the Control Plane's admin surface.
+- ``loom admin tokens team {mint,revoke,rotate}`` — team-token
+  rotation via loom_service's /api/v1/tokens route.
+- ``loom admin secret-store rewrap`` — master-key rotation walker;
+  re-encrypts all SecretStore rows with the primary key configured
+  in ``LOOM_SECRET_STORE_MASTER_KEYS``.
 
-This first slice ships worker-token rotation. Team-token rotation
-(via `loom_service`'s `/api/v1/tokens`) and provider secret rewrap
-(`SecretStore.rewrap`) are deferred to follow-up slices of #80.
+The CP admin surface is NOT exposed via Ingress; reach it through a
+port-forward (``kubectl port-forward deploy/loom-control-plane 8080:8080``).
 """
 
 from __future__ import annotations
@@ -384,14 +380,136 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _generate_new_key() -> str:
+    """Return a fresh base64-encoded 32-byte key."""
+    import base64
+    return base64.b64encode(os.urandom(32)).decode()
+
+
+def _rewrap_secret_store(args: argparse.Namespace) -> int:
+    """POST /api/v1/admin/secret-store/rewrap.
+
+    2-stage online rotation protocol — see operator-runbook.md
+    §Secret-store master-key rotation for the full procedure.
+    """
+    try:
+        cfg = require_logged_in()
+    except NotLoggedInError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    # Handle --generate-new-key: mint a key, print it + the kubectl
+    # commands, but do NOT call the endpoint (the key isn't deployed yet).
+    if getattr(args, "generate_new_key", False):
+        new_key = _generate_new_key()
+        sys.stdout.write(
+            f"Generated new master key (keep this secret!):\n"
+            f"  {new_key}\n\n"
+            f"Next steps:\n"
+            f"  1. Deploy new key as FALLBACK (existing rows still readable):\n"
+            f"       # Read the current key first:\n"
+            f"       OLD_KEY=$(kubectl get secret loom-secrets "
+            f"-o jsonpath='{{.data.secret-store-master-key}}' | base64 -d)\n"
+            f"       kubectl patch secret loom-secrets \\\n"
+            f"         -p '{{\"stringData\":{{\"secret-store-master-keys\":"
+            f"\"{new_key},${{OLD_KEY}}\"}},\"data\":{{\"secret-store-master-key\":null}}}}'\n"
+            f"       kubectl rollout restart deploy/loom-service\n\n"
+            f"  2. Run the rewrap walk:\n"
+            f"       loom admin secret-store rewrap --new-key {new_key!r} "
+            f"--admin-actor <your-name>\n\n"
+            f"  3. Drop the old key (new key only):\n"
+            f"       kubectl patch secret loom-secrets \\\n"
+            f"         -p '{{\"stringData\":{{\"secret-store-master-keys\":null,"
+            f"\"secret-store-master-key\":\"{new_key}\"}}}}\n"
+            f"       kubectl rollout restart deploy/loom-service\n",
+        )
+        return 0
+
+    if getattr(args, "dry_run", False):
+        # Dry run: list refs without rewrapping.
+        sys.stdout.write(
+            "[dry-run] Would call POST /api/v1/admin/secret-store/rewrap\n"
+            "[dry-run] Use without --dry-run to execute.\n",
+        )
+        return 0
+
+    new_key_b64 = getattr(args, "new_key", None)
+    admin_actor = getattr(args, "admin_actor", None)
+
+    body: dict[str, object] = {}
+    if new_key_b64:
+        body["new_master_key"] = new_key_b64
+
+    headers: dict[str, str] = {}
+    if admin_actor is not None:
+        headers["X-Loom-Admin-Actor"] = admin_actor
+
+    try:
+        with authed_client(cfg) as c:
+            resp = c.post(
+                "/api/v1/admin/secret-store/rewrap",
+                json=body,
+                headers=headers or None,
+                timeout=300.0,  # may take a while for large secrets tables
+            )
+            # 200 = all rewrapped; 207 = partial (some failed)
+            if resp.status_code not in (200, 207):
+                try:
+                    detail = resp.json().get("detail", resp.text)
+                except Exception:
+                    detail = resp.text
+                sys.stderr.write(
+                    f"error: server returned {resp.status_code}: {detail}\n",
+                )
+                return 1
+            data = resp.json()
+    except httpx.RequestError as e:
+        sys.stderr.write(
+            f"error: could not reach {cfg.server_url}: {e}\n",
+        )
+        return 2
+
+    rewrapped = data.get("rewrapped", 0)
+    failed = data.get("failed", [])
+
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(f"Rewrapped {rewrapped} secret(s).\n")
+        if failed:
+            sys.stdout.write(
+                f"\nFailed ({len(failed)}):\n",
+            )
+            for ref, err in failed:
+                sys.stdout.write(f"  {ref}: {err}\n")
+            sys.stdout.write(
+                "\nReview failures above. Refs that failed are still "
+                "encrypted with the OLD key.\n",
+            )
+        else:
+            sys.stdout.write(
+                "\nAll secrets now use the primary key.\n"
+                "Next step: drop the fallback key from loom-secrets "
+                "and restart loom-service:\n"
+                "  kubectl patch secret loom-secrets \\\n"
+                "    -p '{\"stringData\":{\"secret-store-master-keys\":null,"
+                "\"secret-store-master-key\":\"<NEW_KEY>\"}}\n"
+                "  kubectl rollout restart deploy/loom-service\n",
+            )
+
+    return 1 if failed else 0
+
+
 def dispatch(argv: list[str]) -> int:
     """Entry point invoked from `loom_cli.__main__` when `argv[0]` is
     `admin`. Returns the process exit code."""
     parser = argparse.ArgumentParser(
         prog="loom admin",
         description=(
-            "Operator-only admin operations. Today: worker-token "
-            "rotation via the Control Plane's admin surface."
+            "Operator-only admin operations. Subcommands: "
+            "`tokens` (worker/team token rotation) and "
+            "`secret-store` (master-key rotation walker)."
         ),
     )
     sub = parser.add_subparsers(dest="admin_cmd", required=True)
@@ -503,6 +621,60 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_team_mint_args(p_team_rotate)
     p_team_rotate.set_defaults(handler=_rotate_team_token)
+
+    # ── secret-store subgroup ──────────────────────────────────────────
+    p_ss = sub.add_parser(
+        "secret-store",
+        help=(
+            "SecretStore master-key rotation operations. "
+            "See `loom admin secret-store --help`."
+        ),
+    )
+    ss_sub = p_ss.add_subparsers(dest="ss_op", required=True)
+
+    p_ss_rewrap = ss_sub.add_parser(
+        "rewrap",
+        help=(
+            "Walk all SecretStore refs and re-encrypt with the primary "
+            "master key. Part of the online master-key rotation protocol. "
+            "Run AFTER deploying the new key as a fallback in "
+            "LOOM_SECRET_STORE_MASTER_KEYS."
+        ),
+    )
+    p_ss_rewrap.add_argument(
+        "--new-key", dest="new_key", default=None,
+        help=(
+            "Base64-encoded 32-byte key to rewrap to. Overrides the "
+            "PRIMARY key in LOOM_SECRET_STORE_MASTER_KEYS. Normally "
+            "omit this — the server uses the deployed primary."
+        ),
+    )
+    p_ss_rewrap.add_argument(
+        "--generate-new-key", dest="generate_new_key",
+        action="store_true", default=False,
+        help=(
+            "Mint a fresh key, print it, and output the kubectl patch "
+            "commands. Does NOT call the rewrap endpoint. Use this to "
+            "start the rotation workflow."
+        ),
+    )
+    p_ss_rewrap.add_argument(
+        "--dry-run", dest="dry_run",
+        action="store_true", default=False,
+        help="Print what would be done without calling the endpoint.",
+    )
+    p_ss_rewrap.add_argument(
+        "--admin-actor", default=None,
+        help=(
+            "Sets `X-Loom-Admin-Actor`. Required when the logged-in "
+            "bearer is an admin token (audit trail)."
+        ),
+    )
+    p_ss_rewrap.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="Output format.",
+    )
+    p_ss_rewrap.set_defaults(handler=_rewrap_secret_store)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

@@ -43,6 +43,7 @@ from loom_service.routes import (
     models,
     provider_connections,
     rate_cards,
+    secret_store_admin,
     tasks,
     team_registrations,
     teams,
@@ -196,6 +197,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")
+    app.include_router(secret_store_admin.router, prefix="/api/v1")
 
     @app.middleware("http")
     async def _metrics_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]

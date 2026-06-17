@@ -429,6 +429,107 @@ invalidation step is needed.
 without the post-test step; `rotate-key` is the runbook-friendly verb
 for the "swap + verify" flow.
 
+### Secret-store master-key rotation — `loom admin secret-store rewrap`
+
+All provider-connection API keys are AES-GCM encrypted at rest using
+`LOOM_SECRET_STORE_MASTER_KEY` (or `LOOM_SECRET_STORE_MASTER_KEYS` plural
+during rotation). When you need to rotate the master key (compromise,
+scheduled rotation, compliance requirement), use the online 3-step
+protocol — no downtime:
+
+**Step 1 — generate + deploy new key as FALLBACK**
+
+```bash
+# Generate a new key and see the kubectl commands:
+loom admin secret-store rewrap --generate-new-key
+```
+
+This prints a fresh base64-encoded 32-byte key and the exact `kubectl
+patch` command to deploy it. Follow the printed instructions:
+
+```bash
+# Read the current primary key:
+OLD_KEY=$(kubectl get secret loom-secrets \
+  -o jsonpath='{.data.secret-store-master-key}' | base64 -d)
+
+# OR if already using plural form:
+OLD_KEY=$(kubectl get secret loom-secrets \
+  -o jsonpath='{.data.secret-store-master-keys}' | base64 -d | cut -d, -f1)
+
+# Deploy new key as PRIMARY, old as FALLBACK:
+kubectl patch secret loom-secrets \
+  -p "{\"stringData\":{\"secret-store-master-keys\":\"$NEW_KEY,$OLD_KEY\"},
+       \"data\":{\"secret-store-master-key\":null}}"
+kubectl rollout restart deploy/loom-service
+kubectl rollout status deploy/loom-service
+```
+
+After this deploy, new secrets encrypt with the NEW key; existing secrets
+are still readable via the fallback.
+
+**Step 2 — run the rewrap walk**
+
+```bash
+loom auth login --server https://loom.example.com --token env:LOOM_ADMIN_TOKEN
+loom admin secret-store rewrap --admin-actor <your-name>
+```
+
+This calls `POST /api/v1/admin/secret-store/rewrap` which walks every row
+in the `secrets` table and re-encrypts each one with the PRIMARY key. The
+walk never short-circuits — all rows are attempted. A summary of
+successes and failures is printed.
+
+On success:
+```
+Rewrapped N secret(s).
+
+All secrets now use the primary key.
+Next step: drop the fallback key from loom-secrets and restart loom-service:
+  ...
+```
+
+On partial failure: the endpoint returns HTTP 207 with a `failed` list.
+Investigate the per-ref errors (typically tampered ciphertext or corrupt
+rows) and re-run after fixing them.
+
+**Step 3 — drop the old key**
+
+Once the walk completes with zero failures, no rows use the old key.
+Remove the fallback and switch back to the singular env var:
+
+```bash
+kubectl patch secret loom-secrets \
+  -p "{\"stringData\":{\"secret-store-master-keys\":null,
+       \"secret-store-master-key\":\"$NEW_KEY\"}}"
+kubectl rollout restart deploy/loom-service
+kubectl rollout status deploy/loom-service
+```
+
+Rotation is complete. Verify with `loom providers test <name>` to
+confirm provider connections are still readable.
+
+**Audit trail**
+
+Each call to the rewrap endpoint writes one `secret_store.rewrap` event
+to `admin_audit_events`. View with:
+```bash
+curl -s https://loom.example.com/api/v1/admin/audit-events \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq '.items[] | select(.action=="secret_store.rewrap")'
+```
+
+**Emergency / scripted use**
+
+For disaster recovery (can't redeploy first), supply the new key directly:
+```bash
+loom admin secret-store rewrap \
+  --new-key "$(base64 -w0 /path/to/new-key.bin)" \
+  --admin-actor your-name
+```
+
+This tells the server to re-encrypt to THAT key even if it isn't the
+deployed primary. Use with caution — after this, only that key can
+decrypt the rewrapped rows.
+
 ## Provider connection cost attribution
 
 BYO provider connections default conservatively:

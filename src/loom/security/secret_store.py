@@ -17,11 +17,27 @@ with the ciphertext, the nonce, or the master-key version produces
 ``InvalidTag`` at decrypt time rather than silently returning bad bytes.
 
 Master key: 32 bytes (AES-256). Loaded once at construction from the
-operator-supplied ``LOOM_SECRET_STORE_MASTER_KEY`` env var, base64-encoded.
-Rotation is a Phase 5 concern; the ``master_key_version`` column on the
-``secrets`` row records which key generation encrypted each row so the
-rotation walker can decrypt with the historic key and re-encrypt with
-the current one.
+operator-supplied ``LOOM_SECRET_STORE_MASTER_KEY`` (singular) or
+``LOOM_SECRET_STORE_MASTER_KEYS`` (plural, comma-separated) env var,
+base64-encoded.
+
+Multi-key online rotation (approach C):
+  ``LOOM_SECRET_STORE_MASTER_KEYS`` accepts a comma-separated list of
+  base64-encoded 32-byte keys. The FIRST entry is the PRIMARY key used
+  for new encrypts (``put``) and as the rewrap target. Subsequent entries
+  are FALLBACK keys: ``get`` tries the fallback if the row's
+  ``master_key_version`` doesn't match the primary version. This allows
+  zero-downtime master-key rotation:
+
+  Step 1: deploy new-as-primary + old-as-fallback
+  Step 2: run ``loom admin secret-store rewrap --new-key <NEW>``
+  Step 3: deploy new-only (drop fallback)
+
+  ``master_key_version`` identifies which generation encrypted each row
+  so the rotation walker can decrypt with the historic key and
+  re-encrypt with the primary. For the primary key, version = the
+  maximum version found across fallback keys + 1; for backward
+  compatibility with existing single-key deployments, version = 1.
 """
 
 from __future__ import annotations
@@ -165,12 +181,95 @@ _MASTER_KEY_LEN = 32  # AES-256
 _NONCE_LEN = 12       # AES-GCM standard
 
 
+def _decode_b64_key(raw: str, label: str) -> bytes:
+    """Decode a base64-encoded 32-byte key; raise SecretStoreError on bad input."""
+    import base64
+
+    try:
+        key = base64.b64decode(raw.strip(), validate=True)
+    except (ValueError, base64.binascii.Error) as e:  # type: ignore[attr-defined]
+        raise SecretStoreError(
+            f"{label} is not valid base64: {e}",
+        ) from e
+    if len(key) != _MASTER_KEY_LEN:
+        raise SecretStoreError(
+            f"{label} decodes to {len(key)} bytes; expected "
+            f"{_MASTER_KEY_LEN} (AES-256)",
+        )
+    return key
+
+
+def load_master_keys_from_env() -> tuple[bytes, int, dict[int, bytes]]:
+    """Load master key(s) from env vars.
+
+    Resolution order:
+
+    1. ``LOOM_SECRET_STORE_MASTER_KEYS`` (plural, comma-separated base64
+       keys). First key = PRIMARY; remaining keys = FALLBACKS. Versions
+       are assigned as (len(keys), len(keys)-1, ..., 1) so the primary
+       has the highest version number and each fallback is one step older.
+       This ensures the version bumps monotonically on each rotation.
+
+    2. ``LOOM_SECRET_STORE_MASTER_KEY`` (singular, backward compat). Used
+       as the sole key at version 1.
+
+    Both env vars set simultaneously → fail-fast (ambiguous config).
+
+    Returns:
+        (primary_key, primary_version, {version: fallback_key, ...})
+    """
+    singular = os.environ.get("LOOM_SECRET_STORE_MASTER_KEY", "")
+    plural = os.environ.get("LOOM_SECRET_STORE_MASTER_KEYS", "")
+
+    if singular and plural:
+        raise SecretStoreError(
+            "Both LOOM_SECRET_STORE_MASTER_KEY and "
+            "LOOM_SECRET_STORE_MASTER_KEYS are set. Use only one. "
+            "During key rotation use LOOM_SECRET_STORE_MASTER_KEYS "
+            "(plural) with a comma-separated list: NEW,OLD."
+        )
+
+    if not singular and not plural:
+        raise SecretStoreError(
+            "Neither LOOM_SECRET_STORE_MASTER_KEY nor "
+            "LOOM_SECRET_STORE_MASTER_KEYS is set. "
+            "Generate a key with: python -c 'import os, base64; "
+            "print(base64.b64encode(os.urandom(32)).decode())'",
+        )
+
+    if singular:
+        key = _decode_b64_key(singular, "LOOM_SECRET_STORE_MASTER_KEY")
+        return key, 1, {}
+
+    # plural path: comma-separated list
+    parts = [p.strip() for p in plural.split(",") if p.strip()]
+    if not parts:
+        raise SecretStoreError(
+            "LOOM_SECRET_STORE_MASTER_KEYS is set but contains no keys",
+        )
+    total = len(parts)
+    # Primary gets the highest version; fallbacks get descending versions.
+    primary_version = total
+    primary_key = _decode_b64_key(
+        parts[0], "LOOM_SECRET_STORE_MASTER_KEYS[0] (primary)",
+    )
+    fallbacks: dict[int, bytes] = {}
+    for i, part in enumerate(parts[1:], start=1):
+        version = total - i  # primary=N, 1st fallback=N-1, ...
+        fallbacks[version] = _decode_b64_key(
+            part, f"LOOM_SECRET_STORE_MASTER_KEYS[{i}] (fallback v{version})",
+        )
+    return primary_key, primary_version, fallbacks
+
+
 def _load_master_key_from_env(env_var: str = "LOOM_SECRET_STORE_MASTER_KEY") -> bytes:
     """Load + validate a 32-byte AES-256 master key from a base64-encoded
     env var. Fail-fast if missing / wrong length / not base64.
-    """
-    import base64
 
+    This single-key loader is kept for callers that bypass the env
+    resolution logic (e.g. tests constructing a store directly).
+    Production code uses :func:`load_master_keys_from_env`.
+    """
     raw = os.environ.get(env_var)
     if not raw:
         raise SecretStoreError(
@@ -178,18 +277,7 @@ def _load_master_key_from_env(env_var: str = "LOOM_SECRET_STORE_MASTER_KEY") -> 
             f"python -c 'import os, base64; "
             f"print(base64.b64encode(os.urandom(32)).decode())'",
         )
-    try:
-        key = base64.b64decode(raw, validate=True)
-    except (ValueError, base64.binascii.Error) as e:  # type: ignore[attr-defined]
-        raise SecretStoreError(
-            f"{env_var} is not valid base64: {e}",
-        ) from e
-    if len(key) != _MASTER_KEY_LEN:
-        raise SecretStoreError(
-            f"{env_var} decodes to {len(key)} bytes; expected "
-            f"{_MASTER_KEY_LEN} (AES-256)",
-        )
-    return key
+    return _decode_b64_key(raw, env_var)
 
 
 class LocalEncryptedSecretStore:
@@ -199,13 +287,16 @@ class LocalEncryptedSecretStore:
     generated per-put; the namespace is operator-supplied (typically
     ``team:<team_id>`` for user API keys).
 
-    ``master_key_version`` lets the rotation walker (Phase 5) identify
-    which key generation encrypted each row. This PR's impl supports
-    one current key — the rotation cutover with prev_master_key is a
-    Phase 5 concern (covered by the dual-key validation window in the
-    spec).
+    ``master_key_version`` lets the rotation walker identify which key
+    generation encrypted each row. This impl supports multi-key online
+    rotation via ``LOOM_SECRET_STORE_MASTER_KEYS`` (see module docstring).
 
-    Thread/coroutine safety: stateless apart from the loaded master key.
+    The ``fallback_keys`` dict maps ``{version: key_bytes}`` for keys
+    that were previously primary but are now being phased out. ``get()``
+    tries the primary key first; if the row's version matches a fallback,
+    it decrypts with that fallback instead.
+
+    Thread/coroutine safety: stateless apart from the loaded master keys.
     Safe to share one instance across the FastAPI worker process.
     """
 
@@ -215,16 +306,50 @@ class LocalEncryptedSecretStore:
         *,
         master_key: bytes | None = None,
         master_key_version: int = 1,
+        fallback_keys: dict[int, bytes] | None = None,
     ) -> None:
         if master_key is None:
-            master_key = _load_master_key_from_env()
+            master_key, master_key_version, loaded_fallbacks = (
+                load_master_keys_from_env()
+            )
+            if fallback_keys is None:
+                fallback_keys = loaded_fallbacks
         if len(master_key) != _MASTER_KEY_LEN:
             raise SecretStoreError(
                 f"master_key length {len(master_key)} != {_MASTER_KEY_LEN}",
             )
         self._session = session
+        self._primary_key = master_key
         self._aead = AESGCM(master_key)
         self._master_key_version = master_key_version
+        # Build fallback AEAD map: {version: AESGCM}
+        self._fallback_aeads: dict[int, AESGCM] = {}
+        for ver, fb_key in (fallback_keys or {}).items():
+            if len(fb_key) != _MASTER_KEY_LEN:
+                raise SecretStoreError(
+                    f"fallback_key v{ver} length {len(fb_key)} != "
+                    f"{_MASTER_KEY_LEN}",
+                )
+            self._fallback_aeads[ver] = AESGCM(fb_key)
+
+    def _aead_for_version(self, version: int) -> AESGCM:
+        """Return the AEAD for the given master_key_version.
+
+        Primary version → primary AEAD.
+        Known fallback version → fallback AEAD.
+        Unknown version → DecryptError (never silently use wrong key).
+        """
+        if version == self._master_key_version:
+            return self._aead
+        if version in self._fallback_aeads:
+            return self._fallback_aeads[version]
+        known = sorted([self._master_key_version, *self._fallback_aeads])
+        raise DecryptError(
+            f"secret row uses master_key_version={version}, but the "
+            f"store only knows versions {known}. Either load the "
+            f"corresponding key in LOOM_SECRET_STORE_MASTER_KEYS or "
+            f"run the rewrap walker to migrate to the current key.",
+        )
 
     async def put(self, *, namespace: str, value: str) -> str:
         if not namespace:
@@ -256,15 +381,9 @@ class LocalEncryptedSecretStore:
         )).scalar_one_or_none()
         if row is None:
             raise SecretNotFoundError(f"no secret for ref {ref!r}")
-        if row.master_key_version != self._master_key_version:
-            raise DecryptError(
-                f"secret {ref!r} encrypted with master_key_version="
-                f"{row.master_key_version}, but store is configured for "
-                f"version {self._master_key_version}. Rotation walker "
-                f"(Phase 5) re-encrypts on demand.",
-            )
+        aead = self._aead_for_version(row.master_key_version)
         try:
-            plaintext = self._aead.decrypt(
+            plaintext = aead.decrypt(
                 row.nonce, row.ciphertext,
                 associated_data=ref.encode("utf-8"),
             )
@@ -299,23 +418,20 @@ class LocalEncryptedSecretStore:
             yield row[0]
 
     async def rewrap(self, ref: str, *, new_master_key: bytes) -> str:
-        """Re-encrypt the secret with ``new_master_key``. The ref is
-        stable (returned unchanged); the row's ciphertext + nonce +
-        master_key_version are updated in place inside the caller's
-        transaction.
+        """Re-encrypt the secret with ``new_master_key``.
 
-        Version bump: the new row's ``master_key_version`` is
-        ``self._master_key_version + 1``. The walker that drives
-        rotation MUST be invoked against a store configured with the
-        OLD version (so get() decrypts the existing row), and the
-        resulting row carries version+1. For multi-step rotation,
-        reconstruct the store with the new (key, version) pair before
-        the next rewrap call.
+        The ref is stable (returned unchanged); the row's ciphertext +
+        nonce + master_key_version are updated in place.
 
-        The caller is responsible for sequencing this with the
-        gateway-cache invalidation (the rotation walker bumps every
-        affected ``provider_connections.updated_at`` afterwards so the
-        ``updated_at``-keyed cache pattern observes the change).
+        The new ``master_key_version`` is ``self._master_key_version + 1``
+        when ``new_master_key != self._primary_key``, or stays at
+        ``self._master_key_version`` when new_master_key IS the primary key
+        (idempotent rewrap to same key — use during the bulk-walk pass when
+        the key is already the primary in ``LOOM_SECRET_STORE_MASTER_KEYS``).
+
+        The rewrap endpoint (``POST /api/v1/admin/secret-store/rewrap``)
+        always calls this with ``new_master_key == self._primary_key`` so
+        that rows from fallback versions are migrated to the primary.
         """
         if len(new_master_key) != _MASTER_KEY_LEN:
             raise SecretStoreError(
@@ -330,13 +446,18 @@ class LocalEncryptedSecretStore:
             associated_data=ref.encode("utf-8"),
         )
         # In-place UPDATE preserves the ref string the consuming row
-        # (e.g., provider_connections.encrypted_api_key_ref) already
-        # holds.
+        # (e.g., provider_connections.encrypted_api_key_ref) already holds.
         row = (await self._session.execute(
             select(Secret).where(Secret.ref == ref),
         )).scalar_one()
         row.ciphertext = new_ciphertext
         row.nonce = new_nonce
-        row.master_key_version = self._master_key_version + 1
+        # If new key == primary key, stamp with the primary version.
+        # Otherwise bump to primary_version+1 (caller supplies a truly
+        # NEW key, not yet the primary — rare outside testing).
+        if new_master_key == self._primary_key:
+            row.master_key_version = self._master_key_version
+        else:
+            row.master_key_version = self._master_key_version + 1
         await self._session.flush()
         return ref
