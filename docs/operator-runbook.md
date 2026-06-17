@@ -3,6 +3,54 @@
 For operators of a production Loom deployment. Local dev → see the
 top-level README + `deploy/docker-compose.dev.yml`.
 
+## At-a-glance: deploy a fresh cluster
+
+The fastest path uses the `loom cluster` CLI (shipped via #76). Install
+the optional `cluster` extra and point at your kubeconfig context:
+
+```bash
+pip install "loom[cluster]"   # or `uv sync --extra cluster`
+export KUBECONFIG=~/.kube/config   # standard kubectl config
+
+# 1. Configure
+cat > cluster-config.toml <<EOF
+namespace = "loom"
+image_tag = "0.7"
+ingress_host = "loom.example.com"
+# gateway_public_host = "gateway.loom.example.com"  # opt in to expose
+EOF
+
+# 2. One-time bootstrap (Secrets) — see "Bootstrap Secrets" below
+# 3. Verify the cluster is ready to receive Loom
+loom cluster preflight --namespace loom
+
+# 4. Audit the manifests against the public/internal boundary
+loom cluster audit --config cluster-config.toml
+
+# 5. Deploy
+loom cluster up --config cluster-config.toml --context $YOUR_CTX
+
+# 6. Verify
+loom cluster status --namespace loom --format table
+```
+
+Each verb:
+
+| Command | What it does | Exit codes |
+|---|---|---|
+| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
+| `loom cluster audit` | Static public/internal boundary check on rendered manifests (no LoadBalancer/NodePort, Ingress backends on allowlist, no hostPort) | 0 clean / 1 violation / 2 bad config |
+| `loom cluster up` | Preflight → render → `kubectl apply` → wait for components ready | 0 ready / 1 not-ready / 2 unreachable or kubectl missing |
+| `loom cluster status` | Live readiness snapshot with ingress endpoints | 0 all-ready / 1 not-ready / 2 unreachable |
+| `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown | 0 / 1 on failure or operator-cancelled prompt |
+
+The detailed manual flow (build images → create Secrets → apply
+each manifest → mint tokens → approve registrations) below documents
+the bootstrap and operator steps the CLI doesn't yet automate. It's
+also the fallback when `cluster-config.toml` doesn't yet expose the
+knob you need.
+
 ## Initial deployment
 
 1. **Build images.** From repo root:
@@ -160,6 +208,9 @@ Workers drain on SIGTERM (default 600 s); k8s sends SIGTERM during rollout.
 
 ## Rollback
 
+For a single-component rollback (the new image is bad but everything
+else is fine):
+
 ```bash
 kubectl rollout undo deploy/loom-control-plane
 kubectl rollout undo deploy/loom-llm-gateway
@@ -167,6 +218,21 @@ kubectl rollout undo deploy/loom-service
 kubectl rollout undo deploy/loom-web
 kubectl rollout undo deploy/loom-worker
 ```
+
+For a full-cluster rollback (manifest schema change went wrong, or
+the new release misbehaves across components), point
+`cluster-config.toml` back at the previous `image_tag` and re-deploy:
+
+```bash
+# 1. Edit cluster-config.toml: set image_tag back to the prior known-good
+# 2. Audit + apply the previous shape:
+loom cluster audit --config cluster-config.toml
+loom cluster up --config cluster-config.toml --skip-preflight
+loom cluster status
+```
+
+`--skip-preflight` is safe here because preflight checks (Secrets,
+IngressClass, StorageClass) don't change between rollouts.
 
 Migration rollbacks: `alembic downgrade -1` from a Control Plane pod.
 DB-level downgrades that drop columns are NOT reversible without
@@ -294,6 +360,95 @@ the same connection/model.
   once a trial reaches a terminal state. Mirror with
   `mc mirror loom-minio/trajectories backup-store/trajectories` on a
   cron. Restore: re-create the buckets and `mc mirror` back.
+
+## Staging smoke gate
+
+Before promoting a release from `dev` → `main`, exercise each user-facing
+flow on a staging cluster. The gate is a manual checklist today
+(automation tracked in a follow-up); every item below maps to a
+concrete command or UI action.
+
+### Prereqs
+
+- A staging cluster deployed via `loom cluster up` against the
+  candidate image tag.
+- A real provider key for at least one provider (OpenAI works for the
+  default benchmark sweep).
+- One of the canonical task fixtures registered: `hello-world` is
+  enough.
+
+### Checklist
+
+1. **Cluster healthy.** `loom cluster status --namespace loom` reports
+   `all_ready=True`. `kubectl get pods -n loom` shows no `CrashLoopBackOff`.
+2. **Public surface reachable.** `curl -sf https://<ingress_host>/api/v1/health`
+   returns `200`. `curl -sf https://<ingress_host>/` returns the SPA
+   index when `loom-web` replicas > 0.
+3. **Boundary holds.** `loom cluster audit` exits 0. `kubectl get svc -n loom`
+   shows no `LoadBalancer` / `NodePort` services. `kubectl get ingress -n loom`
+   shows backends only for `loom-service` and `loom-web` (plus
+   `loom-llm-gateway` when `gateway_public_host` is configured).
+4. **API token issuance.** Mint a team token and verify a 401 turns
+   into a 200:
+   ```bash
+   curl -X POST https://loom.example.com/api/v1/tokens \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Loom-Admin-Actor: smoke-operator" \
+     -d '{"type":"team","team_id":"'$TEAM_ID'",
+          "scopes":["read:own","submit"],"expires_in_days":7}'
+   curl -sf -H "Authorization: Bearer $TEAM_TOKEN" \
+     https://loom.example.com/api/v1/trials
+   ```
+5. **Provider connection create + test.** Create a connection through
+   the CLI (or `POST /api/v1/provider-connections`), then probe:
+   ```bash
+   loom providers create --name smoke-openai --type openai \
+     --api-key env:OPENAI_API_KEY
+   loom providers test smoke-openai
+   ```
+   `test` must return `200` with a valid `model` echoed back.
+6. **Model discovery.** `loom providers models refresh smoke-openai`
+   followed by `loom providers models list smoke-openai` returns a
+   non-empty catalog. `curl /api/v1/models` from a team token shows
+   the agent-capable view.
+7. **Submit a small batch.** Pick `hello-world` (or another canonical
+   fixture) and submit:
+   ```bash
+   loom eval batch create \
+     --name smoke-$(date +%s) \
+     --benchmark hello-world \
+     --provider smoke-openai --model gpt-4o-mini --agent oracle \
+     --n-per-task 1
+   # then tail it:
+   loom eval batch show <batch-id>
+   ```
+   Re-run `batch show` until `state` reaches a terminal value.
+8. **Live progress visibility.** While the batch runs, the SPA Tasks
+   page shows the trial advancing through `queued → claimed → running`,
+   and `GET /api/v1/trials/{id}` echoes the same state.
+9. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
+   with a sensible reason). `GET /api/v1/trials/{id}` carries an
+   `evaluator_result` payload.
+10. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
+    streams events; `GET /api/v1/trials/{id}/atif` returns the ATIF
+    JSON. Both bodies parse cleanly.
+11. **Provider error surfaces.** Temporarily rotate the provider key
+    to an invalid value, re-run a trial, and confirm the SPA + API
+    surface a clear `provider_error` reason rather than a generic 500.
+12. **Teardown clean.** `loom cluster down --yes` removes every applied
+    object; PVCs survive (verify via `kubectl get pvc -n loom`). Pass
+    `--with-volumes` only when wiping staging state intentionally.
+
+A staging release that fails any check is NOT eligible for `main`.
+Capture artifact links + a brief note for each pass in the
+`docs/release-history.md` entry (or the equivalent for your fork).
+
+### Automation status
+
+The kind smoke (`cluster-smoke` workflow, #76 Phase 4B) covers
+steps 1, 3, and 12 today (manifest schema + apply + audit + status +
+down round-trip). Steps 4-11 require provider keys + a long-lived
+staging cluster — automation is tracked in #111.
 
 ## Capacity planning
 
