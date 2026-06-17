@@ -49,6 +49,10 @@ scripts/                           # operator + test helpers
 
 ## Dev setup
 
+Service mode requires Docker CLI with the Compose plugin. On macOS, install and
+start Docker Desktop first; `docker compose version` should succeed before
+running `loom service up`.
+
 ```bash
 # One-time — uv creates .venv/ on first sync; activate it after.
 uv sync --extra dev

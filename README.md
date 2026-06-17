@@ -188,6 +188,13 @@ config (`LOOM_GW_LOCAL_<NAME>_BASE_URL`):
 
 ## Quick start — service mode (`loom service up`)
 
+Service mode requires Docker CLI with the Compose plugin. On macOS, install and
+start Docker Desktop first, then verify the prerequisite with:
+
+```bash
+docker compose version
+```
+
 ```bash
 cp .env.example .env             # add your provider API keys
 loom service up                  # docker compose + migrations + token bootstrap

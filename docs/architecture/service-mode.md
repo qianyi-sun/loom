@@ -10,6 +10,11 @@ uses the file-backed singleton secret specified in
 
 Postgres + MinIO are the only stateful services.
 
+Local service-mode development uses `docker compose`, so operators need Docker
+CLI with the Compose plugin before running `loom service up`, `down`, or
+`status`. On macOS, install and start Docker Desktop first and confirm
+`docker compose version` succeeds.
+
 ## Service-prefix convention
 
 | Service | Routes mounted at | Audience |

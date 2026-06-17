@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -68,6 +69,52 @@ def _compose_args(compose_file: Path, env_file: Path | None) -> list[str]:
 def _run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Subprocess wrapper that streams output to our stdout/stderr."""
     return subprocess.run(argv, check=check, text=True)
+
+
+def _docker_cli_missing_message() -> str:
+    return (
+        "error: Docker CLI was not found on PATH.\n"
+        "Install and start Docker Desktop for Mac, or install Docker CLI "
+        "with the Compose plugin.\n"
+        "Verify the prerequisite with `docker compose version`, then re-run "
+        "the `loom service` command.\n"
+    )
+
+
+def _docker_compose_unavailable_message(detail: str) -> str:
+    detail = detail.strip()
+    message = (
+        "error: Docker Compose is not available through `docker compose`.\n"
+        "Install and start Docker Desktop for Mac, or install Docker CLI "
+        "with the Compose plugin.\n"
+        "Verify the prerequisite with `docker compose version`, then re-run "
+        "the `loom service` command.\n"
+    )
+    if detail:
+        message += f"Docker reported: {detail}\n"
+    return message
+
+
+def _ensure_docker_compose_available() -> int:
+    """Return 0 when `docker compose` is usable, otherwise print a setup hint."""
+    if shutil.which("docker") is None:
+        sys.stderr.write(_docker_cli_missing_message())
+        return 2
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        sys.stderr.write(_docker_cli_missing_message())
+        return 2
+    if result.returncode != 0:
+        detail = result.stderr or result.stdout
+        sys.stderr.write(_docker_compose_unavailable_message(detail))
+        return 2
+    return 0
 
 
 def _wait_for_postgres(compose_file: Path, env_file: Path | None) -> bool:
@@ -195,6 +242,10 @@ def _up(args: argparse.Namespace) -> int:
         )
         return 1
 
+    rc = _ensure_docker_compose_available()
+    if rc != 0:
+        return rc
+
     print(f"→ ensuring dev singleton admin secret ({args.admin_secret_file})")
     try:
         admin_token = _ensure_dev_admin_secret(args.admin_secret_file)
@@ -295,6 +346,9 @@ def _down(args: argparse.Namespace) -> int:
     if not compose_file.is_file():
         sys.stderr.write(f"error: compose file not found at {compose_file}.\n")
         return 1
+    rc = _ensure_docker_compose_available()
+    if rc != 0:
+        return rc
     cmd = [*_compose_args(compose_file, args.env_file), "down"]
     if args.volumes:
         cmd.append("-v")
@@ -307,6 +361,9 @@ def _status(args: argparse.Namespace) -> int:
     if not compose_file.is_file():
         sys.stderr.write(f"error: compose file not found at {compose_file}.\n")
         return 1
+    rc = _ensure_docker_compose_available()
+    if rc != 0:
+        return rc
     print(f"→ docker compose ps ({compose_file})")
     rc = _run(
         [*_compose_args(compose_file, args.env_file), "ps"],

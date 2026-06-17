@@ -86,6 +86,9 @@ refresh or manually add its model ids, then launch from the SPA. The
 SPA hides obvious tool/API entries by default and submits
 `provider_connection_id` + `provider_model_id` with the trial or batch;
 operators can use the raw model view for debugging noisy catalogs.
+Running the local service stack requires Docker CLI with the Compose
+plugin; on macOS, install and start Docker Desktop, then verify
+`docker compose version` before `loom service up`.
 
 ## Cloud sandboxes (Daytona)
 

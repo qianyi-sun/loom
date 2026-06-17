@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import stat
+import subprocess
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +70,72 @@ def test_status_errors_when_compose_file_missing(
     assert "not found" in capsys.readouterr().err.lower()
 
 
+@pytest.mark.parametrize("service_cmd", ["up", "down", "status"])
+def test_service_commands_error_without_docker_cli(
+    service_cmd: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing Docker should produce an actionable CLI error, not a traceback."""
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda binary: None if binary == "docker" else "/bin/other",
+    )
+
+    with patch("loom_cli.service_cmd._run", side_effect=AssertionError("compose should not run")):
+        rc = main([
+            "service", service_cmd,
+            "--compose-file", str(compose),
+            "--env-file", str(tmp_path / "absent.env"),
+        ])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "Docker CLI was not found" in captured.err
+    assert "Docker Desktop for Mac" in captured.err
+    assert "docker compose version" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_service_status_errors_when_docker_compose_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing Compose plugin should be diagnosed before compose ps runs."""
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda binary: "/usr/local/bin/docker" if binary == "docker" else None,
+    )
+
+    def _fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        assert argv == ["docker", "compose", "version"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="docker: compose is not a docker command\n",
+        )
+
+    monkeypatch.setattr("loom_cli.service_cmd.subprocess.run", _fake_run)
+    rc = main([
+        "service", "status",
+        "--compose-file", str(compose),
+        "--env-file", str(tmp_path / "absent.env"),
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "Docker Compose is not available" in captured.err
+    assert "docker compose version" in captured.err
+    assert "docker: compose is not a docker command" in captured.err
+
+
 def test_compose_args_includes_env_file_when_present(
     tmp_path: Path,
 ) -> None:
@@ -102,7 +169,9 @@ def test_up_invokes_docker_compose_up(
     runs first; on its failure we bail before alembic + seed."""
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n")
-    with patch("loom_cli.service_cmd._run") as mock_run, \
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run") as mock_run, \
          patch("loom_cli.service_cmd._wait_for_postgres",
                return_value=False) as mock_wait:
         # _run returns CompletedProcess-like; we need .returncode = 0
@@ -322,7 +391,9 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
     }
     admin_secret_token = "loom_admin_" + "U" * 43
 
-    with patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
          patch("loom_cli.service_cmd._wait_for_postgres",
                return_value=True), \
          patch("loom_cli.service_cmd._alembic_upgrade",
@@ -392,7 +463,9 @@ def test_up_skips_worker_recreate_when_no_env_file(
         "worker": "loom_w_fresh",
     }
 
-    with patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
          patch("loom_cli.service_cmd._wait_for_postgres",
                return_value=True), \
          patch("loom_cli.service_cmd._alembic_upgrade",
