@@ -178,7 +178,7 @@ def test_default_storage_class_check_fail_when_no_classes() -> None:
 
 
 def test_pss_enforce_warn_when_restricted() -> None:
-    """Worker DaemonSet bind-mounts docker.sock; PSS restricted
+    """Worker Deployment bind-mounts docker.sock; PSS restricted
     blocks it. Warn (not fail) so non-Docker driver users aren't
     forced to relax PSS."""
     core = _FakeCoreV1(

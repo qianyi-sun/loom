@@ -154,7 +154,7 @@ def _fully_ready_apps() -> _FakeAppsV1:
     apps.deployments["loom-control-plane"] = _make_deployment(2, 2)
     apps.deployments["loom-llm-gateway"] = _make_deployment(2, 2)
     apps.deployments["loom-web"] = _make_deployment(0, 0)  # paused by default
-    apps.daemonsets["loom-worker"] = _make_daemonset(3, 3)
+    apps.deployments["loom-worker"] = _make_deployment(3, 3)
     apps.statefulsets["postgres"] = _make_statefulset(1, 1)
     apps.statefulsets["minio"] = _make_statefulset(1, 1)
     return apps

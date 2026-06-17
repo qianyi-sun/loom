@@ -41,11 +41,14 @@ _COMPONENT_DEPLOYMENTS: tuple[tuple[str, str], ...] = (
     ("loom-control-plane", "loom-control-plane"),
     ("loom-llm-gateway", "loom-llm-gateway"),
     ("loom-web", "loom-web"),
-)
-
-_COMPONENT_DAEMONSETS: tuple[tuple[str, str], ...] = (
     ("loom-worker", "loom-worker"),
 )
+
+# Reserved for future DaemonSet components (e.g., per-node log
+# shippers). The trial-runner workload was DaemonSet in the original
+# design but ships as a Deployment today — see issue #108 for the
+# rationale and the deferred DaemonSet redesign.
+_COMPONENT_DAEMONSETS: tuple[tuple[str, str], ...] = ()
 
 _COMPONENT_STATEFULSETS: tuple[tuple[str, str], ...] = (
     ("postgres", "loom-postgres"),
@@ -59,7 +62,7 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "loom-control-plane": "Internal scheduler + worker control",
     "loom-llm-gateway": "Provider-connection facade",
     "loom-web": "SPA (paused by default)",
-    "loom-worker": "Trial runner DaemonSet (one per node)",
+    "loom-worker": "Trial runner Deployment (scales horizontally)",
     "postgres": "Postgres (state)",
     "minio": "Object store (trajectories + ATIF)",
 }
@@ -707,7 +710,7 @@ def _check_default_storage_class(
 def _check_pss_enforce(
     core_v1: Any, namespace: str,
 ) -> PreflightCheck:
-    """The worker DaemonSet bind-mounts the host docker socket. PSS
+    """The worker Deployment bind-mounts the host docker socket. PSS
     `restricted` (k8s 1.25+ default for new namespaces) rejects this
     at admission. Warn (not fail) so operators using a non-Docker
     driver aren't blocked."""
@@ -727,7 +730,7 @@ def _check_pss_enforce(
             outcome="warn",
             detail=(
                 f"namespace {namespace!r} has PSS enforce=restricted; "
-                "the worker DaemonSet's hostPath docker.sock mount "
+                "the worker Deployment's hostPath docker.sock mount "
                 "will be rejected"
             ),
             remediation=(
