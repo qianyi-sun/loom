@@ -55,6 +55,10 @@ Start with the overview, drill into the area you care about:
 - **[architecture/auth-threat-model.md](architecture/auth-threat-model.md)** —
   threat model for singleton admin auth, team registration, audit,
   rotation, and production rollout gates
+- **[architecture/sandbox-isolation.md](architecture/sandbox-isolation.md)** —
+  honest description of the sandbox trust boundary as shipped: what
+  iptables policies enforce, what's still aspirational, the known
+  `Public`-policy metadata-IP gap, and the #78 roadmap
 - **[architecture/auth-registration-spec.md](architecture/auth-registration-spec.md)** —
   implementation spec for #10: singleton admin secret, team registration,
   audit events, rotation commands, and DB-admin removal
