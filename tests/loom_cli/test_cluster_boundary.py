@@ -501,7 +501,7 @@ def test_audit_flags_components_without_network_policy() -> None:
         f"containers: [{{ name: c, ports: [{{ containerPort: 8080 }}] }}]\n"
         for app in (
             "loom-control-plane", "loom-llm-gateway", "loom-service",
-            "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+            "loom-web", "loom-worker", "loom-postgres", "loom-minio", "loom-gateway-router",
         )
     )
     violations = audit_boundary(yaml_text)
@@ -511,7 +511,7 @@ def test_audit_flags_components_without_network_policy() -> None:
     }
     assert missing == {
         "loom-control-plane", "loom-llm-gateway", "loom-service",
-        "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+        "loom-web", "loom-worker", "loom-postgres", "loom-minio", "loom-gateway-router",
     }
 
 
@@ -526,7 +526,7 @@ def test_audit_passes_when_all_components_have_network_policy() -> None:
         f"  ingress: []\n  egress: []\n"
         for app in (
             "loom-control-plane", "loom-llm-gateway", "loom-service",
-            "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+            "loom-web", "loom-worker", "loom-postgres", "loom-minio", "loom-gateway-router",
         )
     )
     violations = audit_boundary(yaml_text)
@@ -589,5 +589,5 @@ def test_audit_network_policy_with_non_app_selector_ignored() -> None:
     }
     assert missing == {
         "loom-control-plane", "loom-llm-gateway", "loom-service",
-        "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+        "loom-web", "loom-worker", "loom-postgres", "loom-minio", "loom-gateway-router",
     }

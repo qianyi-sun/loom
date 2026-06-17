@@ -48,6 +48,17 @@ _REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
     "loom-worker",
     "loom-postgres",
     "loom-minio",
+    "loom-gateway-router",
+})
+
+# Workloads that legitimately need a hostPort. The cluster-deploy
+# design explicitly calls out one such use: the gateway-router
+# DaemonSet binds hostPort 30443 because the sandbox Docker
+# containers spawned by the worker can't reach in-cluster Service
+# DNS — they need a stable per-node TCP endpoint. The auditor
+# exempts named workloads here; any other hostPort is still flagged.
+_HOSTPORT_ALLOWLIST: frozenset[str] = frozenset({
+    "loom-gateway-router",
 })
 
 
@@ -210,6 +221,10 @@ def _audit_pod_template(
     doc: dict[str, Any], kind: str, name: str,
 ) -> list[BoundaryViolation]:
     out: list[BoundaryViolation] = []
+    # Whitelisted workloads (cluster-deploy.md called out hostPort
+    # use cases) skip the hostPort check entirely.
+    if name in _HOSTPORT_ALLOWLIST:
+        return out
     pod_spec = (
         doc.get("spec", {}).get("template", {}).get("spec", {})
     )

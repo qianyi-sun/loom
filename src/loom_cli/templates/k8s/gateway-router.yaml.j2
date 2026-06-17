@@ -1,0 +1,100 @@
+# loom-gateway-router — per-node TCP proxy from hostPort 30443 to the
+# in-cluster `loom-llm-gateway` Service (#78 partial-D).
+#
+# Why a DaemonSet + hostPort instead of just direct Service access:
+# Sandbox containers spawned by the worker are NOT k8s pods — they're
+# Docker containers on a per-trial (#78 D) or default bridge. Those
+# containers can reach the HOST's network interface but cannot resolve
+# in-cluster k8s Service DNS. The router gives them a stable
+# `node-IP:30443` endpoint to dial; the router pod proxies the TCP
+# stream into the in-cluster gateway Service.
+#
+# Image: a minimal socat container does the TCP forward. Replacing
+# socat with the loom-llm-gateway-sandbox singleton (which adds
+# TLS termination + step-JWT validation) is the next slice — for
+# now this is a plain TCP forward with no extra auth (the gateway
+# itself enforces step-JWT auth).
+#
+# Why an exception in `loom cluster audit`: hostPort declarations
+# are normally flagged by the boundary auditor. This DaemonSet
+# legitimately needs hostPort 30443 — it's the sandbox-side
+# endpoint. The auditor's allowlist (see cluster_boundary.py) lists
+# `loom-gateway-router` as an exempted hostPort user.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loom-gateway-router
+spec:
+  selector:
+    matchLabels: { app: loom-gateway-router }
+  template:
+    metadata:
+      labels: { app: loom-gateway-router }
+    spec:
+      # Tolerate the control-plane taint so single-node kind clusters
+      # still place a router pod. On multi-node prod clusters this
+      # places one per node, which is exactly what we want — sandbox
+      # traffic stays on the local node.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: router
+          image: alpine/socat:1.7.4.4
+          # TCP-LISTEN on 30443 (host port via hostPort below) →
+          # forks one socat per connection, each one TCP-connecting
+          # to the in-cluster loom-llm-gateway Service. `reuseaddr`
+          # avoids the TIME_WAIT bind hold after pod restart;
+          # `fork` lets multiple sandboxes connect concurrently.
+          args:
+            - "-d"  # info-level logging
+            - "TCP-LISTEN:30443,reuseaddr,fork"
+            - "TCP:loom-llm-gateway.{{ namespace }}.svc.cluster.local:9100"
+          ports:
+            - name: sandbox
+              containerPort: 30443
+              hostPort: 30443
+              protocol: TCP
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          # No probes: socat doesn't ship a healthcheck endpoint.
+          # The DaemonSet's readiness derives from process liveness;
+          # if socat crashes, k8s restarts it within seconds.
+
+---
+# NetworkPolicy: router pod ingress from anywhere on the node (which
+# is what hostPort traffic looks like — comes via the node's local
+# stack), egress to the in-cluster gateway + kube-dns only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-gateway-router
+spec:
+  podSelector:
+    matchLabels: { app: loom-gateway-router }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # hostPort traffic arrives via the node-local network — k8s
+    # NetworkPolicy can't restrict this further (the pod sees the
+    # connection as coming from the node interface, not a labeled
+    # pod). Accept all on the listening port; auth happens at the
+    # gateway behind us.
+    - ports:
+        - { port: 30443, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-llm-gateway } }
+      ports:
+        - { port: 9100, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
