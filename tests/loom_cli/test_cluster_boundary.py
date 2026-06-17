@@ -66,7 +66,7 @@ spec:
 def test_audit_clean_manifests_yields_no_violations() -> None:
     """Default manifest shape — ClusterIP services, Ingress only
     points at loom-service + loom-web, no hostPorts."""
-    assert audit_boundary(_CLEAN_MANIFESTS) == []
+    assert audit_boundary(_CLEAN_MANIFESTS, require_network_policies=False) == []
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ spec:
   type: LoadBalancer
   ports: [{ port: 8080 }]
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     v = violations[0]
     assert v.kind == "service-type"
@@ -100,7 +100,7 @@ spec:
   type: NodePort
   ports: [{ port: 5432, nodePort: 32432 }]
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     assert violations[0].kind == "service-type"
     assert "NodePort" in violations[0].detail
@@ -115,7 +115,7 @@ spec:
   type: ClusterIP
   ports: [{ port: 5432 }]
 """
-    assert audit_boundary(yaml_text) == []
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
 def test_audit_accepts_implicit_cluster_ip_service() -> None:
@@ -127,7 +127,7 @@ metadata: { name: loom-postgres }
 spec:
   ports: [{ port: 5432 }]
 """
-    assert audit_boundary(yaml_text) == []
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ spec:
                 name: loom-control-plane
                 port: { number: 8080 }
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     v = violations[0]
     assert v.kind == "ingress-backend"
@@ -179,7 +179,7 @@ spec:
                 name: loom-llm-gateway
                 port: { number: 9100 }
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     assert "loom-llm-gateway" in violations[0].detail
 
@@ -203,6 +203,7 @@ spec:
 """
     violations = audit_boundary(
         yaml_text, gateway_public_host="gateway.example.com",
+        require_network_policies=False,
     )
     assert violations == []
 
@@ -222,7 +223,7 @@ spec:
       name: loom-control-plane
       port: { number: 8080 }
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     v = violations[0]
     assert v.kind == "ingress-backend"
@@ -249,7 +250,7 @@ spec:
         paths:
           - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     assert "defaultBackend" in violations[0].detail
     assert "loom-llm-gateway" in violations[0].detail
@@ -264,7 +265,7 @@ spec:
   defaultBackend:
     service: { name: loom-web, port: { number: 80 } }
 """
-    assert audit_boundary(yaml_text) == []
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
 def test_audit_default_backend_gateway_opted_in() -> None:
@@ -280,6 +281,7 @@ spec:
 """
     assert audit_boundary(
         yaml_text, gateway_public_host="gateway.example.com",
+        require_network_policies=False,
     ) == []
 
 
@@ -297,7 +299,7 @@ spec:
           - { path: /api/v1, backend: { service: { name: loom-service, port: { number: 8090 } } } }
           - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
 """
-    assert audit_boundary(yaml_text) == []
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -319,7 +321,7 @@ spec:
             - containerPort: 8080
               hostPort: 30080
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     v = violations[0]
     assert v.kind == "host-port"
@@ -347,7 +349,7 @@ spec:
         - name: main
           ports: [{ containerPort: 8080 }]
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     v = violations[0]
     assert v.kind == "host-port"
@@ -371,7 +373,7 @@ spec:
             - containerPort: 30443
               hostPort: 30443
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     assert violations[0].kind == "host-port"
     assert violations[0].object_kind == "DaemonSet"
@@ -390,7 +392,7 @@ spec:
           ports:
             - containerPort: 8090
 """
-    assert audit_boundary(yaml_text) == []
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -430,7 +432,7 @@ spec:
         - name: c
           ports: [{ containerPort: 80, hostPort: 80 }]
 """
-    violations = audit_boundary(yaml_text)
+    violations = audit_boundary(yaml_text, require_network_policies=False)
     kinds = {v.kind for v in violations}
     assert kinds == {"service-type", "ingress-backend", "host-port"}
 
@@ -480,3 +482,112 @@ def test_cli_audit_returns_1_when_config_invalid(
     rc = main(["cluster", "audit", "--config", str(p)])
     assert rc == 2
     assert "error" in capsys.readouterr().err.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# NetworkPolicy coverage check (#78 slice C)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_audit_flags_components_without_network_policy() -> None:
+    """A manifest set with no NetworkPolicies flags every required
+    component. Catches the namespace-default-allow-all hole."""
+    # Minimal namespace with just the seven required components but
+    # zero NetworkPolicies.
+    yaml_text = "\n---\n".join(
+        f"apiVersion: apps/v1\nkind: Deployment\n"
+        f"metadata: {{ name: {app} }}\n"
+        f"spec:\n  template:\n    spec:\n      "
+        f"containers: [{{ name: c, ports: [{{ containerPort: 8080 }}] }}]\n"
+        for app in (
+            "loom-control-plane", "loom-llm-gateway", "loom-service",
+            "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+        )
+    )
+    violations = audit_boundary(yaml_text)
+    missing = {
+        v.object_name for v in violations
+        if v.kind == "missing-network-policy"
+    }
+    assert missing == {
+        "loom-control-plane", "loom-llm-gateway", "loom-service",
+        "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+    }
+
+
+def test_audit_passes_when_all_components_have_network_policy() -> None:
+    """When every required component has a matching NetworkPolicy,
+    the coverage check fires no violations."""
+    yaml_text = "\n---\n".join(
+        f"apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
+        f"metadata: {{ name: {app} }}\n"
+        f"spec:\n  podSelector:\n    matchLabels: {{ app: {app} }}\n"
+        f"  policyTypes: [Ingress, Egress]\n"
+        f"  ingress: []\n  egress: []\n"
+        for app in (
+            "loom-control-plane", "loom-llm-gateway", "loom-service",
+            "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+        )
+    )
+    violations = audit_boundary(yaml_text)
+    assert violations == []
+
+
+def test_audit_partial_coverage_flags_only_missing_components() -> None:
+    """Coverage check is per-component — only the uncovered ones get
+    flagged."""
+    yaml_text = (
+        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
+        "metadata: { name: loom-postgres }\n"
+        "spec:\n  podSelector:\n    matchLabels: { app: loom-postgres }\n"
+        "  policyTypes: [Ingress]\n  ingress: []\n"
+    )
+    violations = audit_boundary(yaml_text)
+    missing = {
+        v.object_name for v in violations
+        if v.kind == "missing-network-policy"
+    }
+    assert "loom-postgres" not in missing
+    assert "loom-control-plane" in missing
+    assert "loom-worker" in missing
+
+
+def test_audit_require_network_policies_opt_out(
+) -> None:
+    """Backwards-compat for tests that pre-date slice C: when
+    `require_network_policies=False`, the coverage check is skipped
+    even on manifests with no NetworkPolicies at all."""
+    yaml_text = (
+        "apiVersion: apps/v1\nkind: Deployment\n"
+        "metadata: { name: loom-control-plane }\n"
+        "spec:\n  template:\n    spec:\n      "
+        "containers: [{ name: c, ports: [{ containerPort: 8080 }] }]\n"
+    )
+    violations = audit_boundary(
+        yaml_text, require_network_policies=False,
+    )
+    assert violations == []
+
+
+def test_audit_network_policy_with_non_app_selector_ignored() -> None:
+    """A NetworkPolicy whose podSelector uses non-`app` labels (or
+    matchExpressions) doesn't contribute to the coverage set. This
+    matches reality: future operator-added policies on third-party
+    selectors shouldn't accidentally satisfy the loom-component
+    coverage requirement."""
+    yaml_text = (
+        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
+        "metadata: { name: other }\n"
+        "spec:\n  podSelector:\n    matchLabels: { team: research }\n"
+    )
+    violations = audit_boundary(yaml_text)
+    # All required components still flagged — the team-research
+    # selector doesn't cover any of them.
+    missing = {
+        v.object_name for v in violations
+        if v.kind == "missing-network-policy"
+    }
+    assert missing == {
+        "loom-control-plane", "loom-llm-gateway", "loom-service",
+        "loom-web", "loom-worker", "loom-postgres", "loom-minio",
+    }

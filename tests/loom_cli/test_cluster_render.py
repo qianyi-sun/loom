@@ -28,7 +28,7 @@ _DEPLOY_DIR = _REPO_ROOT / "deploy" / "k8s"
 _GOLDEN_FILES = (
     "postgres.yaml", "minio.yaml", "control-plane.yaml",
     "loom-service.yaml", "llm-gateway.yaml", "worker.yaml",
-    "web.yaml", "ingress.yaml",
+    "web.yaml", "ingress.yaml", "network-policies.yaml",
 )
 
 
@@ -121,8 +121,9 @@ def test_load_config_path_none_returns_defaults() -> None:
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     """Smoke: every document parses, the set covers the 5 Deployments
-    + 6 Services + 2 StatefulSets + 1 PVC + 1 Ingress expected by
-    cluster-deploy.md §Component map."""
+    + 6 Services + 2 StatefulSets + 1 PVC + 1 Ingress + 7
+    NetworkPolicies expected by cluster-deploy.md §Component map +
+    sandbox-isolation.md."""
     text = render_manifests(ClusterConfig())
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
@@ -131,6 +132,10 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     assert kinds.count("Service") == 6       # all five Deployments + minio (web Service goes through Deployment count separately; actually web has both)
     assert kinds.count("Ingress") == 1
     assert kinds.count("PersistentVolumeClaim") == 1
+    # NetworkPolicies (#78 slice C) — one per component that needs
+    # isolation: postgres + minio + control-plane + llm-gateway +
+    # worker + service + web = 7.
+    assert kinds.count("NetworkPolicy") == 7
 
 
 def test_render_default_matches_deploy_k8s_yamls() -> None:

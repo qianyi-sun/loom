@@ -393,6 +393,10 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     "worker.yaml.j2",
     "web.yaml.j2",
     "ingress.yaml.j2",
+    # NetworkPolicies last — they reference workloads via podSelectors,
+    # and listing them after the workloads keeps the rendered output
+    # naturally ordered for human review (workload, then its policy).
+    "network-policies.yaml.j2",
 )
 
 

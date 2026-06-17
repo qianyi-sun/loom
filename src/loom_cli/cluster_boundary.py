@@ -35,6 +35,21 @@ _PUBLIC_ALLOWLIST: frozenset[str] = frozenset({"loom-service", "loom-web"})
 # loom-llm-gateway, gated on `gateway_public_host` being set).
 _PUBLIC_ALLOWLIST_OPTIONAL: frozenset[str] = frozenset({"loom-llm-gateway"})
 
+# Pods that MUST have a NetworkPolicy selecting them (#78 slice C).
+# These are the in-cluster Loom components; an internal-only workload
+# without any NetworkPolicy is reachable from every other pod in the
+# namespace by default (k8s allow-all default), which is exactly the
+# boundary the public/internal split is supposed to enforce.
+_REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
+    "loom-control-plane",
+    "loom-llm-gateway",
+    "loom-service",
+    "loom-web",
+    "loom-worker",
+    "loom-postgres",
+    "loom-minio",
+})
+
 
 @dataclass(frozen=True)
 class BoundaryViolation:
@@ -48,7 +63,9 @@ class BoundaryViolation:
 
 
 def audit_boundary(
-    yaml_text: str, *, gateway_public_host: str | None = None,
+    yaml_text: str, *,
+    gateway_public_host: str | None = None,
+    require_network_policies: bool = True,
 ) -> list[BoundaryViolation]:
     """Walk rendered manifests and flag boundary violations.
 
@@ -56,11 +73,24 @@ def audit_boundary(
     the LLM gateway on its own public host. When set (non-empty),
     `loom-llm-gateway` is added to the Ingress backend allowlist;
     when None/empty, an Ingress rule pointing at it is flagged.
+
+    `require_network_policies` (default True, matching the CLI's
+    behavior) flags Loom components that aren't selected by any
+    NetworkPolicy. Set to False when auditing a manifest fragment
+    that intentionally omits NetworkPolicies (e.g., the
+    Service/Ingress-only fixtures used by unit tests for the other
+    checks).
     """
     violations: list[BoundaryViolation] = []
     allowlist = set(_PUBLIC_ALLOWLIST)
     if gateway_public_host:
         allowlist |= _PUBLIC_ALLOWLIST_OPTIONAL
+
+    # Track which Loom components have a NetworkPolicy selecting them
+    # (#78 slice C). We collect the set of selected app-labels in
+    # pass 1, then in pass 2 flag any required component without
+    # coverage.
+    np_covered_apps: set[str] = set()
 
     for doc in yaml.safe_load_all(yaml_text):
         if not doc:
@@ -74,8 +104,43 @@ def audit_boundary(
             violations.extend(_audit_ingress(doc, name, allowlist))
         elif kind in ("Deployment", "StatefulSet", "DaemonSet"):
             violations.extend(_audit_pod_template(doc, kind, name))
+        elif kind == "NetworkPolicy":
+            np_covered_apps |= _network_policy_selected_apps(doc)
+
+    if require_network_policies:
+        # Pass 2: every required component MUST be selected by at
+        # least one NetworkPolicy. A pod without any NetworkPolicy
+        # selecting it gets k8s's default allow-all behavior, which
+        # is exactly the boundary we want to enforce.
+        missing = _REQUIRES_NETWORK_POLICY - np_covered_apps
+        for app in sorted(missing):
+            violations.append(BoundaryViolation(
+                kind="missing-network-policy",
+                object_kind="NetworkPolicy",
+                object_name=app,
+                detail=(
+                    f"component {app!r} has no NetworkPolicy selecting "
+                    f"it. Without a policy, k8s defaults to allow-all "
+                    f"ingress and egress — internal traffic from "
+                    f"arbitrary pods in the namespace is unrestricted."
+                ),
+            ))
 
     return violations
+
+
+def _network_policy_selected_apps(doc: dict[str, Any]) -> set[str]:
+    """Extract the `app` labels from a NetworkPolicy's `podSelector`.
+    Returns an empty set for selectors that don't use a simple
+    `matchLabels.app: <name>` shape — non-app selectors don't
+    contribute to the required-component coverage check."""
+    spec = doc.get("spec") or {}
+    selector = spec.get("podSelector") or {}
+    match_labels = selector.get("matchLabels") or {}
+    app = match_labels.get("app")
+    if isinstance(app, str):
+        return {app}
+    return set()
 
 
 def _audit_service(

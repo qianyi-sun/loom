@@ -89,19 +89,33 @@ on a cloud-hosted cluster. Use `Allowlist({domains: ["gateway.loom"]})`
 or `NoNetwork` and let the always-blocked CIDR DROPs + the explicit
 allowlist do the work.
 
-### Cluster-level: k8s NetworkPolicy on Loom components
+### Cluster-level: k8s NetworkPolicy on Loom components (#78 slice C, shipped)
 
-Not yet shipped. Once shipped, the policy set will:
+`loom cluster render` emits seven `NetworkPolicy` resources, one per
+required component, restricting ingress/egress to only what each
+component needs:
 
-- `loom-control-plane` ingress: only from `loom-worker` + `loom-service`.
-- `loom-llm-gateway` ingress: only from `loom-worker` (production via
-  `loom-gateway-router` DaemonSet pod, hostPort 30443) + `loom-service`.
-- `loom-postgres` + `loom-minio`: only from listed services.
-- Egress on every component: explicit allowlist of cluster DNS +
-  the listed sibling services.
+| Component | Ingress allowed from | Egress allowed to |
+|---|---|---|
+| `loom-postgres` | `loom-control-plane`, `loom-llm-gateway`, `loom-service` | kube-dns |
+| `loom-minio` | `loom-service`, `loom-worker`, `loom-llm-gateway` | kube-dns |
+| `loom-control-plane` | `loom-worker`, `loom-service` | `loom-postgres`, kube-dns |
+| `loom-llm-gateway` | `loom-worker`, `loom-service` | `loom-postgres`, `loom-minio`, kube-dns, public 80/443 (egress-proxy slice E will narrow this) |
+| `loom-worker` | (none — workers only initiate) | `loom-control-plane`, `loom-llm-gateway`, `loom-minio`, kube-dns |
+| `loom-service` | any (public REST surface) | `loom-control-plane`, `loom-llm-gateway`, `loom-postgres`, `loom-minio`, kube-dns |
+| `loom-web` | any (public SPA) | kube-dns |
 
-Until shipped, cluster-internal traffic is enforced only by Service
-selector + the public/internal Ingress boundary (#77, `loom cluster audit`).
+`loom cluster audit` enforces presence: any required component without
+a selecting NetworkPolicy fails with `missing-network-policy`. The
+auditor checks coverage, not correctness — operators who edit policies
+should re-render against `deploy/k8s/network-policies.yaml` as the
+golden.
+
+**CNI requirement:** NetworkPolicy is CNI-enforced. Kind's default
+CNI accepts the resources but does NOT enforce them; production
+clusters need calico, cilium, or equivalent. The kind smoke
+validates the schema + apply path; in-cluster traffic-shaping is
+production-CNI work.
 
 ### Gateway-level: SSRF defense
 
@@ -167,26 +181,25 @@ These are checks an operator can run today:
 
 The remaining slices of #78, in priority order:
 
-1. **Cluster NetworkPolicies.** Ship k8s NetworkPolicy templates
-   for the in-cluster components. Extends `loom cluster audit`
-   to verify they're present.
-2. **Per-trial Docker bridges.** Move from shared bridge to a
+1. **Per-trial Docker bridges.** Move from shared bridge to a
    `--internal` per-trial bridge with the worker spawning a
    `loom-llm-gateway-sandbox` singleton (architecture per
-   cluster-deploy.md §Sandbox→gateway flow).
-3. **`loom-gateway-router` DaemonSet.** Implements the
+   cluster-deploy.md §Sandbox→gateway flow). Worker code change.
+2. **`loom-gateway-router` DaemonSet.** Implements the
    sandbox-Docker-network → in-cluster-Service hop with hostPort
-   30443.
-4. **Egress proxy.** `loom-egress-proxy` Envoy + `loom-egress-xds`
+   30443. New k8s component.
+3. **Egress proxy.** `loom-egress-proxy` Envoy + `loom-egress-xds`
    provider-CDS feeds for "even a compromised gateway can only
-   reach approved provider IPs."
+   reach approved provider IPs." Replaces the loom-llm-gateway
+   egress allow-0.0.0.0/0 rule with a per-connection IP allowlist.
 
 Each slice updates this doc as it lands.
 
 Shipped slices:
 
 - **Slice A** (PR #116): this doc, honest as-shipped trust boundary.
-- **Slice B** (this PR): always-blocked CIDRs for metadata + link-local IPs.
+- **Slice B** (PR #117): always-blocked CIDRs for metadata + link-local IPs.
+- **Slice C** (this PR): k8s NetworkPolicies for in-cluster components.
 
 ## See also
 
