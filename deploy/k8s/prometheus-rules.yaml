@@ -277,3 +277,67 @@ spec:
                 kubectl logs -n loom -l app=loom-service --since=15m \
                   | grep -i "500\|exception\|traceback"
                 Check upstream control-plane and gateway dependencies.
+
+    - name: loom.worker.health
+      interval: 30s
+      rules:
+        - alert: LoomWorkerProcessDown
+          expr: up{job=~".*loom-worker.*"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            component: worker
+          annotations:
+            summary: "Worker scrape down"
+            description: |
+              Prometheus can't scrape a worker instance for 5 minutes.
+              The CP's loom_workers_active gauge is the source of truth
+              for "no workers can take trials"; this alert catches the
+              narrower case where one specific worker is silent.
+
+              Triage:
+                kubectl get pod -n loom -l app=loom-worker
+                kubectl logs -n loom -l app=loom-worker --previous
+
+        - alert: LoomWorkerHeartbeatFailing
+          expr: |
+            rate(loom_worker_heartbeat_failures_total[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+            component: worker
+          annotations:
+            summary: "Worker heartbeat failures > 0 for 10m"
+            description: |
+              A worker's heartbeat thread is failing to PATCH the CP
+              for 10 minutes. The CP crash detector will reclaim
+              this worker's trials in 1-2 expiry windows.
+
+              Triage:
+                - Verify control-plane reachability from the worker pod.
+                - Check loom_worker_claim_loop_iterations_total{result="error"}
+                  for related connectivity issues.
+
+        - alert: LoomWorkerTrialFailureRateHigh
+          expr: |
+            (
+              sum(rate(loom_worker_trials_completed_total{result!="succeeded"}[5m]))
+              /
+              sum(rate(loom_worker_trials_completed_total[5m]))
+            ) > 0.2
+          for: 15m
+          labels:
+            severity: warning
+            component: worker
+          annotations:
+            summary: "Worker trial failure rate > 20% for 15m"
+            description: |
+              More than 20% of completed trials are failing/cancelling/
+              crashing for 15 minutes. Could be an upstream provider
+              outage, a broken agent runtime image, or worker-side bugs.
+
+              Triage:
+                - Inspect per-result breakdown:
+                    sum by (result) (rate(loom_worker_trials_completed_total[5m]))
+                - Check recent trial trajectories for common failure
+                  reasons.
