@@ -152,9 +152,10 @@ services:
       LOOM_SVC_LOG_LEVEL: debug
       LOOM_SVC_DEV_RELOAD: "1"
       LOOM_SVC_ADMIN_SECRET_FILE: /var/run/loom/admin/secrets.toml
-      # LOOM_SVC_BATCH_RUNNER_CP_TOKEN unset → runner skips its tick
-      # with a warning. Set it after seeding a submit-scoped token if
-      # you want to exercise the batch-runner locally.
+      # Minted by `loom service up` via POST /admin/batch-runner-tokens
+      # and written to .env. Without this token the batch fan-out loop
+      # logs a warning and batches sit at state=submitted.
+      LOOM_SVC_BATCH_RUNNER_CP_TOKEN: "${LOOM_SVC_BATCH_RUNNER_CP_TOKEN:-}"
     volumes:
       - ../src:/app/src
       - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro

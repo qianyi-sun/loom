@@ -30,6 +30,7 @@ import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import tomli_w
 
 from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
@@ -41,6 +42,7 @@ _DEFAULT_DEV_ADMIN_SECRET_FILE = Path(".loom/admin/secrets.toml")
 _DEFAULT_ADMIN_SECRET_FILE = Path.home() / ".config" / "loom" / "secrets.toml"
 _HEALTHCHECK_RETRIES = 30
 _HEALTHCHECK_INTERVAL_SEC = 2.0
+_DEFAULT_CP_URL = "http://localhost:8080"
 
 # Endpoint map (matches compose YAML port bindings + k8s ingress).
 # Order = order printed by `loom service up`. User panel goes first
@@ -194,6 +196,46 @@ def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     return 0, tokens
 
 
+def _mint_batch_runner_cp_token(
+    admin_token: str,
+    cp_url: str = _DEFAULT_CP_URL,
+) -> str | None:
+    """Mint a batch-runner CP token via `POST /admin/batch-runner-tokens`.
+
+    Returns the raw token string on success, or None on failure (with a
+    warning already printed to stderr). The returned token is written to
+    .env as LOOM_SVC_BATCH_RUNNER_CP_TOKEN so loom-service picks it up
+    on the next force-recreate.
+
+    This mirrors production runbook step 6. Dev-only: called from
+    `loom service up`; production operators use `loom admin tokens`
+    with a port-forward.
+    """
+    url = f"{cp_url.rstrip('/')}/admin/batch-runner-tokens"
+    try:
+        resp = httpx.post(
+            url, json={},
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(
+            f"warning: could not reach CP at {url} to mint batch-runner token: {exc}\n"
+            "Batches will queue but not fan out. Re-run `loom service up` "
+            "once the control-plane is healthy.\n",
+        )
+        return None
+    if resp.status_code != 201:
+        sys.stderr.write(
+            f"warning: CP returned {resp.status_code} minting batch-runner token: "
+            f"{resp.text}\n"
+            "Batches will queue but not fan out.\n",
+        )
+        return None
+    token: str = resp.json()["token"]
+    return token
+
+
 def _print_summary(tokens: dict[str, str]) -> None:
     print()
     print("=" * 60)
@@ -279,6 +321,16 @@ def _up(args: argparse.Namespace) -> int:
         return rc
     tokens["admin"] = admin_token
 
+    # Mint the batch-runner CP token so the batch fan-out loop in
+    # loom-service can submit trials to the Control Plane. Without this
+    # token, batches accept (201) but sit at state=submitted forever.
+    # We mint after seeding so the DB is fully migrated before the CP
+    # receives any admin requests.
+    print("→ minting batch-runner CP token")
+    batch_runner_token = _mint_batch_runner_cp_token(admin_token, args.cp_url)
+    if batch_runner_token:
+        tokens["batch_runner_cp"] = batch_runner_token
+
     # Persist the just-seeded tokens to .env so `docker compose`,
     # curl/HTTPie examples, and the SPA's local-storage bootstrap all
     # keep working after `down -v` invalidates the previous set. Without
@@ -288,6 +340,8 @@ def _up(args: argparse.Namespace) -> int:
     if env_file is not None:
         _write_env_tokens(env_file, tokens)
         print(f"→ updated {env_file} with fresh tokens")
+        if batch_runner_token:
+            print("✓ batch-runner CP token written to .env")
 
         # The worker container booted in the earlier `compose up` with
         # whatever LOOM_WORKER_TOKEN was in .env BEFORE the seed ran —
@@ -304,6 +358,19 @@ def _up(args: argparse.Namespace) -> int:
             check=False,
         )
 
+        if batch_runner_token:
+            # loom-service booted without LOOM_SVC_BATCH_RUNNER_CP_TOKEN
+            # (it wasn't in .env yet when compose first started it).
+            # Force-recreate so it picks up the freshly-written token.
+            print("→ recreating loom-service so it picks up LOOM_SVC_BATCH_RUNNER_CP_TOKEN")
+            _run(
+                [
+                    *_compose_args(compose_file, env_file),
+                    "up", "-d", "--force-recreate", "--no-deps", "loom-service",
+                ],
+                check=False,
+            )
+
     _print_summary(tokens)
     return 0
 
@@ -312,6 +379,7 @@ _ENV_TOKEN_KEYS: dict[str, str] = {
     "team": "LOOM_TEAM_TOKEN",
     "worker": "LOOM_WORKER_TOKEN",
     "admin": "LOOM_ADMIN_TOKEN",
+    "batch_runner_cp": "LOOM_SVC_BATCH_RUNNER_CP_TOKEN",
 }
 
 
@@ -544,6 +612,14 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         help=(
             "Dev singleton admin secrets.toml path mounted by compose "
             f"(default: {_DEFAULT_DEV_ADMIN_SECRET_FILE})"
+        ),
+    )
+    p_up.add_argument(
+        "--cp-url",
+        default=_DEFAULT_CP_URL,
+        help=(
+            "Control Plane base URL for minting the batch-runner token "
+            f"(default: {_DEFAULT_CP_URL})"
         ),
     )
     p_up.set_defaults(handler=_up)

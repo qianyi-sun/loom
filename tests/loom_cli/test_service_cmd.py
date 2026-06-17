@@ -401,7 +401,9 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
          patch("loom_cli.service_cmd._seed_test_data",
                return_value=(0, fake_tokens)), \
          patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value=admin_secret_token):
+               return_value=admin_secret_token), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=None):
         rc = main([
             "service", "up",
             "--compose-file", str(compose),
@@ -429,11 +431,9 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
     assert "-d" in recreate_argv
     assert "--no-deps" in recreate_argv
 
-    # Order check: the recreate must come AFTER _write_env_tokens
-    # has run (i.e., after the .env file has the new token). We assert
-    # this by confirming the recreate is the LAST _run call (since
-    # _write_env_tokens is between _seed_test_data and the recreate
-    # in _up).
+    # Order check: the worker recreate must come AFTER _write_env_tokens
+    # has run. When mint returns None (no loom-service recreate), the
+    # worker recreate is the last _run call.
     assert captured_run_calls[-1] == recreate_argv, (
         "worker recreate must be the last subprocess call, AFTER "
         "_write_env_tokens has persisted fresh tokens"
@@ -473,7 +473,9 @@ def test_up_skips_worker_recreate_when_no_env_file(
          patch("loom_cli.service_cmd._seed_test_data",
                return_value=(0, fake_tokens)), \
          patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value="loom_admin_" + "N" * 43):
+               return_value="loom_admin_" + "N" * 43), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value="loom_br_unused"):
         # argparse defaults --env-file to <compose_dir>/.env if not
         # explicitly None, so we have to pass --env-file pointing
         # somewhere AND ensure the loader treats it as "absent".
@@ -483,17 +485,18 @@ def test_up_skips_worker_recreate_when_no_env_file(
         # branch reachable only via the API, not the CLI flag set.
         import argparse
 
-        from loom_cli.service_cmd import _up
+        from loom_cli.service_cmd import _DEFAULT_CP_URL, _up
         args = argparse.Namespace(
             compose_file=compose,
             env_file=None,
             db_url="postgresql://x/y",
             admin_secret_file=tmp_path / ".loom" / "admin" / "secrets.toml",
+            cp_url=_DEFAULT_CP_URL,
         )
         rc = _up(args)
 
     assert rc == 0
-    # No recreate should have happened.
+    # No recreate should have happened (env_file is None → nothing to write).
     recreate_calls = [
         argv for argv in captured_run_calls
         if "--force-recreate" in argv
@@ -583,3 +586,292 @@ def test_rotate_admin_replaces_secret_without_printing_new_token(
     assert new_token not in out
     assert old_token not in out
     assert "restart" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# _mint_batch_runner_cp_token
+# ---------------------------------------------------------------------------
+
+
+def test_mint_batch_runner_cp_token_returns_token_on_201(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 201 response with a token field yields the raw token string."""
+    import httpx
+
+    from loom_cli.service_cmd import _mint_batch_runner_cp_token
+
+    def _fake_post(url, *, json, headers, timeout):  # type: ignore[no-untyped-def]
+        assert "/admin/batch-runner-tokens" in url
+        assert "Authorization" in headers
+        return httpx.Response(201, json={"token": "loom_br_testtoken", "token_hash_prefix": "ab12cd34"})
+
+    monkeypatch.setattr("loom_cli.service_cmd.httpx.post", _fake_post)
+    result = _mint_batch_runner_cp_token("loom_admin_" + "A" * 43)
+    assert result == "loom_br_testtoken"
+
+
+def test_mint_batch_runner_cp_token_returns_none_on_non_201(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A non-201 response yields None and prints a warning."""
+    import httpx
+
+    from loom_cli.service_cmd import _mint_batch_runner_cp_token
+
+    def _fake_post(url, *, json, headers, timeout):  # type: ignore[no-untyped-def]
+        return httpx.Response(403, text="missing scope admin:tokens")
+
+    monkeypatch.setattr("loom_cli.service_cmd.httpx.post", _fake_post)
+    result = _mint_batch_runner_cp_token("loom_admin_" + "B" * 43)
+    assert result is None
+    err = capsys.readouterr().err
+    assert "warning" in err.lower()
+    assert "403" in err
+
+
+def test_mint_batch_runner_cp_token_returns_none_on_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A network error yields None and prints a recoverable warning."""
+    import httpx
+
+    from loom_cli.service_cmd import _mint_batch_runner_cp_token
+
+    def _fake_post(url, *, json, headers, timeout):  # type: ignore[no-untyped-def]
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr("loom_cli.service_cmd.httpx.post", _fake_post)
+    result = _mint_batch_runner_cp_token("loom_admin_" + "C" * 43)
+    assert result is None
+    err = capsys.readouterr().err
+    assert "warning" in err.lower()
+    assert "connection refused" in err
+
+
+# ---------------------------------------------------------------------------
+# _up: batch-runner token integration
+# ---------------------------------------------------------------------------
+
+
+def test_up_mints_batch_runner_token_and_writes_to_env(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """After a successful seed, _up mints a batch-runner CP token, writes
+    it to .env as LOOM_SVC_BATCH_RUNNER_CP_TOKEN, and prints a confirm line."""
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+
+    fake_tokens = {
+        "team": "loom_team_fresh",
+        "worker": "loom_w_fresh",
+    }
+    admin_secret_token = "loom_admin_" + "U" * 43
+    batch_runner_token = "loom_br_fakebatchtoken"
+
+    def _capture_run(argv, *_args, **_kwargs):
+        return CompletedProcess(argv, 0, "", "")
+
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value=admin_secret_token), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=batch_runner_token) as mock_mint:
+        rc = main([
+            "service", "up",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+    # mint was called with the admin token
+    mock_mint.assert_called_once()
+    call_args = mock_mint.call_args
+    assert call_args.args[0] == admin_secret_token
+
+    # token written to .env
+    assert env_file.exists()
+    env_content = env_file.read_text()
+    assert f"LOOM_SVC_BATCH_RUNNER_CP_TOKEN={batch_runner_token}" in env_content
+
+    # confirmation line printed
+    out = capsys.readouterr().out
+    assert "batch-runner CP token written to .env" in out
+
+
+def test_up_recreates_loom_service_after_writing_batch_runner_token(
+    tmp_path: Path,
+) -> None:
+    """loom-service must be force-recreated AFTER .env is updated so it
+    reads the freshly-minted LOOM_SVC_BATCH_RUNNER_CP_TOKEN."""
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+
+    captured_run_calls: list[list[str]] = []
+
+    def _capture_run(argv, *_args, **_kwargs):
+        captured_run_calls.append(list(argv))
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {"team": "loom_team_x", "worker": "loom_w_x"}
+    admin_secret_token = "loom_admin_" + "V" * 43
+    batch_runner_token = "loom_br_recreatetest"
+
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value=admin_secret_token), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=batch_runner_token):
+        rc = main([
+            "service", "up",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+
+    # loom-service recreate call must exist
+    svc_recreate_calls = [
+        argv for argv in captured_run_calls
+        if "--force-recreate" in argv and "loom-service" in argv
+    ]
+    assert len(svc_recreate_calls) == 1, (
+        f"expected exactly one --force-recreate loom-service call; "
+        f"got {len(svc_recreate_calls)} of {len(captured_run_calls)} _run calls. "
+        f"All argvs: {captured_run_calls!r}"
+    )
+    svc_recreate_argv = svc_recreate_calls[0]
+    assert "up" in svc_recreate_argv
+    assert "-d" in svc_recreate_argv
+    assert "--no-deps" in svc_recreate_argv
+
+    # The loom-service recreate must come AFTER the env file is written
+    # (i.e., it must be a later _run call than the initial `up -d`).
+    initial_up_idx = next(
+        i for i, argv in enumerate(captured_run_calls)
+        if "up" in argv and "-d" in argv and "--force-recreate" not in argv
+    )
+    svc_recreate_idx = captured_run_calls.index(svc_recreate_argv)
+    assert svc_recreate_idx > initial_up_idx, (
+        "loom-service recreate must come after initial compose up"
+    )
+
+    # env file must have the token before the recreate ran (we wrote it)
+    assert f"LOOM_SVC_BATCH_RUNNER_CP_TOKEN={batch_runner_token}" in env_file.read_text()
+
+
+def test_up_skips_loom_service_recreate_when_mint_fails(
+    tmp_path: Path,
+) -> None:
+    """If minting the batch-runner token fails (returns None), _up must
+    not attempt to recreate loom-service — that would be pointless."""
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+
+    captured_run_calls: list[list[str]] = []
+
+    def _capture_run(argv, *_args, **_kwargs):
+        captured_run_calls.append(list(argv))
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {"team": "loom_team_x", "worker": "loom_w_x"}
+
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value="loom_admin_" + "W" * 43), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=None):
+        rc = main([
+            "service", "up",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+    # No loom-service recreate when mint failed
+    svc_recreate_calls = [
+        argv for argv in captured_run_calls
+        if "--force-recreate" in argv and "loom-service" in argv
+    ]
+    assert svc_recreate_calls == [], (
+        f"unexpected loom-service recreate when mint failed: {svc_recreate_calls!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _write_env_tokens: batch_runner_cp key
+# ---------------------------------------------------------------------------
+
+
+def test_write_env_tokens_writes_batch_runner_cp_token(tmp_path: Path) -> None:
+    """LOOM_SVC_BATCH_RUNNER_CP_TOKEN must be persisted alongside the
+    other token keys when the batch_runner_cp label is present."""
+    from loom_cli.service_cmd import _write_env_tokens
+
+    env_file = tmp_path / ".env"
+    _write_env_tokens(env_file, {
+        "team": "loom_team_t",
+        "worker": "loom_w_w",
+        "admin": "loom_admin_a",
+        "batch_runner_cp": "loom_br_b",
+    })
+    content = env_file.read_text()
+    assert "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_b" in content
+
+
+def test_write_env_tokens_replaces_existing_batch_runner_cp_token(
+    tmp_path: Path,
+) -> None:
+    """Idempotent overwrite: an existing LOOM_SVC_BATCH_RUNNER_CP_TOKEN
+    line is replaced with the new value on re-seed."""
+    from loom_cli.service_cmd import _write_env_tokens
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LOOM_TEAM_TOKEN=loom_team_old\n"
+        "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_old\n",
+    )
+    _write_env_tokens(env_file, {
+        "team": "loom_team_new",
+        "batch_runner_cp": "loom_br_new",
+    })
+    lines = env_file.read_text().splitlines()
+    assert "LOOM_TEAM_TOKEN=loom_team_new" in lines
+    assert "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_new" in lines
+    assert not any("loom_br_old" in line for line in lines)
