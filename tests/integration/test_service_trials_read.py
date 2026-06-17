@@ -23,7 +23,7 @@ from sqlalchemy import create_engine, delete, insert, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -425,3 +425,41 @@ async def test_filter_by_task_id(
     assert r2.status_code == 200
     items = r2.json()["items"]
     assert all(it["task_id"] == task_id for it in items)
+
+
+async def test_filter_by_batch_id(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    """Inject a batch + back-link the first two trials; the third
+    keeps `batch_id = NULL`. Filtering by the batch id must return
+    exactly the two linked trials."""
+    app, raw, team_id, trial_ids = trials_setup
+    batch_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Batch).values(
+            id=batch_id, team_id=team_id, name="qa-batch-161",
+            task_filter={}, trial_config={},
+        ))
+        s.execute(
+            update(Trial)
+            .where(Trial.id.in_(trial_ids[:2]))
+            .values(batch_id=batch_id),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials?batch_id={batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    returned_ids = {it["id"] for it in items}
+    assert returned_ids == {str(trial_ids[0]), str(trial_ids[1])}

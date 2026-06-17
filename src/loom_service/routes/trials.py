@@ -107,6 +107,7 @@ async def list_trials(
     sc: SessionAndCtx,
     team_id: Annotated[UUID | None, Query()] = None,
     task_id: Annotated[str | None, Query()] = None,
+    batch_id: Annotated[UUID | None, Query()] = None,
     state: Annotated[
         str | None,
         Query(description="comma-separated state filter"),
@@ -134,6 +135,8 @@ async def list_trials(
         stmt = stmt.where(Trial.team_id == target_team)
     if task_id is not None:
         stmt = stmt.where(Trial.task_id == task_id)
+    if batch_id is not None:
+        stmt = stmt.where(Trial.batch_id == batch_id)
     if state:
         wanted = [x.strip() for x in state.split(",") if x.strip()]
         if wanted:
