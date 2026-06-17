@@ -69,6 +69,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
         'image_tag = "1.2.3"\n'
         'ingress_host = "loom.acme.example"\n'
         'gateway_public_host = "gw.acme.example"\n'
+        'worker_max_concurrent = 12\n'
         '[replicas]\n'
         'service = 5\n'
         'worker = 10\n',
@@ -78,6 +79,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     assert cfg.image_tag == "1.2.3"
     assert cfg.ingress_host == "loom.acme.example"
     assert cfg.gateway_public_host == "gw.acme.example"
+    assert cfg.worker_max_concurrent == 12
     assert cfg.replicas.service == 5
     assert cfg.replicas.worker == 10
     # Unspecified fields keep their defaults.
@@ -235,6 +237,24 @@ def test_render_custom_storage_sizes() -> None:
         and d["metadata"]["name"] == "loom-worker-trajectories"
     )
     assert worker_pvc["spec"]["resources"]["requests"]["storage"] == "500Gi"
+
+
+def test_render_custom_worker_max_concurrent() -> None:
+    """Cluster operators must be able to size worker throughput
+    explicitly instead of relying on the worker process default."""
+    docs = _load_docs(render_manifests(ClusterConfig(worker_max_concurrent=12)))
+    worker = next(
+        d for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+    )
+    env = {
+        item["name"]: item
+        for item in worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["LOOM_WORKER_MAX_CONCURRENT"] == {
+        "name": "LOOM_WORKER_MAX_CONCURRENT",
+        "value": "12",
+    }
 
 
 def test_render_uses_strict_undefined_so_missing_var_fails_loudly(

@@ -26,6 +26,8 @@ spec:
               valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
             - name: LOOM_WORKER_MINIO_SECRET_KEY
               valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+            - name: LOOM_WORKER_MAX_CONCURRENT
+              value: "5"
           volumeMounts:
             - name: trajectories
               mountPath: /var/lib/loom/trajectories

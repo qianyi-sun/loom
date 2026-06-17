@@ -93,6 +93,13 @@ line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
 
+[tool.uv]
+# Keep uv resolution valid for both local Mac development and Linux CI.
+required-environments = [
+  "sys_platform == 'darwin'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF"]
 # E501: line length handled by formatter.

@@ -17,6 +17,7 @@ cat > cluster-config.toml <<EOF
 namespace = "loom"
 image_tag = "0.7"
 ingress_host = "loom.example.com"
+worker_max_concurrent = 5
 # gateway_public_host = "gateway.loom.example.com"  # opt in to expose
 EOF
 
@@ -578,9 +579,16 @@ staging cluster — automation is tracked in #111.
 
 - 1 vCPU + 256 MiB per Control Plane replica handles ~200 RPS for
   PATCH/GET; bump if `state_patch_total{result="timeout"}` non-zero.
-- Each Worker pod runs `max_concurrent` (default 5) trials. Memory
-  scales with the trajectory ring buffer + the largest artifact in
-  flight; 8 GiB limit covers most workloads.
+- Each Worker process runs `LOOM_WORKER_MAX_CONCURRENT` trials
+  (default 5). Memory scales with the trajectory ring buffer + the
+  largest artifact in flight; 8 GiB limit covers most workloads.
+- For shared-dev or staging hosts outside Kubernetes, use
+  [remote-worker-pool.md](remote-worker-pool.md). Start at concurrency
+  5 per worker host, then raise only after CPU, RAM, Docker cleanup,
+  MinIO throughput, and provider rate limits are healthy.
+- Until Docker sandbox CPU/RAM limits are enforced per trial, treat
+  higher worker concurrency as an operator decision backed by load-test
+  evidence, not just a CPU-count formula.
 - Postgres: 50 GiB volume covers ~10M trial rows. Trial rows are
   small (< 4 KiB); trajectory JSONL lives in MinIO, not Postgres.
 - MinIO: depends entirely on trajectory + artifact volume. 500 GiB

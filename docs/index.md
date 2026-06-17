@@ -18,6 +18,9 @@ What you're looking for, where it lives:
 - **[operator-runbook.md](operator-runbook.md)** — deployment,
   upgrade/rollback, rate-card management, token rotation, alarm
   response, backup/restore, capacity planning
+- **[remote-worker-pool.md](remote-worker-pool.md)** — join extra
+  Docker-capable hosts to an existing control node for shared-dev or
+  staging capacity before full Kubernetes cluster mode
 
 ## I want to understand how Loom is built
 

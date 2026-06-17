@@ -359,13 +359,24 @@ Rewrap during master-key rotation bumps `provider_connections.updated_at` for ev
 
 ## Worker concurrency
 
-One `loom-worker` DaemonSet pod per node. The process handles N concurrent trials via the existing asyncio Semaphore, gated by `LOOM_WORKER_CONCURRENCY`:
+One `loom-worker` Deployment replica runs one worker process. That
+process handles N concurrent trials via the existing asyncio Semaphore,
+gated by `LOOM_WORKER_MAX_CONCURRENT`. The rendered manifest value comes
+from `cluster-config.toml`'s `worker_max_concurrent` field and defaults
+to 5, matching `WorkerSettings.max_concurrent`.
+
+Use the CPU/memory formula as an upper-bound planning heuristic, not as
+the default:
 
 ```
-LOOM_WORKER_CONCURRENCY = min(cpu_cores // 2, memory_gb // 8, 32)
+worker_max_concurrent <= min(cpu_cores // 2, memory_gb // 8, 32)
 ```
 
-One DaemonSet pod (not N replicas) because one process owns docker.sock cleanly, intra-process file locks are simpler than cross-process flock dances, and DRF claim is per-worker-id. The pod advertises `workers.capabilities.max_concurrent = LOOM_WORKER_CONCURRENCY`.
+One worker process per worker host is preferred because one process owns
+docker.sock cleanly, intra-process file locks are simpler than
+cross-process flock dances, and DRF claim is per-worker-id. The worker
+capability advertisement should include the effective concurrency once
+the scheduler consumes per-worker capacity directly.
 
 ## Multi-tenancy boundaries
 

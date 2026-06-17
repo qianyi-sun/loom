@@ -55,6 +55,8 @@ running `loom service up`.
 
 ```bash
 # One-time — uv creates .venv/ on first sync; activate it after.
+# Dependency resolution is intentionally constrained in pyproject.toml
+# to stay valid on both local macOS development and Linux x86_64 CI.
 uv sync --extra dev
 uv pip install -e packages/loom-launcher \
                -e packages/loom-benchmarks \

@@ -50,6 +50,10 @@ class ClusterConfig:
       can set it to `gateway.<base>` to keep direct gateway access.
     - `postgres_*`, `minio_*`, `worker_trajectory_storage_gi`: storage
       knobs.
+    - `worker_max_concurrent`: per-worker process trial concurrency.
+      This maps to WorkerSettings.max_concurrent via
+      LOOM_WORKER_MAX_CONCURRENT and defaults to the worker's runtime
+      default.
     """
 
     namespace: str = "loom"
@@ -61,6 +65,7 @@ class ClusterConfig:
     minio_image: str = "minio/minio"
     minio_storage_gi: int = 500
     worker_trajectory_storage_gi: int = 100
+    worker_max_concurrent: int = 5
     replicas: ReplicaConfig = field(default_factory=ReplicaConfig)
 
     def to_render_context(self) -> dict[str, Any]:
