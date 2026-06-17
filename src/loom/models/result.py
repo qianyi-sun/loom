@@ -30,6 +30,7 @@ class FailureReason(StrEnum):
     ENV_HEALTHCHECK_FAILED = "env_healthcheck_failed"
     VERIFIER_ERROR = "verifier_error"
     VERIFIER_TIMEOUT = "verifier_timeout"
+    ARTIFACT_UPLOAD_FAILED = "artifact_upload_failed"
     TRAJECTORY_FLUSH_FAILED = "trajectory_flush_failed"
     EXHAUSTED_RETRIES = "exhausted_retries"
     WORKER_LOST_CLAIM = "worker_lost_claim"

@@ -19,6 +19,7 @@ from loom.models.networking import NetworkPolicy
 from loom.models.result import (
     AgentInfo,
     FailureReason,
+    StepError,
     TrialResult,
     TrialState,
 )
@@ -170,7 +171,12 @@ class Trial:
                         )
                         result.steps.append(sr)
                     result.reward = _aggregate(self.ctx, result)
-                    result.state = TrialState.SUCCEEDED
+                    artifact_error = _first_artifact_error(result)
+                    if artifact_error is not None:
+                        result.state = TrialState.FAILED
+                        result.failure_reason = FailureReason.ARTIFACT_UPLOAD_FAILED
+                    else:
+                        result.state = TrialState.SUCCEEDED
                 except asyncio.CancelledError:
                     cancelled = True
                     result.state = TrialState.CANCELLED
@@ -387,6 +393,13 @@ def _aggregate(ctx: TrialContext, result: TrialResult) -> dict[str, float] | Non
     if strategy == "min":
         return {k: min(r.get(k, 0.0) for r in rewards) for k in keys}
     return {k: sum(r.get(k, 0.0) for r in rewards) / len(rewards) for k in keys}
+
+
+def _first_artifact_error(result: TrialResult) -> StepError | None:
+    for step in result.steps:
+        if step.error is not None and step.error.phase == "artifacts":
+            return step.error
+    return None
 
 
 def _format_tb(exc: BaseException) -> str:

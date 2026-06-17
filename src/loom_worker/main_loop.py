@@ -206,7 +206,7 @@ def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
 
 
 async def _ensure_runtime_buckets(object_store: ObjectStore) -> None:
-    for bucket in ("trajectories",):
+    for bucket in ("trajectories", "artifacts"):
         try:
             await object_store.ensure_bucket(bucket)
         except Exception:

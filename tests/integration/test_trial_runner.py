@@ -194,6 +194,66 @@ async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type:
     assert ("failed", FailureReason.TRAJECTORY_FLUSH_FAILED.value) in calls
 
 
+async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[no-untyped-def]
+    hello_task, tmp_path: Path,
+):
+    """Artifact persistence is part of platform success.
+
+    The verifier may still return a reward from the sandbox workspace, but
+    if a declared artifact cannot be persisted to object storage, the worker
+    must not report the trial as succeeded.
+    """
+
+    class MissingArtifactBucketStore(FakeObjectStore):
+        async def put_object(self, *, bucket: str, key: str, body: bytes):  # type: ignore[no-untyped-def]
+            if bucket == "artifacts":
+                raise RuntimeError(f"NoSuchBucket: {bucket}/{key}")
+            return await super().put_object(bucket=bucket, key=key, body=body)
+
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+        calls.append((state, failure_reason))
+        return True
+
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+        "find /workspace -path /workspace/result.txt -type f -print0": ExecResult(
+            return_code=0, stdout=b"/workspace/result.txt\x00", stderr=b"",
+            truncated=False, duration_sec=0.01,
+        ),
+    })
+    trial_id = uuid4()
+    task_config = _task_config().model_copy(update={
+        "steps": [StepConfig(name="main", artifacts=["result.txt"])],
+    })
+    runner = LocalTrialRunner(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task_config, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=_driver_factory(handler),
+        agent_factory=lambda task_dir, _gw, _model, _name:
+            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=MissingArtifactBucketStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.ARTIFACT_UPLOAD_FAILED
+    assert result.steps[0].error is not None
+    assert result.steps[0].error.phase == "artifacts"
+    assert ("failed", FailureReason.ARTIFACT_UPLOAD_FAILED.value) in calls
+
+
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
     hello_task, tmp_path: Path, caplog,
 ):
