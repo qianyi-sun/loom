@@ -298,7 +298,41 @@ curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN"
 ```
 
-Team tokens: managed via `loom_service`'s public API:
+### Team + admin tokens — `loom admin tokens team`
+
+Team-token rotation hits `loom_service`'s public `/api/v1/tokens`
+route, so it uses the bearer + server URL from `loom auth login`
+(no port-forward). Admin callers must supply `--admin-actor NAME`
+which the server records in `admin_audit_events`.
+
+```bash
+loom auth login --server https://loom.example.com --token env:LOOM_ADMIN_TOKEN
+
+# Mint a fresh team token + print the rollout checklist.
+loom admin tokens team rotate \
+  --team-id <UUID> \
+  --scopes read:own,submit \
+  --expires-in-days 90 \
+  --admin-actor qianyi
+
+# After clients have moved over, revoke the old token by its 8-hex prefix:
+loom admin tokens team revoke <OLD_PREFIX> --admin-actor qianyi
+```
+
+One-off mint / revoke without the rollout reminder:
+
+```bash
+loom admin tokens team mint --team-id <UUID> --admin-actor qianyi
+loom admin tokens team revoke 01234567 --admin-actor qianyi
+```
+
+`--scopes` accepts a comma-separated list. Known scopes: `read:own`,
+`submit`, `admin:tokens`, `admin:rate_cards` — anything else is rejected
+client-side before the round-trip. `--type` defaults to `team`; pass
+`--type admin` to mint a global admin token (the server rejects
+`--type admin` combined with `--team-id`). Default lifetime is 90 days.
+
+Raw curl is still supported for scripted automation:
 ```bash
 curl -X POST https://loom.example.com/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -306,12 +340,8 @@ curl -X POST https://loom.example.com/api/v1/tokens \
   -d '{"type": "team", "team_id": "...",
        "scopes": ["submit"], "expires_in_days": 90}'
 ```
-Admin callers must include `X-Loom-Admin-Actor`; service token create/revoke
-admin mutations are written to `admin_audit_events`. `type` is required;
-allowed values are currently `team` and `admin`, though `admin` is scheduled for
-removal in the final #10 DB-admin removal slice.
-Recognized `scopes`: `read:own`, `submit`, `admin:tokens`,
-`admin:rate_cards`. Unrecognized scopes 400 at the route.
+`type` is required; allowed values are `team` and `admin`, though
+`admin` is scheduled for removal in the final #10 DB-admin removal slice.
 
 ## Provider connection cost attribution
 

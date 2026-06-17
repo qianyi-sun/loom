@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
 import httpx
@@ -99,8 +100,7 @@ def test_mint_json_format_emits_raw_json(
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    import json as _json
-    parsed = _json.loads(out)
+    parsed = json.loads(out)
     assert parsed == {"token": "t", "token_hash_prefix": "p"}
     # Rollout-hint text MUST NOT be present in JSON mode.
     assert "loom-secrets" not in out
@@ -352,3 +352,338 @@ def test_rotate_json_mode_skips_checklist(
     out = capsys.readouterr().out
     assert "Rotation checklist" not in out
     assert "rollout restart" not in out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# loom admin tokens team — uses loom_service /api/v1/tokens
+# ──────────────────────────────────────────────────────────────────────
+
+
+from pathlib import Path  # noqa: E402
+
+_TEAM_ID = "00000000-0000-0000-0000-000000000aaa"
+
+
+@pytest.fixture
+def _team_logged_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Each team-token test starts logged in with an isolated config
+    dir so we don't read the dev `~/.config/loom/config.toml`."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("MY_TOK", "loom_admin_abcdefgh")
+    main([
+        "auth", "login",
+        "--server", "https://loom.test",
+        "--token", "env:MY_TOK",
+    ])
+
+
+class _MockServer:
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.canned: dict[tuple[str, str], httpx.Response] = {}
+
+
+@pytest.fixture
+def mock_server(
+    monkeypatch: pytest.MonkeyPatch, _team_logged_in: None,
+) -> _MockServer:
+    server = _MockServer()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        server.requests.append(request)
+        key = (request.method, request.url.path)
+        if key in server.canned:
+            return server.canned[key]
+        return httpx.Response(404, json={"detail": f"no mock for {key}"})
+
+    transport = httpx.MockTransport(_handler)
+
+    def _patched(cfg: Any, *, timeout: float = 30.0) -> httpx.Client:
+        return httpx.Client(
+            base_url=cfg.server_url,
+            headers={"Authorization": f"Bearer {cfg.auth_token}"},
+            transport=transport,
+            timeout=timeout,
+        )
+
+    monkeypatch.setattr("loom_cli.admin_cmd.authed_client", _patched)
+    return server
+
+
+# ── team mint ────────────────────────────────────────────────────────
+
+
+def test_team_mint_posts_payload(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "loom_team_xyz",
+            "token_hash_prefix": "01234567",
+            "expires_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    rc = main([
+        "admin", "tokens", "team", "mint",
+        "--team-id", _TEAM_ID,
+        "--scopes", "read:own,submit",
+        "--expires-in-days", "30",
+        "--admin-actor", "qianyi",
+    ])
+    assert rc == 0
+    req = mock_server.requests[0]
+    body = json.loads(req.content)
+    assert body == {
+        "type": "team",
+        "team_id": _TEAM_ID,
+        "scopes": ["read:own", "submit"],
+        "expires_in_days": 30,
+    }
+    assert req.headers["X-Loom-Admin-Actor"] == "qianyi"
+    out = capsys.readouterr().out
+    assert "01234567" in out
+    assert "loom_team_xyz" in out
+
+
+def test_team_mint_admin_type_omits_team_id_when_none(
+    mock_server: _MockServer,
+) -> None:
+    """`--type admin` without --team-id sends no team_id field — the
+    server rejects admin+team_id at 400."""
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "loom_admin_xyz",
+            "token_hash_prefix": "abcd0123",
+            "expires_at": "2027-01-01T00:00:00+00:00",
+        },
+    )
+    rc = main([
+        "admin", "tokens", "team", "mint",
+        "--type", "admin",
+        "--scopes", "admin:tokens",
+        "--admin-actor", "qianyi",
+    ])
+    assert rc == 0
+    body = json.loads(mock_server.requests[0].content)
+    assert "team_id" not in body
+    assert body["type"] == "admin"
+
+
+def test_team_mint_rejects_unknown_scope_before_request(
+    _team_logged_in: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Unknown scopes fail at argparse-time so a typo doesn't burn an
+    HTTP round-trip + audit log entry."""
+    with pytest.raises(SystemExit):
+        main([
+            "admin", "tokens", "team", "mint",
+            "--scopes", "submit,bogus",
+            "--team-id", _TEAM_ID,
+        ])
+    err = capsys.readouterr().err
+    assert "bogus" in err
+
+
+def test_team_mint_default_scopes(
+    mock_server: _MockServer,
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "loom_team_xyz",
+            "token_hash_prefix": "abc12345",
+            "expires_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    rc = main([
+        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+    ])
+    assert rc == 0
+    body = json.loads(mock_server.requests[0].content)
+    assert body["scopes"] == ["read:own", "submit"]
+    assert body["expires_in_days"] == 90  # default
+
+
+def test_team_mint_no_admin_actor_omits_header(
+    mock_server: _MockServer,
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "t", "token_hash_prefix": "ab123456",
+            "expires_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    main([
+        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+    ])
+    assert "X-Loom-Admin-Actor" not in mock_server.requests[0].headers
+
+
+def test_team_mint_not_logged_in_returns_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # No `auth login` — config is empty.
+    rc = main([
+        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+    ])
+    assert rc == 2
+    assert "not logged in" in capsys.readouterr().err.lower()
+
+
+def test_team_mint_server_403_returns_1(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        403, json={"detail": "X-Loom-Admin-Actor required"},
+    )
+    rc = main([
+        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+    ])
+    assert rc == 1
+    assert "403" in capsys.readouterr().err
+
+
+def test_team_mint_json_format(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "t", "token_hash_prefix": "01234567",
+            "expires_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    main([
+        "admin", "tokens", "team", "mint",
+        "--team-id", _TEAM_ID, "--format", "json",
+    ])
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["token_hash_prefix"] == "01234567"
+
+
+# ── team revoke ──────────────────────────────────────────────────────
+
+
+def test_team_revoke_deletes_at_correct_url(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[
+        ("DELETE", "/api/v1/tokens/01234567")
+    ] = httpx.Response(204)
+    rc = main([
+        "admin", "tokens", "team", "revoke", "01234567",
+        "--admin-actor", "qianyi",
+    ])
+    assert rc == 0
+    req = mock_server.requests[0]
+    assert req.method == "DELETE"
+    assert req.url.path == "/api/v1/tokens/01234567"
+    assert req.headers["X-Loom-Admin-Actor"] == "qianyi"
+    assert "01234567" in capsys.readouterr().out
+
+
+def test_team_revoke_rejects_non_hex_prefix(
+    _team_logged_in: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main([
+        "admin", "tokens", "team", "revoke", "deadbeefX",
+    ])
+    assert rc == 2
+    assert "hex" in capsys.readouterr().err.lower()
+
+
+def test_team_revoke_rejects_wrong_length_prefix(
+    _team_logged_in: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Server requires exactly 8 hex chars; reject 7 + 9 client-side."""
+    for bad in ("abcdef0", "abcdef012"):
+        rc = main([
+            "admin", "tokens", "team", "revoke", bad,
+        ])
+        assert rc == 2
+
+
+def test_team_revoke_uppercase_hex_rejected(
+    _team_logged_in: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Server's check is lowercase hex; client matches."""
+    rc = main([
+        "admin", "tokens", "team", "revoke", "ABCDEF01",
+    ])
+    assert rc == 2
+
+
+def test_team_revoke_404_returns_1(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[
+        ("DELETE", "/api/v1/tokens/01234567")
+    ] = httpx.Response(404, json={"detail": "token not found"})
+    rc = main([
+        "admin", "tokens", "team", "revoke", "01234567",
+    ])
+    assert rc == 1
+
+
+# ── team rotate ──────────────────────────────────────────────────────
+
+
+def test_team_rotate_mints_then_prints_checklist(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "loom_team_new",
+            "token_hash_prefix": "newpref0",
+            "expires_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    rc = main([
+        "admin", "tokens", "team", "rotate",
+        "--team-id", _TEAM_ID,
+    ])
+    assert rc == 0
+    # Only ONE request — rotate does not auto-DELETE.
+    assert len(mock_server.requests) == 1
+    out = capsys.readouterr().out
+    assert "newpref0" in out
+    assert "Rotation checklist" in out
+    assert "secure channel" in out
+    assert "loom admin tokens team revoke" in out
+
+
+def test_team_rotate_mint_failure_propagates(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        403, json={"detail": "X-Loom-Admin-Actor required"},
+    )
+    rc = main([
+        "admin", "tokens", "team", "rotate",
+        "--team-id", _TEAM_ID,
+    ])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "Rotation checklist" not in out
+
+
+def test_team_rotate_json_skips_checklist(
+    mock_server: _MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
+        201, json={
+            "token": "t", "token_hash_prefix": "ab123456",
+            "expires_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    rc = main([
+        "admin", "tokens", "team", "rotate",
+        "--team-id", _TEAM_ID, "--format", "json",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Rotation checklist" not in out
