@@ -330,6 +330,7 @@ async def test_runner_advances_to_finished_when_all_terminal(
         ).scalar_one()
     sync_engine.dispose()
     assert batch_row.state == "finished"
+    assert batch_row.result_status == "succeeded"
     assert batch_row.finished_at is not None
 
 

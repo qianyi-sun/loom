@@ -570,11 +570,15 @@ Four additions in one migration:
   earlier variants spec.
 - **`batches.result_status`** — outcome lane separate from
   lifecycle `status`. Values: `null` (in progress / pre-terminal),
-  `succeeded` (all trials terminal + all reward > 0),
-  `partial_failed` (mix), `all_failed`, `cancelled`. Computed by
-  the batch-runner when transitioning the lifecycle status to
-  `finished`/`cancelled`. The existing `status` column keeps the
-  lifecycle (`submitted` → `running` → `finished` / `cancelled`).
+  `succeeded` (all child trials reached terminal state `succeeded`),
+  `partial_failed` (mix of succeeded and failed/cancelled terminal
+  child trials), `all_failed`, `cancelled`. Computed by the
+  batch-runner when transitioning the lifecycle status to
+  `finished`/`cancelled`. Reward stays separate as evaluator outcome
+  data and is surfaced through `aggregate_reward`; a missing or zero
+  reward does not by itself make a terminal `succeeded` trial a
+  platform failure. The existing `status` column keeps the lifecycle
+  (`submitted` → `running` → `finished` / `cancelled`).
 - **`trials.combination_idx`** — which Combination this trial
   belongs to within its parent Batch. 0 for single-combination
   batches. The idempotency key becomes
@@ -783,8 +787,8 @@ has no production users.
   sample_idx)` units; idempotency_key 4-segment format for
   multi-combination batches.
 - result_status computation lives in batch_runner's state
-  advance — when transitioning to `finished`, derive from
-  trial reward rollup; when transitioning to `cancelled`, set
+  advance — when transitioning to `finished`, derive from child
+  trial terminal states; when transitioning to `cancelled`, set
   `result_status = "cancelled"`.
 - Shared `resolve_task_filter` honors `subset_kind`; batch
   creation/count and batch-runner fan-out use the same resolver.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from loom_service.batch_runner import next_batch_state
+from loom_service.batch_runner import _compute_result_status, next_batch_state
 
 
 def _empty() -> dict[str, int]:
@@ -74,3 +74,17 @@ def test_first_in_flight_promotes_submitted_to_running() -> None:
     assert next_batch_state(
         current="submitted", expected=2, counts=counts,
     ) == "running"
+
+
+def test_result_status_uses_terminal_state_not_reward() -> None:
+    assert _compute_result_status(["succeeded"]) == "succeeded"
+
+
+def test_result_status_mixed_terminal_states_is_partial_failed() -> None:
+    assert _compute_result_status([
+        "succeeded", "failed", "cancelled",
+    ]) == "partial_failed"
+
+
+def test_result_status_without_succeeded_trials_is_all_failed() -> None:
+    assert _compute_result_status(["failed", "cancelled"]) == "all_failed"

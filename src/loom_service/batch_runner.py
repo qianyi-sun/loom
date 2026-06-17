@@ -164,22 +164,19 @@ async def _submit_one(
 
 
 def _compute_result_status(
-    rewards: list[float | None],
+    terminal_states: list[str],
 ) -> str:
     """Outcome classifier for a finished batch.
 
     Per the spec: succeeded / partial_failed / all_failed.
     Cancelled is set elsewhere (lifecycle override).
 
-    Heuristic: a trial "succeeded" if its `aggregate_reward` is
-    strictly > 0; "failed" otherwise (including None). Apply the
-    classification across the rewards list:
-    - all succeeded → succeeded
-    - all failed → all_failed
-    - mix → partial_failed
+    A trial's platform outcome is its terminal state. Reward is model/evaluator
+    outcome data and can be absent or zero without making a completed trial a
+    platform failure.
     """
-    succeeded = sum(1 for r in rewards if r is not None and r > 0)
-    failed = len(rewards) - succeeded
+    succeeded = sum(1 for state in terminal_states if state == "succeeded")
+    failed = len(terminal_states) - succeeded
     if failed == 0 and succeeded > 0:
         return "succeeded"
     if succeeded == 0:
@@ -210,23 +207,7 @@ async def _advance_batch_state(
         if new_state == "cancelled":
             values["result_status"] = "cancelled"
         elif new_state == "finished":
-            # Compute outcome from finished trials' rewards.
-            result_rows = (await session.execute(
-                select(Trial.result).where(Trial.batch_id == batch.id),
-            )).scalars().all()
-            rewards: list[float | None] = []
-            for r in result_rows:
-                if not r:
-                    rewards.append(None)
-                    continue
-                val = r.get("aggregate_reward")
-                if val is None:
-                    val = r.get("reward")
-                try:
-                    rewards.append(float(val) if val is not None else None)
-                except (TypeError, ValueError):
-                    rewards.append(None)
-            computed = _compute_result_status(rewards)
+            computed = _compute_result_status([str(st) for st in state_rows])
             if batch.result_status == "partial_failed" and (
                 computed == "succeeded"
             ):
