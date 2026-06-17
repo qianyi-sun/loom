@@ -852,6 +852,192 @@ def _preflight(args: argparse.Namespace) -> int:
     return 1 if report.any_fail else 0
 
 
+# ──────────────────────────────────────────────────────────────────────
+# up (#76 Phase 3 — orchestrate preflight → render → apply → wait)
+# ──────────────────────────────────────────────────────────────────────
+
+# Default deadline for the whole "wait for ready" loop after apply.
+# Heuristic: image pull on a cold cluster can take a few minutes;
+# Postgres readiness probe is ~5s after init; MinIO is fast. 10 min
+# covers cold-start safely. Operators can override via `--timeout`.
+_DEFAULT_UP_TIMEOUT_SEC = 600
+_DEFAULT_UP_POLL_INTERVAL_SEC = 5.0
+
+
+@dataclass
+class ApplyResult:
+    """Outcome of the kubectl apply step. `summary_lines` captures
+    kubectl's own per-object reporting (`deployment.apps/loom-service
+    configured`) so operators see what changed."""
+
+    returncode: int
+    summary_lines: list[str]
+    stderr: str
+
+
+def apply_manifests(
+    yaml_text: str, namespace: str, *, context: str | None,
+    extra_args: tuple[str, ...] = (),
+) -> ApplyResult:
+    """Pipe rendered manifests into `kubectl apply -f -`. We shell out
+    to kubectl rather than use the python client's apply path because
+    kubectl handles server-side-apply + multi-doc YAML + namespace
+    auto-creation natively. The result's returncode passes through;
+    callers map it to the right exit code.
+
+    `extra_args` lets tests inject `--dry-run=server` etc. without
+    cluttering the route signature. Production callers leave it empty.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("kubectl") is None:
+        raise RuntimeError(
+            "kubectl is required for `loom cluster up`. install from "
+            "https://kubernetes.io/docs/tasks/tools/ and ensure it's "
+            "on PATH.",
+        )
+
+    cmd: list[str] = ["kubectl", "apply", "-n", namespace, "-f", "-"]
+    if context:
+        cmd.extend(["--context", context])
+    cmd.extend(extra_args)
+
+    proc = subprocess.run(
+        cmd, input=yaml_text, capture_output=True, text=True, check=False,
+    )
+    summary_lines = [
+        line for line in proc.stdout.splitlines() if line.strip()
+    ]
+    return ApplyResult(
+        returncode=proc.returncode,
+        summary_lines=summary_lines,
+        stderr=proc.stderr,
+    )
+
+
+def wait_for_ready(
+    apps_v1: Any, networking_v1: Any, core_v1: Any,
+    namespace: str, *, context: str | None,
+    timeout_sec: int = _DEFAULT_UP_TIMEOUT_SEC,
+    poll_interval_sec: float = _DEFAULT_UP_POLL_INTERVAL_SEC,
+    _sleep: Any = None,
+    _now: Any = None,
+) -> ClusterStatus:
+    """Poll `collect_status` until every component is healthy or the
+    deadline expires. Returns the final ClusterStatus regardless —
+    callers inspect `all_ready` to decide the exit code.
+
+    `_sleep` + `_now` are test seams. Production passes
+    `time.sleep` / `time.monotonic`.
+    """
+    import time
+
+    sleep_fn = _sleep if _sleep is not None else time.sleep
+    now_fn = _now if _now is not None else time.monotonic
+
+    deadline = now_fn() + timeout_sec
+    while True:
+        status = collect_status(
+            apps_v1, networking_v1, core_v1, namespace, context=context,
+        )
+        if status.all_ready:
+            return status
+        if now_fn() >= deadline:
+            return status
+        sleep_fn(poll_interval_sec)
+
+
+def _up(args: argparse.Namespace) -> int:
+    try:
+        apps_v1, net_v1, core_v1, storage_v1 = _load_clients(args.context)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except Exception as exc:
+        sys.stderr.write(
+            f"error: cannot connect to cluster: "
+            f"{type(exc).__name__}: {exc}\n",
+        )
+        return 2
+
+    # 1. Preflight
+    if not args.skip_preflight:
+        try:
+            report = collect_preflight(
+                core_v1, net_v1, storage_v1, args.namespace,
+                context=args.context,
+            )
+        except Exception as exc:
+            sys.stderr.write(
+                f"error: preflight failed: "
+                f"{type(exc).__name__}: {exc}\n",
+            )
+            return 2
+        if report.any_fail:
+            sys.stderr.write(
+                "error: preflight checks failed — refusing to apply. "
+                "Re-run with `loom cluster preflight` to see details, "
+                "or pass `--skip-preflight` if you know what you're "
+                "doing.\n",
+            )
+            sys.stderr.write(_format_preflight_table(report))
+            return 1
+        sys.stdout.write("Preflight: all checks passed.\n")
+
+    # 2. Render
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+        manifests = render_manifests(config)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+
+    # 3. Apply
+    try:
+        result = apply_manifests(
+            manifests, args.namespace, context=args.context,
+        )
+    except RuntimeError as exc:
+        # kubectl missing.
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"error: kubectl apply failed (exit {result.returncode}):\n"
+            f"{result.stderr}\n",
+        )
+        return 1
+    for line in result.summary_lines:
+        sys.stdout.write(f"  {line}\n")
+
+    if args.no_wait:
+        sys.stdout.write(
+            "Applied. Skipping readiness wait (--no-wait).\n",
+        )
+        return 0
+
+    # 4. Wait for ready
+    sys.stdout.write(
+        f"Waiting up to {args.timeout}s for components to become "
+        f"ready...\n",
+    )
+    final = wait_for_ready(
+        apps_v1, net_v1, core_v1, args.namespace,
+        context=args.context, timeout_sec=args.timeout,
+        poll_interval_sec=args.poll_interval,
+    )
+    sys.stdout.write(_format_table(final))
+    if final.all_ready:
+        return 0
+    sys.stderr.write(
+        f"error: components did not reach ready state within "
+        f"{args.timeout}s.\n",
+    )
+    return 1
+
+
 def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom cluster",
@@ -922,6 +1108,62 @@ def dispatch(argv: list[str]) -> int:
         help="Output format. JSON for CI/scripting.",
     )
     p_preflight.set_defaults(handler=_preflight)
+
+    p_up = sub.add_parser(
+        "up",
+        help=(
+            "Bring a Loom cluster up: preflight → render → kubectl "
+            "apply → wait for components to become ready. Composes "
+            "the read-only `preflight`, `render`, and `status` "
+            "commands."
+        ),
+    )
+    p_up.add_argument(
+        "--context", default=None,
+        help="kubeconfig context (default: current context).",
+    )
+    p_up.add_argument(
+        "--namespace", default="loom",
+        help="Kubernetes namespace (default: loom).",
+    )
+    p_up.add_argument(
+        "--config", default=None,
+        help=(
+            "Path to cluster-config.toml. Omit for all defaults "
+            "(see `loom cluster render --help`)."
+        ),
+    )
+    p_up.add_argument(
+        "--skip-preflight", dest="skip_preflight", action="store_true",
+        help=(
+            "Skip the preflight checks. Use sparingly — usually "
+            "intended for re-applying after a known transient "
+            "preflight failure."
+        ),
+    )
+    p_up.add_argument(
+        "--no-wait", dest="no_wait", action="store_true",
+        help=(
+            "Apply manifests and return immediately without waiting "
+            "for components to reach ready state."
+        ),
+    )
+    p_up.add_argument(
+        "--timeout", type=int, default=_DEFAULT_UP_TIMEOUT_SEC,
+        help=(
+            f"Wait timeout in seconds "
+            f"(default: {_DEFAULT_UP_TIMEOUT_SEC})."
+        ),
+    )
+    p_up.add_argument(
+        "--poll-interval", dest="poll_interval", type=float,
+        default=_DEFAULT_UP_POLL_INTERVAL_SEC,
+        help=(
+            f"Poll interval in seconds during the readiness wait "
+            f"(default: {_DEFAULT_UP_POLL_INTERVAL_SEC})."
+        ),
+    )
+    p_up.set_defaults(handler=_up)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
