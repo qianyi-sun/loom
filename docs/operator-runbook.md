@@ -182,6 +182,32 @@ knob you need.
 
 ## Upgrade
 
+### Breaking changes by release
+
+**v0.3 (PR #150, 2026-06-17) — config consolidation.** Two operator-visible breakages when upgrading from a pre-#150 cluster:
+
+1. **`worker_max_concurrent` removed from `cluster-config.toml`.** The field no longer exists on `[render_config]`. Worker concurrency is now controlled by `LOOM_WORKER_MAX_CONCURRENT` (the existing env var). If your `cluster-config.toml` set this field, delete the line — otherwise `loom cluster render` exits with `unknown keys in cluster config: ['worker_max_concurrent']`. To override the default of 5, patch the worker Deployment's env block or set the value in `config/loom-schema.toml`'s `service_config.max_concurrent` and regenerate.
+
+2. **Secret keys renamed in `loom-secrets`.** Two keys changed:
+   - `cp-db-url` (used by loom-service) → `svc-db-url` (loom-service now has its own DB credential slot; control-plane keeps `cp-db-url`)
+   - `svc-campaign-runner-cp-token` → `batch-runner-cp-token`
+
+   To migrate an existing cluster:
+   ```bash
+   # Copy the existing values into the new keys, then drop the old ones.
+   OLD_SVC_DB=$(kubectl get secret loom-secrets -o jsonpath='{.data.cp-db-url}' | base64 -d)
+   OLD_CP_TOKEN=$(kubectl get secret loom-secrets -o jsonpath='{.data.svc-campaign-runner-cp-token}' | base64 -d)
+   kubectl patch secret loom-secrets \
+     -p "{\"stringData\":{\"svc-db-url\":\"$OLD_SVC_DB\",\"batch-runner-cp-token\":\"$OLD_CP_TOKEN\"}}"
+   # Optional: drop the old keys after the rollout settles.
+   ```
+
+   Or run `loom cluster doctor` after the upgrade — it reports any orphan keys (no schema entry references them) and any missing keys (declared in schema, absent from Secret).
+
+3. **New Secret keys required.** `postgres-user` and `postgres-password` are now declared in `[infra_secrets]` and must exist in `loom-secrets` (previously the postgres template assumed they existed but nothing checked). If they're already populated, no action. If not, add them — `loom cluster bootstrap-secrets --rotate` mints fresh postgres-password and emits `<EDIT_ME>` for postgres-user.
+
+### Image upgrade
+
 ```bash
 # Build + push new images
 NEW_TAG=0.8
