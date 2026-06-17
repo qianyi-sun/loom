@@ -288,6 +288,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "cluster":
         from loom_cli.cluster_cmd import dispatch as cluster_dispatch
         return cluster_dispatch(raw[1:])
+    if raw and raw[0] == "admin":
+        from loom_cli.admin_cmd import dispatch as admin_dispatch
+        return admin_dispatch(raw[1:])
     parser = _build_parser()
     args = parser.parse_args(raw)
     return cast(int, args.handler(args))

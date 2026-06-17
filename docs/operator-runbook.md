@@ -253,16 +253,50 @@ requests use whatever card was active when they started.
 
 ## Token rotation
 
-Worker tokens (admin route is CP-internal; reach via port-forward):
-1. Mint a new token via `POST /admin/worker-tokens` (port-forward CP
-   first: `kubectl port-forward deploy/loom-control-plane 8080:8080 &`).
-2. Update `loom-secrets` and `kubectl rollout restart deploy/loom-worker`.
-3. Revoke the old token by its hash prefix:
-   ```bash
-   curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
-     -H "Authorization: Bearer $ADMIN_TOKEN"
-   ```
-   Prefix is the 4–64 hex chars from `token_hash_prefix` returned at issue.
+### Worker tokens — `loom admin tokens worker`
+
+The CP admin surface (`/admin/worker-tokens`) is NOT exposed via
+Ingress; reach it through a port-forward:
+
+```bash
+kubectl port-forward deploy/loom-control-plane 8080:8080 &
+export LOOM_ADMIN_TOKEN=$(yq '.[admin].token' loom-admin-secret.toml)
+```
+
+Then use the CLI (since #80):
+
+```bash
+# Mint + print rollout checklist (does NOT revoke the old token).
+loom admin tokens worker rotate --expires-in-days 365
+
+# Rollout: update Secret + restart workers (the checklist above tells
+# you the kubectl commands).
+
+# After workers re-register cleanly, revoke the old token by prefix:
+loom admin tokens worker revoke <OLD_PREFIX>
+```
+
+For one-off mint or revoke without the rollout reminder:
+
+```bash
+loom admin tokens worker mint --expires-in-days 365
+loom admin tokens worker revoke ab12cd34
+```
+
+All three subcommands accept `--cp-url URL` (default
+`http://localhost:8080`) and `--admin-token SRC` (default
+`env:LOOM_ADMIN_TOKEN`; same `env:VAR | file:PATH | -` indirection
+form as the rest of the CLI). The prefix is the 4-64 hex chars from
+`token_hash_prefix` returned at mint.
+
+Raw curl is still supported for emergency operations:
+```bash
+curl -X POST http://localhost:8080/admin/worker-tokens \
+  -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
+  -d '{"expires_in_days": 365}'
+curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
+  -H "Authorization: Bearer $LOOM_ADMIN_TOKEN"
+```
 
 Team tokens: managed via `loom_service`'s public API:
 ```bash
