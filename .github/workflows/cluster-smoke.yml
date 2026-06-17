@@ -109,6 +109,12 @@ jobs:
           kubectl --context kind-loom-smoke -n loom apply \
             --dry-run=server -f /tmp/manifests.yaml
 
+      - name: loom cluster audit — public/internal boundary check
+        # Static check: no LoadBalancer/NodePort Services, Ingress
+        # backends on the allowlist, no hostPort declarations. Runs
+        # before apply so a boundary regression fails fast (#77).
+        run: uv run python -m loom_cli cluster audit
+
       - name: loom cluster up — apply, skip preflight + wait
         # --skip-preflight: dummy Secrets pass preflight but the smoke
         # doesn't depend on it; --no-wait: pods can't reach Ready

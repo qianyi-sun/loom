@@ -1,0 +1,378 @@
+"""Public/internal boundary auditor tests (#77)."""
+
+from __future__ import annotations
+
+import pytest
+
+from loom_cli.__main__ import main
+from loom_cli.cluster_boundary import (
+    BoundaryViolation,
+    audit_boundary,
+    format_violations,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# audit_boundary — happy path
+# ──────────────────────────────────────────────────────────────────────
+
+
+_CLEAN_MANIFESTS = """\
+apiVersion: v1
+kind: Service
+metadata: { name: loom-control-plane }
+spec:
+  type: ClusterIP
+  ports: [{ port: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: loom-service }
+spec:
+  ports: [{ port: 8090 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: loom-ingress }
+spec:
+  rules:
+    - host: loom.example.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-service
+                port: { number: 8090 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-web
+                port: { number: 80 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: loom-control-plane }
+spec:
+  template:
+    spec:
+      containers:
+        - name: cp
+          ports: [{ containerPort: 8080 }]
+"""
+
+
+def test_audit_clean_manifests_yields_no_violations() -> None:
+    """Default manifest shape — ClusterIP services, Ingress only
+    points at loom-service + loom-web, no hostPorts."""
+    assert audit_boundary(_CLEAN_MANIFESTS) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Service type checks
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_audit_flags_load_balancer_service() -> None:
+    yaml_text = """\
+apiVersion: v1
+kind: Service
+metadata: { name: loom-control-plane }
+spec:
+  type: LoadBalancer
+  ports: [{ port: 8080 }]
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.kind == "service-type"
+    assert v.object_name == "loom-control-plane"
+    assert "LoadBalancer" in v.detail
+
+
+def test_audit_flags_node_port_service() -> None:
+    yaml_text = """\
+apiVersion: v1
+kind: Service
+metadata: { name: loom-postgres }
+spec:
+  type: NodePort
+  ports: [{ port: 5432, nodePort: 32432 }]
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    assert violations[0].kind == "service-type"
+    assert "NodePort" in violations[0].detail
+
+
+def test_audit_accepts_cluster_ip_service() -> None:
+    yaml_text = """\
+apiVersion: v1
+kind: Service
+metadata: { name: loom-postgres }
+spec:
+  type: ClusterIP
+  ports: [{ port: 5432 }]
+"""
+    assert audit_boundary(yaml_text) == []
+
+
+def test_audit_accepts_implicit_cluster_ip_service() -> None:
+    """When `type` is omitted, Kubernetes defaults to ClusterIP."""
+    yaml_text = """\
+apiVersion: v1
+kind: Service
+metadata: { name: loom-postgres }
+spec:
+  ports: [{ port: 5432 }]
+"""
+    assert audit_boundary(yaml_text) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Ingress backend checks
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_audit_flags_ingress_backend_off_allowlist() -> None:
+    """`loom-control-plane` is not on the public allowlist — flag it
+    if an Ingress backends to it."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: bad-ingress }
+spec:
+  rules:
+    - host: leaky.example.com
+      http:
+        paths:
+          - path: /
+            backend:
+              service:
+                name: loom-control-plane
+                port: { number: 8080 }
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.kind == "ingress-backend"
+    assert "loom-control-plane" in v.detail
+
+
+def test_audit_flags_gateway_when_not_opted_in() -> None:
+    """`loom-llm-gateway` only joins the allowlist when
+    `gateway_public_host` is non-empty. Without the opt-in, an
+    Ingress rule for it is a boundary violation."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: loom-ingress }
+spec:
+  rules:
+    - host: gateway.example.com
+      http:
+        paths:
+          - path: /
+            backend:
+              service:
+                name: loom-llm-gateway
+                port: { number: 9100 }
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    assert "loom-llm-gateway" in violations[0].detail
+
+
+def test_audit_accepts_gateway_when_opted_in() -> None:
+    """With `gateway_public_host` set, gateway is allowlisted."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: loom-ingress }
+spec:
+  rules:
+    - host: gateway.example.com
+      http:
+        paths:
+          - path: /
+            backend:
+              service:
+                name: loom-llm-gateway
+                port: { number: 9100 }
+"""
+    violations = audit_boundary(
+        yaml_text, gateway_public_host="gateway.example.com",
+    )
+    assert violations == []
+
+
+def test_audit_accepts_allowlisted_ingress_backends() -> None:
+    """loom-service + loom-web are both on the default allowlist."""
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: loom-ingress }
+spec:
+  rules:
+    - host: loom.example.com
+      http:
+        paths:
+          - { path: /api/v1, backend: { service: { name: loom-service, port: { number: 8090 } } } }
+          - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
+"""
+    assert audit_boundary(yaml_text) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# hostPort checks
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_audit_flags_host_port_on_deployment() -> None:
+    yaml_text = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sneaky-deploy }
+spec:
+  template:
+    spec:
+      containers:
+        - name: sneaky
+          ports:
+            - containerPort: 8080
+              hostPort: 30080
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.kind == "host-port"
+    assert v.object_kind == "Deployment"
+    assert "30080" in v.detail
+
+
+def test_audit_flags_host_port_on_daemonset() -> None:
+    """DaemonSets in particular need this guard — hostPort + DaemonSet
+    is the pattern operators reach for to bypass Ingress."""
+    yaml_text = """\
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: { name: gateway-router }
+spec:
+  template:
+    spec:
+      containers:
+        - name: router
+          ports:
+            - containerPort: 30443
+              hostPort: 30443
+"""
+    violations = audit_boundary(yaml_text)
+    assert len(violations) == 1
+    assert violations[0].kind == "host-port"
+    assert violations[0].object_kind == "DaemonSet"
+
+
+def test_audit_accepts_container_port_without_host_port() -> None:
+    yaml_text = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: loom-service }
+spec:
+  template:
+    spec:
+      containers:
+        - name: svc
+          ports:
+            - containerPort: 8090
+"""
+    assert audit_boundary(yaml_text) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Multi-violation + format_violations
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_audit_reports_multiple_violations() -> None:
+    """When several violations coexist, all are reported (audits are
+    not short-circuited)."""
+    yaml_text = """\
+apiVersion: v1
+kind: Service
+metadata: { name: loom-postgres }
+spec:
+  type: LoadBalancer
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: bad-ingress }
+spec:
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: postgres
+                port: { number: 5432 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: leaky }
+spec:
+  template:
+    spec:
+      containers:
+        - name: c
+          ports: [{ containerPort: 80, hostPort: 80 }]
+"""
+    violations = audit_boundary(yaml_text)
+    kinds = {v.kind for v in violations}
+    assert kinds == {"service-type", "ingress-backend", "host-port"}
+
+
+def test_format_violations_clean() -> None:
+    out = format_violations([])
+    assert "no violations" in out
+
+
+def test_format_violations_lists_each_one() -> None:
+    out = format_violations([
+        BoundaryViolation(
+            kind="service-type", object_kind="Service",
+            object_name="loom-postgres",
+            detail="Service type 'LoadBalancer' exposes pods",
+        ),
+        BoundaryViolation(
+            kind="host-port", object_kind="DaemonSet",
+            object_name="router", detail="hostPort=80",
+        ),
+    ])
+    assert "2 violation" in out
+    assert "loom-postgres" in out
+    assert "router" in out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CLI dispatch
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_cli_audit_default_config_clean(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The default rendered manifests must be boundary-clean. If
+    they aren't, the docs + smoke check are broken."""
+    rc = main(["cluster", "audit"])
+    assert rc == 0
+    assert "no violations" in capsys.readouterr().out
+
+
+def test_cli_audit_returns_1_when_config_invalid(
+    capsys: pytest.CaptureFixture[str], tmp_path: object,
+) -> None:
+    from pathlib import Path
+    p = Path(str(tmp_path)) / "does-not-exist.toml"  # type: ignore[arg-type]
+    rc = main(["cluster", "audit", "--config", str(p)])
+    assert rc == 2
+    assert "error" in capsys.readouterr().err.lower()

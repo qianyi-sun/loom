@@ -457,6 +457,33 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _audit(args: argparse.Namespace) -> int:
+    """`loom cluster audit` — render manifests and check the
+    public/internal boundary (#77). Renders without touching the
+    cluster, so it's safe to run anywhere as a static check (CI
+    pre-merge, kind smoke, operator dry-run)."""
+    from loom_cli.cluster_boundary import audit_boundary, format_violations
+
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    try:
+        manifests = render_manifests(config)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    violations = audit_boundary(
+        manifests, gateway_public_host=config.gateway_public_host or None,
+    )
+    sys.stdout.write(format_violations(violations))
+    return 0 if not violations else 1
+
+
 def _status(args: argparse.Namespace) -> int:
     try:
         apps_v1, net_v1, core_v1, _storage_v1 = _load_clients(args.context)
@@ -1400,6 +1427,25 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_down.set_defaults(handler=_down)
+
+    p_audit = sub.add_parser(
+        "audit",
+        help=(
+            "Render manifests and check the public/internal boundary: "
+            "no LoadBalancer/NodePort Services, no Ingress backends "
+            "outside the allowlist, no hostPort declarations. Exits "
+            "0 on clean, 1 on any violation."
+        ),
+    )
+    p_audit.add_argument(
+        "--config", default=None,
+        help=(
+            "Path to cluster-config.toml. Omit for all defaults; "
+            "`gateway_public_host` in the config opts the LLM gateway "
+            "into the public Ingress allowlist."
+        ),
+    )
+    p_audit.set_defaults(handler=_audit)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

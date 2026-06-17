@@ -152,6 +152,31 @@ MinIO bucket lifecycle: `AbortIncompleteMultipartUpload after 7 days` for non-tr
 | `loom-web` | Deployment (replicas: 0 by default) | `loom` namespace | SPA, paused; operator scales up when work resumes. |
 | `postgres`, `minio` | StatefulSet (1 replica each, control node) | `loom` namespace | State + object store. `--storage external` substitutes managed equivalents. |
 
+## Public / internal boundary
+
+What the public Internet can reach (left) vs. what stays cluster-internal
+(right). `loom cluster audit` enforces this statically on every render
+and the kind smoke runs it before `kubectl apply` — see #77.
+
+| Component | Public via Ingress | Reason |
+|---|---|---|
+| `loom-service` | Yes (default) — `https://<ingress_host>/api/v1/*` | The user-facing REST surface. |
+| `loom-web` | Yes (default) — `https://<ingress_host>/` | The React SPA. Replica count is 0 by default; operators scale up to enable. |
+| `loom-llm-gateway` | Opt-in — set `gateway_public_host` in `cluster-config.toml` to expose at its own host | Some agents inside sandboxes need a stable external URL. Default install keeps the gateway internal-only; operators opt in case by case. |
+| `loom-control-plane` | **No** — port-forward for operator-side admin curls | Worker claim path + admin token issuance must not be reachable from the public Internet. |
+| `loom-worker` | **No** | Worker pods talk only to control-plane via cluster DNS. |
+| `postgres`, `minio` | **No** | State + object store sit behind `loom_service` signed-URL routes. |
+| `loom-egress-proxy`, `loom-egress-xds` | **No** | Egress validators; only reachable from `loom-llm-gateway`. |
+| `loom-gateway-router` | **No** Ingress (binds `hostPort 30443` on each node for sandbox-Docker → gateway routing) | NOT for public Internet — sandbox bridges dial `<node>:30443` from inside the cluster network. Auditor allows this hostPort by exception when shipped from the canonical template. |
+
+The audit checks:
+
+1. **Service type.** Every `Service` must be `ClusterIP`. `LoadBalancer` or `NodePort` would publish a pod to external traffic; the public surface is supposed to flow through the shared Ingress.
+2. **Ingress backends.** Only `loom-service` + `loom-web` are on the default allowlist. `loom-llm-gateway` joins the allowlist only when `gateway_public_host` is set in config.
+3. **`hostPort` declarations.** Any container port that binds to the node interface is flagged. The auditor catches accidental hostPort use; future revisions of the canonical templates that legitimately need hostPort (e.g., the gateway-router DaemonSet when shipped) will get an explicit allowlist entry.
+
+Operators run the audit ad-hoc with `loom cluster audit [--config cluster-config.toml]`; it exits 0 on clean, 1 on any violation. CI runs it on every PR touching the cluster CLI or templates via the `cluster-smoke` workflow.
+
 ## CLI surface
 
 Cluster commands use the optional Kubernetes client dependency so normal laptop
