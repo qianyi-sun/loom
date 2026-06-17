@@ -33,15 +33,6 @@ spec:
                 name: loom-web
                 port:
                   number: 80
-  # NOTE: per cluster-deploy.md §Public/Private Boundary, the LLM
-  # Gateway is internal-only by default. Operators who need
-  # direct browser access to `/v1/*` for ad-hoc testing opt in via
-  # `loom cluster render --config ... gateway_public_host=...`
-  # (or `kubectl apply -f` against the rendered manifest with
-  # `[gateway_public_host]` set in cluster-config.toml). The
-  # rationale and #77 boundary enforcement notes live in the
-  # template comment.
-  #
   # NOTE: the Control Plane (`loom-control-plane:8080`) is intentionally
   # NOT exposed via Ingress. It carries worker-only routes
   # (`POST /trials/claim`, `PATCH /trials/{id}/state`) and admin

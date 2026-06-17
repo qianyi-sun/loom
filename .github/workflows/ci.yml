@@ -130,6 +130,10 @@ jobs:
         if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run mypy
 
+      - name: Verify codegen up-to-date
+        if: steps.docs_only.outputs.docs_only != 'true'
+        run: uv run loom config codegen --check
+
       - name: Pytest — unit + contract + property + loom_cli
         if: steps.docs_only.outputs.docs_only != 'true'
         run: |

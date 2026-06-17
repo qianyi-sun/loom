@@ -92,6 +92,7 @@ include = ["loom*", "loom_drivers*"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+extend-exclude = ["**/_generated.py"]
 
 [tool.uv]
 # Keep uv resolution valid for both local Mac development and Linux CI.

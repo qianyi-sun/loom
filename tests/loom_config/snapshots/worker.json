@@ -1,0 +1,102 @@
+{
+  "benchmark_cache": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "claim_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "1.0",
+    "required": false
+  },
+  "control_plane_url": {
+    "annotation": "<class 'pydantic.networks.HttpUrl'>",
+    "default": "'http://loom-control-plane:8080'",
+    "required": false
+  },
+  "docker_socket": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/docker.sock')",
+    "required": false
+  },
+  "drain_timeout_sec": {
+    "annotation": "<class 'int'>",
+    "default": "600",
+    "required": false
+  },
+  "enable_worker_vllm": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "fixtures_root": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "gateway_url": {
+    "annotation": "<class 'pydantic.networks.HttpUrl'>",
+    "default": "'http://loom-llm-gateway:9100'",
+    "required": false
+  },
+  "heartbeat_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "5.0",
+    "required": false
+  },
+  "log_level": {
+    "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
+    "default": "'info'",
+    "required": false
+  },
+  "max_concurrent": {
+    "annotation": "<class 'int'>",
+    "default": "5",
+    "required": false
+  },
+  "metrics_port": {
+    "annotation": "<class 'int'>",
+    "default": "9090",
+    "required": false
+  },
+  "minio_access_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "minio_endpoint": {
+    "annotation": "<class 'str'>",
+    "default": "'http://loom-minio:9000'",
+    "required": false
+  },
+  "minio_region": {
+    "annotation": "<class 'str'>",
+    "default": "'us-east-1'",
+    "required": false
+  },
+  "minio_secret_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "token": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "trajectory_cache_dir": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/lib/loom/trajectories')",
+    "required": false
+  },
+  "vllm_gpu_memory_utilization": {
+    "annotation": "<class 'float'>",
+    "default": "0.9",
+    "required": false
+  },
+  "vllm_tensor_parallel_size": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  }
+}

@@ -10,7 +10,7 @@ import pytest
 from loom_llm_gateway.config import (
     GatewaySettings,
     LocalProviderConfig,
-    _parse_local_providers_from_env,
+    parse_local_providers_from_env,
 )
 
 
@@ -84,7 +84,7 @@ def test_api_key_without_base_url_is_silently_dropped(
 def test_parse_function_lowercases_name(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_local_env(monkeypatch)
     monkeypatch.setenv("LOOM_GW_LOCAL_MYSERVER_BASE_URL", "http://x:1/v1")
-    parsed = _parse_local_providers_from_env()
+    parsed = parse_local_providers_from_env()
     # Name was uppercase in env var, lowercased to match TOML/CLI convention
     assert "myserver" in parsed
     assert "MYSERVER" not in parsed

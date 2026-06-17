@@ -176,6 +176,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_config_set.add_argument("key")
     p_config_set.add_argument("value")
     config_sub.add_parser("show")
+    p_config_codegen = config_sub.add_parser(
+        "codegen",
+        help="Regenerate _generated.py + cluster-config.example.toml from schema.",
+    )
+    p_config_codegen.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit 1 if any committed artifact drifts from schema.",
+    )
     p_config.set_defaults(handler=_config_handler)
 
     # `datasets` is registered as a help-only stub here so it appears in

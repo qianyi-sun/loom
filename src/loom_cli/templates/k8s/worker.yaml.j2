@@ -1,3 +1,4 @@
+{% import "_env.j2" as env_macros %}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,21 +14,7 @@ spec:
       containers:
         - name: worker
           image: loom-worker:{{ image_tag }}
-          env:
-            - name: LOOM_WORKER_CONTROL_PLANE_URL
-              value: http://loom-control-plane:8080
-            - name: LOOM_WORKER_GATEWAY_URL
-              value: http://loom-llm-gateway:9100
-            - name: LOOM_WORKER_TOKEN
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: worker-token } }
-            - name: LOOM_WORKER_MINIO_ENDPOINT
-              value: http://loom-minio:9000
-            - name: LOOM_WORKER_MINIO_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
-            - name: LOOM_WORKER_MINIO_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
-            - name: LOOM_WORKER_MAX_CONCURRENT
-              value: "{{ worker_max_concurrent }}"
+          {{ env_macros.env_block("worker", schema) | indent(10) }}
           volumeMounts:
             - name: trajectories
               mountPath: /var/lib/loom/trajectories

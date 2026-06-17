@@ -66,21 +66,27 @@ knob you need.
    → nginx-alpine serves it). Push to your registry, then update
    `image:` refs in `deploy/k8s/*.yaml`.
 
-2. **Create the `loom-secrets` Secret.** Required keys:
+2. **Create the `loom-secrets` Secret.** Required keys are declared in
+   `config/loom-schema.toml` — the canonical source of truth. Generate and
+   apply the full Secret in one step:
 
    ```bash
-   kubectl create secret generic loom-secrets \
-     --from-literal=postgres-user=loom \
-     --from-literal=postgres-password=$(openssl rand -hex 32) \
-     --from-literal=cp-db-url=postgresql+psycopg://loom:PWD@loom-postgres/loom \
-     --from-literal=gw-db-url=postgresql+psycopg://loom:PWD@loom-postgres/loom \
-     --from-literal=minio-access-key=loom \
-     --from-literal=minio-secret-key=$(openssl rand -hex 32) \
-     --from-literal=anthropic-api-key=YOUR_KEY \
-     --from-literal=step-jwt-signing-key=$(openssl rand -hex 64) \
-     --from-literal=openai-api-key=YOUR_KEY \
-     --from-literal=worker-token=PLACEHOLDER
+   loom cluster bootstrap-secrets --rotate
    ```
+
+   `--rotate` mints fresh values for entries that carry a `generate:` command
+   (currently `step-jwt-signing-key`). For other required secrets (DB URLs,
+   MinIO credentials, provider API keys) the placeholder `<EDIT_ME>` appears —
+   replace with your values before piping to kubectl.
+
+   To preview and edit before applying:
+
+   ```bash
+   loom cluster bootstrap-secrets > /tmp/loom-secret.sh
+   $EDITOR /tmp/loom-secret.sh
+   bash /tmp/loom-secret.sh
+   ```
+
    The `worker-token` value is overwritten in step 5.
 
    Create the singleton admin secret file with the operator CLI and mount it as

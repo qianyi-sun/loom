@@ -65,6 +65,11 @@ Start with the overview, drill into the area you care about:
 - **[architecture/auth-registration-spec.md](architecture/auth-registration-spec.md)** —
   implementation spec for #10: singleton admin secret, team registration,
   audit events, operator rotation commands, and DB-admin removal
+- **[architecture/config-consolidation.md](architecture/config-consolidation.md)** —
+  *(design, not yet shipped)* `config/loom-schema.toml` as the single
+  source of truth for Pydantic Settings + k8s env blocks + Secret
+  bootstrap + operator cluster knobs; `loom config doctor` +
+  `loom config bootstrap-secrets`
 - **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
   — the single-SQL claim query; DRF tie-break + priority + FIFO;
   caps eligibility; crash recovery

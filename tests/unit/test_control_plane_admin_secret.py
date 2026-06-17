@@ -13,6 +13,7 @@ RAW_ADMIN_TOKEN = "loom_admin_" + "D" * 43
 
 def _settings(*, admin_secret_file: Path | None = None) -> ControlPlaneSettings:
     return ControlPlaneSettings(
+        _env_file=None,
         db_url="postgresql+psycopg://loom:pw@localhost:5432/loom",
         minio_endpoint="http://localhost:9000",
         minio_access_key="loomdev",

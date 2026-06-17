@@ -14,39 +14,64 @@ spec:
         - name: loom-service
           image: loom-service:0.7
           env:
-            - name: LOOM_ENV
-              value: production
-            # Reuses the cp-db-url secret — loom_service + CP share
-            # the same Postgres database.
-            - name: LOOM_SVC_DB_URL
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
-            - name: LOOM_SVC_ADMIN_SECRET_FILE
-              value: /var/run/loom/secrets/admin/secrets.toml
-            - name: LOOM_SVC_MINIO_ENDPOINT
-              value: http://loom-minio:9000
-            - name: LOOM_SVC_MINIO_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
-            - name: LOOM_SVC_MINIO_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
-            # Internal cluster DNS — CP is no longer externally exposed
-            # (see ingress.yaml comment); loom_service forwards trial
-            # CRUD here over the pod network.
-            - name: LOOM_SVC_CONTROL_PLANE_URL
-              value: http://loom-control-plane:8080/
-            - name: LOOM_SVC_GATEWAY_URL
-              value: http://loom-llm-gateway:9100/
-            # Campaign-runner needs a submit-scoped service token.
-            # Provision via:
-            #   kubectl create secret generic loom-secrets \
-            #     --from-literal=svc-campaign-runner-cp-token=$(./scripts/mint-submit-token.sh)
-            # If absent, the runner skips its tick with a warning —
-            # campaigns will not fan out until the operator sets this.
+            - name: LOOM_SVC_ARTIFACTS_BUCKET
+              value: "artifacts"
+            - name: LOOM_SVC_BATCH_RUNNER_BATCH_SIZE
+              value: "50"
             - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: loom-secrets
-                  key: svc-campaign-runner-cp-token
+                  key: batch-runner-cp-token
                   optional: true
+            - name: LOOM_SVC_BATCH_RUNNER_POLL_INTERVAL_SEC
+              value: "5"
+            - name: LOOM_SVC_BATCH_RUNNER_SUBMIT_RATE_PER_SEC
+              value: "100"
+            - name: LOOM_SVC_BIND_HOST
+              value: "0.0.0.0"
+            - name: LOOM_SVC_BIND_PORT
+              value: "8090"
+            - name: LOOM_SVC_CONTROL_PLANE_URL
+              value: "http://loom-control-plane:8080"
+            - name: LOOM_SVC_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-db-url
+            - name: LOOM_SVC_DEV_RELOAD
+              value: "False"
+            - name: LOOM_SVC_GATEWAY_URL
+              value: "http://loom-llm-gateway:9100"
+            - name: LOOM_SVC_LOCAL_SERVERS_JSON
+              value: "{}"
+            - name: LOOM_SVC_LOG_LEVEL
+              value: "info"
+            - name: LOOM_SVC_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-access-key
+            - name: LOOM_SVC_MINIO_ENDPOINT
+              value: "http://loom-minio:9000"
+            - name: LOOM_SVC_MINIO_REGION
+              value: "us-east-1"
+            - name: LOOM_SVC_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-secret-key
+            - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
+              value: "3600"
+            - name: LOOM_SVC_TEAM_REGISTRATION_OPEN
+              value: "False"
+            - name: LOOM_SVC_TRAJECTORIES_BUCKET
+              value: "trajectories"
+
+            - name: LOOM_SVC_ADMIN_SECRET_FILE
+              value: "/var/run/loom/secrets/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "production"
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

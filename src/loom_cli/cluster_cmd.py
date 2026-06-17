@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from loom_cli.cluster_config import ClusterConfig, load_cluster_config
+from loom_config.doctor import reconcile as _doctor_reconcile
+from loom_config.loader import load_schema as _load_schema
+
+# Repo root: cluster_cmd.py → loom_cli → src → loom (parents[2])
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # These are the Deployments cluster-deploy.md §Component map lists as
 # the in-cluster surface. The status command renders one row per
@@ -132,8 +137,7 @@ def _format_table(status: ClusterStatus) -> str:
     )
     lines.append("")
     lines.append(
-        f"{'COMPONENT':<22} {'KIND':<14} {'READY':<8} {'STATUS':<10} "
-        f"DESCRIPTION",
+        f"{'COMPONENT':<22} {'KIND':<14} {'READY':<8} {'STATUS':<10} DESCRIPTION",
     )
     for c in status.components:
         ready_str = f"{c.ready}/{c.desired}"
@@ -179,10 +183,7 @@ def _format_json(status: ClusterStatus) -> str:
             }
             for c in status.components
         ],
-        "ingresses": [
-            {"host": i.host, "paths": i.paths, "tls": i.tls}
-            for i in status.ingresses
-        ],
+        "ingresses": [{"host": i.host, "paths": i.paths, "tls": i.tls} for i in status.ingresses],
         "warnings": status.warnings,
     }
     return json.dumps(obj, indent=2) + "\n"
@@ -229,7 +230,8 @@ def _load_clients(
 
 
 def _collect_workload(
-    api: Any, namespace: str,
+    api: Any,
+    namespace: str,
     deployments: tuple[tuple[str, str], ...],
     daemonsets: tuple[tuple[str, str], ...],
     statefulsets: tuple[tuple[str, str], ...],
@@ -249,36 +251,52 @@ def _collect_workload(
             d = apps.read_namespaced_deployment(name=k8s_name, namespace=namespace)
             spec = d.spec
             stat = d.status
-            out.append(ComponentStatus(
-                name=display_name,
-                kind="Deployment",
-                ready=int(stat.ready_replicas or 0),
-                desired=int(spec.replicas or 0),
-                available=(stat.available_replicas or 0) > 0,
-            ))
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="Deployment",
+                    ready=int(stat.ready_replicas or 0),
+                    desired=int(spec.replicas or 0),
+                    available=(stat.available_replicas or 0) > 0,
+                )
+            )
         except Exception as exc:  # ApiException 404 most commonly
-            out.append(ComponentStatus(
-                name=display_name, kind="Deployment",
-                ready=0, desired=0, available=False,
-                note=_exception_to_note(exc),
-            ))
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="Deployment",
+                    ready=0,
+                    desired=0,
+                    available=False,
+                    note=_exception_to_note(exc),
+                )
+            )
     for display_name, k8s_name in daemonsets:
         try:
             d = apps.read_namespaced_daemon_set(name=k8s_name, namespace=namespace)
             stat = d.status
             desired = int(stat.desired_number_scheduled or 0)
             ready = int(stat.number_ready or 0)
-            out.append(ComponentStatus(
-                name=display_name, kind="DaemonSet",
-                ready=ready, desired=desired,
-                available=ready > 0,
-            ))
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="DaemonSet",
+                    ready=ready,
+                    desired=desired,
+                    available=ready > 0,
+                )
+            )
         except Exception as exc:
-            out.append(ComponentStatus(
-                name=display_name, kind="DaemonSet",
-                ready=0, desired=0, available=False,
-                note=_exception_to_note(exc),
-            ))
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="DaemonSet",
+                    ready=0,
+                    desired=0,
+                    available=False,
+                    note=_exception_to_note(exc),
+                )
+            )
     for display_name, k8s_name in statefulsets:
         try:
             s = apps.read_namespaced_stateful_set(name=k8s_name, namespace=namespace)
@@ -286,17 +304,26 @@ def _collect_workload(
             stat = s.status
             ready = int(stat.ready_replicas or 0)
             desired = int(spec.replicas or 0)
-            out.append(ComponentStatus(
-                name=display_name, kind="StatefulSet",
-                ready=ready, desired=desired,
-                available=ready > 0,
-            ))
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="StatefulSet",
+                    ready=ready,
+                    desired=desired,
+                    available=ready > 0,
+                )
+            )
         except Exception as exc:
-            out.append(ComponentStatus(
-                name=display_name, kind="StatefulSet",
-                ready=0, desired=0, available=False,
-                note=_exception_to_note(exc),
-            ))
+            out.append(
+                ComponentStatus(
+                    name=display_name,
+                    kind="StatefulSet",
+                    ready=0,
+                    desired=0,
+                    available=False,
+                    note=_exception_to_note(exc),
+                )
+            )
     return out
 
 
@@ -331,32 +358,41 @@ def _collect_ingresses(api: Any, namespace: str) -> list[IngressEndpoint]:
         # TLS hostnames are in spec.tls; flag them so the URL hint
         # uses https://.
         tls_hosts: set[str] = set()
-        for t in (spec.tls or []):
-            for h in (t.hosts or []):
+        for t in spec.tls or []:
+            for h in t.hosts or []:
                 tls_hosts.add(h)
-        for rule in (spec.rules or []):
+        for rule in spec.rules or []:
             host = rule.host or ""
             paths: list[str] = []
             http = getattr(rule, "http", None)
             if http is not None:
-                for p in (http.paths or []):
+                for p in http.paths or []:
                     if p.path:
                         paths.append(p.path)
-            out.append(IngressEndpoint(
-                host=host, paths=paths, tls=(host in tls_hosts),
-            ))
+            out.append(
+                IngressEndpoint(
+                    host=host,
+                    paths=paths,
+                    tls=(host in tls_hosts),
+                )
+            )
     return out
 
 
 def collect_status(
-    apps_v1: Any, networking_v1: Any, core_v1: Any,
-    namespace: str, *, context: str | None,
+    apps_v1: Any,
+    networking_v1: Any,
+    core_v1: Any,
+    namespace: str,
+    *,
+    context: str | None,
 ) -> ClusterStatus:
     """Pure-collection function — the api clients are passed in so
     tests can inject fakes. Keeps the network-touching glue
     (`_load_clients`) out of the assertion surface."""
     components = _collect_workload(
-        apps_v1, namespace,
+        apps_v1,
+        namespace,
         _COMPONENT_DEPLOYMENTS,
         _COMPONENT_DAEMONSETS,
         _COMPONENT_STATEFULSETS,
@@ -426,12 +462,15 @@ def render_manifests(config: ClusterConfig) -> str:
     """Render every template and join with `---` separators. Output is
     valid YAML that can be piped directly into `kubectl apply -f -`.
 
-    Templates are loaded from `loom_cli.templates.k8s` via the
-    `importlib.resources` API so packaging (sdist + wheel) picks them
-    up without needing a separate MANIFEST.in entry.
+    Templates are loaded from `loom_cli.templates.k8s` via a Jinja2
+    FileSystemLoader so that `{% import "_env.j2" as env_macros %}`
+    directives in individual templates can resolve the shared macro.
+    The package path is resolved once via `importlib.resources` so
+    packaging (sdist + wheel) continues to pick up the templates
+    without a separate MANIFEST.in entry.
     """
     try:
-        from jinja2 import Environment, StrictUndefined
+        from jinja2 import Environment, FileSystemLoader, StrictUndefined
     except ModuleNotFoundError as exc:
         # jinja2 is a core dep in pyproject.toml; this should never
         # fire in a correctly-installed environment but the error
@@ -442,22 +481,30 @@ def render_manifests(config: ClusterConfig) -> str:
             "(or `pip install -e .`) to pick up dependencies.",
         ) from exc
 
+    pkg_path = resources.files("loom_cli.templates.k8s")
     env = Environment(
+        # FileSystemLoader is required so that `{% import "_env.j2" %}`
+        # in per-service templates can resolve the shared macro file.
+        loader=FileSystemLoader(str(pkg_path)),
         # StrictUndefined makes a missing variable error LOUDLY instead
         # of rendering an empty string. Better to fail at render time
         # than silently emit a manifest with `image: loom-service:`
         # (no tag) that operators chase for an hour.
         undefined=StrictUndefined,
         keep_trailing_newline=True,
-        trim_blocks=False,
-        lstrip_blocks=False,
+        # trim_blocks + lstrip_blocks remove the newline after block
+        # tags and leading whitespace before them, which is required
+        # for the `_env.j2` macro to emit clean YAML without spurious
+        # blank lines. Verified against all existing templates — parsed
+        # YAML is identical with or without these flags.
+        trim_blocks=True,
+        lstrip_blocks=True,
     )
     ctx = config.to_render_context()
+    ctx["schema"] = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
     chunks: list[str] = []
-    pkg = resources.files("loom_cli.templates.k8s")
     for name in _TEMPLATE_ORDER:
-        template_text = (pkg / name).read_text(encoding="utf-8")
-        rendered = env.from_string(template_text).render(**ctx)
+        rendered = env.get_template(name).render(**ctx)
         # Each rendered file is itself one-or-more YAML docs. Splice
         # with `---\n` between files. Files that already end with a
         # trailing newline merge cleanly; the join trims any
@@ -504,7 +551,8 @@ def _audit(args: argparse.Namespace) -> int:
         return 2
 
     violations = audit_boundary(
-        manifests, gateway_public_host=config.gateway_public_host or None,
+        manifests,
+        gateway_public_host=config.gateway_public_host or None,
     )
     sys.stdout.write(format_violations(violations))
     return 0 if not violations else 1
@@ -521,20 +569,21 @@ def _status(args: argparse.Namespace) -> int:
         # Kubeconfig / context errors. Map to exit 2 (cluster
         # unreachable) per the documented exit-code contract.
         sys.stderr.write(
-            f"error: cannot connect to cluster: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
         )
         return 2
 
     try:
         status = collect_status(
-            apps_v1, net_v1, core_v1, args.namespace,
+            apps_v1,
+            net_v1,
+            core_v1,
+            args.namespace,
             context=args.context,
         )
     except Exception as exc:
         sys.stderr.write(
-            f"error: failed to read cluster state: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"error: failed to read cluster state: {type(exc).__name__}: {exc}\n",
         )
         return 2
 
@@ -599,7 +648,8 @@ class PreflightReport:
 
 
 def _check_namespace_exists(
-    core_v1: Any, namespace: str,
+    core_v1: Any,
+    namespace: str,
 ) -> PreflightCheck:
     """First check: does the namespace exist? Every subsequent check
     is namespace-scoped so this gates the rest."""
@@ -611,8 +661,7 @@ def _check_namespace_exists(
             outcome="fail",
             detail=f"namespace {namespace!r} not found ({_exception_to_note(exc)})",
             remediation=(
-                f"kubectl create namespace {namespace}\n"
-                f"# Then re-run `loom cluster preflight`."
+                f"kubectl create namespace {namespace}\n# Then re-run `loom cluster preflight`."
             ),
         )
     return PreflightCheck(
@@ -623,31 +672,36 @@ def _check_namespace_exists(
 
 
 def _check_required_secrets(
-    core_v1: Any, namespace: str,
+    core_v1: Any,
+    namespace: str,
 ) -> list[PreflightCheck]:
     """One check per Secret listed in `_REQUIRED_SECRETS`. Missing
     Secret = fail with a `kubectl create secret` hint."""
     out: list[PreflightCheck] = []
     for name in _REQUIRED_SECRETS:
         if _secret_present(core_v1, namespace, name):
-            out.append(PreflightCheck(
-                name=f"secret-{name}",
-                outcome="pass",
-                detail=f"Secret {name!r} present in {namespace}",
-            ))
+            out.append(
+                PreflightCheck(
+                    name=f"secret-{name}",
+                    outcome="pass",
+                    detail=f"Secret {name!r} present in {namespace}",
+                )
+            )
         else:
-            out.append(PreflightCheck(
-                name=f"secret-{name}",
-                outcome="fail",
-                detail=f"Secret {name!r} missing in {namespace}",
-                remediation=(
-                    f"# See cluster-deploy.md §Bootstrap for the keys "
-                    f"{name!r} expects. Quick example:\n"
-                    f"kubectl create secret generic {name} \\\n"
-                    f"  --namespace={namespace} \\\n"
-                    f"  --from-literal=<key>=<value>"
-                ),
-            ))
+            out.append(
+                PreflightCheck(
+                    name=f"secret-{name}",
+                    outcome="fail",
+                    detail=f"Secret {name!r} missing in {namespace}",
+                    remediation=(
+                        f"# See cluster-deploy.md §Bootstrap for the keys "
+                        f"{name!r} expects. Quick example:\n"
+                        f"kubectl create secret generic {name} \\\n"
+                        f"  --namespace={namespace} \\\n"
+                        f"  --from-literal=<key>=<value>"
+                    ),
+                )
+            )
     return out
 
 
@@ -664,19 +718,12 @@ def _check_ingress_class_installed(
         return PreflightCheck(
             name="ingress-class-installed",
             outcome="fail",
-            detail=(
-                f"failed to list IngressClass resources: "
-                f"{_exception_to_note(exc)}"
-            ),
+            detail=(f"failed to list IngressClass resources: {_exception_to_note(exc)}"),
             remediation=(
-                "Check kubectl + cluster networking access; "
-                "see cluster-deploy.md §Prerequisites."
+                "Check kubectl + cluster networking access; see cluster-deploy.md §Prerequisites."
             ),
         )
-    classes = [
-        getattr(it.metadata, "name", "<unknown>")
-        for it in (result.items or [])
-    ]
+    classes = [getattr(it.metadata, "name", "<unknown>") for it in (result.items or [])]
     if not classes:
         return PreflightCheck(
             name="ingress-class-installed",
@@ -706,10 +753,7 @@ def _check_default_storage_class(
         return PreflightCheck(
             name="default-storage-class",
             outcome="fail",
-            detail=(
-                f"failed to list StorageClass resources: "
-                f"{_exception_to_note(exc)}"
-            ),
+            detail=(f"failed to list StorageClass resources: {_exception_to_note(exc)}"),
         )
     items = result.items or []
     if not items:
@@ -728,7 +772,7 @@ def _check_default_storage_class(
         )
     default_names: list[str] = []
     for sc in items:
-        anns = (getattr(sc.metadata, "annotations", None) or {})
+        anns = getattr(sc.metadata, "annotations", None) or {}
         # Both keys are used in the wild — the in-tree storage class
         # uses the unprefixed key, beta and modern CSI uses the
         # storage.k8s.io prefix.
@@ -761,7 +805,8 @@ def _check_default_storage_class(
 
 
 def _check_pss_enforce(
-    core_v1: Any, namespace: str,
+    core_v1: Any,
+    namespace: str,
 ) -> PreflightCheck:
     """The worker Deployment bind-mounts the host docker socket. PSS
     `restricted` (k8s 1.25+ default for new namespaces) rejects this
@@ -797,24 +842,22 @@ def _check_pss_enforce(
         return PreflightCheck(
             name="pss-enforce",
             outcome="pass",
-            detail=(
-                f"namespace {namespace!r} has no PSS enforce label "
-                "(no admission restriction)"
-            ),
+            detail=(f"namespace {namespace!r} has no PSS enforce label (no admission restriction)"),
         )
     return PreflightCheck(
         name="pss-enforce",
         outcome="pass",
-        detail=(
-            f"namespace {namespace!r} PSS enforce={enforce!r} "
-            "(non-restricted)"
-        ),
+        detail=(f"namespace {namespace!r} PSS enforce={enforce!r} (non-restricted)"),
     )
 
 
 def collect_preflight(
-    core_v1: Any, networking_v1: Any, storage_v1: Any, namespace: str,
-    *, context: str | None,
+    core_v1: Any,
+    networking_v1: Any,
+    storage_v1: Any,
+    namespace: str,
+    *,
+    context: str | None,
 ) -> PreflightReport:
     """Pure-collection function — every API client passed in so tests
     can inject fakes. If `namespace-exists` fails, the namespace-
@@ -834,7 +877,9 @@ def collect_preflight(
         checks.append(_check_pss_enforce(core_v1, namespace))
 
     return PreflightReport(
-        namespace=namespace, context=context, checks=checks,
+        namespace=namespace,
+        context=context,
+        checks=checks,
     )
 
 
@@ -884,21 +929,50 @@ def _preflight(args: argparse.Namespace) -> int:
         return 2
     except Exception as exc:
         sys.stderr.write(
-            f"error: cannot connect to cluster: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
         )
         return 2
     try:
         report = collect_preflight(
-            core_v1, net_v1, storage_v1, args.namespace,
+            core_v1,
+            net_v1,
+            storage_v1,
+            args.namespace,
             context=args.context,
         )
     except Exception as exc:
         sys.stderr.write(
-            f"error: failed to read cluster state: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"error: failed to read cluster state: {type(exc).__name__}: {exc}\n",
         )
         return 2
+    if not args.no_doctor:
+        schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+        try:
+            doctor_report = _doctor_reconcile(schema, core_v1, namespace=args.namespace)
+        except Exception as exc:
+            report.checks.append(PreflightCheck(
+                name="schema-doctor",
+                outcome="warn",
+                detail=f"doctor could not run: {type(exc).__name__}: {exc}",
+            ))
+        else:
+            if doctor_report.ok:
+                report.checks.append(PreflightCheck(
+                    name="schema-doctor",
+                    outcome="pass",
+                    detail="schema reconciliation clean",
+                ))
+            else:
+                report.checks.append(PreflightCheck(
+                    name="schema-doctor",
+                    outcome="fail",
+                    detail=f"{len(doctor_report.violations)} schema violation(s)",
+                    remediation="\n".join(
+                        f"  - {v.kind}: {v.entry}: {v.detail}"
+                        for v in doctor_report.violations
+                    ),
+                ))
+
     if args.format == "json":
         sys.stdout.write(_format_preflight_json(report))
     else:
@@ -906,6 +980,27 @@ def _preflight(args: argparse.Namespace) -> int:
     # Exit 1 only when something explicitly failed; warns alone keep
     # exit 0 so CI scripts don't have to special-case them.
     return 1 if report.any_fail else 0
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    try:
+        _apps_v1, _net_v1, core_v1, _storage_v1 = _load_clients(args.context)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except Exception as exc:
+        sys.stderr.write(
+            f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
+        )
+        return 2
+    schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    report = _doctor_reconcile(schema, core_v1, namespace=args.namespace)
+    if report.ok:
+        print("[ok] schema reconciliation clean")
+        return 0
+    for v in report.violations:
+        print(f"  [fail] [{v.kind}] {v.entry}: {v.detail}")
+    return 1
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -932,7 +1027,10 @@ class ApplyResult:
 
 
 def apply_manifests(
-    yaml_text: str, namespace: str, *, context: str | None,
+    yaml_text: str,
+    namespace: str,
+    *,
+    context: str | None,
     extra_args: tuple[str, ...] = (),
 ) -> ApplyResult:
     """Pipe rendered manifests into `kubectl apply -f -`. We shell out
@@ -960,11 +1058,13 @@ def apply_manifests(
     cmd.extend(extra_args)
 
     proc = subprocess.run(
-        cmd, input=yaml_text, capture_output=True, text=True, check=False,
+        cmd,
+        input=yaml_text,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    summary_lines = [
-        line for line in proc.stdout.splitlines() if line.strip()
-    ]
+    summary_lines = [line for line in proc.stdout.splitlines() if line.strip()]
     return ApplyResult(
         returncode=proc.returncode,
         summary_lines=summary_lines,
@@ -973,8 +1073,12 @@ def apply_manifests(
 
 
 def wait_for_ready(
-    apps_v1: Any, networking_v1: Any, core_v1: Any,
-    namespace: str, *, context: str | None,
+    apps_v1: Any,
+    networking_v1: Any,
+    core_v1: Any,
+    namespace: str,
+    *,
+    context: str | None,
     timeout_sec: int = _DEFAULT_UP_TIMEOUT_SEC,
     poll_interval_sec: float = _DEFAULT_UP_POLL_INTERVAL_SEC,
     _sleep: Any = None,
@@ -995,7 +1099,11 @@ def wait_for_ready(
     deadline = now_fn() + timeout_sec
     while True:
         status = collect_status(
-            apps_v1, networking_v1, core_v1, namespace, context=context,
+            apps_v1,
+            networking_v1,
+            core_v1,
+            namespace,
+            context=context,
         )
         if status.all_ready:
             return status
@@ -1012,8 +1120,7 @@ def _up(args: argparse.Namespace) -> int:
         return 2
     except Exception as exc:
         sys.stderr.write(
-            f"error: cannot connect to cluster: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
         )
         return 2
 
@@ -1021,13 +1128,15 @@ def _up(args: argparse.Namespace) -> int:
     if not args.skip_preflight:
         try:
             report = collect_preflight(
-                core_v1, net_v1, storage_v1, args.namespace,
+                core_v1,
+                net_v1,
+                storage_v1,
+                args.namespace,
                 context=args.context,
             )
         except Exception as exc:
             sys.stderr.write(
-                f"error: preflight failed: "
-                f"{type(exc).__name__}: {exc}\n",
+                f"error: preflight failed: {type(exc).__name__}: {exc}\n",
             )
             return 2
         if report.any_fail:
@@ -1053,7 +1162,9 @@ def _up(args: argparse.Namespace) -> int:
     # 3. Apply
     try:
         result = apply_manifests(
-            manifests, args.namespace, context=args.context,
+            manifests,
+            args.namespace,
+            context=args.context,
         )
     except RuntimeError as exc:
         # kubectl missing.
@@ -1061,8 +1172,7 @@ def _up(args: argparse.Namespace) -> int:
         return 2
     if result.returncode != 0:
         sys.stderr.write(
-            f"error: kubectl apply failed (exit {result.returncode}):\n"
-            f"{result.stderr}\n",
+            f"error: kubectl apply failed (exit {result.returncode}):\n{result.stderr}\n",
         )
         return 1
     for line in result.summary_lines:
@@ -1076,20 +1186,22 @@ def _up(args: argparse.Namespace) -> int:
 
     # 4. Wait for ready
     sys.stdout.write(
-        f"Waiting up to {args.timeout}s for components to become "
-        f"ready...\n",
+        f"Waiting up to {args.timeout}s for components to become ready...\n",
     )
     final = wait_for_ready(
-        apps_v1, net_v1, core_v1, args.namespace,
-        context=args.context, timeout_sec=args.timeout,
+        apps_v1,
+        net_v1,
+        core_v1,
+        args.namespace,
+        context=args.context,
+        timeout_sec=args.timeout,
         poll_interval_sec=args.poll_interval,
     )
     sys.stdout.write(_format_table(final))
     if final.all_ready:
         return 0
     sys.stderr.write(
-        f"error: components did not reach ready state within "
-        f"{args.timeout}s.\n",
+        f"error: components did not reach ready state within {args.timeout}s.\n",
     )
     return 1
 
@@ -1106,7 +1218,10 @@ class DeleteResult:
 
 
 def delete_manifests(
-    yaml_text: str, namespace: str, *, context: str | None,
+    yaml_text: str,
+    namespace: str,
+    *,
+    context: str | None,
     extra_args: tuple[str, ...] = (),
 ) -> DeleteResult:
     """Pipe rendered manifests into
@@ -1125,7 +1240,12 @@ def delete_manifests(
         )
 
     cmd: list[str] = [
-        "kubectl", "delete", "-n", namespace, "-f", "-",
+        "kubectl",
+        "delete",
+        "-n",
+        namespace,
+        "-f",
+        "-",
         "--ignore-not-found",
     ]
     if context:
@@ -1133,11 +1253,13 @@ def delete_manifests(
     cmd.extend(extra_args)
 
     proc = subprocess.run(
-        cmd, input=yaml_text, capture_output=True, text=True, check=False,
+        cmd,
+        input=yaml_text,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    summary_lines = [
-        line for line in proc.stdout.splitlines() if line.strip()
-    ]
+    summary_lines = [line for line in proc.stdout.splitlines() if line.strip()]
     return DeleteResult(
         returncode=proc.returncode,
         summary_lines=summary_lines,
@@ -1156,7 +1278,8 @@ class PVCDeleteResult:
 
 
 def delete_pvcs(
-    core_v1: Any, namespace: str,
+    core_v1: Any,
+    namespace: str,
 ) -> PVCDeleteResult:
     """Delete every PVC in the namespace. StatefulSet
     volumeClaimTemplates create PVCs (`data-loom-postgres-0`, etc.)
@@ -1176,7 +1299,8 @@ def delete_pvcs(
         name = pvc.metadata.name
         try:
             core_v1.delete_namespaced_persistent_volume_claim(
-                name=name, namespace=namespace,
+                name=name,
+                namespace=namespace,
             )
             deleted.append(name)
         except Exception as exc:
@@ -1189,7 +1313,8 @@ def delete_pvcs(
 
 
 def delete_namespace_resource(
-    core_v1: Any, namespace: str,
+    core_v1: Any,
+    namespace: str,
 ) -> None:
     """Delete the namespace itself. Cascades to every resource in it,
     including any objects not produced by `render_manifests` (operator
@@ -1206,8 +1331,7 @@ def _down(args: argparse.Namespace) -> int:
         return 2
     except Exception as exc:
         sys.stderr.write(
-            f"error: cannot connect to cluster: "
-            f"{type(exc).__name__}: {exc}\n",
+            f"error: cannot connect to cluster: {type(exc).__name__}: {exc}\n",
         )
         return 2
 
@@ -1228,10 +1352,7 @@ def _down(args: argparse.Namespace) -> int:
     # 2. Confirm. Teardown is destructive; require explicit `--yes`
     # or an interactive y/N prompt before touching anything.
     if not args.yes:
-        prompt = (
-            f"This will delete Loom resources in namespace "
-            f"'{args.namespace}'"
-        )
+        prompt = f"This will delete Loom resources in namespace '{args.namespace}'"
         if args.with_volumes:
             prompt += " AND its PersistentVolumeClaims (data loss)"
         if args.delete_namespace:
@@ -1254,7 +1375,9 @@ def _down(args: argparse.Namespace) -> int:
     # 3. Delete manifests.
     try:
         result = delete_manifests(
-            manifests, args.namespace, context=args.context,
+            manifests,
+            args.namespace,
+            context=args.context,
         )
     except RuntimeError as exc:
         # kubectl missing.
@@ -1262,8 +1385,7 @@ def _down(args: argparse.Namespace) -> int:
         return 2
     if result.returncode != 0:
         sys.stderr.write(
-            f"error: kubectl delete failed (exit {result.returncode}):\n"
-            f"{result.stderr}\n",
+            f"error: kubectl delete failed (exit {result.returncode}):\n{result.stderr}\n",
         )
         return 1
     for line in result.summary_lines:
@@ -1306,13 +1428,24 @@ def _down(args: argparse.Namespace) -> int:
             delete_namespace_resource(core_v1, args.namespace)
         except Exception as exc:
             sys.stderr.write(
-                f"error: failed to delete namespace: "
-                f"{type(exc).__name__}: {exc}\n",
+                f"error: failed to delete namespace: {type(exc).__name__}: {exc}\n",
             )
             return 1
         sys.stdout.write(f"  namespace/{args.namespace} deleted\n")
 
     sys.stdout.write("Cluster down: complete.\n")
+    return 0
+
+
+def _bootstrap_secrets(args: argparse.Namespace) -> int:
+    from loom_config.bootstrap import render_bootstrap_command
+    schema = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
+    print(render_bootstrap_command(
+        schema,
+        namespace=args.namespace,
+        smoke_defaults=args.smoke_defaults,
+        rotate=args.rotate,
+    ))
     return 0
 
 
@@ -1329,21 +1462,22 @@ def dispatch(argv: list[str]) -> int:
 
     p_status = sub.add_parser(
         "status",
-        help=(
-            "Show component readiness + ingress endpoints for the "
-            "configured Loom namespace."
-        ),
+        help=("Show component readiness + ingress endpoints for the configured Loom namespace."),
     )
     p_status.add_argument(
-        "--context", default=None,
+        "--context",
+        default=None,
         help="kubeconfig context (default: current context).",
     )
     p_status.add_argument(
-        "--namespace", default="loom",
+        "--namespace",
+        default="loom",
         help="Kubernetes namespace (default: loom).",
     )
     p_status.add_argument(
-        "--format", choices=["table", "json"], default="table",
+        "--format",
+        choices=["table", "json"],
+        default="table",
         help="Output format. JSON for CI/scripting.",
     )
     p_status.set_defaults(handler=_status)
@@ -1356,7 +1490,8 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_render.add_argument(
-        "--config", default=None,
+        "--config",
+        default=None,
         help=(
             "Path to cluster-config.toml. Omit for all defaults "
             "(produces the same shape as deploy/k8s/*.yaml)."
@@ -1374,16 +1509,29 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_preflight.add_argument(
-        "--context", default=None,
+        "--context",
+        default=None,
         help="kubeconfig context (default: current context).",
     )
     p_preflight.add_argument(
-        "--namespace", default="loom",
+        "--namespace",
+        default="loom",
         help="Kubernetes namespace (default: loom).",
     )
     p_preflight.add_argument(
-        "--format", choices=["table", "json"], default="table",
+        "--format",
+        choices=["table", "json"],
+        default="table",
         help="Output format. JSON for CI/scripting.",
+    )
+    p_preflight.add_argument(
+        "--no-doctor",
+        dest="no_doctor",
+        action="store_true",
+        help=(
+            "Skip schema-vs-cluster reconciliation (use when applying "
+            "to an empty cluster where loom-secrets does not yet exist)."
+        ),
     )
     p_preflight.set_defaults(handler=_preflight)
 
@@ -1397,22 +1545,26 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_up.add_argument(
-        "--context", default=None,
+        "--context",
+        default=None,
         help="kubeconfig context (default: current context).",
     )
     p_up.add_argument(
-        "--namespace", default="loom",
+        "--namespace",
+        default="loom",
         help="Kubernetes namespace (default: loom).",
     )
     p_up.add_argument(
-        "--config", default=None,
+        "--config",
+        default=None,
         help=(
-            "Path to cluster-config.toml. Omit for all defaults "
-            "(see `loom cluster render --help`)."
+            "Path to cluster-config.toml. Omit for all defaults (see `loom cluster render --help`)."
         ),
     )
     p_up.add_argument(
-        "--skip-preflight", dest="skip_preflight", action="store_true",
+        "--skip-preflight",
+        dest="skip_preflight",
+        action="store_true",
         help=(
             "Skip the preflight checks. Use sparingly — usually "
             "intended for re-applying after a known transient "
@@ -1420,21 +1572,24 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_up.add_argument(
-        "--no-wait", dest="no_wait", action="store_true",
+        "--no-wait",
+        dest="no_wait",
+        action="store_true",
         help=(
             "Apply manifests and return immediately without waiting "
             "for components to reach ready state."
         ),
     )
     p_up.add_argument(
-        "--timeout", type=int, default=_DEFAULT_UP_TIMEOUT_SEC,
-        help=(
-            f"Wait timeout in seconds "
-            f"(default: {_DEFAULT_UP_TIMEOUT_SEC})."
-        ),
+        "--timeout",
+        type=int,
+        default=_DEFAULT_UP_TIMEOUT_SEC,
+        help=(f"Wait timeout in seconds (default: {_DEFAULT_UP_TIMEOUT_SEC})."),
     )
     p_up.add_argument(
-        "--poll-interval", dest="poll_interval", type=float,
+        "--poll-interval",
+        dest="poll_interval",
+        type=float,
         default=_DEFAULT_UP_POLL_INTERVAL_SEC,
         help=(
             f"Poll interval in seconds during the readiness wait "
@@ -1452,15 +1607,18 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_down.add_argument(
-        "--context", default=None,
+        "--context",
+        default=None,
         help="kubeconfig context (default: current context).",
     )
     p_down.add_argument(
-        "--namespace", default="loom",
+        "--namespace",
+        default="loom",
         help="Kubernetes namespace (default: loom).",
     )
     p_down.add_argument(
-        "--config", default=None,
+        "--config",
+        default=None,
         help=(
             "Path to cluster-config.toml. Must match the config used "
             "for `loom cluster up`; resources outside the rendered set "
@@ -1468,7 +1626,10 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_down.add_argument(
-        "--yes", "-y", dest="yes", action="store_true",
+        "--yes",
+        "-y",
+        dest="yes",
+        action="store_true",
         help=(
             "Skip the destructive-action confirmation prompt. Intended "
             "for CI/scripted teardowns; production operators should "
@@ -1476,7 +1637,9 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_down.add_argument(
-        "--with-volumes", dest="with_volumes", action="store_true",
+        "--with-volumes",
+        dest="with_volumes",
+        action="store_true",
         help=(
             "Also delete PersistentVolumeClaims in the namespace. "
             "StatefulSet PVCs survive normal teardown; pass this when "
@@ -1485,7 +1648,9 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_down.add_argument(
-        "--delete-namespace", dest="delete_namespace", action="store_true",
+        "--delete-namespace",
+        dest="delete_namespace",
+        action="store_true",
         help=(
             "Also delete the namespace. Cascades to every resource in "
             "it, including objects not produced by `cluster render`."
@@ -1503,7 +1668,8 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_audit.add_argument(
-        "--config", default=None,
+        "--config",
+        default=None,
         help=(
             "Path to cluster-config.toml. Omit for all defaults; "
             "`gateway_public_host` in the config opts the LLM gateway "
@@ -1511,6 +1677,39 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_audit.set_defaults(handler=_audit)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Reconcile config schema against a live cluster.",
+    )
+    p_doctor.add_argument(
+        "--namespace",
+        default="loom",
+        help="Kubernetes namespace (default: loom).",
+    )
+    p_doctor.add_argument(
+        "--context",
+        default=None,
+        help="kubeconfig context (default: current context).",
+    )
+    p_doctor.set_defaults(handler=_doctor)
+
+    p_boot = sub.add_parser(
+        "bootstrap-secrets",
+        help="Emit the kubectl command to create loom-secrets from schema.",
+    )
+    p_boot.add_argument("--namespace", default="loom")
+    p_boot.add_argument(
+        "--smoke-defaults",
+        action="store_true",
+        help="Use test-grade placeholder values (for smoke workflows).",
+    )
+    p_boot.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Run each entry's `generate` command to mint fresh values.",
+    )
+    p_boot.set_defaults(handler=_bootstrap_secrets)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

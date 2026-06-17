@@ -1,3 +1,4 @@
+{% import "_env.j2" as env_macros %}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,22 +14,11 @@ spec:
       containers:
         - name: gateway
           image: loom-llm-gateway:{{ image_tag }}
-          env:
-            - name: LOOM_ENV
-              value: production
-            - name: LOOM_GW_DB_URL
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: gw-db-url } }
+          {{ env_macros.env_block("llm-gateway", schema) | indent(10) }}
             - name: LOOM_GW_ADMIN_SECRET_FILE
-              value: /var/run/loom/admin/secrets.toml
-            - name: LOOM_GW_ANTHROPIC_API_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: anthropic-api-key } }
-            - name: LOOM_GW_OPENAI_API_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: openai-api-key } }
-            # Step-JWT verification key. MUST match CP's
-            # LOOM_CP_STEP_JWT_SIGNING_KEY — CP mints, gateway
-            # verifies. Mismatch → 401 on every facade call.
-            - name: LOOM_GW_STEP_JWT_SIGNING_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: step-jwt-signing-key } }
+              value: "/var/run/loom/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "production"
           ports:
             - containerPort: 9100
           readinessProbe:

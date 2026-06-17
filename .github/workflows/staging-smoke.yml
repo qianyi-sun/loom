@@ -162,27 +162,19 @@ jobs:
           done
 
       - name: Bootstrap namespace + Secrets
-        # Real-format admin token + worker token placeholder. Mock
-        # provider keys (sk-test-*) — pods don't try to call upstream
-        # until a trial actually runs, so these are fine for the
-        # readiness check.
+        # Bootstrap loom-secrets from schema via `loom cluster bootstrap-secrets`.
+        # --smoke-defaults covers every key declared in config/loom-schema.toml
+        # with test-grade placeholders. kind sets the current kubeconfig context
+        # to kind-loom-staging after cluster creation, so the generated kubectl
+        # command targets the right cluster without an explicit --context flag.
         run: |
+          set -e
           kubectl --context kind-loom-staging create namespace loom
           ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
           echo "::add-mask::${ADMIN_TOKEN}"
           echo "ADMIN_TOKEN=${ADMIN_TOKEN}" >> "$GITHUB_ENV"
 
-          kubectl --context kind-loom-staging -n loom create secret generic loom-secrets \
-            --from-literal=cp-db-url='postgresql+psycopg://loom:smoke@loom-postgres/loom' \
-            --from-literal=gw-db-url='postgresql+psycopg://loom:smoke@loom-postgres/loom' \
-            --from-literal=postgres-user='loom' \
-            --from-literal=postgres-password='smoke' \
-            --from-literal=minio-access-key='smoke' \
-            --from-literal=minio-secret-key='smokesmokesmoke' \
-            --from-literal=worker-token='loom_w_placeholder_replaced_in_step_below' \
-            --from-literal=openai-api-key='sk-test-not-real' \
-            --from-literal=anthropic-api-key='sk-ant-test-not-real' \
-            --from-literal=step-jwt-signing-key="$(openssl rand -hex 64)"
+          eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
 
           printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > /tmp/admin.toml
           kubectl --context kind-loom-staging -n loom create secret generic loom-admin-secret \

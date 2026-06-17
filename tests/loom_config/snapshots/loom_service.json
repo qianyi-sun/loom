@@ -1,0 +1,107 @@
+{
+  "admin_secret_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "artifacts_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'artifacts'",
+    "required": false
+  },
+  "batch_runner_batch_size": {
+    "annotation": "<class 'int'>",
+    "default": "50",
+    "required": false
+  },
+  "batch_runner_cp_token": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "batch_runner_poll_interval_sec": {
+    "annotation": "<class 'int'>",
+    "default": "5",
+    "required": false
+  },
+  "batch_runner_submit_rate_per_sec": {
+    "annotation": "<class 'int'>",
+    "default": "100",
+    "required": false
+  },
+  "bind_host": {
+    "annotation": "<class 'str'>",
+    "default": "'0.0.0.0'",
+    "required": false
+  },
+  "bind_port": {
+    "annotation": "<class 'int'>",
+    "default": "8090",
+    "required": false
+  },
+  "control_plane_url": {
+    "annotation": "<class 'pydantic.networks.HttpUrl'>",
+    "default": "'http://loom-control-plane:8080'",
+    "required": false
+  },
+  "db_url": {
+    "annotation": "<class 'pydantic.networks.PostgresDsn'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "dev_reload": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "gateway_url": {
+    "annotation": "<class 'pydantic.networks.HttpUrl'>",
+    "default": "'http://loom-llm-gateway:9100'",
+    "required": false
+  },
+  "local_servers_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
+  "log_level": {
+    "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
+    "default": "'info'",
+    "required": false
+  },
+  "minio_access_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "minio_endpoint": {
+    "annotation": "<class 'str'>",
+    "default": "'http://loom-minio:9000'",
+    "required": false
+  },
+  "minio_region": {
+    "annotation": "<class 'str'>",
+    "default": "'us-east-1'",
+    "required": false
+  },
+  "minio_secret_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "signed_url_expiry_sec": {
+    "annotation": "<class 'int'>",
+    "default": "3600",
+    "required": false
+  },
+  "team_registration_open": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "trajectories_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'trajectories'",
+    "required": false
+  }
+}

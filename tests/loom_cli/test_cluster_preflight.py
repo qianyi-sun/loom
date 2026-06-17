@@ -413,7 +413,7 @@ def test_cli_preflight_json_format(
         net=_FakeNetworkingV1(["nginx"]),
         storage=_FakeStorageV1([("standard", True)]),
     )
-    rc = main(["cluster", "preflight", "--format", "json"])
+    rc = main(["cluster", "preflight", "--format", "json", "--no-doctor"])
     assert rc == 0
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["all_pass"] is True

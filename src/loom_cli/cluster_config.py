@@ -1,120 +1,132 @@
-"""Cluster-deploy config: TOML schema + loader (#76 Phase 1B).
+"""Cluster-deploy config (#76 Phase 1B + #146).
 
-`loom cluster render --config FILE` reads a `cluster-config.toml`
-to produce a deployable manifest set. Every variable has a sensible
-default so an empty file (or no `--config` flag at all) yields a
-working manifest set matching the canonical `deploy/k8s/*.yaml`
-examples.
-
-The schema is deliberately minimal in this PR; subsequent phases
-add fields like `--postgres-url` for external storage, backup
-targets, etc.
+Public surface unchanged: `ClusterConfig` dataclass with operator
+fields, `load_cluster_config(path)` returns one. Fields and defaults
+now come from `config/loom-schema.toml` (`render_config` section).
+The dataclass shape is materialized at import time so call sites
+keep dot-access (`cfg.image_tag`, `cfg.replicas.service`).
 """
-
 from __future__ import annotations
 
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields, make_dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from loom_config.loader import RenderConfigEntry, load_schema
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCHEMA = load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
 
 
-@dataclass(frozen=True)
-class ReplicaConfig:
-    service: int = 2
-    control_plane: int = 2
-    gateway: int = 2
-    # `loom-web` is paused by default per cluster-deploy.md §Component
-    # map — operators scale it up when they want the SPA exposed.
-    web: int = 0
-    worker: int = 3
+def _make_table_dataclass(entry: RenderConfigEntry) -> type:
+    """For `python_type = "table"` entries (e.g. replicas), build a
+    frozen dataclass whose fields are `entry.fields.keys()`."""
+    assert entry.fields is not None
+    cls = make_dataclass(
+        f"_{entry.name.capitalize()}Config",
+        [(k, type(v), field(default=v)) for k, v in entry.fields.items()],
+        frozen=True,
+    )
+    return cls
 
 
-@dataclass(frozen=True)
-class ClusterConfig:
-    """Operator inputs that drive `loom cluster render`. All fields
-    have defaults; the simplest `--config` is an empty TOML file.
+def _build_cluster_config_cls() -> type:
+    """Materialize `ClusterConfig` from `render_config`."""
+    spec: list[tuple[str, type, Any]] = []
+    for name in sorted(_SCHEMA.render_config):
+        entry = _SCHEMA.render_config[name]
+        if entry.python_type == "table":
+            sub_cls = _make_table_dataclass(entry)
+            spec.append((name, sub_cls, field(default_factory=sub_cls)))
+        else:
+            py_type = {"str": str, "int": int, "bool": bool, "float": float}[entry.python_type]
+            spec.append((name, py_type, field(default=entry.default)))
 
-    Field semantics:
-    - `namespace`: target k8s namespace. The render command does NOT
-      emit a Namespace resource yet (Phase 1B keeps the existing
-      manifest shape); namespace selection happens at `kubectl apply
-      -n <namespace>` or via `loom cluster up` (Phase 3).
-    - `image_tag`: applied to every loom-* image (loom-service,
-      loom-control-plane, loom-llm-gateway, loom-worker, loom-web).
-      External images (`postgres`, `minio`) are configured separately.
-    - `ingress_host`: the single public host. SPA at `/`, API at `/api/v1`.
-    - `gateway_public_host`: optional second host for the LLM gateway.
-      Empty string ⇒ no public gateway ingress (the default, per #77
-      boundary enforcement). Operators on a transitional/legacy path
-      can set it to `gateway.<base>` to keep direct gateway access.
-    - `postgres_*`, `minio_*`, `worker_trajectory_storage_gi`: storage
-      knobs.
-    - `worker_max_concurrent`: per-worker process trial concurrency.
-      This maps to WorkerSettings.max_concurrent via
-      LOOM_WORKER_MAX_CONCURRENT and defaults to the worker's runtime
-      default.
-    """
-
-    namespace: str = "loom"
-    image_tag: str = "0.7"
-    ingress_host: str = "loom.example.com"
-    gateway_public_host: str = ""
-    postgres_image: str = "postgres:16"
-    postgres_storage_gi: int = 50
-    minio_image: str = "minio/minio"
-    minio_storage_gi: int = 500
-    worker_trajectory_storage_gi: int = 100
-    worker_max_concurrent: int = 5
-    replicas: ReplicaConfig = field(default_factory=ReplicaConfig)
-
-    def to_render_context(self) -> dict[str, Any]:
-        """Flatten to a dict the jinja2 templates can consume.
-        `replicas.service`, `replicas.worker`, etc. become attribute
-        access in templates via the nested ReplicaConfig dataclass —
-        but dataclasses aren't directly accessible by attribute in
-        jinja2, so we hand-flatten with a dict-of-dicts shape."""
-        out = asdict(self)
-        # `replicas` is already a dict via asdict; jinja2 supports
-        # `replicas.service` as dict-key access when undefined=strict.
+    def _to_render_context(self: Any) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            val = getattr(self, f.name)
+            if hasattr(val, "__dataclass_fields__"):
+                out[f.name] = {sub.name: getattr(val, sub.name) for sub in fields(val)}
+            else:
+                out[f.name] = val
         return out
 
+    return make_dataclass(
+        "ClusterConfig",
+        spec,
+        frozen=True,
+        namespace={"to_render_context": _to_render_context},
+    )
 
-def _merge_replicas(raw: object | None) -> ReplicaConfig:
-    """Validate the [replicas] table from TOML. Unknown keys fail
-    loudly so a typo (`servvice = 4`) doesn't silently use the
-    default."""
-    if raw is None:
-        return ReplicaConfig()
-    if not isinstance(raw, dict):
-        raise ValueError(
-            f"[replicas] must be a TOML table, got {type(raw).__name__}",
-        )
-    known = {f for f in ReplicaConfig.__dataclass_fields__}
-    unknown = set(raw.keys()) - known
-    if unknown:
-        raise ValueError(
-            f"unknown keys under [replicas]: {sorted(unknown)} "
-            f"(known: {sorted(known)})",
-        )
-    return ReplicaConfig(**{k: int(v) for k, v in raw.items()})
+
+if TYPE_CHECKING:
+    # Static shape for mypy. Mirrors the runtime dataclass produced by
+    # _build_cluster_config_cls() so call sites get attribute checking
+    # and `-> ClusterConfig` annotations type-check. When the schema
+    # (config/loom-schema.toml) changes, refresh this stub to match.
+
+    @dataclass(frozen=True)
+    class _ReplicasConfig:
+        service: int = 2
+        control_plane: int = 2
+        gateway: int = 2
+        web: int = 0
+        worker: int = 3
+
+    @dataclass(frozen=True)
+    class ClusterConfig:
+        gateway_public_host: str = ""
+        image_tag: str = "0.7"
+        ingress_host: str = "loom.example.com"
+        minio_image: str = "minio/minio"
+        minio_storage_gi: int = 500
+        namespace: str = "loom"
+        postgres_image: str = "postgres:16"
+        postgres_storage_gi: int = 50
+        replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
+        worker_trajectory_storage_gi: int = 100
+
+        def to_render_context(self) -> dict[str, Any]: ...
+else:
+    ClusterConfig = _build_cluster_config_cls()
 
 
 def load_cluster_config(path: Path | None) -> ClusterConfig:
-    """Load a TOML config file or fall back to all-defaults when path
-    is None. Per-field type-check + unknown-key rejection so typos
-    surface immediately instead of silently using a default."""
+    """Same semantics as before #146: empty/missing path → defaults;
+    unknown top-level or nested keys raise loudly."""
     if path is None:
         return ClusterConfig()
     if not path.exists():
         raise FileNotFoundError(f"cluster config not found: {path}")
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    known = {f for f in ClusterConfig.__dataclass_fields__}
-    unknown = set(raw.keys()) - known
+    field_names = {f.name for f in fields(ClusterConfig)}
+    unknown = set(raw.keys()) - field_names
     if unknown:
         raise ValueError(
             f"unknown keys in cluster config: {sorted(unknown)} "
-            f"(known: {sorted(known)})",
+            f"(known: {sorted(field_names)})"
         )
-    replicas = _merge_replicas(raw.pop("replicas", None))
-    return ClusterConfig(replicas=replicas, **raw)
+    kwargs: dict[str, Any] = {}
+    for name, val in raw.items():
+        entry_field = next(f for f in fields(ClusterConfig) if f.name == name)
+        field_type = entry_field.type
+        if isinstance(field_type, type) and hasattr(field_type, "__dataclass_fields__"):
+            sub_cls: type = field_type
+            sub_known = {f.name for f in fields(sub_cls)}
+            if not isinstance(val, dict):
+                raise ValueError(f"[{name}] must be a TOML table")
+            sub_unknown = set(val.keys()) - sub_known
+            if sub_unknown:
+                raise ValueError(
+                    f"unknown keys under [{name}]: {sorted(sub_unknown)} "
+                    f"(known: {sorted(sub_known)})"
+                )
+            # Coerce values to the right type via the sub-dataclass default's type
+            default_instance = sub_cls()
+            coerced = {k: type(getattr(default_instance, k))(v) for k, v in val.items()}
+            kwargs[name] = sub_cls(**coerced)
+        else:
+            kwargs[name] = val
+    return ClusterConfig(**kwargs)

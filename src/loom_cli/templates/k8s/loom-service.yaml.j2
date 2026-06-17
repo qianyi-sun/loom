@@ -1,3 +1,4 @@
+{% import "_env.j2" as env_macros %}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,40 +14,11 @@ spec:
       containers:
         - name: loom-service
           image: loom-service:{{ image_tag }}
-          env:
-            - name: LOOM_ENV
-              value: production
-            # Reuses the cp-db-url secret — loom_service + CP share
-            # the same Postgres database.
-            - name: LOOM_SVC_DB_URL
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
+          {{ env_macros.env_block("loom-service", schema) | indent(10) }}
             - name: LOOM_SVC_ADMIN_SECRET_FILE
-              value: /var/run/loom/secrets/admin/secrets.toml
-            - name: LOOM_SVC_MINIO_ENDPOINT
-              value: http://loom-minio:9000
-            - name: LOOM_SVC_MINIO_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
-            - name: LOOM_SVC_MINIO_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
-            # Internal cluster DNS — CP is no longer externally exposed
-            # (see ingress.yaml comment); loom_service forwards trial
-            # CRUD here over the pod network.
-            - name: LOOM_SVC_CONTROL_PLANE_URL
-              value: http://loom-control-plane:8080/
-            - name: LOOM_SVC_GATEWAY_URL
-              value: http://loom-llm-gateway:9100/
-            # Campaign-runner needs a submit-scoped service token.
-            # Provision via:
-            #   kubectl create secret generic loom-secrets \
-            #     --from-literal=svc-campaign-runner-cp-token=$(./scripts/mint-submit-token.sh)
-            # If absent, the runner skips its tick with a warning —
-            # campaigns will not fan out until the operator sets this.
-            - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: svc-campaign-runner-cp-token
-                  optional: true
+              value: "/var/run/loom/secrets/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "production"
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

@@ -14,20 +14,52 @@ spec:
         - name: worker
           image: loom-worker:0.7
           env:
+            - name: LOOM_WORKER_CLAIM_POLL_INTERVAL_SEC
+              value: "1.0"
             - name: LOOM_WORKER_CONTROL_PLANE_URL
-              value: http://loom-control-plane:8080
+              value: "http://loom-control-plane:8080"
+            - name: LOOM_WORKER_DOCKER_SOCKET
+              value: "/var/run/docker.sock"
+            - name: LOOM_WORKER_DRAIN_TIMEOUT_SEC
+              value: "600"
+            - name: LOOM_WORKER_ENABLE_WORKER_VLLM
+              value: "False"
             - name: LOOM_WORKER_GATEWAY_URL
-              value: http://loom-llm-gateway:9100
-            - name: LOOM_WORKER_TOKEN
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: worker-token } }
-            - name: LOOM_WORKER_MINIO_ENDPOINT
-              value: http://loom-minio:9000
-            - name: LOOM_WORKER_MINIO_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
-            - name: LOOM_WORKER_MINIO_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
+              value: "http://loom-llm-gateway:9100"
+            - name: LOOM_WORKER_HEARTBEAT_INTERVAL_SEC
+              value: "5.0"
+            - name: LOOM_WORKER_LOG_LEVEL
+              value: "info"
             - name: LOOM_WORKER_MAX_CONCURRENT
               value: "5"
+            - name: LOOM_WORKER_METRICS_PORT
+              value: "9090"
+            - name: LOOM_WORKER_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-access-key
+            - name: LOOM_WORKER_MINIO_ENDPOINT
+              value: "http://loom-minio:9000"
+            - name: LOOM_WORKER_MINIO_REGION
+              value: "us-east-1"
+            - name: LOOM_WORKER_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-secret-key
+            - name: LOOM_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: worker-token
+            - name: LOOM_WORKER_TRAJECTORY_CACHE_DIR
+              value: "/var/lib/loom/trajectories"
+            - name: LOOM_WORKER_VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.9"
+            - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE
+              value: "1"
+
           volumeMounts:
             - name: trajectories
               mountPath: /var/lib/loom/trajectories

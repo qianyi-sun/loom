@@ -1,0 +1,311 @@
+[meta]
+version = 1
+
+[service_prefix]
+control-plane = "CP"
+llm-gateway   = "GW"
+loom-service  = "SVC"
+worker        = "WORKER"
+
+# ─── service_config: shared fields first ───
+
+[service_config.db_url]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "PostgresDsn"
+required    = true
+secret      = { key_per_service = { control-plane = "cp-db-url", llm-gateway = "gw-db-url", loom-service = "svc-db-url" } }
+description = "Postgres connection string. Per-service Secret keys so DB credentials rotate independently."
+
+[service_config.step_jwt_signing_key]
+used_by     = ["control-plane", "llm-gateway"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "step-jwt-signing-key", generate = "openssl rand -hex 64" }
+description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 on every facade call."
+
+[service_config.minio_endpoint]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "http://loom-minio:9000"
+
+[service_config.minio_access_key]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "minio-access-key" }
+
+[service_config.minio_secret_key]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "minio-secret-key" }
+
+[service_config.minio_region]
+used_by     = ["control-plane", "loom-service", "worker"]
+python_type = "str"
+default     = "us-east-1"
+
+[service_config.llm_gateway_url]
+used_by     = ["control-plane"]
+python_type = "HttpUrl"
+default     = "http://loom-llm-gateway:9100"
+
+[service_config.control_plane_url]
+used_by     = ["loom-service", "worker"]
+python_type = "HttpUrl"
+default     = "http://loom-control-plane:8080"
+
+[service_config.gateway_url]
+used_by     = ["loom-service", "worker"]
+python_type = "HttpUrl"
+default     = "http://loom-llm-gateway:9100"
+
+[service_config.admin_secret_file]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "Path"
+# no required, no default → `Path | None = None`
+# k8s templates inject a template-local literal after the env_block macro
+
+[service_config.log_level]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
+python_type = "LogLevel"
+default     = "info"
+
+[service_config.dev_reload]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.bind_host]
+used_by     = ["control-plane", "llm-gateway", "loom-service"]
+python_type = "str"
+default     = "0.0.0.0"
+
+[service_config.bind_port]
+used_by             = ["control-plane", "llm-gateway", "loom-service"]
+python_type         = "int"
+default_per_service = { control-plane = 8080, llm-gateway = 9100, loom-service = 8090 }
+
+[service_config.metrics_port]
+used_by             = ["control-plane", "llm-gateway", "worker"]
+python_type         = "int"
+default_per_service = { control-plane = 9090, llm-gateway = 9101, worker = 9090 }
+
+# ─── control-plane only ───
+
+[service_config.worker_heartbeat_expiry_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 15
+
+[service_config.worker_reclaim_sweep_interval_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 30
+
+[service_config.signed_url_expiry_sec]
+used_by     = ["control-plane", "loom-service"]
+python_type = "int"
+default     = 3600
+
+# ─── llm-gateway only ───
+
+[service_config.anthropic_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "anthropic-api-key" }
+
+[service_config.openai_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "openai-api-key" }
+
+[service_config.google_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "google-api-key" }
+
+[service_config.together_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "together-api-key" }
+
+[service_config.huggingface_api_key]
+used_by     = ["llm-gateway"]
+python_type = "SecretStr"
+secret      = { key = "huggingface-api-key" }
+
+[service_config.rate_card_cache_ttl_sec]
+used_by     = ["llm-gateway"]
+python_type = "int"
+default     = 300
+
+[service_config.upstream_timeout_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 120.0
+
+# ─── loom-service only ───
+
+[service_config.team_registration_open]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.trajectories_bucket]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "trajectories"
+
+[service_config.artifacts_bucket]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "artifacts"
+
+[service_config.batch_runner_batch_size]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 50
+
+[service_config.batch_runner_submit_rate_per_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 100
+
+[service_config.batch_runner_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5
+
+[service_config.batch_runner_cp_token]
+used_by     = ["loom-service"]
+python_type = "SecretStr"
+secret      = { key = "batch-runner-cp-token" }
+# no required, no default → `SecretStr | None = None`
+
+[service_config.local_servers_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+
+# ─── worker only ───
+
+[service_config.token]
+used_by     = ["worker"]
+python_type = "SecretStr"
+required    = true
+secret      = { key = "worker-token" }
+description = "Worker bearer token, minted by `loom admin tokens worker mint`."
+
+[service_config.max_concurrent]
+used_by     = ["worker"]
+python_type = "int"
+default     = 5
+
+[service_config.drain_timeout_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 600
+
+[service_config.claim_poll_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 1.0
+
+[service_config.heartbeat_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 5.0
+
+[service_config.trajectory_cache_dir]
+used_by     = ["worker"]
+python_type = "Path"
+default     = "/var/lib/loom/trajectories"
+
+[service_config.docker_socket]
+used_by     = ["worker"]
+python_type = "Path"
+default     = "/var/run/docker.sock"
+
+[service_config.fixtures_root]
+used_by     = ["worker"]
+python_type = "Path"
+# no default → `Path | None = None`
+
+[service_config.benchmark_cache]
+used_by     = ["worker"]
+python_type = "Path"
+# no default → `Path | None = None`
+
+[service_config.enable_worker_vllm]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+
+[service_config.vllm_gpu_memory_utilization]
+used_by     = ["worker"]
+python_type = "float"
+default     = 0.90
+
+[service_config.vllm_tensor_parallel_size]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1
+
+# ─── infra_secrets: Secret keys used by 3rd-party containers (postgres) ───
+# Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
+# but no codegen Settings field is emitted.
+#
+# Note: minio uses the same minio-access-key / minio-secret-key as the loom
+# services (declared in service_config above), so they need no entry here.
+
+[infra_secrets.postgres-user]
+description = "Postgres superuser (POSTGRES_USER in postgres.yaml.j2)"
+
+[infra_secrets.postgres-password]
+description = "Postgres superuser password (POSTGRES_PASSWORD in postgres.yaml.j2)"
+generate    = "openssl rand -hex 16"
+
+# ─── render_config ───
+
+[render_config.namespace]
+python_type = "str"
+default     = "loom"
+
+[render_config.image_tag]
+python_type = "str"
+default     = "0.7"
+description = "Image tag applied to every loom-* image."
+
+[render_config.ingress_host]
+python_type = "str"
+default     = "loom.example.com"
+
+[render_config.gateway_public_host]
+python_type = "str"
+default     = ""
+description = "Empty = no public gateway ingress (default, per #77 boundary)."
+
+[render_config.postgres_image]
+python_type = "str"
+default     = "postgres:16"
+
+[render_config.postgres_storage_gi]
+python_type = "int"
+default     = 50
+
+[render_config.minio_image]
+python_type = "str"
+default     = "minio/minio"
+
+[render_config.minio_storage_gi]
+python_type = "int"
+default     = 500
+
+[render_config.worker_trajectory_storage_gi]
+python_type = "int"
+default     = 100
+
+[render_config.replicas]
+python_type = "table"
+fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3 }

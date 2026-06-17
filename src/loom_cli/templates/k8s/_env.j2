@@ -1,0 +1,39 @@
+{#-
+  env_block(service, schema) — emits the full `env:` YAML for a
+  service's container. Iterates the schema's service_config entries
+  that declare the service in `used_by`. Secret-backed entries get
+  `valueFrom: secretKeyRef`; non-secret entries with a known default
+  get a literal `value:` (string-coerced — k8s rejects unquoted
+  scalars). Non-secret entries with neither a default nor `required`
+  are omitted entirely (the operator must supply them via
+  cluster-config.toml or a separate ConfigMap).
+
+  Optional secret-backed entries (e.g. provider API keys) emit
+  `optional: true` on the secretKeyRef so the pod doesn't crash
+  when the Secret key is absent.
+
+  Usage (with trim_blocks=True, lstrip_blocks=True):
+    {% import "_env.j2" as e %}
+    {{ e.env_block("control-plane", schema) }}
+-#}
+{%- macro env_block(service, schema) -%}
+env:
+{% for entry in schema.service_config_for(service) %}
+{% if entry.secret is not none %}
+  - name: {{ entry.env_var_for(service) }}
+    valueFrom:
+      secretKeyRef:
+        name: loom-secrets
+        key: {{ entry.secret_key_for(service) }}
+{% if not entry.required %}
+        optional: true
+{% endif %}
+{% elif entry.required %}
+  - name: {{ entry.env_var_for(service) }}
+    value: ""  # required, no schema default — operator must override
+{% elif entry.default is not none or entry.default_per_service is not none %}
+  - name: {{ entry.env_var_for(service) }}
+    value: {{ entry.value_for(service) | string | tojson }}
+{% endif %}
+{% endfor %}
+{%- endmacro -%}

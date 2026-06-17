@@ -32,6 +32,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return _set(args.key, args.value)
     if sub == "show":
         return _show()
+    if sub == "codegen":
+        from loom_config.codegen import main as codegen_main
+        return codegen_main(["--check"] if args.check else [])
     print(f"unknown config subcommand: {sub}", file=sys.stderr)
     return 2
 

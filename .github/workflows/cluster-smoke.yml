@@ -80,24 +80,16 @@ jobs:
           kubectl --context kind-loom-smoke cluster-info
 
       - name: Create loom namespace + required Secrets
-        # Templates reference Secrets via `secretKeyRef`. Without these,
-        # `kubectl apply` still succeeds (the resolve happens at pod
-        # admission, not object creation), but real pods would fail to
-        # start. We create dummy values anyway so the manifests don't
-        # block on missing references when extended to readiness later.
+        # Bootstrap loom-secrets from schema via `loom cluster bootstrap-secrets`.
+        # --smoke-defaults substitutes test-grade placeholder values for every
+        # secret key declared in config/loom-schema.toml, so the Secret always
+        # covers the full key set even as new entries are added to the schema.
+        # kind sets the current kubeconfig context to kind-loom-smoke, so the
+        # generated kubectl command targets the right cluster without --context.
         run: |
+          set -e
           kubectl --context kind-loom-smoke create namespace loom
-          kubectl --context kind-loom-smoke -n loom create secret generic loom-secrets \
-            --from-literal=cp-db-url='postgres://loom@postgres/loom' \
-            --from-literal=gw-db-url='postgres://gw@postgres/gw' \
-            --from-literal=postgres-user='loom' \
-            --from-literal=postgres-password='smoke' \
-            --from-literal=minio-access-key='smoke' \
-            --from-literal=minio-secret-key='smokesmokesmoke' \
-            --from-literal=worker-token='smoke-token' \
-            --from-literal=openai-api-key='smoke' \
-            --from-literal=anthropic-api-key='smoke' \
-            --from-literal=step-jwt-signing-key='smoke-step-jwt-signing-key-must-be-long-enough'
+          eval "$(uv run loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
           printf '[admin]\ntoken="smoke"\n' > /tmp/admin-secrets.toml
           kubectl --context kind-loom-smoke -n loom create secret generic loom-admin-secret \
             --from-file=secrets.toml=/tmp/admin-secrets.toml

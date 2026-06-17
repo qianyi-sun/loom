@@ -5,73 +5,98 @@ metadata:
 spec:
   replicas: 2
   selector:
-    matchLabels:
-      app: loom-llm-gateway
+    matchLabels: { app: loom-llm-gateway }
   template:
     metadata:
-      labels:
-        app: loom-llm-gateway
+      labels: { app: loom-llm-gateway }
     spec:
       containers:
-      - name: gateway
-        image: loom-llm-gateway:0.7
-        env:
-        - name: LOOM_ENV
-          value: production
-        - name: LOOM_GW_DB_URL
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: gw-db-url
-        - name: LOOM_GW_ADMIN_SECRET_FILE
-          value: /var/run/loom/admin/secrets.toml
-        - name: LOOM_GW_ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: anthropic-api-key
-        - name: LOOM_GW_OPENAI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: openai-api-key
-        - name: LOOM_GW_STEP_JWT_SIGNING_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: step-jwt-signing-key
-        ports:
-        - containerPort: 9100
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 9100
-          periodSeconds: 5
-        volumeMounts:
-        - name: loom-admin-secret
-          mountPath: /var/run/loom/admin
-          readOnly: true
-        resources:
-          requests:
-            cpu: 200m
-            memory: 256Mi
-          limits:
-            cpu: 1
-            memory: 1Gi
-      volumes:
-      - name: loom-admin-secret
-        secret:
-          secretName: loom-admin-secret
-          defaultMode: 384
+        - name: gateway
+          image: loom-llm-gateway:0.7
+          env:
+            - name: LOOM_GW_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: anthropic-api-key
+                  optional: true
+            - name: LOOM_GW_BIND_HOST
+              value: "0.0.0.0"
+            - name: LOOM_GW_BIND_PORT
+              value: "9100"
+            - name: LOOM_GW_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: gw-db-url
+            - name: LOOM_GW_DEV_RELOAD
+              value: "False"
+            - name: LOOM_GW_GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: google-api-key
+                  optional: true
+            - name: LOOM_GW_HUGGINGFACE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: huggingface-api-key
+                  optional: true
+            - name: LOOM_GW_LOG_LEVEL
+              value: "info"
+            - name: LOOM_GW_METRICS_PORT
+              value: "9101"
+            - name: LOOM_GW_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: openai-api-key
+                  optional: true
+            - name: LOOM_GW_RATE_CARD_CACHE_TTL_SEC
+              value: "300"
+            - name: LOOM_GW_STEP_JWT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: step-jwt-signing-key
+            - name: LOOM_GW_TOGETHER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: together-api-key
+                  optional: true
+            - name: LOOM_GW_UPSTREAM_TIMEOUT_SEC
+              value: "120.0"
 
+            - name: LOOM_GW_ADMIN_SECRET_FILE
+              value: "/var/run/loom/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "production"
+          ports:
+            - containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9100 }
+            periodSeconds: 5
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/admin
+              readOnly: true
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0600
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: loom-llm-gateway
 spec:
-  selector:
-    app: loom-llm-gateway
+  selector: { app: loom-llm-gateway }
   ports:
-  - port: 9100
-    targetPort: 9100
+    - port: 9100
+      targetPort: 9100

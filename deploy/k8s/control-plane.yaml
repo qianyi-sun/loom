@@ -5,77 +5,86 @@ metadata:
 spec:
   replicas: 2
   selector:
-    matchLabels:
-      app: loom-control-plane
+    matchLabels: { app: loom-control-plane }
   template:
     metadata:
-      labels:
-        app: loom-control-plane
+      labels: { app: loom-control-plane }
     spec:
       containers:
-      - name: control-plane
-        image: loom-control-plane:0.7
-        env:
-        - name: LOOM_ENV
-          value: production
-        - name: LOOM_CP_DB_URL
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: cp-db-url
-        - name: LOOM_CP_ADMIN_SECRET_FILE
-          value: /var/run/loom/secrets/admin/secrets.toml
-        - name: LOOM_CP_MINIO_ENDPOINT
-          value: http://loom-minio:9000
-        - name: LOOM_CP_MINIO_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: minio-access-key
-        - name: LOOM_CP_MINIO_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: minio-secret-key
-        - name: LOOM_CP_LLM_GATEWAY_URL
-          value: http://loom-llm-gateway:9100
-        - name: LOOM_CP_STEP_JWT_SIGNING_KEY
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: step-jwt-signing-key
-        volumeMounts:
-        - name: loom-admin-secret
-          mountPath: /var/run/loom/secrets/admin
-          readOnly: true
-        ports:
-        - containerPort: 8080
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 8080
-          periodSeconds: 5
-        resources:
-          requests:
-            cpu: 200m
-            memory: 256Mi
-          limits:
-            cpu: 1
-            memory: 1Gi
-      volumes:
-      - name: loom-admin-secret
-        secret:
-          secretName: loom-admin-secret
-          defaultMode: 256
+        - name: control-plane
+          image: loom-control-plane:0.7
+          env:
+            - name: LOOM_CP_BIND_HOST
+              value: "0.0.0.0"
+            - name: LOOM_CP_BIND_PORT
+              value: "8080"
+            - name: LOOM_CP_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: cp-db-url
+            - name: LOOM_CP_DEV_RELOAD
+              value: "False"
+            - name: LOOM_CP_LLM_GATEWAY_URL
+              value: "http://loom-llm-gateway:9100"
+            - name: LOOM_CP_LOG_LEVEL
+              value: "info"
+            - name: LOOM_CP_METRICS_PORT
+              value: "9090"
+            - name: LOOM_CP_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-access-key
+            - name: LOOM_CP_MINIO_ENDPOINT
+              value: "http://loom-minio:9000"
+            - name: LOOM_CP_MINIO_REGION
+              value: "us-east-1"
+            - name: LOOM_CP_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-secret-key
+            - name: LOOM_CP_SIGNED_URL_EXPIRY_SEC
+              value: "3600"
+            - name: LOOM_CP_STEP_JWT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: step-jwt-signing-key
+            - name: LOOM_CP_WORKER_HEARTBEAT_EXPIRY_SEC
+              value: "15"
+            - name: LOOM_CP_WORKER_RECLAIM_SWEEP_INTERVAL_SEC
+              value: "30"
 
+            - name: LOOM_CP_ADMIN_SECRET_FILE
+              value: "/var/run/loom/secrets/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "production"
+          volumeMounts:
+            - name: loom-admin-secret
+              mountPath: /var/run/loom/secrets/admin
+              readOnly: true
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 1, memory: 1Gi }
+      volumes:
+        - name: loom-admin-secret
+          secret:
+            secretName: loom-admin-secret
+            defaultMode: 0400
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: loom-control-plane
 spec:
-  selector:
-    app: loom-control-plane
+  selector: { app: loom-control-plane }
   ports:
-  - port: 8080
-    targetPort: 8080
+    - port: 8080
+      targetPort: 8080

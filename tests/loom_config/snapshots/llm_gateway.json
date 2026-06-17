@@ -1,0 +1,77 @@
+{
+  "admin_secret_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "anthropic_api_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "bind_host": {
+    "annotation": "<class 'str'>",
+    "default": "'0.0.0.0'",
+    "required": false
+  },
+  "bind_port": {
+    "annotation": "<class 'int'>",
+    "default": "9100",
+    "required": false
+  },
+  "db_url": {
+    "annotation": "<class 'pydantic.networks.PostgresDsn'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "dev_reload": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "google_api_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "huggingface_api_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "log_level": {
+    "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
+    "default": "'info'",
+    "required": false
+  },
+  "metrics_port": {
+    "annotation": "<class 'int'>",
+    "default": "9101",
+    "required": false
+  },
+  "openai_api_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "rate_card_cache_ttl_sec": {
+    "annotation": "<class 'int'>",
+    "default": "300",
+    "required": false
+  },
+  "step_jwt_signing_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "together_api_key": {
+    "annotation": "pydantic.types.SecretStr | None",
+    "default": "None",
+    "required": false
+  },
+  "upstream_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "120.0",
+    "required": false
+  }
+}

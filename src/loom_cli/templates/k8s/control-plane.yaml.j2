@@ -1,3 +1,4 @@
+{% import "_env.j2" as env_macros %}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,28 +14,11 @@ spec:
       containers:
         - name: control-plane
           image: loom-control-plane:{{ image_tag }}
-          env:
-            - name: LOOM_ENV
-              value: production
-            - name: LOOM_CP_DB_URL
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: cp-db-url } }
+          {{ env_macros.env_block("control-plane", schema) | indent(10) }}
             - name: LOOM_CP_ADMIN_SECRET_FILE
-              value: /var/run/loom/secrets/admin/secrets.toml
-            - name: LOOM_CP_MINIO_ENDPOINT
-              value: http://loom-minio:9000
-            - name: LOOM_CP_MINIO_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-access-key } }
-            - name: LOOM_CP_MINIO_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
-            - name: LOOM_CP_LLM_GATEWAY_URL
-              value: http://loom-llm-gateway:9100
-            # Step-JWT signing key. Mint random with:
-            #   openssl rand -hex 64
-            # The same key MUST be in the gateway's loom-secrets
-            # (key `step-jwt-signing-key`) — CP mints, gateway
-            # verifies. Mismatch → 401 on every facade call.
-            - name: LOOM_CP_STEP_JWT_SIGNING_KEY
-              valueFrom: { secretKeyRef: { name: loom-secrets, key: step-jwt-signing-key } }
+              value: "/var/run/loom/secrets/admin/secrets.toml"
+            - name: LOOM_ENV
+              value: "production"
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

@@ -1,0 +1,82 @@
+{
+  "admin_secret_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "bind_host": {
+    "annotation": "<class 'str'>",
+    "default": "'0.0.0.0'",
+    "required": false
+  },
+  "bind_port": {
+    "annotation": "<class 'int'>",
+    "default": "8080",
+    "required": false
+  },
+  "db_url": {
+    "annotation": "<class 'pydantic.networks.PostgresDsn'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "dev_reload": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "llm_gateway_url": {
+    "annotation": "<class 'pydantic.networks.HttpUrl'>",
+    "default": "'http://loom-llm-gateway:9100'",
+    "required": false
+  },
+  "log_level": {
+    "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
+    "default": "'info'",
+    "required": false
+  },
+  "metrics_port": {
+    "annotation": "<class 'int'>",
+    "default": "9090",
+    "required": false
+  },
+  "minio_access_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "minio_endpoint": {
+    "annotation": "<class 'str'>",
+    "default": "'http://loom-minio:9000'",
+    "required": false
+  },
+  "minio_region": {
+    "annotation": "<class 'str'>",
+    "default": "'us-east-1'",
+    "required": false
+  },
+  "minio_secret_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "signed_url_expiry_sec": {
+    "annotation": "<class 'int'>",
+    "default": "3600",
+    "required": false
+  },
+  "step_jwt_signing_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "worker_heartbeat_expiry_sec": {
+    "annotation": "<class 'int'>",
+    "default": "15",
+    "required": false
+  },
+  "worker_reclaim_sweep_interval_sec": {
+    "annotation": "<class 'int'>",
+    "default": "30",
+    "required": false
+  }
+}
