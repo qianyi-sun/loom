@@ -875,3 +875,123 @@ def test_write_env_tokens_replaces_existing_batch_runner_cp_token(
     assert "LOOM_TEAM_TOKEN=loom_team_new" in lines
     assert "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_new" in lines
     assert not any("loom_br_old" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# _mint_secret_store_master_key + _ensure_secret_store_master_key
+# ---------------------------------------------------------------------------
+
+
+def test_secret_store_master_key_is_32_bytes_base64() -> None:
+    """The helper must produce a base64-encoded 32-byte (256-bit) key."""
+    import base64
+
+    from loom_cli.service_cmd import _mint_secret_store_master_key
+
+    key = _mint_secret_store_master_key()
+    raw = base64.b64decode(key)
+    assert len(raw) == 32, f"expected 32 bytes, got {len(raw)}"
+
+
+def test_up_generates_secret_store_master_key_if_absent(
+    tmp_path: Path,
+) -> None:
+    """On a fresh .env (no pre-existing key), `_up` must write
+    LOOM_SECRET_STORE_MASTER_KEY before docker compose starts."""
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+    # env_file does NOT yet exist (fresh dev setup)
+
+    def _capture_run(argv, *_args, **_kwargs):
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {"team": "loom_team_t", "worker": "loom_w_w"}
+    admin_secret_token = "loom_admin_" + "K" * 43
+
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value=admin_secret_token), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=None):
+        rc = main([
+            "service", "up",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+    assert env_file.exists(), ".env should have been created"
+    content = env_file.read_text()
+    assert "LOOM_SECRET_STORE_MASTER_KEY=" in content
+    # The value must be non-empty
+    for line in content.splitlines():
+        if line.startswith("LOOM_SECRET_STORE_MASTER_KEY="):
+            value = line.split("=", 1)[1]
+            assert value, "LOOM_SECRET_STORE_MASTER_KEY must have a non-empty value"
+            break
+
+
+def test_up_preserves_existing_secret_store_master_key(
+    tmp_path: Path,
+) -> None:
+    """When LOOM_SECRET_STORE_MASTER_KEY already exists in .env, `_up` must
+    NOT regenerate it — rotating the master key would invalidate all stored
+    provider-connection secrets."""
+    import base64
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+    existing_key = base64.b64encode(b"existing-32-byte-key-padded-here").decode()
+    env_file.write_text(f"LOOM_SECRET_STORE_MASTER_KEY={existing_key}\n")
+
+    def _capture_run(argv, *_args, **_kwargs):
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {"team": "loom_team_t", "worker": "loom_w_w"}
+    admin_secret_token = "loom_admin_" + "P" * 43
+
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value=admin_secret_token), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=None):
+        rc = main([
+            "service", "up",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+    content = env_file.read_text()
+    # The original key must be unchanged.
+    assert f"LOOM_SECRET_STORE_MASTER_KEY={existing_key}" in content
+    # No duplicate lines for the key.
+    key_lines = [
+        line for line in content.splitlines()
+        if line.startswith("LOOM_SECRET_STORE_MASTER_KEY=")
+    ]
+    assert len(key_lines) == 1, (
+        f"expected exactly one LOOM_SECRET_STORE_MASTER_KEY line; "
+        f"got {len(key_lines)}: {key_lines!r}"
+    )

@@ -236,6 +236,48 @@ def _mint_batch_runner_cp_token(
     return token
 
 
+def _mint_secret_store_master_key() -> str:
+    """Generate a fresh 32-byte random key, base64-encoded.
+
+    Matches the generation command documented in the SecretStoreError message:
+        python -c 'import os, base64; print(base64.b64encode(os.urandom(32)).decode())'
+    """
+    import base64
+
+    return base64.b64encode(os.urandom(32)).decode()
+
+
+def _ensure_secret_store_master_key(env_file: Path) -> str:
+    """Read LOOM_SECRET_STORE_MASTER_KEY from env_file if present; generate
+    and write it if absent.
+
+    Returns the key value (existing or freshly-generated).
+
+    IMPORTANT: Never regenerate on a second call — rotating the master key
+    would make all previously-encrypted provider-connection secrets unreadable.
+    """
+    key_name = "LOOM_SECRET_STORE_MASTER_KEY"
+
+    # Check if the key already exists in .env.
+    if env_file.exists():
+        for raw in env_file.read_text().splitlines():
+            stripped = raw.lstrip()
+            if stripped.startswith("#") or "=" not in stripped:
+                continue
+            k, _, v = stripped.partition("=")
+            if k.strip() == key_name and v.strip():
+                return v.strip()
+
+    # Key absent — generate once and append to .env.
+    key = _mint_secret_store_master_key()
+    lines: list[str] = []
+    if env_file.exists():
+        lines = env_file.read_text().splitlines()
+    lines.append(f"{key_name}={key}")
+    env_file.write_text("\n".join(lines) + "\n")
+    return key
+
+
 def _print_summary(tokens: dict[str, str]) -> None:
     print()
     print("=" * 60)
@@ -294,6 +336,18 @@ def _up(args: argparse.Namespace) -> int:
     except AdminSecretConfigError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
+
+    # Ensure LOOM_SECRET_STORE_MASTER_KEY is in .env before loom-service boots.
+    # The key is needed at startup to initialise LocalEncryptedSecretStore; it
+    # cannot be injected post-boot like the batch-runner CP token.
+    # We generate once and never rotate automatically — rotating the key
+    # would make all existing provider-connection secrets unreadable.
+    if env_file is not None:
+        _ensure_secret_store_master_key(env_file)
+        print(
+            "✓ secret-store master key written to .env "
+            "(DO NOT lose this — rotating it loses all stored provider secrets)"
+        )
 
     print(f"→ docker compose up -d ({compose_file})")
     r = _run([*_compose_args(compose_file, env_file), "up", "-d"], check=False)
@@ -380,6 +434,7 @@ _ENV_TOKEN_KEYS: dict[str, str] = {
     "worker": "LOOM_WORKER_TOKEN",
     "admin": "LOOM_ADMIN_TOKEN",
     "batch_runner_cp": "LOOM_SVC_BATCH_RUNNER_CP_TOKEN",
+    "secret_store_master_key": "LOOM_SECRET_STORE_MASTER_KEY",
 }
 
 
