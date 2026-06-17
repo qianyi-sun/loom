@@ -127,27 +127,19 @@ knob you need.
    raw token, then `kubectl rollout restart deploy/loom-worker`.
 
 6. **(Optional) Provision the batch-runner CP token.** The
-   `loom_service` batch-runner needs a `submit`-scoped team token
+   `loom_service` batch-runner needs a `submit:batch` internal token
    to fan out trials from batches. Without it, the runner skips
-   its tick with a warning — batches will not advance.
+   its tick with a warning — batches will not advance. The token is
+   team-less; Control Plane derives each child trial's `team_id` from
+   the parent batch row, so one runner can safely process multiple teams.
 
-   CP's `POST /admin/worker-tokens` hardcodes `type=worker` /
-   `scopes=[worker:*]` so it cannot mint a submit-scoped token. Mint
-   instead via `loom_service`'s `POST /api/v1/tokens`, which DOES
-   accept `type` + `scopes` + `team_id`. Port-forward `loom-service`
-   (NOT CP), pick the team that will own the batches, then patch
-   the secret:
+   Mint it through Control Plane's admin endpoint, then patch the
+   service secret:
    ```bash
-   kubectl port-forward deploy/loom-service 8090:8090 &
-   # SYSTEM_TEAM_UUID is the team_id you want batches to be
-   # attributed to — typically a dedicated "system" team you
-   # created via the SQL bootstrap (similar to step 5's admin
-   # token), or any existing team.
-   RAW=$(curl -sS -X POST http://localhost:8090/api/v1/tokens \
+   kubectl port-forward deploy/loom-control-plane 8080:8080 &
+   RAW=$(curl -sS -X POST http://localhost:8080/admin/batch-runner-tokens \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Loom-Admin-Actor: qianyi" \
-     -d "{\"type\": \"team\", \"team_id\": \"$SYSTEM_TEAM_UUID\",
-          \"scopes\": [\"submit\"], \"expires_in_days\": 365}" \
+     -d '{"expires_in_days": 365}' \
      | jq -r .token)
    kubectl patch secret loom-secrets \
      -p "{\"stringData\":{\"svc-batch-runner-cp-token\":\"$RAW\"}}"

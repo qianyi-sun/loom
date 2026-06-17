@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Token
@@ -83,6 +83,38 @@ def test_issue_worker_token(app):  # type: ignore[no-untyped-def]
         body = r.json()
         assert body["token"].startswith("loom_w_")
         assert "token_hash_prefix" in body
+
+
+def test_issue_batch_runner_token(
+    app,  # type: ignore[no-untyped-def]
+    postgres_url: str,
+) -> None:
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/batch-runner-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={"expires_in_days": 90},
+        )
+
+    assert r.status_code == 201
+    body = r.json()
+    assert body["token"].startswith("loom_br_")
+    assert "token_hash_prefix" in body
+
+    engine = create_engine(postgres_url)
+    sl = sessionmaker(engine)
+    with sl() as s:
+        row = s.execute(
+            select(Token).where(
+                Token.token_hash == hashlib.sha256(
+                    body["token"].encode(),
+                ).digest(),
+            ),
+        ).scalar_one()
+    engine.dispose()
+    assert row.type == "worker"
+    assert row.team_id is None
+    assert row.scopes == ["submit:batch"]
 
 
 def test_issue_worker_token_accepts_singleton_admin_secret(

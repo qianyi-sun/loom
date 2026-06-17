@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -169,6 +169,168 @@ def test_unknown_batch_id_returns_400(
         )
     assert r.status_code == 400
     assert "unknown batch" in r.json()["detail"]
+
+
+def test_team_token_cannot_submit_trial_for_other_team_batch(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    """A normal submit token cannot attach a trial to another team's batch.
+
+    This is the tenant-boundary failure from issue #142: the old path only
+    checked that batch_id existed, then wrote Trial.team_id from the caller's
+    token.
+    """
+    owner_team, _owner_raw = seed_team
+    runner_team = uuid4()
+    runner_raw = f"loom_team_{uuid4().hex}"
+    batch_id = uuid4()
+
+    engine = create_engine(postgres_url)
+    sl = sessionmaker(engine)
+    with sl() as s:
+        s.execute(insert(Team).values(
+            id=runner_team, name=f"runner-{runner_team}",
+        ))
+        s.execute(insert(TeamQuota).values(team_id=runner_team))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(runner_raw.encode()).digest(),
+            type="team",
+            scopes=["submit"],
+            team_id=runner_team,
+            issued_at=datetime.now(UTC),
+        ))
+        s.add(Batch(
+            id=batch_id,
+            team_id=owner_team,
+            name="owner-batch",
+            task_filter={},
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=1,
+        ))
+        s.commit()
+    engine.dispose()
+
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {runner_raw}"},
+                json={
+                    "task_id": "hello",
+                    "config": {
+                        "agent_name": "oracle",
+                        "agent_model": None,
+                    },
+                    "batch_id": str(batch_id),
+                    "idempotency_key": f"{batch_id}::hello",
+                },
+            )
+        assert r.status_code == 403
+        assert "batch belongs to another team" in r.json()["detail"]
+
+        engine = create_engine(postgres_url)
+        sl = sessionmaker(engine)
+        with sl() as s:
+            trial = s.execute(
+                select(Trial).where(Trial.batch_id == batch_id),
+            ).scalar_one_or_none()
+        engine.dispose()
+        assert trial is None
+    finally:
+        engine = create_engine(postgres_url)
+        sl = sessionmaker(engine)
+        with sl() as s:
+            s.execute(delete(Trial))
+            s.execute(delete(Batch).where(Batch.id == batch_id))
+            s.execute(delete(Token).where(Token.team_id == runner_team))
+            s.execute(delete(TeamQuota).where(
+                TeamQuota.team_id == runner_team,
+            ))
+            s.execute(delete(Team).where(Team.id == runner_team))
+            s.commit()
+        engine.dispose()
+
+
+def test_batch_submit_token_creates_trial_for_batch_team(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    """A team-less internal batch-submit token derives ownership from Batch.
+
+    This is the intended service-runner path for multi-team deployments:
+    the token authorizes fan-out, but the parent batch row decides the
+    trial's tenant.
+    """
+    owner_team, _owner_raw = seed_team
+    runner_raw = f"loom_w_{uuid4().hex}"
+    batch_id = uuid4()
+
+    engine = create_engine(postgres_url)
+    sl = sessionmaker(engine)
+    with sl() as s:
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(runner_raw.encode()).digest(),
+            type="worker",
+            scopes=["submit:batch"],
+            team_id=None,
+            issued_at=datetime.now(UTC),
+        ))
+        s.add(Batch(
+            id=batch_id,
+            team_id=owner_team,
+            name="owner-batch",
+            task_filter={},
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=1,
+        ))
+        s.commit()
+    engine.dispose()
+
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {runner_raw}"},
+                json={
+                    "task_id": "hello",
+                    "config": {
+                        "agent_name": "oracle",
+                        "agent_model": None,
+                    },
+                    "batch_id": str(batch_id),
+                    "idempotency_key": f"{batch_id}::hello",
+                },
+            )
+        assert r.status_code == 201, r.text
+        trial_id = UUID(r.json()["trial_id"])
+
+        engine = create_engine(postgres_url)
+        sl = sessionmaker(engine)
+        with sl() as s:
+            trial = s.execute(
+                select(Trial).where(Trial.id == trial_id),
+            ).scalar_one()
+        engine.dispose()
+        assert trial.team_id == owner_team
+        assert trial.batch_id == batch_id
+    finally:
+        engine = create_engine(postgres_url)
+        sl = sessionmaker(engine)
+        with sl() as s:
+            s.execute(delete(Trial))
+            s.execute(delete(Batch).where(Batch.id == batch_id))
+            s.execute(delete(Token).where(Token.token_hash == (
+                hashlib.sha256(runner_raw.encode()).digest()
+            )))
+            s.commit()
+        engine.dispose()
 
 
 def test_cross_team_idempotency_key_does_not_leak(

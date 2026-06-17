@@ -64,6 +64,47 @@ async def issue_worker_token(
     }
 
 
+@router.post("/batch-runner-tokens", status_code=201)
+async def issue_batch_runner_token(
+    request: Request,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(
+                request.app.state, "admin_secret_verifier", None,
+            ),
+        )
+    if ctx is None or "admin:tokens" not in ctx.scopes:
+        raise HTTPException(status_code=403, detail="missing scope admin:tokens")
+
+    raw = "loom_br_" + secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at: datetime | None = None
+    days = payload.get("expires_in_days")
+    if days is not None:
+        expires_at = datetime.now(UTC) + timedelta(days=int(days))
+
+    async with request.app.state.session_factory() as session:
+        await session.execute(insert(Token).values(
+            token_hash=token_hash,
+            type="worker",
+            scopes=["submit:batch"],
+            team_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=expires_at,
+        ))
+        await session.commit()
+
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash.hex()[:8],
+    }
+
+
 @router.delete("/worker-tokens/{prefix}")
 async def revoke_token(
     prefix: str,

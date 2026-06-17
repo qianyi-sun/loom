@@ -11,7 +11,7 @@ from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from loom.auth import verify_bearer_token
-from loom.db.schema import LlmCall, TeamQuota
+from loom.db.schema import Batch, LlmCall, TeamQuota
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
 from loom.models.task import TaskConfig, normalize_steps
@@ -29,13 +29,47 @@ async def submit_trial(
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
-    if ctx is None or "submit" not in ctx.scopes or ctx.team_id is None:
+    if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
     task_id = payload.get("task_id")
     if not task_id:
         raise HTTPException(status_code=400, detail="task_id required")
     idempotency_key = payload.get("idempotency_key")
+
+    # Plan 19 validated only batch existence. Multi-team deployments need
+    # ownership validation too: normal team tokens may only submit into their
+    # own batches, while the internal batch-runner token derives the target
+    # tenant from the parent batch row.
+    batch_id = payload.get("batch_id")
+    batch_team_id: UUID | None = None
+    if batch_id is not None:
+        async with request.app.state.session_factory() as session:
+            batch_team_id = (await session.execute(
+                select(Batch.team_id).where(Batch.id == batch_id),
+            )).scalar_one_or_none()
+        if batch_team_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown batch {batch_id}",
+            )
+
+    if ctx.team_id is not None:
+        if "submit" not in ctx.scopes:
+            raise HTTPException(
+                status_code=401,
+                detail="not authorized to submit",
+            )
+        if batch_team_id is not None and batch_team_id != ctx.team_id:
+            raise HTTPException(
+                status_code=403,
+                detail="batch belongs to another team",
+            )
+        submit_team_id = ctx.team_id
+    elif "submit:batch" in ctx.scopes and batch_team_id is not None:
+        submit_team_id = batch_team_id
+    else:
+        raise HTTPException(status_code=401, detail="not authorized to submit")
 
     # Plan 19: if `idempotency_key` was supplied and a trial with that
     # key already exists FOR THIS TEAM, return its trial_id without
@@ -50,7 +84,7 @@ async def submit_trial(
             existing = (await session.execute(
                 select(TrialRow).where(
                     TrialRow.idempotency_key == idempotency_key,
-                    TrialRow.team_id == ctx.team_id,
+                    TrialRow.team_id == submit_team_id,
                 ),
             )).scalar_one_or_none()
         if existing is not None:
@@ -66,22 +100,6 @@ async def submit_trial(
         )).scalar_one_or_none()
     if task_row is None:
         raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
-
-    # Plan 19: validate batch_id FK at request time. The schema FK
-    # would raise IntegrityError → 500; surface as a clean 400 so the
-    # batch runner sees the misconfig in the response (audit C2).
-    batch_id = payload.get("batch_id")
-    if batch_id is not None:
-        from loom.db.schema import Batch
-        async with request.app.state.session_factory() as session:
-            exists = (await session.execute(
-                select(Batch.id).where(Batch.id == batch_id),
-            )).scalar_one_or_none()
-        if exists is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown batch {batch_id}",
-            )
 
     try:
         task_config = normalize_steps(
@@ -112,7 +130,7 @@ async def submit_trial(
         # A13.1) means the new row carries the v1 allowlist automatically.
         await session.execute(
             pg_insert(TeamQuota)
-            .values(team_id=ctx.team_id)
+            .values(team_id=submit_team_id)
             .on_conflict_do_nothing(index_elements=["team_id"]),
         )
         # Plan 13 Task 4: license-allowlist enforcement. Re-read the
@@ -125,7 +143,7 @@ async def submit_trial(
         # should fall through to the allowlist check and 403.
         if task_row.license is not None:
             quota = (await session.execute(
-                select(TeamQuota).where(TeamQuota.team_id == ctx.team_id),
+                select(TeamQuota).where(TeamQuota.team_id == submit_team_id),
             )).scalar_one()
             if task_row.license not in quota.license_allowlist:
                 raise HTTPException(
@@ -156,7 +174,7 @@ async def submit_trial(
         provider_connection_id = payload.get("provider_connection_id")
         provider_model_id = payload.get("provider_model_id")
         insert_values: dict[str, Any] = {
-            "id": trial_id, "team_id": ctx.team_id, "task_id": task_id,
+            "id": trial_id, "team_id": submit_team_id, "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
             "requires_caps": requires_caps.model_dump(mode="json"),
             "state": "queued",
@@ -199,7 +217,7 @@ async def submit_trial(
                     ),
                 )).scalar_one()
                 await session.commit()
-                if existing.team_id != ctx.team_id:
+                if existing.team_id != submit_team_id:
                     raise HTTPException(
                         status_code=409,
                         detail=(

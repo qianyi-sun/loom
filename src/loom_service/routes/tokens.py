@@ -54,6 +54,7 @@ _TEAM_ALLOWED_SCOPES = frozenset({"read:own", "submit"})
 _KNOWN_SCOPES = frozenset({
     "read:own",
     "submit",
+    "submit:batch",
     "admin:tokens",
     "admin:rate_cards",
     "worker:claim",
