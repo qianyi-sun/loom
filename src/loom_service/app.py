@@ -17,7 +17,8 @@ from contextlib import asynccontextmanager
 import boto3
 import httpx
 from botocore.config import Config
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.admin_secret import (
@@ -26,6 +27,10 @@ from loom.admin_secret import (
 )
 from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
+from loom_service.metrics import (
+    HTTP_REQUEST_LATENCY_SEC,
+    HTTP_REQUESTS_TOTAL,
+)
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -191,4 +196,41 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")
+
+    @app.middleware("http")
+    async def _metrics_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """Observe every HTTP request once. Uses FastAPI's matched
+        route template (e.g., `/api/v1/trials/{trial_id}`) as the
+        label so cardinality is bounded by the route count, not the
+        UUIDs in the URL."""
+        import time as _time
+        t0 = _time.perf_counter()
+        response = await call_next(request)
+        elapsed = _time.perf_counter() - t0
+        # The matched route lands on request.scope["route"] for
+        # APIRoute matches; missing for /metrics and 404s. Fall back
+        # to the raw URL path in those cases (bounded — 404s typically
+        # come from a small set of operator typos).
+        route_obj = request.scope.get("route")
+        route_path = getattr(route_obj, "path", None) or request.url.path
+        status_class = f"{response.status_code // 100}xx"
+        HTTP_REQUESTS_TOTAL.labels(
+            route=route_path, method=request.method,
+            status_class=status_class,
+        ).inc()
+        HTTP_REQUEST_LATENCY_SEC.labels(
+            route=route_path, method=request.method,
+        ).observe(elapsed)
+        return response
+
+    # /metrics: prometheus_client ASGI app. Note the Ingress only
+    # routes `/api/v1/*` to loom-service (see
+    # `src/loom_cli/templates/k8s/ingress.yaml.j2`), so `/metrics`
+    # is NOT reachable from the public Internet — only from cluster
+    # scrapers using the ClusterIP Service. The #78 slice C
+    # NetworkPolicy on loom-service still allows any-namespace
+    # ingress (the Ingress controller is in another namespace and
+    # hard to label-select), so production scrapers should target
+    # the Service's cluster DNS, not the public URL.
+    app.mount("/metrics", make_asgi_app())
     return app

@@ -234,3 +234,46 @@ spec:
                   | grep -i "provider=$LABEL\|upstream"
                 loom providers test <connection-name>
                 Check provider status page.
+
+    - name: loom.service.health
+      interval: 30s
+      rules:
+        - alert: LoomServiceDown
+          expr: up{job=~".*loom-service.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: service
+          annotations:
+            summary: "loom-service scrape down"
+            description: |
+              Prometheus can't scrape loom-service for 5 minutes.
+              Public API is silent.
+
+              Triage:
+                kubectl get pods -n loom -l app=loom-service
+                kubectl describe svc -n loom loom-service
+                Check ServiceMonitor / PodMonitor label selectors.
+
+        - alert: LoomServiceHighErrorRate
+          expr: |
+            (
+              sum(rate(loom_svc_http_requests_total{
+                status_class="5xx"
+              }[5m]))
+              /
+              sum(rate(loom_svc_http_requests_total[5m]))
+            ) > 0.02
+          for: 10m
+          labels:
+            severity: warning
+            component: service
+          annotations:
+            summary: "Service 5xx rate > 2% for 10m"
+            description: |
+              The public API is returning > 2% 5xx for 10 minutes.
+
+              Triage:
+                kubectl logs -n loom -l app=loom-service --since=15m \
+                  | grep -i "500\|exception\|traceback"
+                Check upstream control-plane and gateway dependencies.
