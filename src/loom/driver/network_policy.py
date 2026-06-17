@@ -14,6 +14,16 @@ and pins the resulting IPs. Subsequent DNS lookups inside the container go
 through the default DROP and will fail. A future iteration can add an
 explicit ACCEPT for UDP/53 to the host's resolvers, or pre-populate
 /etc/hosts with the resolved entries.
+
+Always-blocked CIDRs (#78): when iptables rules ARE emitted (NoNetwork
+or Allowlist policy), `_ALWAYS_BLOCKED_CIDRS` DROP entries are inserted
+at the top of the OUTPUT chain so they match BEFORE any
+operator-supplied ACCEPT. This makes it impossible for an Allowlist that
+inadvertently widens to include `0.0.0.0/0` (or any range that covers
+the metadata IP) to expose cloud-instance metadata. Public policy
+remains a no-op for vanilla-image compatibility — the
+`sandbox-isolation.md` doc tells operators not to use Public on
+untrusted workloads on cloud-hosted clusters.
 """
 
 from __future__ import annotations
@@ -21,6 +31,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from loom.models.networking import Allowlist, NetworkPolicy, NoNetwork, Public
+
+# IPv4 CIDRs that NO sandbox should reach, regardless of NetworkPolicy
+# choice. Applied when iptables rules are emitted at all (i.e., not
+# Public). Ordered most-specific first for human readability; iptables
+# itself doesn't care about ordering between DROPs.
+#
+# - 169.254.169.254/32 — AWS / GCP / Azure instance metadata service.
+#   Reaching this from a sandbox would surface node-level credentials.
+# - 169.254.0.0/16    — IPv4 link-local (RFC 3927). Catches the
+#   metadata service's siblings on the same /16 (e.g. AWS IMDSv2's
+#   adjacent IPs used by some SDKs) AND any other link-local services
+#   the host happens to expose.
+_ALWAYS_BLOCKED_CIDRS: tuple[str, ...] = (
+    "169.254.169.254/32",
+    "169.254.0.0/16",
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +89,12 @@ def render_iptables_commands(plan: IptablesPlan) -> list[str]:
     For a Public-equivalent plan (no drops, no allows) we return an empty
     list so vanilla images without iptables installed still work. Containers
     running NoNetwork or Allowlist policies must have iptables present.
+
+    When rules ARE emitted, `_ALWAYS_BLOCKED_CIDRS` DROPs are inserted
+    immediately after the flush + loopback/established ACCEPTs so they
+    match before any operator-supplied destination ACCEPT. iptables
+    walks the chain top-down and stops at the first match, so a DROP
+    earlier in the chain wins over a later ACCEPT.
     """
     if not plan.outbound_drops and not plan.allowed_domains and not plan.allowed_cidrs:
         return []
@@ -72,6 +104,11 @@ def render_iptables_commands(plan: IptablesPlan) -> list[str]:
         cmds.append("iptables -F INPUT || true")
     cmds.append("iptables -A OUTPUT -o lo -j ACCEPT")
     cmds.append("iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")
+    # Always-blocked CIDRs go BEFORE any operator ACCEPT so an
+    # Allowlist that inadvertently covers 169.254/16 (e.g. via a wide
+    # CIDR) still has metadata-IP traffic dropped.
+    for cidr in _ALWAYS_BLOCKED_CIDRS:
+        cmds.append(f"iptables -A OUTPUT -d {cidr} -j DROP")
     for cidr in plan.allowed_cidrs:
         cmds.append(f"iptables -A OUTPUT -d {cidr} -j ACCEPT")
     for domain in plan.allowed_domains:

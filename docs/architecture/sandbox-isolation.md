@@ -57,23 +57,37 @@ lookups inside the container after apply go through the default
 DROP — that's intentional, so a compromised agent can't dial new
 hosts via DNS.
 
-### Container-level: NetworkPolicy `Public` lacks default-deny
+### Container-level: always-blocked CIDRs (#78 slice B, shipped)
+
+When iptables rules are emitted at all (i.e. for `NoNetwork` and
+`Allowlist`), `_ALWAYS_BLOCKED_CIDRS` DROP rules are inserted at the
+top of the OUTPUT chain so they match BEFORE any operator-supplied
+ACCEPT:
+
+| CIDR | What it blocks |
+|---|---|
+| `169.254.169.254/32` | AWS / GCP / Azure instance metadata service |
+| `169.254.0.0/16` | IPv4 link-local (IMDSv2 sibling IPs + arbitrary link-local services) |
+
+iptables matches top-down and stops at the first match. The DROPs
+come before any ACCEPT, so an operator who accidentally widens an
+Allowlist to cover `0.0.0.0/0` (or any range containing the metadata
+IP) still gets metadata traffic dropped.
+
+### Container-level: NetworkPolicy `Public` remains a no-op
 
 **Known gap (`Public` policy):** vanilla images run with no iptables
-rules at all, so cloud-metadata IPs (`169.254.169.254`),
-link-local (`169.254.0.0/16`), and the rest of the host's
+rules at all, so cloud-metadata IPs and the rest of the host's
 reachable network are wide open. An agent running under a
 `Public` policy on AWS / GCP / Azure can fetch the instance-metadata
-service and exfiltrate node-level credentials.
+service and exfiltrate node-level credentials. `Public` is
+deliberately left as a no-op so vanilla container images without
+iptables installed still work.
 
 **Mitigation today:** never use `Public` for an untrusted workload
 on a cloud-hosted cluster. Use `Allowlist({domains: ["gateway.loom"]})`
-or `NoNetwork` and let the agent reach the gateway through the
-explicit allowlist.
-
-**Planned fix (#78 follow-up slice):** always-deny rules for
-metadata + link-local CIDRs prepended unconditionally when iptables
-is available, with an opt-out flag for vanilla-image compatibility.
+or `NoNetwork` and let the always-blocked CIDR DROPs + the explicit
+allowlist do the work.
 
 ### Cluster-level: k8s NetworkPolicy on Loom components
 
@@ -117,7 +131,8 @@ gateway-side IP allowlist enforcement is a #78 follow-up slice.
 | Agent under `NoNetwork` tries to dial anything | Connection refused / DROP'd at the iptables OUTPUT chain. Container-level error surfaces in the trial trajectory `events.jsonl`. |
 | Agent under `Allowlist` tries to dial a non-allowlisted domain | DNS resolution succeeds (the iptables rule pins IPs at apply-time but doesn't block DNS UDP itself), but TCP connect drops. Look like a network timeout to the agent. |
 | Agent under `Allowlist` tries to dial the gateway with an expired step JWT | Gateway returns `401`; agent sees an HTTP error. JWT expiry events surface in CP logs. |
-| Agent under `Public` reaches `169.254.169.254` | **Currently NOT blocked.** AWS / GCP / Azure metadata service responds with node-level credentials. Mitigation: don't use `Public`. |
+| Agent under `Public` reaches `169.254.169.254` | **NOT blocked.** AWS / GCP / Azure metadata service responds with node-level credentials. Mitigation: don't use `Public` on cloud-hosted clusters. |
+| Agent under `Allowlist` or `NoNetwork` reaches `169.254.169.254` | DROP'd by the always-blocked-CIDR rule (#78 slice B). TCP connect drops; agent sees a network timeout. |
 | Gateway tries to dial a provider URL that resolves to a private IP | Gateway-side SSRF check rejects pre-connect. Returns a 403 with a clear `ssrf_blocked` reason. |
 | Provider key leaks via trajectory event | Should not happen — keys are never given to the worker process, let alone the sandbox. If it does, treat as a critical bug, file a security issue. |
 
@@ -152,24 +167,26 @@ These are checks an operator can run today:
 
 The remaining slices of #78, in priority order:
 
-1. **Always-blocked CIDRs.** Inject DROPs for metadata +
-   link-local IPs whenever iptables is available, regardless of
-   policy. Closes the `Public` gap above.
-2. **Cluster NetworkPolicies.** Ship k8s NetworkPolicy templates
+1. **Cluster NetworkPolicies.** Ship k8s NetworkPolicy templates
    for the in-cluster components. Extends `loom cluster audit`
    to verify they're present.
-3. **Per-trial Docker bridges.** Move from shared bridge to a
+2. **Per-trial Docker bridges.** Move from shared bridge to a
    `--internal` per-trial bridge with the worker spawning a
    `loom-llm-gateway-sandbox` singleton (architecture per
    cluster-deploy.md §Sandbox→gateway flow).
-4. **`loom-gateway-router` DaemonSet.** Implements the
+3. **`loom-gateway-router` DaemonSet.** Implements the
    sandbox-Docker-network → in-cluster-Service hop with hostPort
    30443.
-5. **Egress proxy.** `loom-egress-proxy` Envoy + `loom-egress-xds`
+4. **Egress proxy.** `loom-egress-proxy` Envoy + `loom-egress-xds`
    provider-CDS feeds for "even a compromised gateway can only
    reach approved provider IPs."
 
 Each slice updates this doc as it lands.
+
+Shipped slices:
+
+- **Slice A** (PR #116): this doc, honest as-shipped trust boundary.
+- **Slice B** (this PR): always-blocked CIDRs for metadata + link-local IPs.
 
 ## See also
 
