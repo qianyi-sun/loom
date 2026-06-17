@@ -183,6 +183,51 @@ def _presign_get(
     return url
 
 
+def _projected_artifacts(
+    client: Any,
+    *,
+    artifacts_bucket: str,
+    trajectory_index: dict[str, Any] | None,
+    expires_sec: int,
+) -> list[dict[str, Any]]:
+    if not trajectory_index:
+        return []
+    artifacts = trajectory_index.get("artifacts")
+    if not isinstance(artifacts, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        if not isinstance(key, str) or not key:
+            continue
+        bucket = item.get("bucket")
+        if not isinstance(bucket, str) or not bucket:
+            bucket = artifacts_bucket
+        size = item.get("size")
+        if isinstance(size, int):
+            size_int = size
+        elif isinstance(size, str):
+            try:
+                size_int = int(size)
+            except ValueError:
+                size_int = 0
+        else:
+            size_int = 0
+        entry: dict[str, Any] = {
+            "key": key,
+            "size": max(size_int, 0),
+            "download_url": _presign_get(client, bucket, key, expires_sec),
+        }
+        step_name = item.get("step_name")
+        if isinstance(step_name, str):
+            entry["step_name"] = step_name
+        out.append(entry)
+    return out
+
+
 @router.get("/trials/{trial_id}")
 async def get_trial(
     request: Request,
@@ -200,6 +245,7 @@ async def get_trial(
     require_team_or_admin(ctx, trial.team_id)
 
     base = _trial_row(trial)
+    trajectory_index = trial.trajectory_index or {}
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;
     # finalize.py writes ATIF to the same bucket at `atif.json`.
@@ -220,13 +266,18 @@ async def get_trial(
     # that's going to 404. The trajectory exists as soon as the worker
     # starts the trial (first event flushed); ATIF only after finalize.
     is_terminal = trial.state in {"succeeded", "failed", "cancelled"}
-    base["atif_ready"] = is_terminal and trial.finished_at is not None
-    base["trajectory_ready"] = trial.started_at is not None
-    # Per-artifact listing comes from Plan 7's `tasks/{id}/bundle` or
-    # the in-flight artifacts table; v0.7 doesn't yet have an
-    # `artifacts` table, so the array stays empty here. Plan 21+ can
-    # add it without changing the response shape.
-    base["artifacts"] = []
+    base["atif_ready"] = bool(trajectory_index.get("atif_uri")) or (
+        is_terminal and trial.finished_at is not None
+    )
+    base["trajectory_ready"] = bool(trajectory_index.get("trajectory_uri")) or (
+        trial.started_at is not None
+    )
+    base["artifacts"] = _projected_artifacts(
+        request.app.state.minio_client,
+        artifacts_bucket=settings.artifacts_bucket,
+        trajectory_index=trajectory_index,
+        expires_sec=settings.signed_url_expiry_sec,
+    )
     return base
 
 

@@ -54,6 +54,14 @@ class StepError(BaseModel):
     occurred_at: datetime
 
 
+class ArtifactRef(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    step_name: str
+    bucket: str
+    key: str
+    size: int = Field(ge=0)
+
+
 class StepResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     step_name: str
@@ -62,6 +70,7 @@ class StepResult(BaseModel):
     verifier_result: VerifierResult | None = None
     error: StepError | None = None
     artifacts_uri: str | None = None
+    artifacts: list[ArtifactRef] = []
 
 
 class TrialResult(BaseModel):

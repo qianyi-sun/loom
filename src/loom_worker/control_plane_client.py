@@ -206,3 +206,18 @@ class HttpControlPlaneClient:
         finally:
             if owned:
                 await client.aclose()
+
+    async def patch_output_projection(
+        self,
+        *,
+        trial_id: UUID,
+        worker_id: UUID,
+        result: dict[str, Any],
+        trajectory_index: dict[str, Any],
+    ) -> bool:
+        return await self.patch_trajectory_index(
+            trial_id=trial_id,
+            worker_id=worker_id,
+            result=result,
+            **trajectory_index,
+        )

@@ -157,6 +157,22 @@ bodies live in the Gateway's database. CLI mode skips this step
 ATIF is a pure projection — re-running it on the same events.jsonl
 produces a byte-identical result modulo `emitted_at` timestamps.
 
+## Service Output Projection
+
+In service mode, a successful Worker finalize also updates the trial row
+through the fenced Control Plane `PATCH /trials/{id}/trajectory_index`
+path:
+
+- `trials.result` stores the serialized `TrialResult`, including
+  `aggregate_reward` for list and batch rollups.
+- `trials.trajectory_index` stores `trajectory_uri`, `atif_uri`,
+  `atif_schema_version`, and an `artifacts` array containing each
+  uploaded artifact's `step_name`, bucket, object key, and size.
+
+`GET /api/v1/trials/{id}` reads this projection to return ready flags
+and presigned artifact download URLs. A succeeded trial should not
+require clients to scan object storage or guess artifact keys.
+
 ## Trajectory ↔ ATIF in code
 
 ```python

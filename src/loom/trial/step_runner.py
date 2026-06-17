@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from loom.errors import AgentError
 from loom.models.networking import NetworkPolicy
-from loom.models.result import StepError, StepResult
+from loom.models.result import ArtifactRef, StepError, StepResult
 from loom.models.task import StepConfig
 from loom.models.trajectory import StepEndEvent, StepStartEvent
 from loom.trajectory.reader import TrajectoryReader
@@ -92,16 +92,26 @@ async def run_step(
         local_root=ctx.local_trajectory_path.parent / "artifacts" / step.name,
     )
     artifacts_uri: str | None = None
+    artifacts: list[ArtifactRef] = []
     try:
-        artifacts_uri = await collector.collect(
+        collection = await collector.collect(
             env=ctx.driver, patterns=list(step.artifacts),
         )
-    except Exception as exc:
-        if sr_error is None:
-            sr_error = StepError(
-                phase="artifacts", reason="exception",
-                message=str(exc), occurred_at=datetime.now(UTC),
+        artifacts_uri = collection.prefix
+        artifacts = [
+            ArtifactRef(
+                step_name=step.name,
+                bucket=artifact.bucket,
+                key=artifact.key,
+                size=artifact.size,
             )
+            for artifact in collection.artifacts
+        ]
+    except Exception as exc:
+        sr_error = StepError(
+            phase="artifacts", reason="exception",
+            message=str(exc), occurred_at=datetime.now(UTC),
+        )
 
     # Verifier phase ───────────────────────────────────────────────────────
     verifier_result = None
@@ -146,7 +156,7 @@ async def run_step(
     step_result = StepResult(
         step_name=step.name, started_at=sr_started, finished_at=sr_finished,
         verifier_result=verifier_result, error=sr_error,
-        artifacts_uri=artifacts_uri,
+        artifacts_uri=artifacts_uri, artifacts=artifacts,
     )
 
     await trajectory.append(StepEndEvent(

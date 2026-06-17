@@ -41,11 +41,16 @@ async def test_collect_and_upload(
         team_id="t1", trial_id="r1",
         step_name="main", local_root=tmp_path / "art",
     )
-    prefix = await collector.collect(
+    collection = await collector.collect(
         env=fake_with_artifacts,
         patterns=["out/*.json"],
     )
-    assert prefix == "s3://artifacts/t1/r1/main/"
+    assert collection.prefix == "s3://artifacts/t1/r1/main/"
+    assert [a.key for a in collection.artifacts] == [
+        "t1/r1/main/out/a.json",
+        "t1/r1/main/out/b.json",
+    ]
+    assert [a.size for a in collection.artifacts] == [8, 8]
     assert ("artifacts", "t1/r1/main/out/a.json") in store.objects
     assert ("artifacts", "t1/r1/main/out/b.json") in store.objects
 
@@ -63,6 +68,7 @@ async def test_empty_match_is_not_an_error(
         team_id="t", trial_id="r", step_name="main",
         local_root=tmp_path / "art",
     )
-    prefix = await collector.collect(env=f, patterns=["nope/*"])
-    assert prefix == "s3://artifacts/t/r/main/"
+    collection = await collector.collect(env=f, patterns=["nope/*"])
+    assert collection.prefix == "s3://artifacts/t/r/main/"
+    assert collection.artifacts == []
     assert not [k for k in store.objects if k[1].startswith("t/r/main/")]

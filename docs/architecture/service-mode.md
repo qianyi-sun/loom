@@ -140,6 +140,7 @@ all scale horizontally. Postgres is the durability boundary.
         |                      |                      |              |  3. project_to_atif      |
         |                      |                      |              |  4. upload atif.json     |
         |                      |                      |              | PATCH /trajectory_index  |
+        |                      |                      |              |   (result + output index)|
         |                      |                      |              | --- stop --> [delete sandbox]
         |                      |                      |              |                          |
    GET /trials/{id} ----------> GET /api/v1/         | <-- SELECT --|                          |
@@ -164,6 +165,19 @@ returns 409. Two Workers can never both think they own a trial.
 `loom_worker.HttpControlPlaneClient` translates `409 Conflict` →
 `False` return (the Worker logs + abandons the trial). The trial
 stays in whatever state the new owner has put it in.
+
+After a successful trial finalizes, the Worker also sends a fenced
+`PATCH /trials/{id}/trajectory_index` carrying two durable projections:
+
+- `trials.result`: the serialized `TrialResult` plus an
+  `aggregate_reward` scalar and `cost_usd` default for list/batch
+  rollups.
+- `trials.trajectory_index`: trajectory URI, ATIF URI/schema version,
+  and the actual uploaded artifact object keys and sizes.
+
+The service detail API uses that projection to set `trajectory_ready`,
+`atif_ready`, and artifact download links. Clients should not infer
+output availability by guessing MinIO keys.
 
 ## DRF scheduling
 

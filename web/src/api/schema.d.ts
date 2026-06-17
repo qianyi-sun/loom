@@ -300,7 +300,12 @@ export interface components {
       trajectory_url: string;
       atif_ready: boolean;
       trajectory_ready: boolean;
-      artifacts: { key: string; size: number; download_url: string }[];
+      artifacts: {
+        step_name?: string;
+        key: string;
+        size: number;
+        download_url: string;
+      }[];
     };
     TrajectoryEvent: {
       kind: string;

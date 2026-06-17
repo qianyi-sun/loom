@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # (state, failure_reason) → bool: True if the Control Plane accepted the
 # transition, False if the worker has lost its claim (fenced).
 StatePatchCallback = Callable[[str, str | None], Awaitable[bool]]
+OutputProjectionCallback = Callable[
+    [dict[str, object], dict[str, object]], Awaitable[bool]
+]
 
 # Factory signature: (task_dir, gateway, model, agent_name) → AgentRuntime.
 # agent_name is read from task_config.agent.name; the factory routes:
@@ -63,6 +66,7 @@ class LocalTrialRunner:
 
     local_trajectory_root: Path
     state_patch_callback: StatePatchCallback
+    output_projection_callback: OutputProjectionCallback | None = None
     # Plan 9/11 amendment A11.1: optional fetcher the worker plumbs
     # through to Trial via TrialContext.llm_calls_fetcher. None means
     # no llm_calls injection at finalize (legacy v0.7 behavior).
@@ -129,7 +133,9 @@ class LocalTrialRunner:
 
         trial = Trial(ctx=ctx, state_patch=_patch)
         try:
-            return await trial.run()
+            result = await trial.run()
+            await self._patch_output_projection(result)
+            return result
         except Exception:
             logger.exception("trial_runner_uncaught_exception trial=%s", self.trial_id)
             if trial.result is None:
@@ -148,6 +154,29 @@ class LocalTrialRunner:
                 )
                 return result
             raise
+
+    async def _patch_output_projection(self, result: TrialResult) -> None:
+        if self.output_projection_callback is None:
+            return
+        if result.state != TrialState.SUCCEEDED:
+            return
+        result_payload = _build_result_payload(result)
+        trajectory_index = _build_trajectory_index(result)
+        try:
+            ok = await self.output_projection_callback(
+                result_payload,
+                trajectory_index,
+            )
+            if not ok:
+                logger.warning(
+                    "output_projection_patch_fenced trial=%s — worker lost claim",
+                    self.trial_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "output_projection_patch_error trial=%s err=%s",
+                self.trial_id, exc,
+            )
 
     async def _resolve_gateway(self) -> LLMGatewayClient:
         """Pick the gateway client for this trial.
@@ -173,3 +202,36 @@ class LocalTrialRunner:
             )
         handle = await self.vllm_registry.get_or_launch(model.name)
         return LocalVLLMGatewayClient(base_url=handle.base_url)
+
+
+def _build_result_payload(result: TrialResult) -> dict[str, object]:
+    payload: dict[str, object] = result.model_dump(mode="json")
+    payload["aggregate_reward"] = _aggregate_reward_scalar(result.reward)
+    payload.setdefault("cost_usd", 0.0)
+    return payload
+
+
+def _aggregate_reward_scalar(reward: dict[str, float] | None) -> float | None:
+    if not reward:
+        return None
+    if len(reward) == 1:
+        return float(next(iter(reward.values())))
+    return sum(float(v) for v in reward.values()) / len(reward)
+
+
+def _build_trajectory_index(result: TrialResult) -> dict[str, object]:
+    artifacts = [
+        artifact.model_dump(mode="json")
+        for step in result.steps
+        for artifact in step.artifacts
+    ]
+    return {
+        "schema_version": "1",
+        "trial_id": str(result.id),
+        "team_id": str(result.team_id),
+        "task_id": result.task_id,
+        "trajectory_uri": result.trajectory_uri,
+        "atif_uri": result.atif_uri,
+        "atif_schema_version": result.atif_schema_version,
+        "artifacts": artifacts,
+    }

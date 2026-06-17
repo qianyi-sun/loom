@@ -19,7 +19,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -273,6 +273,53 @@ async def test_trial_detail_returns_presigned_urls(
     assert f"/{trial_ids[0]}/atif.json" in body["atif_url"]
     assert f"/{trial_ids[0]}/events.jsonl" in body["trajectory_url"]
     assert body["artifacts"] == []
+
+
+async def test_trial_detail_exposes_projected_artifacts(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    artifact_key = f"{team_id}/{trial_ids[0]}/main/result.txt"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[0])
+            .values(trajectory_index={
+                "trajectory_uri": (
+                    f"s3://trajectories/{team_id}/{trial_ids[0]}/events.jsonl"
+                ),
+                "atif_uri": f"s3://trajectories/{team_id}/{trial_ids[0]}/atif.json",
+                "artifacts": [{
+                    "step_name": "main",
+                    "bucket": "artifacts",
+                    "key": artifact_key,
+                    "size": 5,
+                }],
+            }),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["artifacts"] == [{
+        "step_name": "main",
+        "key": artifact_key,
+        "size": 5,
+        "download_url": body["artifacts"][0]["download_url"],
+    }]
+    assert "X-Amz-Signature" in body["artifacts"][0]["download_url"]
 
 
 async def test_trial_detail_not_found(

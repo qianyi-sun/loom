@@ -172,7 +172,10 @@ Before treating a remote worker pool as usable:
 3. Submit a tiny API-model + Docker-terminal evaluation and verify the
    remote worker claims it.
 4. Confirm the trial reaches a terminal state and artifacts/trajectory
-   downloads work.
+   downloads work. Workers bootstrap both runtime buckets
+   (`trajectories` and `artifacts`) before claiming trials; a missing
+   bucket or artifact upload failure should produce a terminal failed
+   trial, not a succeeded trial with missing outputs.
 5. Scale to the rest of the worker hosts at concurrency 5.
 6. Run a 25-trial batch or equivalent load test.
 7. Check there are no stuck `claimed` / `running` trials, leaked Docker
@@ -188,6 +191,6 @@ record the failure on the deployment issue before raising the limit.
 |---|---|---|
 | Worker never registers | Bad token or cannot reach Control Plane | Worker logs; `curl $LOOM_WORKER_CONTROL_PLANE_URL/healthz` from the worker host. |
 | Claims happen but trials fail immediately | Docker unavailable or sandbox image missing | `docker info`; worker logs around sandbox start. |
-| Trials upload no trajectory/artifacts | MinIO endpoint or credentials wrong | `curl $LOOM_WORKER_MINIO_ENDPOINT/minio/health/live`; worker logs for S3 errors. |
+| Trials upload no trajectory/artifacts | MinIO endpoint, credentials, or runtime bucket bootstrap failure | `curl $LOOM_WORKER_MINIO_ENDPOINT/minio/health/live`; worker logs for S3 errors; trial `failure_reason` should be `trajectory_flush_failed` or `artifact_upload_failed`. |
 | Queue grows while hosts look idle | Workers not matching task capabilities or provider limits throttling | Control Plane worker table, queue depth, gateway/provider errors. |
 | Host becomes unstable | Concurrency too high or missing sandbox resource limits | Lower `LOOM_WORKER_MAX_CONCURRENT`; inspect memory, swap, and Docker container count. |

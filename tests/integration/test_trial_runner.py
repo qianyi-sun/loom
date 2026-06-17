@@ -3,7 +3,7 @@ the callback. Uses Plan 1+2+3 stack with fakes."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -48,14 +48,14 @@ def hello_task(tmp_path: Path) -> Path:
     return d
 
 
-def _task_config() -> TaskConfig:
+def _task_config(*, artifacts: list[str] | None = None) -> TaskConfig:
     return TaskConfig(
         schema_version="1",
         task=TaskMetadata(id="hello", name="hello"),
         environment=EnvironmentConfig(os="linux", docker_image="alpine"),
         agent=AgentDefaults(name="oracle"),
         verifier=VerifierDefaults(name="pass"),
-        steps=[StepConfig(name="main")],
+        steps=[StepConfig(name="main", artifacts=artifacts or [])],
     )
 
 
@@ -205,7 +205,7 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
     """
 
     class MissingArtifactBucketStore(FakeObjectStore):
-        async def put_object(self, *, bucket: str, key: str, body: bytes):  # type: ignore[no-untyped-def]
+        async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
             if bucket == "artifacts":
                 raise RuntimeError(f"NoSuchBucket: {bucket}/{key}")
             return await super().put_object(bucket=bucket, key=key, body=body)
@@ -216,26 +216,30 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
         calls.append((state, failure_reason))
         return True
 
-    handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd.startswith("find "):
+            return ExecResult(
+                return_code=0,
+                stdout=b"/workspace/result.txt\x00",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.01,
+            )
+        return ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
-        ),
-        "find /workspace -path /workspace/result.txt -type f -print0": ExecResult(
-            return_code=0, stdout=b"/workspace/result.txt\x00", stderr=b"",
-            truncated=False, duration_sec=0.01,
-        ),
-    })
+        )
+
     trial_id = uuid4()
-    task_config = _task_config().model_copy(update={
-        "steps": [StepConfig(name="main", artifacts=["result.txt"])],
-    })
+    driver = FakeDriver(exec_handler=handler)
+    driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
     runner = LocalTrialRunner(
         trial_id=trial_id, team_id=uuid4(),
-        task_config=task_config, task_checksum="0" * 64,
+        task_config=_task_config(artifacts=["result.txt"]),
+        task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(),
-        driver_factory=_driver_factory(handler),
+        driver_factory=lambda: driver,
         agent_factory=lambda task_dir, _gw, _model, _name:
             OracleAgent(task_dir=task_dir, trial_id=trial_id),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
@@ -252,6 +256,83 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
     assert result.steps[0].error is not None
     assert result.steps[0].error.phase == "artifacts"
     assert ("failed", FailureReason.ARTIFACT_UPLOAD_FAILED.value) in calls
+    assert ("succeeded", None) not in calls
+
+
+async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-untyped-def]
+    hello_task, tmp_path: Path,
+):
+    state_calls: list[tuple[str, str | None]] = []
+    projection_calls: list[dict[str, Any]] = []
+
+    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+        state_calls.append((state, failure_reason))
+        return True
+
+    async def fake_output_projection(
+        result_payload: dict[str, Any],
+        trajectory_index: dict[str, Any],
+    ) -> bool:
+        projection_calls.append({
+            "result": result_payload,
+            "trajectory_index": trajectory_index,
+        })
+        return True
+
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd.startswith("find "):
+            return ExecResult(
+                return_code=0,
+                stdout=b"/workspace/result.txt\x00",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.01,
+            )
+        return ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        )
+
+    trial_id = uuid4()
+    team_id = uuid4()
+    driver = FakeDriver(exec_handler=handler)
+    driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
+    runner = LocalTrialRunner(
+        trial_id=trial_id, team_id=team_id,
+        task_config=_task_config(artifacts=["result.txt"]),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=lambda: driver,
+        agent_factory=lambda task_dir, _gw, _model, _name:
+            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+        output_projection_callback=fake_output_projection,
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert ("succeeded", None) in state_calls
+    assert len(projection_calls) == 1
+    projection = projection_calls[0]
+    assert projection["result"]["state"] == "succeeded"
+    assert projection["result"]["aggregate_reward"] == 1.0
+    assert (
+        projection["trajectory_index"]["trajectory_uri"]
+        == result.trajectory_uri
+    )
+    assert projection["trajectory_index"]["atif_uri"] == result.atif_uri
+    assert projection["trajectory_index"]["artifacts"] == [{
+        "step_name": "main",
+        "bucket": "artifacts",
+        "key": f"{team_id}/{trial_id}/main/result.txt",
+        "size": 5,
+    }]
 
 
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]

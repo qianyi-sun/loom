@@ -19,10 +19,15 @@ router = APIRouter()
 
 _INDEX_PATCH = sql_text("""
 UPDATE trials
-   SET trajectory_index = :index_payload
+   SET trajectory_index = :index_payload,
+       result = CASE WHEN (:has_result)::boolean
+                     THEN :result_payload ELSE result END
  WHERE id = (:trial_id)::uuid AND worker_id = (:worker_id)::uuid
  RETURNING id;
-""").bindparams(bindparam("index_payload", type_=JSONB))
+""").bindparams(
+    bindparam("index_payload", type_=JSONB),
+    bindparam("result_payload", type_=JSONB),
+)
 
 
 @router.patch("/trials/{trial_id}/trajectory_index")
@@ -43,12 +48,18 @@ async def patch_trajectory_index(
         raise HTTPException(
             status_code=400, detail=f"worker_id required: {exc}",
         ) from exc
-    index_payload = {k: v for k, v in payload.items() if k != "worker_id"}
+    result_payload = payload.get("result")
+    index_payload = {
+        k: v for k, v in payload.items()
+        if k not in {"worker_id", "result"}
+    }
 
     async with request.app.state.session_factory() as session:
         row = (await session.execute(_INDEX_PATCH, {
             "trial_id": trial_id, "worker_id": worker_id,
             "index_payload": index_payload,
+            "result_payload": result_payload,
+            "has_result": result_payload is not None,
         })).mappings().one_or_none()
         await session.commit()
     if row is None:

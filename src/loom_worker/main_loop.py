@@ -259,6 +259,17 @@ async def _spawn_trial(
             state=state, failure_reason=fr,
         )
 
+    async def _output_projection(
+        result_payload: dict[str, object],
+        trajectory_index: dict[str, object],
+    ) -> bool:
+        return await cp_client.patch_output_projection(
+            trial_id=trial_id,
+            worker_id=worker_id,
+            result=result_payload,
+            trajectory_index=trajectory_index,
+        )
+
     runner = LocalTrialRunner(
         trial_id=trial_id, team_id=team_id,
         task_config=task_config, task_checksum=task_checksum,
@@ -277,6 +288,7 @@ async def _spawn_trial(
         gateway_client=gateway_client,
         local_trajectory_root=settings.trajectory_cache_dir,
         state_patch_callback=_state_patch,
+        output_projection_callback=_output_projection,
         # A11.1: query CP for the trial's llm_calls rows at finalize,
         # project each into an LLMCallEvent. No-op for trials that
         # don't route through the Gateway (oracle, in-box runtimes).

@@ -15,6 +15,19 @@ from loom.driver.base import Driver
 from loom.trajectory.storage import ObjectStore
 
 
+@dataclass(frozen=True)
+class CollectedArtifact:
+    bucket: str
+    key: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ArtifactCollection:
+    prefix: str
+    artifacts: list[CollectedArtifact]
+
+
 @dataclass
 class ArtifactCollector:
     store: ObjectStore
@@ -33,8 +46,9 @@ class ArtifactCollector:
 
     async def collect(
         self, *, env: Driver, patterns: Sequence[str],
-    ) -> str:
+    ) -> ArtifactCollection:
         self.local_root.mkdir(parents=True, exist_ok=True)
+        artifacts: list[CollectedArtifact] = []
         for pattern in patterns:
             anchored = f"{self.workspace_root.as_posix()}/{pattern}"
             cmd = (
@@ -56,8 +70,15 @@ class ArtifactCollector:
                     f"{self.team_id}/{self.trial_id}/{self.step_name}/"
                     f"{rel.as_posix()}"
                 )
+                body = local_target.read_bytes()
                 await self.store.put_object(
-                    bucket=self.bucket, key=key,
-                    body=local_target.read_bytes(),
+                    bucket=self.bucket, key=key, body=body,
                 )
-        return self.prefix
+                artifacts.append(
+                    CollectedArtifact(
+                        bucket=self.bucket,
+                        key=key,
+                        size=len(body),
+                    ),
+                )
+        return ArtifactCollection(prefix=self.prefix, artifacts=artifacts)
