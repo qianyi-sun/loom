@@ -17,7 +17,6 @@ cat > cluster-config.toml <<EOF
 namespace = "loom"
 image_tag = "0.7"
 ingress_host = "loom.example.com"
-worker_max_concurrent = 5
 # gateway_public_host = "gateway.loom.example.com"  # opt in to expose
 EOF
 
@@ -150,7 +149,7 @@ knob you need.
      -d '{"expires_in_days": 365}' \
      | jq -r .token)
    kubectl patch secret loom-secrets \
-     -p "{\"stringData\":{\"svc-batch-runner-cp-token\":\"$RAW\"}}"
+     -p "{\"stringData\":{\"batch-runner-cp-token\":\"$RAW\"}}"
    kubectl rollout restart deploy/loom-service
    ```
 

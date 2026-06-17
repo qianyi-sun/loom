@@ -1,10 +1,13 @@
 # Cluster deployment
 
-**Status: design with first CLI slice** — this is the target architecture for
-`loom cluster`. The read-only `loom cluster status` inspector is implemented as
-Phase 1A of [#76](https://github.com/carinrc/loom/issues/76); render, preflight,
-up, and down remain planned follow-up slices. See
-[PR #50](https://github.com/carinrc/loom/pull/50) for the implementation plan.
+**Status: shipped.** The full `loom cluster` CLI is operational —
+`status`, `render`, `preflight`, `audit`, `up`, `down`, `doctor`,
+`bootstrap-secrets`. See [`../operator-runbook.md`](../operator-runbook.md)
+for day-2 procedures and [`config-consolidation.md`](config-consolidation.md)
+for the schema that drives manifest generation and Secret bootstrap.
+Originally tracked in [#76](https://github.com/carinrc/loom/issues/76)
+(cluster deploy CLI) and [#146](https://github.com/carinrc/loom/issues/146)
+(schema unification).
 
 `loom cluster` is the multi-node deployment mode. A control node runs the API services + storage; worker nodes spawn trial sandboxes via `docker.sock` onto per-trial Docker bridges. Users supply OpenAI-compatible model endpoints via the per-team `provider_connections` API; `loom-llm-gateway` mediates every LLM call.
 

@@ -1,10 +1,12 @@
 # Config consolidation
 
-> **Status**: design — not yet shipped. Tracking issue: [#146].
-> Motivation traces to PR #128 staging-smoke runs #3 and #8, which
-> caught two latent production bugs whose root cause was the same:
-> configuration invariants spread across files that didn't know about
-> each other.
+> **Status**: shipped in #150 (closes #146). Single schema at
+> `config/loom-schema.toml` now drives Pydantic Settings codegen,
+> k8s template env blocks, Secret bootstrap, and operator
+> `cluster-config.toml`. Motivation traced to PR #128 staging-smoke
+> runs #3 and #8, which caught two latent production bugs whose root
+> cause was the same: configuration invariants spread across files
+> that didn't know about each other.
 
 ## Problem
 

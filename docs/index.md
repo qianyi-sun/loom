@@ -49,9 +49,8 @@ Start with the overview, drill into the area you care about:
   OpenAI-compatible server dispatch (vLLM / ollama / llama.cpp /
   lm-studio); inline `--local-server`; managed-vLLM (`--model hf:` / `/path/`)
 - **[architecture/multi-server-local-llm.md](architecture/multi-server-local-llm.md)**
-  — *(design, not yet shipped)* `loom serve` + repeatable `--model`
-  for comparing N models on the same dataset; sequential-by-default
-  load loop; `--parallel-models` opt-in
+  — `loom serve` + repeatable `--model` for comparing N models on the
+  same dataset; sequential-by-default load loop; `--parallel-models` opt-in
 - **[architecture/service-mode.md](architecture/service-mode.md)** —
   Control Plane + Worker + LLM Gateway + Postgres + MinIO; auth
   model; persistence schema
@@ -66,10 +65,10 @@ Start with the overview, drill into the area you care about:
   implementation spec for #10: singleton admin secret, team registration,
   audit events, operator rotation commands, and DB-admin removal
 - **[architecture/config-consolidation.md](architecture/config-consolidation.md)** —
-  *(design, not yet shipped)* `config/loom-schema.toml` as the single
-  source of truth for Pydantic Settings + k8s env blocks + Secret
-  bootstrap + operator cluster knobs; `loom config doctor` +
-  `loom config bootstrap-secrets`
+  `config/loom-schema.toml` as the single source of truth for
+  Pydantic Settings + k8s env blocks + Secret bootstrap + operator
+  cluster knobs; `loom cluster doctor` + `loom cluster bootstrap-secrets`
+  + `loom config codegen` (shipped #150)
 - **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
   — the single-SQL claim query; DRF tie-break + priority + FIFO;
   caps eligibility; crash recovery
