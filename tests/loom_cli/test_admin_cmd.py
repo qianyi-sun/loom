@@ -447,28 +447,23 @@ def test_team_mint_posts_payload(
     assert "loom_team_xyz" in out
 
 
-def test_team_mint_admin_type_omits_team_id_when_none(
-    mock_server: _MockServer,
+def test_team_mint_rejects_admin_type_before_request(
+    _team_logged_in: None,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`--type admin` without --team-id sends no team_id field — the
-    server rejects admin+team_id at 400."""
-    mock_server.canned[("POST", "/api/v1/tokens")] = httpx.Response(
-        201, json={
-            "token": "loom_admin_xyz",
-            "token_hash_prefix": "abcd0123",
-            "expires_at": "2027-01-01T00:00:00+00:00",
-        },
-    )
-    rc = main([
-        "admin", "tokens", "team", "mint",
-        "--type", "admin",
-        "--scopes", "admin:tokens",
-        "--admin-actor", "qianyi",
-    ])
-    assert rc == 0
-    body = json.loads(mock_server.requests[0].content)
-    assert "team_id" not in body
-    assert body["type"] == "admin"
+    """Admin credentials are singleton secret-file credentials now.
+
+    The compatibility CLI surface must reject DB-backed admin token creation
+    before issuing an HTTP request.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main([
+            "admin", "tokens", "team", "mint",
+            "--type", "admin",
+            "--admin-actor", "qianyi",
+        ])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_team_mint_rejects_unknown_scope_before_request(

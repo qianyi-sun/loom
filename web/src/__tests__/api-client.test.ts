@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { apiFetch, setUnauthorizedHandler } from "../api/client";
+import { api, apiFetch, setUnauthorizedHandler } from "../api/client";
 
 describe("apiFetch", () => {
   beforeEach(() => {
@@ -67,5 +67,26 @@ describe("apiFetch", () => {
     );
     const result = await apiFetch("/api/v1/tokens/abc12345");
     expect(result).toBeUndefined();
+  });
+
+  it("sends admin actor header when approving a team registration", async () => {
+    window.localStorage.setItem("loom_token", "loom_admin_secret");
+    const spy = vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ registration: { id: "reg-1" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.approveTeamRegistration("reg-1", "ops-owner");
+
+    expect(spy).toHaveBeenCalledWith(
+      "/api/v1/admin/team-registrations/reg-1/approve",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const init = spy.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>)["X-Loom-Admin-Actor"]).toBe(
+      "ops-owner",
+    );
   });
 });

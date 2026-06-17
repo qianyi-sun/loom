@@ -31,21 +31,19 @@ scheduling (DRF), per-`(team, trial, step)` cost attribution, license
 allowlists, and a `/api/v1/usage` dashboard make it usable for a
 research org, not just one user.
 
-**Workflows** — admins publish global saved-recipes that pin every
-config field (benchmark, agent + version, model, backend,
-concurrency, task filter, trial config). Any team launches them as
-a Campaign with one click; the launch deep-copies the workflow at
-submit time so subsequent edits don't retroactively change history.
-See [`docs/architecture/workflows.md`](docs/architecture/workflows.md).
+**Batches** — teams launch many trials from the SPA by selecting a
+provider/model, agent, backend, benchmark, and task filter. The run
+records keep the submitted config snapshot so later catalog changes do
+not rewrite historical results.
 
 Two ways to consume:
 
 - **`loom` CLI** — `uv sync` and run benchmarks against agents on
   your laptop. No server stack.
 - **Service mode** — Control Plane + Workers + LLM Gateway + Postgres
-  + MinIO, with a React SPA at `web/` for browsing trials, campaigns,
-  and per-team usage. `loom service up` brings the whole stack up in
-  one command.
+  + MinIO, with a React SPA at `web/` for launching batches, monitoring
+  trials, reviewing admin access, and inspecting per-team usage.
+  `loom service up` brings the whole stack up in one command.
 
 ---
 
@@ -196,8 +194,9 @@ loom service up                  # docker compose + migrations + token bootstrap
 ```
 
 `loom service up` brings up the full stack (Postgres + MinIO + LLM
-Gateway + Control Plane + loom_service + Worker + React SPA), runs
-migrations, seeds a team token, and prints the bearer + endpoint URLs.
+Gateway + Control Plane + loom_service + Worker + React SPA), ensures
+the dev singleton admin secret exists, runs migrations, seeds team/worker
+tokens, and prints the useful bearers + endpoint URLs.
 
 URLs printed at the end of `loom service up`:
 

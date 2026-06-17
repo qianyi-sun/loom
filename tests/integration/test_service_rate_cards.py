@@ -16,9 +16,12 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import Team, TeamQuota, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+
+RAW_ADMIN_TOKEN = "loom_admin_" + "R" * 43
 
 
 @pytest.fixture
@@ -40,6 +43,9 @@ async def rc_setup(
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
         engine, expire_on_commit=False,
+    )
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
+        RAW_ADMIN_TOKEN,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -82,7 +88,6 @@ async def rc_setup(
         base_url="http://gw",
     )
 
-    admin_raw = f"loom_admin_{uuid4().hex}"
     team_id = uuid4()
     team_raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
@@ -90,19 +95,13 @@ async def rc_setup(
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(admin_raw.encode()).digest(),
-            type="admin",
-            scopes=["admin:tokens", "admin:rate_cards"],
-            team_id=None, issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Token).values(
             token_hash=hashlib.sha256(team_raw.encode()).digest(),
             type="team", scopes=["read:own"], team_id=team_id,
             issued_at=datetime.now(UTC),
         ))
         s.commit()
     try:
-        yield app, admin_raw, team_raw, captured
+        yield app, RAW_ADMIN_TOKEN, team_raw, captured
     finally:
         await app.state.gateway_client.aclose()
         await app.state.http_client.aclose()

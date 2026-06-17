@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import Layout from "./components/Layout";
+import AdminAccess from "./pages/AdminAccess";
 import Benchmarks from "./pages/Benchmarks";
 import BatchDetail from "./pages/BatchDetail";
 import Monitor from "./pages/Monitor";
@@ -31,6 +32,7 @@ export default function App(): JSX.Element {
         <Route path="tasks" element={<Tasks />} />
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />
+        <Route path="admin/access" element={<AdminAccess />} />
         <Route path="rate-cards" element={<RateCardsAdmin />} />
         <Route path="settings" element={<Settings />} />
         <Route path="*" element={<NotFound />} />

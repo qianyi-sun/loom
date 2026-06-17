@@ -39,7 +39,7 @@ def _set_cp_env(monkeypatch: pytest.MonkeyPatch, postgres_url: str) -> None:
 
 
 @pytest.fixture
-def admin_seed(postgres_url: str) -> Iterator[str]:
+def legacy_admin_seed(postgres_url: str) -> Iterator[str]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     raw = f"loom_admin_{uuid4().hex}"
@@ -60,16 +60,23 @@ def admin_seed(postgres_url: str) -> Iterator[str]:
 
 
 @pytest.fixture
-def app(monkeypatch: pytest.MonkeyPatch, postgres_url: str, admin_seed: str):
+def app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    postgres_url: str,
+):
+    secret_file = tmp_path / "secrets.toml"
+    _write_admin_secret(secret_file)
     _set_cp_env(monkeypatch, postgres_url)
+    monkeypatch.setenv("LOOM_CP_ADMIN_SECRET_FILE", str(secret_file))
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
-def test_issue_worker_token(app, admin_seed):  # type: ignore[no-untyped-def]
+def test_issue_worker_token(app):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
             "/admin/worker-tokens",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
             json={"expires_in_days": 90},
         )
         assert r.status_code == 201
@@ -102,17 +109,17 @@ def test_issue_worker_token_accepts_singleton_admin_secret(
     assert "token_hash_prefix" in body
 
 
-def test_revoke_token(app, admin_seed):  # type: ignore[no-untyped-def]
+def test_revoke_token(app):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
             "/admin/worker-tokens",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
             json={"expires_in_days": 1},
         )
         prefix = r.json()["token_hash_prefix"]
         r2 = client.delete(
             f"/admin/worker-tokens/{prefix}",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
         )
         assert r2.status_code == 200
 
@@ -144,7 +151,7 @@ def test_revoke_token_accepts_singleton_admin_secret(
     assert r2.status_code == 200, r2.text
 
 
-def test_issue_without_admin_scope_rejected(app, admin_seed):  # type: ignore[no-untyped-def]
+def test_issue_without_admin_scope_rejected(app):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
             "/admin/worker-tokens",
@@ -163,7 +170,7 @@ def test_issue_without_admin_scope_rejected(app, admin_seed):  # type: ignore[no
     "a" * 65,  # too long
 ])
 def test_revoke_rejects_invalid_prefix(  # type: ignore[no-untyped-def]
-    app, admin_seed, bad_prefix,
+    app, bad_prefix,
 ):
     """Bug 3 regression: revoke prefix must be 4-64 hex chars. Anything
     else — including the empty / wildcard / punctuation that would feed
@@ -172,13 +179,13 @@ def test_revoke_rejects_invalid_prefix(  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.delete(
             f"/admin/worker-tokens/{bad_prefix}",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
         )
         assert r.status_code == 400, r.text
 
 
 def test_revoke_doesnt_affect_unrelated_tokens(  # type: ignore[no-untyped-def]
-    app, admin_seed,
+    app,
 ):
     """Bug 3 regression: a precise prefix must only revoke matching tokens
     (not all of them). We issue two worker tokens, revoke one by its
@@ -186,19 +193,30 @@ def test_revoke_doesnt_affect_unrelated_tokens(  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r1 = client.post(
             "/admin/worker-tokens",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
             json={"expires_in_days": 1},
         )
         prefix_1 = r1.json()["token_hash_prefix"]
         r2 = client.delete(
             f"/admin/worker-tokens/{prefix_1}",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
         )
         assert r2.status_code == 200
         # admin token still works
         r3 = client.post(
             "/admin/worker-tokens",
-            headers={"Authorization": f"Bearer {admin_seed}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
             json={"expires_in_days": 1},
         )
         assert r3.status_code == 201
+
+
+def test_legacy_db_admin_token_rejected(app, legacy_admin_seed):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/worker-tokens",
+            headers={"Authorization": f"Bearer {legacy_admin_seed}"},
+            json={"expires_in_days": 1},
+        )
+
+    assert r.status_code == 403

@@ -16,9 +16,12 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import Team, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+
+RAW_ADMIN_TOKEN = "loom_admin_" + "S" * 43
 
 
 @pytest.fixture
@@ -40,6 +43,9 @@ async def svc_setup(
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
         engine, expire_on_commit=False,
+    )
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
+        RAW_ADMIN_TOKEN,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -166,8 +172,8 @@ async def test_post_rejects_admin_scope_from_team_caller(
                 "expires_in_days": 1,
             },
         )
-    assert r.status_code == 403
-    assert "admin:tokens" in r.json()["detail"]
+    assert r.status_code == 400
+    assert "database-backed admin scopes" in r.json()["detail"]
 
 
 async def test_post_rejects_admin_type_from_team_caller(
@@ -187,8 +193,89 @@ async def test_post_rejects_admin_type_from_team_caller(
                 "expires_in_days": 1,
             },
         )
-    assert r.status_code == 403
-    assert "admin" in r.json()["detail"]
+    assert r.status_code == 400
+    assert "database-backed admin tokens" in r.json()["detail"]
+
+
+async def test_post_rejects_admin_type_from_singleton_admin(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, _raw, _team_id = svc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tokens",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "ops-owner",
+            },
+            json={
+                "type": "admin",
+                "scopes": ["admin:tokens"],
+                "expires_in_days": 1,
+            },
+        )
+    assert r.status_code == 400
+    assert "database-backed admin tokens" in r.json()["detail"]
+
+
+async def test_post_rejects_admin_scopes_from_singleton_admin(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, _raw, team_id = svc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tokens",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "ops-owner",
+            },
+            json={
+                "type": "team",
+                "team_id": str(team_id),
+                "scopes": ["admin:tokens"],
+                "expires_in_days": 1,
+            },
+        )
+    assert r.status_code == 400
+    assert "database-backed admin scopes" in r.json()["detail"]
+
+
+async def test_db_backed_admin_tokens_are_not_accepted(
+    svc_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, _team_id = svc_setup
+    db_admin_raw = f"loom_admin_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(db_admin_raw.encode()).digest(),
+            type="admin",
+            scopes=["admin:tokens", "admin:rate_cards"],
+            team_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=None,
+        ))
+        s.commit()
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://svc",
+        ) as ac:
+            r = await ac.get(
+                "/api/v1/tokens",
+                headers={"Authorization": f"Bearer {db_admin_raw}"},
+            )
+    finally:
+        sync_engine.dispose()
+    assert r.status_code == 401
 
 
 async def test_unauthenticated_401(

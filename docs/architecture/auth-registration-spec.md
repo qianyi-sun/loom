@@ -1,12 +1,11 @@
 # Auth And Team Registration Implementation Spec
 
-This spec turns the [auth threat model](auth-threat-model.md) into an
-implementation plan for issue #10. It is partly shipped: singleton admin secret
-verification, Control Plane singleton-admin bootstrap, default-closed team
-registration APIs, and backend admin audit events for registration review plus
-service token mint/revoke are implemented. Current development stacks still
-support database-backed admin tokens seeded by `scripts/seed_test_data.py`;
-production deployment must not rely on that model after #10 ships.
+This spec turns the [auth threat model](auth-threat-model.md) into the shipped
+implementation for issue #10. Singleton admin secret verification now covers
+`loom_service`, the Control Plane, and the LLM Gateway admin rate-card surface;
+team registration APIs, admin approval/rejection, backend audit events, SPA
+registration review, operator secret commands, and DB-admin removal are in
+place.
 
 ## Goals
 
@@ -63,13 +62,16 @@ database `Token` row.
 
 ### File Location
 
-- Development default: `~/.config/loom/secrets.toml`.
-- Production: `LOOM_SVC_ADMIN_SECRET_FILE` and `LOOM_CP_ADMIN_SECRET_FILE`
-  are required and must point to the same mounted secret file, not an
-  `envFrom` value.
+- Operator command default: `~/.config/loom/secrets.toml`.
+- Local dev stack default: `loom service up` creates
+  `.loom/admin/secrets.toml` and dev compose mounts it read-only into each
+  admin-aware service.
+- Production: `LOOM_SVC_ADMIN_SECRET_FILE`, `LOOM_CP_ADMIN_SECRET_FILE`, and
+  `LOOM_GW_ADMIN_SECRET_FILE` are required and must point to the same mounted
+  secret file, not an `envFrom` value.
 - `loom_control_plane` reads the same secret for CP-internal admin routes such
-  as worker-token bootstrap until those routes are fully driven through
-  `loom_service`.
+  as worker-token bootstrap; the LLM Gateway reads it for rate-card admin
+  mutation routes.
 
 ### File Shape
 
@@ -99,14 +101,14 @@ loud warning only when `LOOM_ENV != production`.
    path.
 
 If `LOOM_ENV=production`, startup fails when the file is missing, unreadable,
-malformed, empty, low entropy, or has unsafe permissions. In development,
-startup may continue without a singleton admin only while the current seeded DB
-admin-token fallback is still present; the log message must say the fallback is
-development-only and blocked from production.
+malformed, empty, low entropy, or has unsafe permissions. Development stacks use
+the same singleton-admin path by default through `loom service up`; DB-backed
+admin rows are not accepted as a fallback.
 
 ## Database Changes
 
-Add two new tables before removing DB admin tokens.
+Issue #10 adds two admin/onboarding tables and a cleanup migration that revokes
+legacy DB-backed admin authority.
 
 ### `pending_team_registrations`
 
@@ -200,10 +202,9 @@ audit metadata.
 
 ## Token Route Changes
 
-`POST /api/v1/tokens` currently accepts `type='admin'`. After singleton admin
-ships, the route must reject `type='admin'` for every caller. Admin credentials
-are created and rotated only by local operator commands and mounted secret
-files.
+`POST /api/v1/tokens` rejects `type='admin'` and any requested `admin:*` scope
+for every caller. Admin credentials are created and rotated only by local
+operator commands and mounted secret files.
 
 Team-token behavior stays database-backed:
 
@@ -214,9 +215,10 @@ Team-token behavior stays database-backed:
 - token responses reveal raw token values only on creation;
 - token list/detail responses reveal only hash prefixes.
 
-The final #10 migration deletes or revokes existing `Token.type='admin'` rows.
-There must be no long-lived compatibility window where production accepts both
-singleton-admin and DB-admin credentials.
+Migration `0024_revoke_db_admin_tokens` revokes active legacy
+`Token.type='admin'` rows and any DB token carrying `admin:*` scopes. The auth
+layer also ignores such rows if they remain in an older database or are inserted
+manually.
 
 ## Operator Commands
 
@@ -253,22 +255,18 @@ production UX/security issues and must not block the singleton-admin backend.
 1. **Spec and docs:** this document plus links from docs index, service-mode,
    operator runbook, and security docs.
 2. **Admin secret verifier:** settings, file validation, in-memory verifier,
-   `loom_service` and Control Plane admin-route auth integration, Kubernetes
-   secret mounts, and production startup guards. The Control Plane worker-token
-   bootstrap route reads the same singleton admin verifier. Keep DB-admin
-   fallback only for development until the migration slice.
+   `loom_service`, Control Plane, and LLM Gateway admin-route auth integration,
+   Kubernetes secret mounts, and production startup guards.
 3. **Team registration API:** migration for `pending_team_registrations`, public
    register endpoint, admin list/approve/reject endpoint, and token mint once.
-   The backend portion is implemented before the SPA table/action wiring.
 4. **Audit events:** migration for `admin_audit_events`, audit writer helper,
    admin mutation hooks for registration approval/rejection and service token
-   mint/revoke, plus the backend audit listing endpoint. The SPA audit table is
-   still part of the SPA wiring slice.
+   mint/revoke, plus the backend audit listing endpoint and SPA audit table.
 5. **Operator CLI and runbook:** `init-admin`, `reveal-admin`, `rotate-admin`,
    production runbook update, and rotation smoke.
-6. **DB-admin removal:** reject admin token creation, delete or revoke existing
-   DB admin rows in migration, remove production fallback, and verify
-   `LOOM_ENV=production` cannot start with DB-admin-only auth.
+6. **DB-admin removal:** reject admin token/admin-scope creation, revoke
+   existing DB admin rows in migration, remove the fallback, and keep seed data
+   on team/worker tokens only.
 
 ## Test Requirements
 
@@ -277,7 +275,7 @@ production UX/security issues and must not block the singleton-admin backend.
 - Integration tests proving production startup fails when the admin secret file
   is missing, malformed, or permission-unsafe.
 - Auth tests proving singleton admin succeeds, wrong admin token fails, team
-  tokens still work, and DB admin rows are rejected after the removal slice.
+  tokens still work, and DB admin rows are rejected.
 - API tests for closed-mode registration, duplicate pending names, approve,
   reject, one-time token reveal, and team-token usability after approval.
 - Audit tests proving admin mutations fail if audit insertion fails, team users
@@ -288,13 +286,10 @@ production UX/security issues and must not block the singleton-admin backend.
 
 ## Rollout Rules
 
-- Development compose can keep seeded admin tokens until the DB-admin removal
-  slice, but must log the fallback as development-only.
-- Shared dev can run the singleton-admin path before migration to validate SPA
-  behavior without breaking Hongjian's v0.1 dev-env lane.
-- Production deployment is blocked until singleton admin, team approval, backend
-  audit, rotation, and DB-admin removal are all complete or an explicit
-  deployment exception is documented. Backend audit is now present for #10
-  registration review and service token admin mutations; broader admin mutation
-  coverage should be handled by follow-up issues instead of silently claiming
-  complete platform-wide audit.
+- Development compose uses `.loom/admin/secrets.toml`; seeded DB admin tokens
+  are no longer created or accepted.
+- Production deployment is blocked unless the same singleton admin secret is
+  mounted into `loom_service`, Control Plane, and LLM Gateway.
+- Backend audit is present for #10 registration review and service token admin
+  mutations; broader admin mutation coverage should be handled by follow-up
+  issues instead of silently claiming complete platform-wide audit.

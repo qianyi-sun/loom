@@ -61,7 +61,7 @@ Start with the overview, drill into the area you care about:
   `Public`-policy metadata-IP gap, and the #78 roadmap
 - **[architecture/auth-registration-spec.md](architecture/auth-registration-spec.md)** —
   implementation spec for #10: singleton admin secret, team registration,
-  audit events, rotation commands, and DB-admin removal
+  audit events, operator rotation commands, and DB-admin removal
 - **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
   — the single-SQL claim query; DRF tie-break + priority + FIFO;
   caps eligibility; crash recovery

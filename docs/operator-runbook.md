@@ -81,20 +81,12 @@ knob you need.
    ```
    The `worker-token` value is overwritten in step 5.
 
-   Create the singleton admin secret file separately. This first #10 slice
-   lets `loom_service` read the file, while later #10 slices add
-   `loom service init-admin` and rotation commands. Until then, generate a
-   high-entropy token manually and mount it as `loom-admin-secret`:
+   Create the singleton admin secret file with the operator CLI and mount it as
+   `loom-admin-secret`:
 
    ```bash
-   ADMIN_TOKEN="loom_admin_$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-   cat > secrets.toml <<EOF
-[admin]
-token = "$ADMIN_TOKEN"
-created_at = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-version = 1
-EOF
-   chmod 0600 secrets.toml
+   loom service init-admin --secret-file ./secrets.toml
+   ADMIN_TOKEN="$(loom service reveal-admin --secret-file ./secrets.toml --yes)"
    kubectl create secret generic loom-admin-secret \
      --from-file=secrets.toml=./secrets.toml
    ```
@@ -118,9 +110,9 @@ EOF
    ```
 
 5. **Mint a worker token** via the admin API. The admin credential is the
-   singleton `loom-admin-secret` mounted into both `loom_service` and the
-   Control Plane. Use the same `ADMIN_TOKEN` generated in step 2; do not create
-   a temporary database-backed admin row for this bootstrap path.
+   singleton `loom-admin-secret` mounted into `loom_service`, the Control Plane,
+   and the LLM Gateway. Use the same `ADMIN_TOKEN` revealed in step 2; do not
+   create a database-backed admin row for this bootstrap path.
 
    The Control Plane's `POST /admin/worker-tokens` route is
    intentionally NOT exposed via Ingress (see
@@ -298,7 +290,7 @@ curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN"
 ```
 
-### Team + admin tokens — `loom admin tokens team`
+### Team tokens — `loom admin tokens team`
 
 Team-token rotation hits `loom_service`'s public `/api/v1/tokens`
 route, so it uses the bearer + server URL from `loom auth login`
@@ -326,11 +318,11 @@ loom admin tokens team mint --team-id <UUID> --admin-actor qianyi
 loom admin tokens team revoke 01234567 --admin-actor qianyi
 ```
 
-`--scopes` accepts a comma-separated list. Known scopes: `read:own`,
-`submit`, `admin:tokens`, `admin:rate_cards` — anything else is rejected
-client-side before the round-trip. `--type` defaults to `team`; pass
-`--type admin` to mint a global admin token (the server rejects
-`--type admin` combined with `--team-id`). Default lifetime is 90 days.
+`--scopes` accepts a comma-separated list. Known team scopes: `read:own` and
+`submit`; anything else is rejected client-side before the round-trip. `--type`
+defaults to `team`, and admin credentials are managed only by
+`loom service init-admin`, `loom service reveal-admin`, and
+`loom service rotate-admin`. Default lifetime is 90 days.
 
 Raw curl is still supported for scripted automation:
 ```bash
@@ -340,8 +332,8 @@ curl -X POST https://loom.example.com/api/v1/tokens \
   -d '{"type": "team", "team_id": "...",
        "scopes": ["submit"], "expires_in_days": 90}'
 ```
-`type` is required; allowed values are `team` and `admin`, though
-`admin` is scheduled for removal in the final #10 DB-admin removal slice.
+`type` is required and must be `team`. The service rejects DB-backed admin
+tokens and any requested `admin:*` scope.
 
 ### Provider API key rotation — `loom providers rotate-key`
 

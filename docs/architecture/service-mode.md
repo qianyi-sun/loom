@@ -4,9 +4,8 @@ Service mode runs Loom as a distributed cluster: a FastAPI Control
 Plane owns trial state, Workers poll for work and execute trials,
 an LLM Gateway centralizes provider calls + cost attribution, and a
 REST `loom_service` + React SPA give researchers and admins a UI.
-The current development auth path still uses database-backed bearer
-tokens; the production target for singleton admin auth and
-admin-approved team registration is specified in
+Team and worker auth still use database-backed bearer tokens, while admin auth
+uses the file-backed singleton secret specified in
 [auth-registration-spec.md](auth-registration-spec.md).
 
 Postgres + MinIO are the only stateful services.
@@ -244,11 +243,9 @@ sandboxes hit them directly):
 
 ## Auth tokens
 
-The current token model is suitable for local and shared development. The
-production auth redesign is tracked in
-[`auth-threat-model.md`](auth-threat-model.md): singleton admin secret,
-admin-approved team registration, audit logging, and rotation must ship before
-this model is treated as production-grade.
+Team and worker credentials remain database-backed. Admin authority comes from a
+file-backed singleton secret loaded by `loom_service`, the Control Plane, and
+the LLM Gateway; DB-backed admin rows are ignored and revoked by migration.
 
 Four token kinds, all bearer-format:
 
@@ -257,7 +254,7 @@ Four token kinds, all bearer-format:
 | `team:*` | Operator (`POST /tokens` with `admin:tokens`) | Long-lived; submit trials, view results |
 | `worker:*` | Auto-issued at worker `POST /workers/register` | Long-lived; claim trials, PATCH state |
 | `step:*` | Worker mints per-step JWT (`mint_step_token`) | Short-lived (per-step); CLI agent calls Gateway with bounded scope |
-| `admin:*` | Operator (DB seed or admin issue) | Manage tokens, rate-cards, teams |
+| `admin:*` | Operator secret file (`loom service init-admin`) | Manage tokens, rate-cards, teams |
 
 Admin callers to `POST /api/v1/tokens` and `DELETE /api/v1/tokens/{prefix}`
 must send `X-Loom-Admin-Actor`; those service-token mutations are recorded in
@@ -319,7 +316,9 @@ Migrations: `migrations/versions/0001_initial_schema.py` through
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — own team tokens + admin token create/revoke
+- **Settings** — token paste/login and local client settings
+- **Admin access** — pending team registrations, one-time approved team-token
+  reveal, and admin audit event review
 - **NotFound**
 
 Auth model: token-paste into the SPA login form, stored in

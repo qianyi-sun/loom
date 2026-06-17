@@ -30,6 +30,7 @@ MEMORY.md
 
 # Runtime artifacts
 .runtime/
+.loom/
 data/
 !src/loom_cli/data/
 /artifacts/

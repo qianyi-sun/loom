@@ -154,12 +154,18 @@ async def verify_bearer_token(
         except jwt.PyJWTError:
             return None
 
-    # DB-backed branch (unchanged from v0.7)
+    # DB-backed branch for team/worker credentials. Admin credentials moved to
+    # the singleton secret verifier above; legacy DB admin rows are ignored so
+    # production cannot accidentally authenticate through the removed path.
     token_hash = hashlib.sha256(raw.encode()).digest()
     row = (await session.execute(
         select(Token).where(Token.token_hash == token_hash),
     )).scalar_one_or_none()
     if row is None:
+        return None
+    if row.type == "admin" or any(
+        scope.startswith("admin:") for scope in row.scopes
+    ):
         return None
     if row.revoked_at is not None:
         return None

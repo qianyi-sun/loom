@@ -1,10 +1,10 @@
-"""Bootstrap a team + tokens (+ optional task/benchmark/rate-card fixtures).
+"""Bootstrap a team + worker tokens (+ optional task/benchmark/rate-card fixtures).
 
 Two modes:
 
 - `--mode test` (default) — system-test fixture: hello-world Task,
-  card-e2e RateCard, + tokens. Existing tests rely on these rows.
-- `--mode dev` — what `loom service up` calls: tokens + every shipped
+  card-e2e RateCard, + team/worker tokens. Existing tests rely on these rows.
+- `--mode dev` — what `loom service up` calls: team/worker tokens + every shipped
   benchmark adapter registered from HF Hub so the SPA dropdown is
   populated and submittable out of the box. Skips the hello-world Task
   + card-e2e RateCard.
@@ -24,18 +24,14 @@ converts in-process, uploads to local MinIO, and writes `s3://` source
 URLs. Slow on first boot (minutes), network-heavy, but works without
 HF Hub access.
 
-Prints tokens to stdout (system tests capture them as the bearer for
-their submit calls; the SPA login screen accepts them as paste-ins).
+Prints team/worker tokens to stdout (system tests capture them as the bearer
+for their submit calls; the SPA login screen accepts the team token as a
+paste-in). The dev admin token is file-backed and managed by
+`loom service init-admin`, `loom service up`, and `loom service rotate-admin`.
 
-In production, an admin uses /admin/* + the rate-card admin endpoint;
-this script side-channels straight into Postgres for speed.
-
-NOTE: this script also seeds a `loom_admin_<…>` token in the DB so the
-SPA admin views work in dev. This is a DEVELOPMENT-ONLY crutch — the
-production model (singleton admin from secret-store, not multi-row DB
-tokens) is tracked in https://github.com/carinrc/loom/issues/295. The
-script refuses to run when `LOOM_ENV=production` so it can't be
-fired against a prod cluster by accident.
+In production, an admin uses /admin/* + the rate-card admin endpoint; this
+script side-channels straight into Postgres for speed and refuses to run when
+`LOOM_ENV=production` so it cannot be fired against a prod cluster by accident.
 """
 
 from __future__ import annotations
@@ -256,10 +252,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--print", choices=("team", "worker", "admin", "all"), default="team",
+        "--print", choices=("team", "worker", "both", "all"), default="team",
         help=(
             "Which token to print to stdout (default: team). "
-            "`admin` is dev-only — see issue #295."
+            "Admin credentials are file-backed singleton secrets."
         ),
     )
     parser.add_argument(
@@ -328,14 +324,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Hard guard: this script side-channels into the DB and ships a
-    # dev-only admin token. Refuse to run against a production env
-    # so a stray invocation can't manufacture an admin token.
+    # Hard guard: this script side-channels into the DB. Refuse to run against
+    # a production env so a stray invocation cannot manufacture credentials or
+    # fixture rows against a prod cluster.
     if os.environ.get("LOOM_ENV", "").lower() == "production":
         sys.stderr.write(
             "seed_test_data.py refuses to run with LOOM_ENV=production. "
-            "It is a development crutch; production admin bootstrap is "
-            "tracked in https://github.com/carinrc/loom/issues/295.\n",
+            "Use the production onboarding and admin-secret flows instead.\n",
         )
         raise SystemExit(2)
 
@@ -344,7 +339,6 @@ def main() -> None:
     team_id = uuid4()
     raw_team = "loom_team_" + secrets.token_hex(8)
     raw_worker = "loom_w_" + secrets.token_hex(8)
-    raw_admin = "loom_admin_" + secrets.token_urlsafe(32)
     now = datetime.now(UTC)
 
     # Test-mode task fixture is loaded ONLY when --mode test (or
@@ -375,19 +369,6 @@ def main() -> None:
             team_id=None,
             issued_at=now, expires_at=None,
         ))
-        # Dev-only admin token so the SPA admin views work. See the
-        # module docstring + issue #295 for the production model.
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_admin.encode()).digest(),
-            type="admin",
-            scopes=[
-                "admin:tokens",
-                "admin:rate_cards",
-            ],
-            team_id=None,
-            issued_at=now, expires_at=None,
-        ))
-
         if args.mode == "test":
             # Task may already exist if called twice for the same
             # fixture (e.g., stack_up + a second test re-seeding).
@@ -504,12 +485,12 @@ def main() -> None:
         print(raw_team)
     elif args.print == "worker":
         print(raw_worker)
-    elif args.print == "admin":
-        print(raw_admin)
+    elif args.print == "both":
+        print(raw_team)
+        print(raw_worker)
     else:  # "all"
         print(f"team: {raw_team}")
         print(f"worker: {raw_worker}")
-        print(f"admin: {raw_admin}")
 
 
 if __name__ == "__main__":

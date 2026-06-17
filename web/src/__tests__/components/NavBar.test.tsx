@@ -25,6 +25,9 @@ describe("NavBar", () => {
     expect(
       screen.queryByRole("link", { name: "Rate cards" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Team access" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("Admin")).not.toBeInTheDocument();
   });
 
@@ -33,6 +36,9 @@ describe("NavBar", () => {
     expect(screen.getByText("Admin")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Rate cards" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Team access" }),
     ).toBeInTheDocument();
   });
 });

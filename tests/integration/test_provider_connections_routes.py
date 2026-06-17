@@ -24,6 +24,7 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import (
     ProviderConnection,
     Secret,
@@ -36,6 +37,7 @@ from loom_service.config import LoomServiceSettings
 
 # Use a fixed test master key so tests are deterministic.
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
+RAW_ADMIN_TOKEN = "loom_admin_" + "P" * 43
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +97,9 @@ async def app_setup(
     app.state.session_factory = async_sessionmaker(
         engine, expire_on_commit=False,
     )
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
+        RAW_ADMIN_TOKEN,
+    )
     app.state.minio_client = boto3.client(
         "s3",
         endpoint_url=settings.minio_endpoint,
@@ -106,12 +111,12 @@ async def app_setup(
     app.state.http_client = httpx.AsyncClient(base_url="http://cp")
     app.state.gateway_client = httpx.AsyncClient(base_url="http://gw")
 
-    # Seed two teams + an admin token + per-team tokens.
+    # Seed two teams + per-team tokens. Admin access comes from the singleton
+    # admin secret verifier wired above, not from DB-backed admin rows.
     team_a = uuid4()
     team_b = uuid4()
     raw_a = f"loom_team_{uuid4().hex}"
     raw_b = f"loom_team_{uuid4().hex}"
-    raw_admin = f"loom_admin_{uuid4().hex}"
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -132,15 +137,9 @@ async def app_setup(
             team_id=team_b,
             issued_at=datetime.now(UTC),
         ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_admin.encode()).digest(),
-            type="admin", scopes=["admin:tokens", "admin:rate_cards"],
-            team_id=None,
-            issued_at=datetime.now(UTC),
-        ))
         s.commit()
 
-    tokens = {"team_a": raw_a, "team_b": raw_b, "admin": raw_admin}
+    tokens = {"team_a": raw_a, "team_b": raw_b, "admin": RAW_ADMIN_TOKEN}
     team_ids = {"a": team_a, "b": team_b}
     try:
         yield app, tokens, team_ids

@@ -9,6 +9,9 @@ shapes flow into our subprocess wrappers.
 
 from __future__ import annotations
 
+import io
+import stat
+import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +19,11 @@ import pytest
 
 from loom_cli.__main__ import main
 from loom_cli.service_cmd import _compose_args
+
+
+def _read_admin_token(secret_file: Path) -> str:
+    data = tomllib.loads(secret_file.read_text(encoding="utf-8"))
+    return data["admin"]["token"]
 
 
 def test_help_lists_subcommands(
@@ -117,7 +125,7 @@ def test_seed_test_data_parses_all_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`--print all` emits `<label>: <token>` per line; the wrapper
-    parses them into a dict so the summary can label each clearly."""
+    parses team/worker dev tokens while admin comes from a secret file."""
     from subprocess import CompletedProcess
 
     from loom_cli.service_cmd import _seed_test_data
@@ -125,7 +133,6 @@ def test_seed_test_data_parses_all_tokens(
     fake_stdout = (
         "team: loom_team_aaaaaa\n"
         "worker: loom_w_bbbbbb\n"
-        "admin: loom_admin_cccccc\n"
     )
 
     def _fake_run(*_args, **_kwargs):
@@ -137,7 +144,6 @@ def test_seed_test_data_parses_all_tokens(
     assert tokens == {
         "team": "loom_team_aaaaaa",
         "worker": "loom_w_bbbbbb",
-        "admin": "loom_admin_cccccc",
     }
 
 
@@ -156,7 +162,7 @@ def test_seed_test_data_invokes_dev_mode(
 
     def _fake_run(argv, *_args, **_kwargs):
         captured_argv.append(list(argv))
-        return CompletedProcess([], 0, "team: t\nworker: w\nadmin: a\n", "")
+        return CompletedProcess([], 0, "team: t\nworker: w\n", "")
 
     monkeypatch.setattr("loom_cli.service_cmd.subprocess.run", _fake_run)
     rc, _tokens = _seed_test_data("postgresql://x/y")
@@ -169,11 +175,10 @@ def test_seed_test_data_invokes_dev_mode(
     assert argv[argv.index("--print") + 1] == "all"
 
 
-def test_print_summary_labels_admin_as_dev_only(
+def test_print_summary_labels_admin_as_file_backed_dev_singleton(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The summary must call out the admin token as DEV-ONLY so users
-    don't carry it into production assumptions. See issue #295."""
+    """The summary must call out that admin comes from the dev secret file."""
     from loom_cli.service_cmd import _print_summary
 
     _print_summary({"team": "loom_team_x", "admin": "loom_admin_y"})
@@ -181,7 +186,41 @@ def test_print_summary_labels_admin_as_dev_only(
     assert "loom_team_x" in out
     assert "loom_admin_y" in out
     assert "DEV-ONLY" in out
-    assert "issue #295" in out
+    assert "file-backed" in out
+
+
+def test_ensure_dev_admin_secret_creates_0600_and_returns_token(
+    tmp_path: Path,
+) -> None:
+    from loom_cli.service_cmd import _ensure_dev_admin_secret
+
+    secret_file = tmp_path / ".loom" / "admin" / "secrets.toml"
+
+    token = _ensure_dev_admin_secret(secret_file)
+
+    assert token == _read_admin_token(secret_file)
+    assert token.startswith("loom_admin_")
+    assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
+
+
+def test_ensure_dev_admin_secret_preserves_existing_token(
+    tmp_path: Path,
+) -> None:
+    from loom_cli.service_cmd import _ensure_dev_admin_secret
+
+    secret_file = tmp_path / ".loom" / "admin" / "secrets.toml"
+    existing = "loom_admin_" + "E" * 43
+    secret_file.parent.mkdir(parents=True)
+    secret_file.write_text(
+        "[admin]\n"
+        f"token = \"{existing}\"\n",
+        encoding="utf-8",
+    )
+    secret_file.chmod(0o600)
+
+    token = _ensure_dev_admin_secret(secret_file)
+
+    assert token == existing
 
 
 def test_write_env_tokens_creates_file_when_absent(tmp_path) -> None:
@@ -278,8 +317,9 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
     fake_tokens = {
         "team": "loom_team_fresh",
         "worker": "loom_w_fresh",
-        "admin": "loom_admin_fresh",
+        "admin": "loom_admin_db_ignored",
     }
+    admin_secret_token = "loom_admin_" + "U" * 43
 
     with patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
          patch("loom_cli.service_cmd._wait_for_postgres",
@@ -287,7 +327,9 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
          patch("loom_cli.service_cmd._alembic_upgrade",
                return_value=0), \
          patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)):
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value=admin_secret_token):
         rc = main([
             "service", "up",
             "--compose-file", str(compose),
@@ -296,6 +338,8 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
 
     assert rc == 0
     assert env_file.exists(), "env_file should have been written"
+    assert f"LOOM_ADMIN_TOKEN={admin_secret_token}" in env_file.read_text()
+    assert "loom_admin_db_ignored" not in env_file.read_text()
 
     # Find the recreate call — must come after the initial `up -d` and
     # carry --force-recreate + --no-deps + worker target.
@@ -345,7 +389,6 @@ def test_up_skips_worker_recreate_when_no_env_file(
     fake_tokens = {
         "team": "loom_team_fresh",
         "worker": "loom_w_fresh",
-        "admin": "loom_admin_fresh",
     }
 
     with patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
@@ -354,7 +397,9 @@ def test_up_skips_worker_recreate_when_no_env_file(
          patch("loom_cli.service_cmd._alembic_upgrade",
                return_value=0), \
          patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)):
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value="loom_admin_" + "N" * 43):
         # argparse defaults --env-file to <compose_dir>/.env if not
         # explicitly None, so we have to pass --env-file pointing
         # somewhere AND ensure the loader treats it as "absent".
@@ -369,6 +414,7 @@ def test_up_skips_worker_recreate_when_no_env_file(
             compose_file=compose,
             env_file=None,
             db_url="postgresql://x/y",
+            admin_secret_file=tmp_path / ".loom" / "admin" / "secrets.toml",
         )
         rc = _up(args)
 
@@ -382,3 +428,84 @@ def test_up_skips_worker_recreate_when_no_env_file(
         f"unexpected --force-recreate when env_file is None: "
         f"{recreate_calls!r}"
     )
+
+
+def test_init_admin_secret_writes_0600_without_printing_token(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_file = tmp_path / "secrets.toml"
+
+    rc = main([
+        "service", "init-admin", "--secret-file", str(secret_file),
+    ])
+
+    assert rc == 0
+    token = _read_admin_token(secret_file)
+    assert token.startswith("loom_admin_")
+    assert len(token.removeprefix("loom_admin_")) >= 32
+    assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
+    captured = capsys.readouterr()
+    assert token not in captured.out
+    assert token not in captured.err
+    assert str(secret_file) in captured.out
+
+
+def test_reveal_admin_requires_confirmation_unless_yes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_file = tmp_path / "secrets.toml"
+    token = "loom_admin_" + "R" * 43
+    secret_file.write_text(
+        "[admin]\n"
+        f"token = \"{token}\"\n",
+        encoding="utf-8",
+    )
+    secret_file.chmod(0o600)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
+    denied = main([
+        "service", "reveal-admin", "--secret-file", str(secret_file),
+    ])
+    denied_output = capsys.readouterr()
+
+    approved = main([
+        "service", "reveal-admin", "--secret-file", str(secret_file), "--yes",
+    ])
+    approved_output = capsys.readouterr()
+
+    assert denied == 2
+    assert token not in denied_output.out
+    assert token not in denied_output.err
+    assert approved == 0
+    assert token in approved_output.out
+
+
+def test_rotate_admin_replaces_secret_without_printing_new_token(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_file = tmp_path / "secrets.toml"
+    old_token = "loom_admin_" + "O" * 43
+    secret_file.write_text(
+        "[admin]\n"
+        f"token = \"{old_token}\"\n",
+        encoding="utf-8",
+    )
+    secret_file.chmod(0o600)
+
+    rc = main([
+        "service", "rotate-admin", "--secret-file", str(secret_file),
+    ])
+
+    assert rc == 0
+    new_token = _read_admin_token(secret_file)
+    assert new_token.startswith("loom_admin_")
+    assert new_token != old_token
+    assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
+    out = capsys.readouterr().out
+    assert new_token not in out
+    assert old_token not in out
+    assert "restart" in out.lower()

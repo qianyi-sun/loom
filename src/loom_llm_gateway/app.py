@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
@@ -25,12 +27,25 @@ from loom_llm_gateway.routes import (
 )
 
 
+def _load_admin_secret_verifier(
+    settings: GatewaySettings,
+) -> AdminSecretVerifier | None:
+    """Load singleton admin auth material for Gateway admin routes."""
+    production = os.environ.get("LOOM_ENV", "").lower() == "production"
+    return load_optional_admin_secret_verifier(
+        settings.admin_secret_file,
+        production=production,
+    )
+
+
 def create_app(settings: GatewaySettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(str(settings.db_url))
+        admin_secret_verifier = _load_admin_secret_verifier(settings)
         app.state.settings = settings
         app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        app.state.admin_secret_verifier = admin_secret_verifier
         app.state.rate_card_cache = RateCardCache(
             session_factory=app.state.session_factory,
             ttl_sec=settings.rate_card_cache_ttl_sec,

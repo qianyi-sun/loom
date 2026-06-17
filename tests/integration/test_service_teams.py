@@ -16,9 +16,12 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import Team, TeamQuota, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+
+RAW_ADMIN_TOKEN = "loom_admin_" + "T" * 43
 
 
 @pytest.fixture
@@ -40,6 +43,9 @@ async def teams_setup(
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
         engine, expire_on_commit=False,
+    )
+    app.state.admin_secret_verifier = AdminSecretVerifier.from_token(
+        RAW_ADMIN_TOKEN,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -184,27 +190,15 @@ async def test_unknown_team_for_team_caller_is_403(
 
 async def test_admin_can_get_any_team(
     teams_setup: tuple[FastAPI, str, str, UUID, UUID],
-    postgres_url: str,
 ) -> None:
     """Admin tokens bypass the same-team check."""
     app, _raw_a, _team_a_str, _, team_b = teams_setup
-    admin_raw = f"loom_admin_{uuid4().hex}"
-    sync_engine = create_engine(postgres_url)
-    sl = sessionmaker(sync_engine)
-    with sl() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(admin_raw.encode()).digest(),
-            type="admin", scopes=["admin:tokens"], team_id=None,
-            issued_at=datetime.now(UTC),
-        ))
-        s.commit()
-    sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/teams/{team_b}",
-            headers={"Authorization": f"Bearer {admin_raw}"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
         )
     assert r.status_code == 200

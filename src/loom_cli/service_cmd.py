@@ -21,14 +21,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import subprocess
 import sys
 import time
+import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
+
+import tomli_w
+
+from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
 
 # Dev-stack defaults — match `deploy/docker-compose.dev.yml`. Keep in sync.
 _DEFAULT_COMPOSE_FILE = Path("deploy/docker-compose.dev.yml")
 _DEFAULT_DB_URL = "postgresql+psycopg://loom:loom@localhost:5432/loom"
+_DEFAULT_DEV_ADMIN_SECRET_FILE = Path(".loom/admin/secrets.toml")
+_DEFAULT_ADMIN_SECRET_FILE = Path.home() / ".config" / "loom" / "secrets.toml"
 _HEALTHCHECK_RETRIES = 30
 _HEALTHCHECK_INTERVAL_SEC = 2.0
 
@@ -154,8 +163,10 @@ def _print_summary(tokens: dict[str, str]) -> None:
         print(f"  {team_token}")
         print()
     if tokens.get("admin"):
-        # Dev-only admin token. Production model tracked in issue #295.
-        print("Admin token (DEV-ONLY; SPA login as admin — see issue #295):")
+        print(
+            "Admin token (DEV-ONLY; file-backed singleton; "
+            "SPA login as admin):",
+        )
         print(f"  {tokens['admin']}")
         print()
     if tokens.get("team"):
@@ -180,6 +191,13 @@ def _up(args: argparse.Namespace) -> int:
         )
         return 1
 
+    print(f"→ ensuring dev singleton admin secret ({args.admin_secret_file})")
+    try:
+        admin_token = _ensure_dev_admin_secret(args.admin_secret_file)
+    except AdminSecretConfigError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
     print(f"→ docker compose up -d ({compose_file})")
     r = _run([*_compose_args(compose_file, env_file), "up", "-d"], check=False)
     if r.returncode != 0:
@@ -199,11 +217,12 @@ def _up(args: argparse.Namespace) -> int:
         sys.stderr.write("error: alembic upgrade failed.\n")
         return rc
 
-    print("→ seeding team + admin tokens + hello-world task fixture")
+    print("→ seeding team + worker tokens + benchmark fixtures")
     rc, tokens = _seed_test_data(args.db_url)
     if rc != 0:
         sys.stderr.write("error: seed_test_data.py failed.\n")
         return rc
+    tokens["admin"] = admin_token
 
     # Persist the just-seeded tokens to .env so `docker compose`,
     # curl/HTTPie examples, and the SPA's local-storage bootstrap all
@@ -297,6 +316,125 @@ def _status(args: argparse.Namespace) -> int:
     return rc
 
 
+def _generate_admin_token() -> str:
+    return f"loom_admin_{secrets.token_urlsafe(32)}"
+
+
+def _admin_secret_payload(token: str) -> dict[str, dict[str, object]]:
+    return {
+        "admin": {
+            "token": token,
+            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "version": 1,
+        },
+    }
+
+
+def _write_admin_secret_file(secret_file: Path, token: str) -> None:
+    AdminSecretVerifier.from_token(token)
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = secret_file.with_name(f".{secret_file.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(
+            tomli_w.dumps(_admin_secret_payload(token)),
+            encoding="utf-8",
+        )
+        tmp.chmod(0o600)
+        os.replace(tmp, secret_file)
+        secret_file.chmod(0o600)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _read_admin_secret_file(secret_file: Path) -> str:
+    if not secret_file.is_file():
+        raise AdminSecretConfigError(f"admin secret file not found: {secret_file}")
+    mode = secret_file.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise AdminSecretConfigError(
+            f"admin secret file permissions must be 0600; got {mode:o}",
+        )
+    try:
+        data = tomllib.loads(secret_file.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise AdminSecretConfigError(
+            f"admin secret file is not valid TOML: {secret_file}",
+        ) from exc
+    admin = data.get("admin")
+    if not isinstance(admin, dict):
+        raise AdminSecretConfigError("admin secret file missing [admin] section")
+    token = admin.get("token")
+    if not isinstance(token, str):
+        raise AdminSecretConfigError("admin secret file missing admin.token")
+    AdminSecretVerifier.from_token(token)
+    return token
+
+
+def _ensure_dev_admin_secret(secret_file: Path) -> str:
+    if secret_file.exists():
+        return _read_admin_secret_file(secret_file)
+    token = _generate_admin_token()
+    _write_admin_secret_file(secret_file, token)
+    return token
+
+
+def _init_admin(args: argparse.Namespace) -> int:
+    secret_file = args.secret_file
+    if secret_file.exists() and not args.force:
+        sys.stderr.write(
+            f"error: admin secret file already exists at {secret_file}. "
+            "Use rotate-admin to replace it, or pass --force to overwrite.\n",
+        )
+        return 1
+    token = _generate_admin_token()
+    _write_admin_secret_file(secret_file, token)
+    print(f"Admin secret file written: {secret_file}")
+    print("Raw token not printed. Use `loom service reveal-admin --secret-file PATH` when needed.")
+    print(
+        "Mount this file as loom-admin-secret/secrets.toml and restart "
+        "loom-service, loom-control-plane, and llm-gateway.",
+    )
+    return 0
+
+
+def _reveal_admin(args: argparse.Namespace) -> int:
+    try:
+        token = _read_admin_secret_file(args.secret_file)
+    except AdminSecretConfigError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    if not args.yes:
+        sys.stderr.write(
+            "This prints the raw singleton admin bearer token. "
+            "Type REVEAL to continue: ",
+        )
+        answer = sys.stdin.readline().strip()
+        if answer != "REVEAL":
+            sys.stderr.write("aborted; token was not revealed.\n")
+            return 2
+    print(token)
+    return 0
+
+
+def _rotate_admin(args: argparse.Namespace) -> int:
+    try:
+        _read_admin_secret_file(args.secret_file)
+    except AdminSecretConfigError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    token = _generate_admin_token()
+    _write_admin_secret_file(args.secret_file, token)
+    print(f"Admin secret file rotated: {args.secret_file}")
+    print("Raw token not printed. Use reveal-admin only when an operator needs it.")
+    print(
+        "Restart loom-service, loom-control-plane, and llm-gateway so "
+        "all processes load the new singleton admin secret.",
+    )
+    print("Old admin tokens become invalid after those processes restart.")
+    return 0
+
+
 def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Register `loom service {up,down,status}` on the top-level argparse."""
     p_service = sub.add_parser(
@@ -319,6 +457,17 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         help="Path to .env file (default: ./.env; ignored if missing)",
     )
 
+    admin_secret_common = argparse.ArgumentParser(add_help=False)
+    admin_secret_common.add_argument(
+        "--secret-file",
+        type=Path,
+        default=_DEFAULT_ADMIN_SECRET_FILE,
+        help=(
+            "Path to singleton admin secrets.toml "
+            f"(default: {_DEFAULT_ADMIN_SECRET_FILE})"
+        ),
+    )
+
     p_up = service_sub.add_parser(
         "up", parents=[common],
         help="Start stack, run migrations, seed test data, print summary",
@@ -326,6 +475,15 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
     p_up.add_argument(
         "--db-url", default=_DEFAULT_DB_URL,
         help=f"Postgres URL for migrations + seeding (default: {_DEFAULT_DB_URL})",
+    )
+    p_up.add_argument(
+        "--admin-secret-file",
+        type=Path,
+        default=_DEFAULT_DEV_ADMIN_SECRET_FILE,
+        help=(
+            "Dev singleton admin secrets.toml path mounted by compose "
+            f"(default: {_DEFAULT_DEV_ADMIN_SECRET_FILE})"
+        ),
     )
     p_up.set_defaults(handler=_up)
 
@@ -344,3 +502,34 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         help="Show container state + endpoint URLs",
     )
     p_status.set_defaults(handler=_status)
+
+    p_init_admin = service_sub.add_parser(
+        "init-admin",
+        parents=[admin_secret_common],
+        help="Create a singleton admin secret file without printing the token",
+    )
+    p_init_admin.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing secret file. Prefer rotate-admin for normal rotation.",
+    )
+    p_init_admin.set_defaults(handler=_init_admin)
+
+    p_reveal_admin = service_sub.add_parser(
+        "reveal-admin",
+        parents=[admin_secret_common],
+        help="Reveal the raw singleton admin token with confirmation",
+    )
+    p_reveal_admin.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt.",
+    )
+    p_reveal_admin.set_defaults(handler=_reveal_admin)
+
+    p_rotate_admin = service_sub.add_parser(
+        "rotate-admin",
+        parents=[admin_secret_common],
+        help="Atomically replace the singleton admin token without printing it",
+    )
+    p_rotate_admin.set_defaults(handler=_rotate_admin)

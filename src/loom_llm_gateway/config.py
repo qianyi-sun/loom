@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -62,6 +63,7 @@ class GatewaySettings(BaseSettings):
 
     # Persistence (rate_cards live here per §4.7)
     db_url: PostgresDsn
+    admin_secret_file: Path | None = None
 
     # Provider keys — only the Gateway has these (§7.4). The native-
     # dialect passthrough routes (Plan 9 A9.1, A9.3) inject these into

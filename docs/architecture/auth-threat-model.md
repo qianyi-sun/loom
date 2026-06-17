@@ -110,10 +110,11 @@ Out of scope for this document:
 5. Operator docs explain first-run setup, rotation, incident response for leaked
    admin/team/provider secrets, and rollback behavior.
 
-## Current Risk Accepted Until #10 Ships
+## Current Residual Risk
 
-The development stack still supports `loom_admin_*` database tokens and local
-seed tooling for SPA/admin testing. This is acceptable only for local and shared
-development environments. A production deployment must not go live until the
-singleton admin secret, team registration approval, audit logging, and rotation
-controls have shipped or a documented deployment exception is approved.
+Admin authority is now file-backed rather than DB-backed, and the development
+stack uses the same singleton-admin path as production. The remaining auth risk
+for this phase is the bearer-token SPA model: admin and team tokens are still
+pasted into the browser and stored client-side for development/pilot use. A
+production deployment should move that browser surface to the dedicated
+cookie/SSO/RBAC follow-up before broad external exposure.

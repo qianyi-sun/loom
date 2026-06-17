@@ -163,6 +163,38 @@ export interface ProviderConnectionEntry {
   rate_card_provider?: string | null;
 }
 
+export interface TeamRegistrationEntry {
+  id: string;
+  name: string;
+  contact_email: string;
+  status: "pending" | "approved" | "rejected" | "expired";
+  requested_at: string;
+  reviewed_at: string | null;
+  reviewed_by_actor: string | null;
+  approved_team_id: string | null;
+}
+
+export interface TeamRegistrationApproval {
+  registration: TeamRegistrationEntry;
+  team: { id: string; name: string };
+  team_token: string;
+  token_hash_prefix: string;
+  expires_at: string;
+}
+
+export interface AdminAuditEvent {
+  id: string;
+  created_at: string;
+  actor: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  request_id: string | null;
+  source_ip_hash: string | null;
+  user_agent_hash: string | null;
+  metadata: Record<string, unknown>;
+}
+
 function qs(params: Record<string, string | number | undefined>): string {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
@@ -261,6 +293,33 @@ export const api = {
     ),
   revokeToken: (prefix: string) =>
     apiFetch<void>(`/api/v1/tokens/${prefix}`, { method: "DELETE" }),
+  listTeamRegistrations: (
+    status: TeamRegistrationEntry["status"] = "pending",
+  ) =>
+    apiFetch<{ items: TeamRegistrationEntry[] }>(
+      `/api/v1/admin/team-registrations${qs({ status })}`,
+    ),
+  approveTeamRegistration: (id: string, actor: string) =>
+    apiFetch<TeamRegistrationApproval>(
+      `/api/v1/admin/team-registrations/${encodeURIComponent(id)}/approve`,
+      {
+        method: "POST",
+        headers: { "X-Loom-Admin-Actor": actor },
+      },
+    ),
+  rejectTeamRegistration: (id: string, actor: string, reason?: string) =>
+    apiFetch<TeamRegistrationEntry>(
+      `/api/v1/admin/team-registrations/${encodeURIComponent(id)}/reject`,
+      {
+        method: "POST",
+        headers: { "X-Loom-Admin-Actor": actor },
+        body: JSON.stringify({ reason: reason ?? null }),
+      },
+    ),
+  listAdminAuditEvents: (limit = 50, cursor?: string) =>
+    apiFetch<{ items: AdminAuditEvent[]; next_cursor: string | null }>(
+      `/api/v1/admin/audit-events${qs({ limit, cursor })}`,
+    ),
   listBatches: (q: Record<string, string | undefined> = {}) =>
     apiFetch<BatchList>(`/api/v1/batches${qs(q)}`),
   getBatch: (id: string) =>

@@ -190,10 +190,8 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
     return 0
 
 
-_KNOWN_TEAM_SCOPES = (
-    "read:own", "submit", "admin:tokens", "admin:rate_cards",
-)
-_KNOWN_TOKEN_TYPES = ("team", "admin")
+_KNOWN_TEAM_SCOPES = ("read:own", "submit")
+_KNOWN_TOKEN_TYPES = ("team",)
 _HEX_8_PREFIX_RE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_TEAM_SCOPES = ("read:own", "submit")
 
@@ -327,8 +325,9 @@ def _add_team_mint_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--type", choices=_KNOWN_TOKEN_TYPES, default="team",
         help=(
-            "Token type. `team` requires --team-id; `admin` is global "
-            "(server rejects --team-id with admin)."
+            "Token type. Admin credentials are file-backed singleton secrets; "
+            "use `loom service init-admin` or `loom service rotate-admin` "
+            "for that lifecycle."
         ),
     )
     p.add_argument(

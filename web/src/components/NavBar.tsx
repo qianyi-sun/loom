@@ -18,6 +18,7 @@ const NAV_ITEMS = [
 ];
 
 const ADMIN_NAV_ITEMS = [
+  { to: "/admin/access", label: "Team access" },
   { to: "/rate-cards", label: "Rate cards" },
 ];
 

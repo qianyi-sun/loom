@@ -9,8 +9,8 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert
 
+from loom.auth import verify_bearer_token
 from loom.db.schema import RateCard
-from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.rate_card import RateCardTable
 
 router = APIRouter(prefix="/admin")
@@ -23,7 +23,15 @@ async def upsert_rate_card(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(
+                request.app.state,
+                "admin_secret_verifier",
+                None,
+            ),
+        )
     if ctx is None:
         raise HTTPException(status_code=401, detail="invalid token")
     if "admin:rate_cards" not in ctx.scopes:

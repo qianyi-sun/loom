@@ -46,12 +46,11 @@ class _CreateTokenReq(BaseModel):
 # Scopes a non-admin team caller may grant via POST /tokens.
 _TEAM_ALLOWED_SCOPES = frozenset({"read:own", "submit"})
 
-# Every recognized scope across the whole product. Plan 20 will add
-# `admin:rate_cards` (migration 0005 already grants it to existing
-# `admin:tokens` holders). Plan 18 will add `read:trajectory`. Updates
-# here are deliberate — an admin minting a token with a never-defined
-# scope is almost certainly a typo, so the route rejects it instead of
-# silently storing it.
+# Every recognized scope across the whole product. Updates here are deliberate:
+# a caller minting a token with a never-defined scope is almost certainly a
+# typo, so the route rejects it instead of silently storing it. Admin scopes are
+# listed only so legacy rows/migration paths remain explicit; new DB-backed
+# tokens carrying admin authority are rejected below.
 _KNOWN_SCOPES = frozenset({
     "read:own",
     "submit",
@@ -115,6 +114,24 @@ async def create_token(
             detail=f"unrecognized scopes: {sorted(unknown)}",
         )
 
+    if payload.type == "admin":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "database-backed admin tokens are disabled; use the "
+                "singleton admin secret file managed by `loom service "
+                "init-admin` or `loom service rotate-admin`"
+            ),
+        )
+    if any(scope.startswith("admin:") for scope in payload.scopes):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "database-backed admin scopes are disabled; admin "
+                "authority must come from the singleton admin secret file"
+            ),
+        )
+
     admin = is_admin(ctx)
     admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
     if not admin:
@@ -135,16 +152,6 @@ async def create_token(
                     detail=f"scope {scope!r} requires admin:tokens",
                 )
 
-    # Admin tokens are global — accidentally pinning one to a team
-    # would create a confused-deputy hazard at a later API revision,
-    # so reject the input rather than silently dropping the field
-    # (audit H2).
-    if payload.type == "admin" and payload.team_id is not None:
-        raise HTTPException(
-            status_code=400,
-            detail="admin tokens are global; team_id must be omitted",
-        )
-
     target_team = (
         payload.team_id if payload.team_id else ctx.team_id
     )
@@ -153,8 +160,7 @@ async def create_token(
             status_code=400, detail="team_id required for team token",
         )
 
-    prefix_str = "team" if payload.type == "team" else "admin"
-    raw = f"loom_{prefix_str}_{secrets.token_urlsafe(32)}"
+    raw = f"loom_team_{secrets.token_urlsafe(32)}"
     token_hash = hashlib.sha256(raw.encode()).digest()
     expires_at = datetime.now(UTC) + timedelta(
         days=payload.expires_in_days,

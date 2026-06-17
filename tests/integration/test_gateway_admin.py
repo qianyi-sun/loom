@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -12,26 +13,36 @@ from loom.db.schema import RateCard, Token
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 
+RAW_ADMIN_TOKEN = "loom_admin_" + "G" * 43
+
+
+def _write_admin_secret(path: Path) -> None:
+    path.write_text(
+        "[admin]\n"
+        f"token = \"{RAW_ADMIN_TOKEN}\"\n"
+        "created_at = \"2026-06-17T00:00:00Z\"\n"
+        "version = 1\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
 
 @pytest.fixture
 def admin_app(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    postgres_url: str,
 ) -> Iterator[tuple[object, str]]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
-    raw_admin = f"loom_admin_{uuid4().hex}"
-    with session_factory() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_admin.encode()).digest(),
-            type="admin", scopes=["admin:rate_cards"], team_id=None,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
-        s.commit()
+    secret_file = tmp_path / "secrets.toml"
+    _write_admin_secret(secret_file)
     monkeypatch.setenv("LOOM_GW_DB_URL", postgres_url)
     monkeypatch.setenv("LOOM_GW_ANTHROPIC_API_KEY", "stub")
+    monkeypatch.setenv("LOOM_GW_ADMIN_SECRET_FILE", str(secret_file))
     app = create_app(GatewaySettings(_env_file=None))
     try:
-        yield app, raw_admin
+        yield app, RAW_ADMIN_TOKEN
     finally:
         with session_factory() as s:
             s.execute(delete(Token))
@@ -114,6 +125,30 @@ def test_non_admin_rejected(admin_app):  # type: ignore[no-untyped-def]
             json={"id": "x", "entries": []},
         )
         assert r.status_code in (401, 403)
+
+
+def test_legacy_db_admin_token_rejected(
+    admin_app,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    app, _raw_admin = admin_app
+    raw_db_admin = f"loom_admin_{uuid4().hex}"
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as s:
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw_db_admin.encode()).digest(),
+            type="admin", scopes=["admin:rate_cards"], team_id=None,
+            issued_at=datetime.now(UTC), expires_at=None,
+        ))
+        s.commit()
+    engine.dispose()
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/rate-cards",
+            headers={"Authorization": f"Bearer {raw_db_admin}"},
+            json={"id": "x", "entries": []},
+        )
+        assert r.status_code == 401
 
 
 def test_missing_scope_rejected(admin_app, postgres_url: str):  # type: ignore[no-untyped-def]
