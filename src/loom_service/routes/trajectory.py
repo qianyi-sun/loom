@@ -26,6 +26,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
+from loom_service.storage import rewrite_to_public
 
 router = APIRouter()
 
@@ -117,12 +118,15 @@ async def download_trajectory(
     require_scope(ctx, "read:own")
     trial = await _load_trial(s, trial_id, ctx)
 
-    url = request.app.state.minio_client.generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": settings.trajectories_bucket,
-            "Key": _key(trial.team_id, trial.id),
-        },
-        ExpiresIn=settings.signed_url_expiry_sec,
+    url = rewrite_to_public(
+        request.app.state.minio_client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": settings.trajectories_bucket,
+                "Key": _key(trial.team_id, trial.id),
+            },
+            ExpiresIn=settings.signed_url_expiry_sec,
+        ),
+        settings,
     )
     return RedirectResponse(url=url, status_code=302)

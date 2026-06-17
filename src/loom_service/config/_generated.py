@@ -33,6 +33,7 @@ class LoomServiceSettings(BaseSettings):
     log_level: LogLevel = "info"
     minio_access_key: SecretStr
     minio_endpoint: str = "http://loom-minio:9000"
+    minio_public_endpoint: str | None = None
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     signed_url_expiry_sec: int = 3600

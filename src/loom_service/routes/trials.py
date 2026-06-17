@@ -40,6 +40,7 @@ from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.storage import rewrite_to_public
 
 router = APIRouter()
 
@@ -189,6 +190,7 @@ def _projected_artifacts(
     artifacts_bucket: str,
     trajectory_index: dict[str, Any] | None,
     expires_sec: int,
+    settings: Any,
 ) -> list[dict[str, Any]]:
     if not trajectory_index:
         return []
@@ -219,7 +221,9 @@ def _projected_artifacts(
         entry: dict[str, Any] = {
             "key": key,
             "size": max(size_int, 0),
-            "download_url": _presign_get(client, bucket, key, expires_sec),
+            "download_url": rewrite_to_public(
+                _presign_get(client, bucket, key, expires_sec), settings,
+            ),
         }
         step_name = item.get("step_name")
         if isinstance(step_name, str):
@@ -250,17 +254,23 @@ async def get_trial(
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;
     # finalize.py writes ATIF to the same bucket at `atif.json`.
     # Both URLs are presigned-GET on the trajectories bucket.
-    base["atif_url"] = _presign_get(
-        request.app.state.minio_client,
-        settings.trajectories_bucket,
-        f"{trial.team_id}/{trial.id}/atif.json",
-        settings.signed_url_expiry_sec,
+    base["atif_url"] = rewrite_to_public(
+        _presign_get(
+            request.app.state.minio_client,
+            settings.trajectories_bucket,
+            f"{trial.team_id}/{trial.id}/atif.json",
+            settings.signed_url_expiry_sec,
+        ),
+        settings,
     )
-    base["trajectory_url"] = _presign_get(
-        request.app.state.minio_client,
-        settings.trajectories_bucket,
-        f"{trial.team_id}/{trial.id}/events.jsonl",
-        settings.signed_url_expiry_sec,
+    base["trajectory_url"] = rewrite_to_public(
+        _presign_get(
+            request.app.state.minio_client,
+            settings.trajectories_bucket,
+            f"{trial.team_id}/{trial.id}/events.jsonl",
+            settings.signed_url_expiry_sec,
+        ),
+        settings,
     )
     # `*_ready` flags so the SPA can avoid rendering a download link
     # that's going to 404. The trajectory exists as soon as the worker
@@ -277,6 +287,7 @@ async def get_trial(
         artifacts_bucket=settings.artifacts_bucket,
         trajectory_index=trajectory_index,
         expires_sec=settings.signed_url_expiry_sec,
+        settings=settings,
     )
     return base
 

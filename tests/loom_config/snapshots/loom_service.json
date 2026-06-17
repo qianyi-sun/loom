@@ -79,6 +79,11 @@
     "default": "'http://loom-minio:9000'",
     "required": false
   },
+  "minio_public_endpoint": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
   "minio_region": {
     "annotation": "<class 'str'>",
     "default": "'us-east-1'",

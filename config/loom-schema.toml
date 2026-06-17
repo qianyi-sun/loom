@@ -157,6 +157,12 @@ used_by     = ["loom-service"]
 python_type = "str"
 default     = "trajectories"
 
+[service_config.minio_public_endpoint]
+used_by     = ["loom-service"]
+python_type = "str"
+# no required, no default → `str | None = None` (codegen rule 4)
+description = "Public-facing MinIO endpoint for presigned URLs. When unset, falls back to minio_endpoint (works for in-cluster clients only)."
+
 [service_config.artifacts_bucket]
 used_by     = ["loom-service"]
 python_type = "str"
