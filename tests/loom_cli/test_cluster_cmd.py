@@ -111,6 +111,14 @@ class _FakeCoreV1:
         return _Spec(name=name)
 
 
+class _FakeStorageV1:
+    """Stub for `_load_clients`'s 4-tuple. Status doesn't read from
+    it; preflight does. Tests in this file pass an empty fake."""
+
+    def list_storage_class(self) -> object:
+        return _Spec(items=[])
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers to build a "happy" cluster snapshot
 # ──────────────────────────────────────────────────────────────────────
@@ -334,7 +342,8 @@ def test_cli_status_returns_0_when_all_ready(
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._load_clients",
         lambda _ctx: (apps, _FakeNetworkingV1(),
-                       _FakeCoreV1(secrets={"loom-secrets"})),
+                       _FakeCoreV1(secrets={"loom-secrets"}),
+                       _FakeStorageV1()),
     )
     rc = main(["cluster", "status"])
     assert rc == 0
@@ -357,7 +366,8 @@ def test_cli_status_returns_1_when_a_component_not_ready(
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._load_clients",
         lambda _ctx: (apps, _FakeNetworkingV1(),
-                       _FakeCoreV1(secrets={"loom-secrets"})),
+                       _FakeCoreV1(secrets={"loom-secrets"}),
+                       _FakeStorageV1()),
     )
     rc = main(["cluster", "status"])
     assert rc == 1
@@ -374,7 +384,8 @@ def test_cli_status_json_format(
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._load_clients",
         lambda _ctx: (apps, _FakeNetworkingV1(),
-                       _FakeCoreV1(secrets={"loom-secrets"})),
+                       _FakeCoreV1(secrets={"loom-secrets"}),
+                       _FakeStorageV1()),
     )
     rc = main(["cluster", "status", "--format", "json"])
     assert rc == 0
@@ -403,7 +414,8 @@ def test_cli_status_namespace_flag_passed_to_collector(
         "loom_cli.cluster_cmd._load_clients",
         lambda _ctx: (_CapturingApps(),
                        _FakeNetworkingV1(),
-                       _FakeCoreV1(secrets=set())),
+                       _FakeCoreV1(secrets=set()),
+                       _FakeStorageV1()),
     )
     main(["cluster", "status", "--namespace", "loom-stage"])
     assert captured_ns["ns"] == "loom-stage"

@@ -173,11 +173,16 @@ def _format_json(status: ClusterStatus) -> str:
 
 def _load_clients(
     context: str | None,
-) -> tuple[object, object, object]:
+) -> tuple[object, object, object, object]:
     """Lazy import + load kube config. Returns (apps_v1, networking_v1,
-    core_v1) API clients. Raises a RuntimeError with a friendly install
-    hint if the kubernetes package isn't available; falls through to
-    the kubernetes lib's own ConfigException on context errors."""
+    core_v1, storage_v1) API clients. Raises a RuntimeError with a
+    friendly install hint if the kubernetes package isn't available;
+    falls through to the kubernetes lib's own ConfigException on
+    context errors.
+
+    `storage_v1` is used by `loom cluster preflight` to check for a
+    default StorageClass; `status` ignores it. Kept in the same
+    helper so every cluster subcommand uses one auth path."""
     try:
         from kubernetes import client, config  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:
@@ -198,7 +203,12 @@ def _load_clients(
         # we catch broadly because the kubernetes lib raises a variety
         # of exception types here depending on what's missing.
         config.load_incluster_config()
-    return client.AppsV1Api(), client.NetworkingV1Api(), client.CoreV1Api()
+    return (
+        client.AppsV1Api(),
+        client.NetworkingV1Api(),
+        client.CoreV1Api(),
+        client.StorageV1Api(),
+    )
 
 
 def _collect_workload(
@@ -446,7 +456,7 @@ def _render(args: argparse.Namespace) -> int:
 
 def _status(args: argparse.Namespace) -> int:
     try:
-        apps_v1, net_v1, core_v1 = _load_clients(args.context)
+        apps_v1, net_v1, core_v1, _storage_v1 = _load_clients(args.context)
     except RuntimeError as exc:
         # Install-hint path.
         sys.stderr.write(f"error: {exc}\n")
@@ -478,6 +488,368 @@ def _status(args: argparse.Namespace) -> int:
         sys.stdout.write(_format_table(status))
 
     return 0 if status.all_ready else 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# preflight (#76 Phase 2A — API-side read-only checks)
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Secrets the cluster manifests (post-rendering) require. Phase 1B's
+# control-plane.yaml + loom-service.yaml mount `loom-admin-secret`;
+# every component reads from `loom-secrets`. Tracking these by name
+# here keeps the preflight in sync with the template surface — a
+# future PR that adds a new Secret reference must add it here too.
+_REQUIRED_SECRETS: tuple[str, ...] = (
+    "loom-secrets",
+    "loom-admin-secret",
+)
+
+# PodSecurityStandard label keys (k8s 1.25+). `restricted` enforce
+# blocks the worker's hostPath docker-socket mount (per the spec's
+# spike #02). The preflight surfaces this as a warning, not a fail,
+# because the operator may have decided to use a different driver
+# (sysbox / kata) where restricted enforce is fine.
+_PSS_ENFORCE_LABEL = "pod-security.kubernetes.io/enforce"
+
+_PreflightOutcome = str  # "pass" | "fail" | "warn"
+
+
+@dataclass
+class PreflightCheck:
+    """One check + its outcome. `detail` is a single line of human-
+    readable context; `remediation` is an optional hint operators
+    can act on (e.g. how to create the missing Secret)."""
+
+    name: str
+    outcome: _PreflightOutcome
+    detail: str
+    remediation: str | None = None
+
+
+@dataclass
+class PreflightReport:
+    namespace: str
+    context: str | None
+    checks: list[PreflightCheck]
+
+    @property
+    def all_pass(self) -> bool:
+        return all(c.outcome == "pass" for c in self.checks)
+
+    @property
+    def any_fail(self) -> bool:
+        return any(c.outcome == "fail" for c in self.checks)
+
+
+def _check_namespace_exists(
+    core_v1: Any, namespace: str,
+) -> PreflightCheck:
+    """First check: does the namespace exist? Every subsequent check
+    is namespace-scoped so this gates the rest."""
+    try:
+        core_v1.read_namespace(name=namespace)
+    except Exception as exc:
+        return PreflightCheck(
+            name="namespace-exists",
+            outcome="fail",
+            detail=f"namespace {namespace!r} not found ({_exception_to_note(exc)})",
+            remediation=(
+                f"kubectl create namespace {namespace}\n"
+                f"# Then re-run `loom cluster preflight`."
+            ),
+        )
+    return PreflightCheck(
+        name="namespace-exists",
+        outcome="pass",
+        detail=f"namespace {namespace!r} present",
+    )
+
+
+def _check_required_secrets(
+    core_v1: Any, namespace: str,
+) -> list[PreflightCheck]:
+    """One check per Secret listed in `_REQUIRED_SECRETS`. Missing
+    Secret = fail with a `kubectl create secret` hint."""
+    out: list[PreflightCheck] = []
+    for name in _REQUIRED_SECRETS:
+        if _secret_present(core_v1, namespace, name):
+            out.append(PreflightCheck(
+                name=f"secret-{name}",
+                outcome="pass",
+                detail=f"Secret {name!r} present in {namespace}",
+            ))
+        else:
+            out.append(PreflightCheck(
+                name=f"secret-{name}",
+                outcome="fail",
+                detail=f"Secret {name!r} missing in {namespace}",
+                remediation=(
+                    f"# See cluster-deploy.md §Bootstrap for the keys "
+                    f"{name!r} expects. Quick example:\n"
+                    f"kubectl create secret generic {name} \\\n"
+                    f"  --namespace={namespace} \\\n"
+                    f"  --from-literal=<key>=<value>"
+                ),
+            ))
+    return out
+
+
+def _check_ingress_class_installed(
+    networking_v1: Any,
+) -> PreflightCheck:
+    """An IngressClass resource is required for the `loom-ingress`
+    Ingress to actually route traffic. Most clusters use `nginx`
+    (ingress-nginx) but the check is class-agnostic — we just need
+    *something* registered."""
+    try:
+        result = networking_v1.list_ingress_class()
+    except Exception as exc:
+        return PreflightCheck(
+            name="ingress-class-installed",
+            outcome="fail",
+            detail=(
+                f"failed to list IngressClass resources: "
+                f"{_exception_to_note(exc)}"
+            ),
+            remediation=(
+                "Check kubectl + cluster networking access; "
+                "see cluster-deploy.md §Prerequisites."
+            ),
+        )
+    classes = [
+        getattr(it.metadata, "name", "<unknown>")
+        for it in (result.items or [])
+    ]
+    if not classes:
+        return PreflightCheck(
+            name="ingress-class-installed",
+            outcome="fail",
+            detail="no IngressClass resources registered in the cluster",
+            remediation=(
+                "Install an ingress controller (e.g. ingress-nginx):\n"
+                "  helm install ingress-nginx ingress-nginx "
+                "--repo https://kubernetes.github.io/ingress-nginx"
+            ),
+        )
+    return PreflightCheck(
+        name="ingress-class-installed",
+        outcome="pass",
+        detail=f"IngressClass(es) present: {', '.join(classes)}",
+    )
+
+
+def _check_default_storage_class(
+    storage_v1: Any,
+) -> PreflightCheck:
+    """At least one StorageClass marked default. Postgres + MinIO
+    StatefulSets and the worker trajectories PVC bind against this."""
+    try:
+        result = storage_v1.list_storage_class()
+    except Exception as exc:
+        return PreflightCheck(
+            name="default-storage-class",
+            outcome="fail",
+            detail=(
+                f"failed to list StorageClass resources: "
+                f"{_exception_to_note(exc)}"
+            ),
+        )
+    items = result.items or []
+    if not items:
+        return PreflightCheck(
+            name="default-storage-class",
+            outcome="fail",
+            detail="no StorageClass resources registered",
+            remediation=(
+                "Install a CSI driver appropriate for your cluster "
+                "(e.g. local-path-provisioner for kind:\n"
+                "  kubectl apply -f "
+                "https://raw.githubusercontent.com/rancher/"
+                "local-path-provisioner/master/deploy/local-path-storage.yaml"
+                ")"
+            ),
+        )
+    default_names: list[str] = []
+    for sc in items:
+        anns = (getattr(sc.metadata, "annotations", None) or {})
+        # Both keys are used in the wild — the in-tree storage class
+        # uses the unprefixed key, beta and modern CSI uses the
+        # storage.k8s.io prefix.
+        is_default = (
+            anns.get("storageclass.kubernetes.io/is-default-class") == "true"
+            or anns.get("storageclass.beta.kubernetes.io/is-default-class") == "true"
+        )
+        if is_default:
+            default_names.append(getattr(sc.metadata, "name", "<unknown>"))
+    if not default_names:
+        return PreflightCheck(
+            name="default-storage-class",
+            outcome="warn",
+            detail=(
+                "StorageClass resources exist but none is marked "
+                "default — PVCs without an explicit storageClassName "
+                "will not bind"
+            ),
+            remediation=(
+                "Pick one StorageClass and annotate it as default:\n"
+                "  kubectl annotate sc <name> "
+                "storageclass.kubernetes.io/is-default-class=true"
+            ),
+        )
+    return PreflightCheck(
+        name="default-storage-class",
+        outcome="pass",
+        detail=f"default StorageClass: {', '.join(default_names)}",
+    )
+
+
+def _check_pss_enforce(
+    core_v1: Any, namespace: str,
+) -> PreflightCheck:
+    """The worker DaemonSet bind-mounts the host docker socket. PSS
+    `restricted` (k8s 1.25+ default for new namespaces) rejects this
+    at admission. Warn (not fail) so operators using a non-Docker
+    driver aren't blocked."""
+    try:
+        ns = core_v1.read_namespace(name=namespace)
+    except Exception:
+        return PreflightCheck(
+            name="pss-enforce",
+            outcome="warn",
+            detail="could not read namespace metadata",
+        )
+    labels = getattr(ns.metadata, "labels", None) or {}
+    enforce = labels.get(_PSS_ENFORCE_LABEL)
+    if enforce == "restricted":
+        return PreflightCheck(
+            name="pss-enforce",
+            outcome="warn",
+            detail=(
+                f"namespace {namespace!r} has PSS enforce=restricted; "
+                "the worker DaemonSet's hostPath docker.sock mount "
+                "will be rejected"
+            ),
+            remediation=(
+                "Either relax to enforce=privileged (worker docker "
+                "driver), or switch worker to a non-Docker driver:\n"
+                f"  kubectl label namespace {namespace} "
+                f"{_PSS_ENFORCE_LABEL}=privileged --overwrite"
+            ),
+        )
+    if enforce is None:
+        return PreflightCheck(
+            name="pss-enforce",
+            outcome="pass",
+            detail=(
+                f"namespace {namespace!r} has no PSS enforce label "
+                "(no admission restriction)"
+            ),
+        )
+    return PreflightCheck(
+        name="pss-enforce",
+        outcome="pass",
+        detail=(
+            f"namespace {namespace!r} PSS enforce={enforce!r} "
+            "(non-restricted)"
+        ),
+    )
+
+
+def collect_preflight(
+    core_v1: Any, networking_v1: Any, storage_v1: Any, namespace: str,
+    *, context: str | None,
+) -> PreflightReport:
+    """Pure-collection function — every API client passed in so tests
+    can inject fakes. If `namespace-exists` fails, the namespace-
+    scoped checks (Secrets, PSS) are skipped to avoid burying the
+    real problem in cascade failures."""
+    checks: list[PreflightCheck] = []
+    ns_check = _check_namespace_exists(core_v1, namespace)
+    checks.append(ns_check)
+
+    # Cluster-scoped checks always run, even when the namespace is
+    # missing — they're useful diagnostics on their own.
+    checks.append(_check_ingress_class_installed(networking_v1))
+    checks.append(_check_default_storage_class(storage_v1))
+
+    if ns_check.outcome == "pass":
+        checks.extend(_check_required_secrets(core_v1, namespace))
+        checks.append(_check_pss_enforce(core_v1, namespace))
+
+    return PreflightReport(
+        namespace=namespace, context=context, checks=checks,
+    )
+
+
+def _format_preflight_table(report: PreflightReport) -> str:
+    """Stable human-readable preflight output. Greppable. Each check
+    appears on its own line with the outcome marker and detail; failed
+    checks include their remediation hint inline (indented)."""
+    lines: list[str] = []
+    lines.append(
+        f"namespace: {report.namespace}"
+        + (f" (context: {report.context})" if report.context else ""),
+    )
+    lines.append("")
+    lines.append(f"{'CHECK':<32} {'OUTCOME':<8} DETAIL")
+    for c in report.checks:
+        lines.append(f"{c.name:<32} {c.outcome:<8} {c.detail}")
+        if c.remediation and c.outcome in ("fail", "warn"):
+            for rline in c.remediation.splitlines():
+                lines.append(f"    {rline}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_preflight_json(report: PreflightReport) -> str:
+    obj = {
+        "namespace": report.namespace,
+        "context": report.context,
+        "all_pass": report.all_pass,
+        "any_fail": report.any_fail,
+        "checks": [
+            {
+                "name": c.name,
+                "outcome": c.outcome,
+                "detail": c.detail,
+                "remediation": c.remediation,
+            }
+            for c in report.checks
+        ],
+    }
+    return json.dumps(obj, indent=2) + "\n"
+
+
+def _preflight(args: argparse.Namespace) -> int:
+    try:
+        _apps_v1, net_v1, core_v1, storage_v1 = _load_clients(args.context)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except Exception as exc:
+        sys.stderr.write(
+            f"error: cannot connect to cluster: "
+            f"{type(exc).__name__}: {exc}\n",
+        )
+        return 2
+    try:
+        report = collect_preflight(
+            core_v1, net_v1, storage_v1, args.namespace,
+            context=args.context,
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"error: failed to read cluster state: "
+            f"{type(exc).__name__}: {exc}\n",
+        )
+        return 2
+    if args.format == "json":
+        sys.stdout.write(_format_preflight_json(report))
+    else:
+        sys.stdout.write(_format_preflight_table(report))
+    # Exit 1 only when something explicitly failed; warns alone keep
+    # exit 0 so CI scripts don't have to special-case them.
+    return 1 if report.any_fail else 0
 
 
 def dispatch(argv: list[str]) -> int:
@@ -527,6 +899,29 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_render.set_defaults(handler=_render)
+
+    p_preflight = sub.add_parser(
+        "preflight",
+        help=(
+            "Verify the target cluster meets prerequisites: required "
+            "Secrets, IngressClass installed, default StorageClass, "
+            "PSS labels. Exits 0 on all-pass (warns allowed), 1 on "
+            "any-fail, 2 on cluster unreachable."
+        ),
+    )
+    p_preflight.add_argument(
+        "--context", default=None,
+        help="kubeconfig context (default: current context).",
+    )
+    p_preflight.add_argument(
+        "--namespace", default="loom",
+        help="Kubernetes namespace (default: loom).",
+    )
+    p_preflight.add_argument(
+        "--format", choices=["table", "json"], default="table",
+        help="Output format. JSON for CI/scripting.",
+    )
+    p_preflight.set_defaults(handler=_preflight)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))
