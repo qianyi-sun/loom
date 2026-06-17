@@ -24,6 +24,11 @@ spec:
               valueFrom: { secretKeyRef: { name: loom-secrets, key: anthropic-api-key } }
             - name: LOOM_GW_OPENAI_API_KEY
               valueFrom: { secretKeyRef: { name: loom-secrets, key: openai-api-key } }
+            # Step-JWT verification key. MUST match CP's
+            # LOOM_CP_STEP_JWT_SIGNING_KEY — CP mints, gateway
+            # verifies. Mismatch → 401 on every facade call.
+            - name: LOOM_GW_STEP_JWT_SIGNING_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: step-jwt-signing-key } }
           ports:
             - containerPort: 9100
           readinessProbe:

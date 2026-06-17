@@ -77,6 +77,7 @@ knob you need.
      --from-literal=minio-access-key=loom \
      --from-literal=minio-secret-key=$(openssl rand -hex 32) \
      --from-literal=anthropic-api-key=YOUR_KEY \
+     --from-literal=step-jwt-signing-key=$(openssl rand -hex 64) \
      --from-literal=openai-api-key=YOUR_KEY \
      --from-literal=worker-token=PLACEHOLDER
    ```
@@ -570,10 +571,21 @@ Capture artifact links + a brief note for each pass in the
 
 ### Automation status
 
-The kind smoke (`cluster-smoke` workflow, #76 Phase 4B) covers
-steps 1, 3, and 12 today (manifest schema + apply + audit + status +
-down round-trip). Steps 4-11 require provider keys + a long-lived
-staging cluster — automation is tracked in #111.
+Two CI workflows automate parts of this checklist:
+
+- **`cluster-smoke`** (kind, label-gated `cluster-smoke`) — covers
+  steps 1, 3, 12. Uses placeholder images, `--no-wait` apply, schema
+  + boundary + apply + status + down round-trip. Fast (~1 min).
+- **`staging-smoke`** (kind, label-gated `staging-smoke`) — builds
+  REAL images, applies them, waits for every pod to reach Ready,
+  probes `/healthz` + `/metrics` on every component. Closes the
+  cold-start regression gap (~15-20 min).
+
+Steps 4-11 (provider connection create + test, model discovery,
+batch submission, trajectory + ATIF download, provider error
+visibility) still require either a real provider key in CI secrets
+or a mock OpenAI server in the staging cluster — tracked as a
+follow-up to #111.
 
 ## Capacity planning
 

@@ -96,7 +96,8 @@ jobs:
             --from-literal=minio-secret-key='smokesmokesmoke' \
             --from-literal=worker-token='smoke-token' \
             --from-literal=openai-api-key='smoke' \
-            --from-literal=anthropic-api-key='smoke'
+            --from-literal=anthropic-api-key='smoke' \
+            --from-literal=step-jwt-signing-key='smoke-step-jwt-signing-key-must-be-long-enough'
           printf '[admin]\ntoken="smoke"\n' > /tmp/admin-secrets.toml
           kubectl --context kind-loom-smoke -n loom create secret generic loom-admin-secret \
             --from-file=secrets.toml=/tmp/admin-secrets.toml

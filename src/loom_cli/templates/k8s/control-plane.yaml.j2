@@ -28,6 +28,13 @@ spec:
               valueFrom: { secretKeyRef: { name: loom-secrets, key: minio-secret-key } }
             - name: LOOM_CP_LLM_GATEWAY_URL
               value: http://loom-llm-gateway:9100
+            # Step-JWT signing key. Mint random with:
+            #   openssl rand -hex 64
+            # The same key MUST be in the gateway's loom-secrets
+            # (key `step-jwt-signing-key`) — CP mints, gateway
+            # verifies. Mismatch → 401 on every facade call.
+            - name: LOOM_CP_STEP_JWT_SIGNING_KEY
+              valueFrom: { secretKeyRef: { name: loom-secrets, key: step-jwt-signing-key } }
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin

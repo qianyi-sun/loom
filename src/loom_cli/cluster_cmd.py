@@ -82,7 +82,21 @@ class ComponentStatus:
 
     @property
     def healthy(self) -> bool:
-        return self.available and self.ready == self.desired and self.desired > 0
+        """A component is healthy when it has reached the desired
+        replica count. A `desired=0` component (e.g., the default
+        `loom-web` paused state, or `loom-worker` when an operator
+        scales it to zero) is healthy by definition — the operator
+        configured it that way.
+
+        Before #128 caught it, this required `desired > 0` which
+        meant `loom cluster up --wait` could never succeed against
+        the default config (where `replicas.web = 0`). Available-
+        replica check is dropped for desired=0 since available
+        only makes sense when there's something to be available.
+        """
+        if self.desired == 0:
+            return self.ready == 0
+        return self.available and self.ready == self.desired
 
 
 @dataclass
@@ -226,13 +240,17 @@ def _collect_workload(
     component, not just the ones that happen to exist."""
     out: list[ComponentStatus] = []
     apps = api  # AppsV1Api
-    for name, _ in deployments:
+    # Each tuple is (display_name, k8s_resource_name). For deployments
+    # + daemonsets the two are identical; for statefulsets they
+    # diverge ("postgres" → "loom-postgres"). The API call MUST use
+    # the k8s name; the status row carries the display name.
+    for display_name, k8s_name in deployments:
         try:
-            d = apps.read_namespaced_deployment(name=name, namespace=namespace)
+            d = apps.read_namespaced_deployment(name=k8s_name, namespace=namespace)
             spec = d.spec
             stat = d.status
             out.append(ComponentStatus(
-                name=name,
+                name=display_name,
                 kind="Deployment",
                 ready=int(stat.ready_replicas or 0),
                 desired=int(spec.replicas or 0),
@@ -240,42 +258,42 @@ def _collect_workload(
             ))
         except Exception as exc:  # ApiException 404 most commonly
             out.append(ComponentStatus(
-                name=name, kind="Deployment",
+                name=display_name, kind="Deployment",
                 ready=0, desired=0, available=False,
                 note=_exception_to_note(exc),
             ))
-    for name, _ in daemonsets:
+    for display_name, k8s_name in daemonsets:
         try:
-            d = apps.read_namespaced_daemon_set(name=name, namespace=namespace)
+            d = apps.read_namespaced_daemon_set(name=k8s_name, namespace=namespace)
             stat = d.status
             desired = int(stat.desired_number_scheduled or 0)
             ready = int(stat.number_ready or 0)
             out.append(ComponentStatus(
-                name=name, kind="DaemonSet",
+                name=display_name, kind="DaemonSet",
                 ready=ready, desired=desired,
                 available=ready > 0,
             ))
         except Exception as exc:
             out.append(ComponentStatus(
-                name=name, kind="DaemonSet",
+                name=display_name, kind="DaemonSet",
                 ready=0, desired=0, available=False,
                 note=_exception_to_note(exc),
             ))
-    for name, _ in statefulsets:
+    for display_name, k8s_name in statefulsets:
         try:
-            s = apps.read_namespaced_stateful_set(name=name, namespace=namespace)
+            s = apps.read_namespaced_stateful_set(name=k8s_name, namespace=namespace)
             spec = s.spec
             stat = s.status
             ready = int(stat.ready_replicas or 0)
             desired = int(spec.replicas or 0)
             out.append(ComponentStatus(
-                name=name, kind="StatefulSet",
+                name=display_name, kind="StatefulSet",
                 ready=ready, desired=desired,
                 available=ready > 0,
             ))
         except Exception as exc:
             out.append(ComponentStatus(
-                name=name, kind="StatefulSet",
+                name=display_name, kind="StatefulSet",
                 ready=0, desired=0, available=False,
                 note=_exception_to_note(exc),
             ))

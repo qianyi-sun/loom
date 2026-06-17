@@ -1,0 +1,341 @@
+name: staging-smoke
+
+# Closes step 1-3 + 12 of the manual staging smoke gate in
+# docs/operator-runbook.md by automating the deploy-and-verify
+# round-trip with REAL images. Where the kind smoke (#107) uses
+# `loom cluster up --no-wait` against unbuilt images, this workflow
+# builds the five loom images, loads them into kind, runs
+# `loom cluster up` WITHOUT --no-wait, waits for every pod to
+# reach Ready, and probes the /healthz + /metrics endpoints.
+#
+# Steps 4-11 (trial submission against a provider, trajectory +
+# ATIF download) still require either a real provider key or a
+# mock OpenAI server. Mock-server work is a follow-up — this
+# automation closes the deploy-readiness gap, which is the
+# longest-running and most-likely-to-regress part of the smoke.
+#
+# Trigger model:
+#   - workflow_dispatch (manual)
+#   - PRs labelled `staging-smoke` (gated; full smoke is slow)
+#
+# Expected runtime: ~15-20 min (5 image builds + kind boot + apply
+# + wait-for-ready).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: kind staging smoke (build images → cluster up → verify ready)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'staging-smoke'))
+    runs-on: ubuntu-latest
+    # 5 image builds (uncached) + kind boot + ingress-nginx + apply +
+    # wait-for-ready easily run 30-40 min on a cold runner. 45 leaves
+    # headroom for the wait step's worst case.
+    timeout-minutes: 45
+    env:
+      IMAGE_TAG: smoke-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install kind + kubectl
+        run: |
+          curl -sSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          curl -sSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -s -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          sudo mv /tmp/kubectl /usr/local/bin/kubectl
+          kind --version && kubectl version --client=true
+
+      - name: Install uv + sync deps
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync python deps (with [cluster] extra)
+        # Pin Python 3.11 to match what the loom Dockerfiles use
+        # (python:3.11-slim). ubuntu-latest defaults to Python 3.12,
+        # which can hit "no wheel for current platform" on pinned
+        # transitive deps that haven't shipped 3.12 wheels.
+        run: |
+          uv python install 3.11
+          uv sync --extra cluster --python 3.11
+
+      - name: Build images (parallel)
+        # Build all 5 loom images in parallel. Each gets the smoke
+        # run-id as its tag so concurrent runs on the same daemon
+        # don't collide. The Dockerfile names (control-plane,
+        # gateway, service, worker, web) don't match the image names
+        # (loom-control-plane, loom-llm-gateway, loom-service,
+        # loom-worker, loom-web) one-to-one — `gateway` Dockerfile
+        # produces `loom-llm-gateway`. Image names MUST match what
+        # the k8s templates reference.
+        run: |
+          set -euo pipefail
+          export DOCKER_BUILDKIT=1
+          # (dockerfile-suffix, image-name) pairs.
+          builds=(
+            "control-plane:loom-control-plane"
+            "gateway:loom-llm-gateway"
+            "service:loom-service"
+            "worker:loom-worker"
+            "web:loom-web"
+          )
+          pids=()
+          for pair in "${builds[@]}"; do
+            suffix="${pair%%:*}"
+            image_name="${pair##*:}"
+            image="${image_name}:${IMAGE_TAG}"
+            (
+              echo "::group::Build ${image}"
+              docker build -f "deploy/Dockerfile.${suffix}" \
+                -t "${image}" . 2>&1 | sed "s/^/[${suffix}] /"
+              echo "::endgroup::"
+            ) &
+            pids+=($!)
+          done
+          rc=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || rc=$?
+          done
+          exit "$rc"
+
+      - name: Create kind cluster
+        # The ingress-nginx kind manifest pins its controller pod to
+        # nodes with `ingress-ready=true`. Without this kind config
+        # the controller pod sits Pending forever. extraPortMappings
+        # let the host reach the controller on 80/443.
+        run: |
+          cat > /tmp/kind-config.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              kubeadmConfigPatches:
+                - |
+                  kind: InitConfiguration
+                  nodeRegistration:
+                    kubeletExtraArgs:
+                      node-labels: "ingress-ready=true"
+              extraPortMappings:
+                - { containerPort: 80,  hostPort: 80,  protocol: TCP }
+                - { containerPort: 443, hostPort: 443, protocol: TCP }
+          EOF
+          kind create cluster --name loom-staging \
+            --config /tmp/kind-config.yaml --wait 60s
+          kubectl --context kind-loom-staging cluster-info
+
+      - name: Install ingress-nginx (so preflight's IngressClass check passes)
+        # Kind doesn't ship with an ingress controller; preflight
+        # would fail without one. Install the standard ingress-nginx
+        # for kind. Wait for the controller pod + IngressClass to
+        # land before continuing.
+        run: |
+          kubectl --context kind-loom-staging apply -f \
+            https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/kind/deploy.yaml
+          # The kind manifest creates a Job + Deployment + IngressClass.
+          # IngressClass appears almost immediately, but the controller
+          # pod takes ~30s to become Ready.
+          kubectl --context kind-loom-staging wait --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=120s
+
+      - name: Load images into kind
+        # `kind load docker-image` copies the image from the host's
+        # Docker daemon into kind's containerd. Without this, pods
+        # would fail to pull (kind has no registry config for
+        # `loom-*:smoke-*` tags).
+        run: |
+          for image_name in loom-control-plane loom-llm-gateway loom-service loom-worker loom-web; do
+            kind load docker-image "${image_name}:${IMAGE_TAG}" \
+              --name loom-staging
+          done
+
+      - name: Bootstrap namespace + Secrets
+        # Real-format admin token + worker token placeholder. Mock
+        # provider keys (sk-test-*) — pods don't try to call upstream
+        # until a trial actually runs, so these are fine for the
+        # readiness check.
+        run: |
+          kubectl --context kind-loom-staging create namespace loom
+          ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"
+          echo "::add-mask::${ADMIN_TOKEN}"
+          echo "ADMIN_TOKEN=${ADMIN_TOKEN}" >> "$GITHUB_ENV"
+
+          kubectl --context kind-loom-staging -n loom create secret generic loom-secrets \
+            --from-literal=cp-db-url='postgresql+psycopg://loom:smoke@loom-postgres/loom' \
+            --from-literal=gw-db-url='postgresql+psycopg://loom:smoke@loom-postgres/loom' \
+            --from-literal=postgres-user='loom' \
+            --from-literal=postgres-password='smoke' \
+            --from-literal=minio-access-key='smoke' \
+            --from-literal=minio-secret-key='smokesmokesmoke' \
+            --from-literal=worker-token='loom_w_placeholder_replaced_in_step_below' \
+            --from-literal=openai-api-key='sk-test-not-real' \
+            --from-literal=anthropic-api-key='sk-ant-test-not-real' \
+            --from-literal=step-jwt-signing-key="$(openssl rand -hex 64)"
+
+          printf '[admin]\ntoken="%s"\n' "${ADMIN_TOKEN}" > /tmp/admin.toml
+          kubectl --context kind-loom-staging -n loom create secret generic loom-admin-secret \
+            --from-file=secrets.toml=/tmp/admin.toml
+
+      - name: Generate cluster-config.toml
+        # image_tag must match what we built + loaded above.
+        # worker = 0 because the worker template needs hostPath
+        # /var/run/docker.sock for the sandbox-Docker driver, and
+        # kind nodes don't expose the host docker socket (kind runs
+        # inside a container itself). Real worker readiness is a
+        # production-only concern; the smoke verifies the other 4
+        # components + gateway-router DaemonSet.
+        run: |
+          cat > /tmp/cluster-config.toml <<EOF
+          namespace = "loom"
+          image_tag = "${IMAGE_TAG}"
+          ingress_host = "loom.staging.example"
+          [replicas]
+          service = 1
+          control_plane = 1
+          gateway = 1
+          web = 1
+          worker = 0
+          EOF
+
+      - name: loom cluster preflight
+        # All required secrets exist; storage + ingress class are
+        # available via kind's default CNI + storage provisioner.
+        run: |
+          uv run python -m loom_cli cluster preflight \
+            --context kind-loom-staging --namespace loom
+
+      - name: loom cluster audit
+        # Boundary check on the rendered manifests before apply.
+        run: |
+          uv run python -m loom_cli cluster audit \
+            --config /tmp/cluster-config.toml
+
+      - name: loom cluster up (with wait)
+        # Unlike the basic kind smoke, we wait for every component
+        # to reach Ready. Real images on kind take ~3-5 min cold-start
+        # (image extraction + Python startup + DB migration).
+        run: |
+          uv run python -m loom_cli cluster up \
+            --context kind-loom-staging --namespace loom \
+            --config /tmp/cluster-config.toml \
+            --skip-preflight \
+            --timeout 600 --poll-interval 5
+
+      - name: loom cluster status
+        run: |
+          uv run python -m loom_cli cluster status \
+            --context kind-loom-staging --namespace loom \
+            --format table
+
+      - name: Verify /healthz on every service via port-forward
+        # Probe each service's /healthz from a temporary port-forward.
+        # If any returns non-200, dump pod logs + fail.
+        run: |
+          set -euo pipefail
+          # local_port:svc:svc_port:path. Use local ports >= 18080 to
+          # avoid colliding with host services bound by kind's
+          # extraPortMappings (e.g. ingress-nginx on 80/443).
+          for spec in \
+              "18080:loom-control-plane:8080:/healthz" \
+              "19100:loom-llm-gateway:9100:/healthz" \
+              "18090:loom-service:8090:/api/v1/health" \
+              "18000:loom-web:80:/" ; do
+            local_port=$(echo "$spec" | cut -d: -f1)
+            svc=$(echo "$spec" | cut -d: -f2)
+            svc_port=$(echo "$spec" | cut -d: -f3)
+            path=$(echo "$spec" | cut -d: -f4-)
+            echo "::group::probe ${svc}${path}"
+            kubectl --context kind-loom-staging -n loom port-forward \
+              "svc/${svc}" "${local_port}:${svc_port}" &
+            pf_pid=$!
+            sleep 3
+            if ! curl -fsS --max-time 10 "http://localhost:${local_port}${path}"; then
+              echo "::error::probe failed for ${svc}${path}"
+              kubectl --context kind-loom-staging -n loom logs \
+                "-l" "app=${svc}" --tail=200
+              kill $pf_pid 2>/dev/null || true
+              exit 1
+            fi
+            kill $pf_pid 2>/dev/null || true
+            wait $pf_pid 2>/dev/null || true
+            echo "::endgroup::"
+          done
+
+      - name: Verify /metrics on every service
+        # /metrics is the prometheus-client endpoint shipped in
+        # #81 slice B-1..B-4. A successful scrape proves the
+        # observability surface is wired end-to-end.
+        run: |
+          set -euo pipefail
+          for spec in \
+              "18080:loom-control-plane:8080" \
+              "19100:loom-llm-gateway:9100" \
+              "18090:loom-service:8090" ; do
+            local_port=$(echo "$spec" | cut -d: -f1)
+            svc=$(echo "$spec" | cut -d: -f2)
+            svc_port=$(echo "$spec" | cut -d: -f3)
+            echo "::group::scrape ${svc}/metrics"
+            kubectl --context kind-loom-staging -n loom port-forward \
+              "svc/${svc}" "${local_port}:${svc_port}" &
+            pf_pid=$!
+            sleep 3
+            # `-L` to follow the 307 from prometheus_client's mounted
+            # ASGI app (`/metrics` → `/metrics/`).
+            body=$(curl -fsSL --max-time 10 "http://localhost:${local_port}/metrics" || echo "FAILED")
+            if [ "$body" = "FAILED" ] || ! echo "$body" | grep -q "^# HELP "; then
+              echo "::error::no prometheus output from ${svc}/metrics"
+              echo "first 500 chars: ${body:0:500}"
+              kill $pf_pid 2>/dev/null || true
+              exit 1
+            fi
+            echo "OK — first metric: $(echo "$body" | grep '^# HELP' | head -1)"
+            kill $pf_pid 2>/dev/null || true
+            wait $pf_pid 2>/dev/null || true
+            echo "::endgroup::"
+          done
+
+      - name: Capture pod state on success (for reference)
+        if: success()
+        run: |
+          kubectl --context kind-loom-staging -n loom get all
+          kubectl --context kind-loom-staging -n loom describe pods \
+            | head -200
+
+      - name: Capture pod state + logs on failure
+        if: failure()
+        run: |
+          kubectl --context kind-loom-staging -n loom get all
+          kubectl --context kind-loom-staging -n loom describe pods
+          for component in control-plane llm-gateway service worker web; do
+            echo "::group::logs ${component}"
+            kubectl --context kind-loom-staging -n loom logs \
+              "-l" "app=loom-${component}" --tail=200 --previous \
+              2>/dev/null || true
+            kubectl --context kind-loom-staging -n loom logs \
+              "-l" "app=loom-${component}" --tail=200 \
+              2>/dev/null || true
+            echo "::endgroup::"
+          done
+
+      - name: loom cluster down --yes
+        if: always()
+        run: |
+          uv run python -m loom_cli cluster down \
+            --context kind-loom-staging --namespace loom --yes \
+            || true
+
+      - name: Cleanup kind
+        if: always()
+        run: kind delete cluster --name loom-staging || true
