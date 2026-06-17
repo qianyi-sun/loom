@@ -398,6 +398,89 @@ def _models(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _rotate_key(args: argparse.Namespace) -> int:
+    """`loom providers rotate-key NAME --api-key SOURCE` —
+    one-shot wrapper around `update --api-key SOURCE` + `test NAME`
+    that emphasizes the rotation context for the operator.
+
+    The server-side rotation path:
+      1. `_make_secret_store(session).put()` writes new ciphertext
+         under a fresh ref.
+      2. `provider_connections.encrypted_api_key_ref` is swapped to
+         the new ref; the row's `updated_at` advances.
+      3. The OLD secret stays decryptable but is no longer pointed
+         at by any connection. Phase 5 ships a cleanup job.
+
+    Gateway-side: there is no in-memory cache for provider connection
+    rows (the gateway looks up by id per-request — see
+    `_facade_common.py:_lookup_provider_connection`), so the new key
+    takes effect on the very next gateway call. No cache invalidation
+    step is needed.
+
+    --skip-test bypasses the post-rotation probe; useful when the
+    upstream provider hasn't propagated the new key yet."""
+    def _body() -> int:
+        cfg = require_logged_in()
+        try:
+            new_api_key = resolve_secret_source(
+                args.api_key, flag_name="--api-key",
+            )
+        except SecretSourceError as e:
+            sys.stderr.write(f"error: {e}\n")
+            return 2
+
+        with authed_client(cfg) as c:
+            row = _resolve_by_name(c, args.name)
+            patch_resp = c.patch(
+                f"/api/v1/provider-connections/{row['id']}",
+                json={"api_key": new_api_key},
+            )
+            body = assert_2xx(
+                patch_resp,
+                action=f"rotate key for provider connection {args.name!r}",
+            )
+            print(
+                f"Rotated api_key for provider connection "
+                f"{body['name']!r}. status: {body.get('status', '?')!r} "
+                f"(verifies on next test/call).",
+            )
+            if args.skip_test:
+                print(
+                    "Post-rotation test skipped (--skip-test). Run "
+                    f"`loom providers test {args.name}` once the "
+                    "upstream provider propagates the new key.",
+                )
+                return 0
+            test_resp = c.post(
+                f"/api/v1/provider-connections/{row['id']}/test",
+                timeout=20.0,
+            )
+        test_body = assert_2xx(
+            test_resp,
+            action=f"test rotated key for {args.name!r}",
+        )
+        status = test_body.get("status", "unknown")
+        print(f"Post-rotation test: status={status!r}")
+        if status == "valid":
+            return 0
+        if test_body.get("last_validation_error"):
+            print(
+                f"  last_validation_error: "
+                f"{test_body['last_validation_error']}",
+            )
+        sys.stderr.write(
+            f"\nrotation succeeded but the new key did NOT probe valid. "
+            f"The connection now points at the new ciphertext; either "
+            f"the new key is wrong or the upstream provider hasn't "
+            f"propagated it. Re-run `loom providers test {args.name}` "
+            f"after a propagation delay, or rotate again with the "
+            f"correct value.\n",
+        )
+        return 1
+
+    return _run_with_error_handling(_body)
+
+
 def _test(args: argparse.Namespace) -> int:
     """`loom providers test NAME` — probe the connection's base_url with
     the stored credentials. The server route persists the outcome on
@@ -550,6 +633,32 @@ def dispatch(argv: list[str]) -> int:
     p_delete = sub.add_parser("delete", help="Soft-delete a connection.")
     p_delete.add_argument("name", help="Display name to delete.")
     p_delete.set_defaults(handler=_delete)
+
+    # --- rotate-key ---
+    p_rotate = sub.add_parser(
+        "rotate-key",
+        help=(
+            "Rotate the provider connection's API key in one step. "
+            "Equivalent to `update --api-key SOURCE` + `test NAME`, "
+            "but the dedicated verb makes rotation runbooks clearer."
+        ),
+    )
+    p_rotate.add_argument("name", help="Display name of the connection.")
+    p_rotate.add_argument(
+        "--api-key", required=True,
+        type=secret_source_argparse_type("--api-key"),
+        help="See `loom providers create --api-key`.",
+    )
+    p_rotate.add_argument(
+        "--skip-test", action="store_true",
+        help=(
+            "Skip the post-rotation probe. Use when the upstream "
+            "provider hasn't propagated the new key yet — the "
+            "rotation still completes, you re-run "
+            "`loom providers test NAME` separately to verify."
+        ),
+    )
+    p_rotate.set_defaults(handler=_rotate_key)
 
     # --- test ---
     p_test = sub.add_parser(

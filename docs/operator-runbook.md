@@ -343,6 +343,51 @@ curl -X POST https://loom.example.com/api/v1/tokens \
 `type` is required; allowed values are `team` and `admin`, though
 `admin` is scheduled for removal in the final #10 DB-admin removal slice.
 
+### Provider API key rotation — `loom providers rotate-key`
+
+When a provider key needs to be rotated (compromise, scheduled rotation,
+key wrap-around), one command swaps the encrypted ciphertext + verifies
+the new key in a single round-trip:
+
+```bash
+loom providers rotate-key openai-prod --api-key env:NEW_OPENAI_KEY
+```
+
+What this does end-to-end:
+
+1. `PATCH /api/v1/provider-connections/<id>` with `api_key=<new value>`.
+2. Server's route encrypts the new value via `SecretStore.put`
+   (fresh ref, fresh nonce, ref bound as AAD), swaps
+   `provider_connections.encrypted_api_key_ref`, and bumps the row's
+   `updated_at`.
+3. CLI immediately follows with `POST .../test` to probe the upstream
+   provider with the new key.
+4. Exit `0` if rotation + test both succeed; `1` if rotation succeeds
+   but the upstream probe is invalid (rare — usually means the new
+   key hasn't propagated yet, or the operator pasted the wrong value).
+
+`--skip-test` bypasses the post-rotation probe — useful when the
+upstream provider takes minutes to propagate a freshly-minted key
+(some hosted-OpenAI-compatibles have noticeable lag). The rotation
+itself still completes; the operator re-runs
+`loom providers test <name>` after the propagation delay.
+
+The OLD encrypted ciphertext is NOT deleted by this command. It stays
+in the `secrets` table — decryptable but no longer pointed at by any
+connection — until Phase 5's cleanup job sweeps revoked refs older
+than the cache TTL. This is intentional: in-flight gateway requests
+that loaded the old ref before rotation can still complete.
+
+Gateway-side: there is no in-memory cache for provider-connection rows
+(the gateway looks up by id per-request — see
+`src/loom_llm_gateway/routes/_facade_common.py:_lookup_provider_connection`).
+The new key takes effect on the very next gateway call. No cache
+invalidation step is needed.
+
+`loom providers update --api-key SOURCE` does the same rotation
+without the post-test step; `rotate-key` is the runbook-friendly verb
+for the "swap + verify" flow.
+
 ## Provider connection cost attribution
 
 BYO provider connections default conservatively:

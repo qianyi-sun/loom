@@ -797,3 +797,156 @@ def test_create_not_logged_in_returns_2(
     err = capsys.readouterr().err
     assert "not logged in" in err
     assert "loom auth login" in err
+
+
+# ──────────────────────────────────────────────────────────────────────
+# rotate-key (#80 slice D)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_rotate_key_patches_then_tests(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Happy path: PATCH writes new key, immediate POST /test probes
+    the new key, both 200 → rc=0."""
+    monkeypatch.setenv("NEW_KEY", "sk-new-rotated")
+    conn = _make_connection(name="openai-prod")
+    cid = conn["id"]
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{cid}")
+    ] = httpx.Response(200, json=conn)
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{cid}/test")
+    ] = httpx.Response(200, json={"status": "valid"})
+
+    rc = main([
+        "providers", "rotate-key", "openai-prod",
+        "--api-key", "env:NEW_KEY",
+    ])
+    assert rc == 0
+    methods = [r.method for r in mock_server.requests]
+    paths = [r.url.path for r in mock_server.requests]
+    assert methods == ["GET", "PATCH", "POST"]
+    assert paths[1] == f"/api/v1/provider-connections/{cid}"
+    assert paths[2] == f"/api/v1/provider-connections/{cid}/test"
+    # PATCH payload sends ONLY api_key, not other fields.
+    patch_body = json.loads(mock_server[1].content)
+    assert patch_body == {"api_key": "sk-new-rotated"}
+    out = capsys.readouterr().out
+    assert "Rotated api_key" in out
+    assert "Post-rotation test: status='valid'" in out
+
+
+def test_rotate_key_post_rotation_invalid_returns_1(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rotation succeeded but the new key doesn't probe valid — operator
+    needs a clear nonzero exit + diagnostic."""
+    monkeypatch.setenv("NEW_KEY", "sk-wrong")
+    conn = _make_connection(name="openai-prod")
+    cid = conn["id"]
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{cid}")
+    ] = httpx.Response(200, json=conn)
+    mock_server.canned[
+        ("POST", f"/api/v1/provider-connections/{cid}/test")
+    ] = httpx.Response(
+        200, json={
+            "status": "invalid",
+            "last_validation_error": "HTTP 401 from upstream",
+        },
+    )
+    rc = main([
+        "providers", "rotate-key", "openai-prod",
+        "--api-key", "env:NEW_KEY",
+    ])
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "status='invalid'" in out.out
+    assert "HTTP 401" in out.out
+    assert "rotation succeeded" in out.err.lower()
+
+
+def test_rotate_key_skip_test(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--skip-test: PATCH only, no POST /test call. Useful when the
+    upstream provider hasn't propagated the new key yet."""
+    monkeypatch.setenv("NEW_KEY", "sk-new")
+    conn = _make_connection(name="openai-prod")
+    cid = conn["id"]
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{cid}")
+    ] = httpx.Response(200, json=conn)
+
+    rc = main([
+        "providers", "rotate-key", "openai-prod",
+        "--api-key", "env:NEW_KEY", "--skip-test",
+    ])
+    assert rc == 0
+    methods = [r.method for r in mock_server.requests]
+    assert "POST" not in methods   # /test was NOT called
+    assert "Post-rotation test skipped" in capsys.readouterr().out
+
+
+def test_rotate_key_patch_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If the PATCH itself fails, exit 1 and don't even attempt /test."""
+    monkeypatch.setenv("NEW_KEY", "sk-new")
+    conn = _make_connection(name="openai-prod")
+    cid = conn["id"]
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[
+        ("PATCH", f"/api/v1/provider-connections/{cid}")
+    ] = httpx.Response(403, json={"detail": "scope admin:tokens required"})
+    rc = main([
+        "providers", "rotate-key", "openai-prod",
+        "--api-key", "env:NEW_KEY",
+    ])
+    assert rc == 1
+    # No /test call after PATCH failed.
+    methods = [r.method for r in mock_server.requests]
+    assert methods.count("POST") == 0
+
+
+def test_rotate_key_unknown_name_returns_1(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NEW_KEY", "sk-new")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": []},
+    )
+    rc = main([
+        "providers", "rotate-key", "nope", "--api-key", "env:NEW_KEY",
+    ])
+    assert rc == 1
+    assert "no provider connection named 'nope'" in capsys.readouterr().err
+
+
+def test_rotate_key_literal_api_key_rejected_at_argparse(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Same argv-hygiene rule as create/update: --api-key accepts only
+    env:VAR / file:PATH / -. Literals leak via shell history."""
+    with pytest.raises(SystemExit):
+        main([
+            "providers", "rotate-key", "openai-prod",
+            "--api-key", "sk-literal-no-good",
+        ])
