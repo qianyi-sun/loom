@@ -1,9 +1,8 @@
 # Prometheus alert rules for Loom (#81 slice A).
 #
-# Targets the metrics currently emitted by loom_control_plane only
-# (see src/loom_control_plane/metrics.py). Gateway, service, and
-# worker metric instrumentation is slice B; rules for those land
-# alongside.
+# Targets the metrics emitted by loom_control_plane, loom_llm_gateway,
+# loom_service, and loom_worker. Keep docs/operator-runbook.md's
+# production alert table in sync with every `alert:` entry below.
 #
 # Requires prometheus-operator (the PrometheusRule CRD), or the
 # kube-prometheus-stack chart. If you ship prometheus differently,
