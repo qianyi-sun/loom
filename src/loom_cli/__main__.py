@@ -208,6 +208,42 @@ def _build_parser() -> argparse.ArgumentParser:
     from loom_cli.models_cmd import add_models_subparser
     add_models_subparser(sub)
 
+    # The commands below are dispatched before argparse in main() (check
+    # `if raw and raw[0] == "<cmd>"` blocks). Stub parsers here are
+    # help-only so they appear in `loom --help`; add_help=False prevents
+    # double-handling when main() re-routes to the real dispatch function.
+    sub.add_parser(
+        "auth",
+        help="Authenticate with a Loom server (login/logout/whoami)",
+        add_help=False,
+    )
+    sub.add_parser(
+        "providers",
+        help=(
+            "Manage LLM provider connections "
+            "(create/list/show/update/delete/test/rotate-key/models)"
+        ),
+        add_help=False,
+    )
+    sub.add_parser(
+        "eval",
+        help="Manage evaluation batches (batch create/show/list/cancel)",
+        add_help=False,
+    )
+    sub.add_parser(
+        "cluster",
+        help=(
+            "Manage the Kubernetes cluster deployment "
+            "(status/render/preflight/up/down/audit)"
+        ),
+        add_help=False,
+    )
+    sub.add_parser(
+        "admin",
+        help="Admin operations — token mint/revoke/rotate (requires admin token)",
+        add_help=False,
+    )
+
     # `loom serve <spec> --name X` — foreground vLLM launcher that
     # auto-registers the server as local/<name> and removes the entry on
     # Ctrl-C / SIGTERM.

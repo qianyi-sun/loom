@@ -588,11 +588,12 @@ concrete command or UI action.
 5. **Provider connection create + test.** Create a connection through
    the CLI (or `POST /api/v1/provider-connections`), then probe:
    ```bash
-   loom providers create --name smoke-openai --type openai \
-     --api-key env:OPENAI_API_KEY
+   loom providers create --name smoke-openai --type openai-compatible \
+     --base-url https://api.openai.com/v1 --api-key env:OPENAI_API_KEY
    loom providers test smoke-openai
    ```
-   `test` must return `200` with a valid `model` echoed back.
+   `test` must return `status=valid`; `http_status` shows the upstream
+   HTTP response code. Exit code is 0 for valid, 1 for invalid.
 6. **Model discovery.** `loom providers models refresh smoke-openai`
    followed by `loom providers models list smoke-openai` returns a
    non-empty catalog. `curl /api/v1/models` from a team token shows
@@ -613,8 +614,10 @@ concrete command or UI action.
    page shows the trial advancing through `queued → claimed → running`,
    and `GET /api/v1/trials/{id}` echoes the same state.
 9. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
-   with a sensible reason). `GET /api/v1/trials/{id}` carries an
-   `evaluator_result` payload.
+   with a sensible reason). `GET /api/v1/trials/{id}` carries
+   `aggregate_reward`, `cost_usd`, and `failure_reason` (when
+   applicable), plus `atif_url`, `trajectory_url`, `atif_ready`,
+   `trajectory_ready`, and `artifacts` for download.
 10. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams events; `GET /api/v1/trials/{id}/atif` returns the ATIF
     JSON. Both bodies parse cleanly.

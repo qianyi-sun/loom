@@ -223,7 +223,8 @@ TEAM_TOKEN=$(loom service up | grep loom_team_ | tr -d ' ')   # or copy from out
 
 curl -X POST http://localhost:8090/api/v1/trials \
   -H "Authorization: Bearer $TEAM_TOKEN" \
-  -d '{"task_id":"hello-world","config":{}}'
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"hello-world","config":{"agent_name":"oracle","agent_model":null}}'
 ```
 
 **Hot reload in dev**: the three uvicorn services (`loom_service`,
