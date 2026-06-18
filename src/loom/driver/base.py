@@ -35,6 +35,13 @@ class StartOptions:
     # isolation is on. Honored only by drivers whose
     # `capabilities.supports_custom_network` is True.
     network: str | None = None
+    # Phase D (#78 PR-D1): tuple of (host_path, container_path,
+    # mode) bind mounts to apply at container creation. Used by the
+    # worker to expose the rotating step-JWT + loom-CA cert to the
+    # sandbox under /run/loom without baking them into the image.
+    # Frozen-tuple shape so StartOptions stays hashable + the
+    # dataclass-frozen contract holds.
+    volumes: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass

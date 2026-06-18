@@ -102,6 +102,17 @@ class DockerDriver:
                 # blocks all host egress — the singleton (PR-B2 #221)
                 # is the only attached endpoint the sandbox can reach.
                 run_kwargs["network"] = opts.network
+            if opts.volumes:
+                # Phase D (#78 PR-D1): bind-mounts. Worker uses this
+                # for the rotating step-JWT + loom-CA cert dir, so
+                # the sandbox sees a stable /run/loom/ path that the
+                # rotator atomically refreshes from the outside.
+                # docker-py format: {host: {'bind': container,
+                # 'mode': mode}}.
+                run_kwargs["volumes"] = {
+                    host: {"bind": container, "mode": mode}
+                    for host, container, mode in opts.volumes
+                }
             # to_thread can't unify the **kwargs overloads of
             # docker-py's containers.run, so wrap the call in a
             # closure whose signature is unambiguous to mypy.
