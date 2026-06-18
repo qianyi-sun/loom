@@ -36,6 +36,41 @@ async def test_uploads_nested_files_preserving_layout(tmp_path: Path) -> None:
     assert PurePosixPath("/workspace/task.toml") not in fs
 
 
+async def test_skips_dev_cruft_at_any_depth(tmp_path: Path) -> None:
+    # Common host-side cruft: must NOT land in the sandbox.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "__pycache__").mkdir()
+    (tmp_path / "src" / "__pycache__" / "foo.cpython-311.pyc").write_text("x")
+    (tmp_path / "src" / "foo.py").write_text("x = 1\n")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "lodash.js").write_text("x")
+    (tmp_path / ".DS_Store").write_text("x")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "thing.pyo").write_text("x")
+    (tmp_path / "build" / "real.txt").write_text("keep me")
+
+    d = FakeDriver()
+    await d.start()
+    count = await materialize_workspace(
+        driver=d, task_dir=tmp_path, dst=PurePosixPath("/workspace"),
+    )
+    # Only src/foo.py and build/real.txt should land.
+    assert count == 2
+    fs = d.filesystem
+    assert PurePosixPath("/workspace/src/foo.py") in fs
+    assert PurePosixPath("/workspace/build/real.txt") in fs
+    # Cruft excluded:
+    assert PurePosixPath("/workspace/.git/HEAD") not in fs
+    assert PurePosixPath(
+        "/workspace/src/__pycache__/foo.cpython-311.pyc",
+    ) not in fs
+    assert PurePosixPath("/workspace/node_modules/lodash.js") not in fs
+    assert PurePosixPath("/workspace/.DS_Store") not in fs
+    assert PurePosixPath("/workspace/build/thing.pyo") not in fs
+
+
 async def test_empty_task_dir_uploads_nothing(tmp_path: Path) -> None:
     d = FakeDriver()
     await d.start()

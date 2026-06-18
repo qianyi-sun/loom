@@ -21,11 +21,31 @@ from pathlib import Path, PurePosixPath
 
 from loom.driver.base import Driver
 
-# Files the worker considers metadata, not workspace content. `task.toml`
-# is read on the host before the trial starts; uploading it would just
-# clutter the sandbox. Anything else in the bundle (instructions,
-# solution scaffolding, tests, fixtures) goes in.
-_SKIP_NAMES = frozenset({"task.toml"})
+# Path components the worker excludes from the upload set.
+#
+# `task.toml` is host-only metadata (read before the trial starts).
+# The rest are common dev-cruft that hand-authored or git-cloned
+# bundles can carry — uploading them is wasteful and, in a few cases
+# (.git/), can leak the bundle's full history into the sandbox where
+# the agent could exfiltrate it via the LLM. Match is on the FIRST
+# component of the relative path; nested matches require the same
+# name (e.g., src/__pycache__ is skipped because rglob walks into it,
+# but its files have `.parts == ("src", "__pycache__", "x.pyc")` so
+# the per-file check below specifically also looks at any segment).
+_SKIP_NAMES = frozenset({
+    "task.toml",
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+})
+
+# Suffix-match (case-sensitive) for individual files to skip. Cheaper
+# than a full glob and covers the common compiled-Python case.
+_SKIP_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 # Cap concurrent uploads so a multi-hundred-file bundle (SWE-Bench)
 # doesn't open hundreds of simultaneous docker HTTP connections. 16
@@ -56,7 +76,11 @@ async def materialize_workspace(
         if not src.is_file():
             continue
         rel = src.relative_to(task_dir)
-        if rel.parts and rel.parts[0] in _SKIP_NAMES:
+        # Skip if ANY path segment matches a skip name (catches both
+        # top-level `.git/` AND nested `src/__pycache__/`).
+        if any(part in _SKIP_NAMES for part in rel.parts):
+            continue
+        if src.suffix in _SKIP_SUFFIXES:
             continue
         targets.append((src, dst / PurePosixPath(*rel.parts)))
     if not targets:

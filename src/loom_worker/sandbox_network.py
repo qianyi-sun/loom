@@ -32,7 +32,14 @@ logger = logging.getLogger(__name__)
 # some test environments) and x.255.0/24 (avoid edge confusion).
 _MIN_INDEX = 1
 _MAX_INDEX = 254
-_SUBNET_TEMPLATE = "10.42.{}.0/24"
+# Three octets baked into the subnet template; the SECOND is reserved
+# for per-worker partitioning so up to 16 workers on the same host
+# can coexist without /24 collisions. Worker N (0-indexed) gets
+# 10.{42+N}.{1..254}.0/24. Default N=0 → 10.42.x.0/24 (unchanged
+# pre-fixup behavior for single-worker hosts).
+_BASE_SECOND_OCTET = 42
+_MAX_WORKER_INDEX = 15
+_SUBNET_TEMPLATE = "10.{second_octet}.{third_octet}.0/24"
 _BRIDGE_NAME_TEMPLATE = "loom-sandbox-{trial_id}"
 
 # Bound the retry loop so a persistently-broken docker daemon fails
@@ -64,11 +71,25 @@ class SandboxNetworkAllocator:
     asyncio tasks (which may resolve on different threads when handing
     off to `asyncio.to_thread`) can acquire concurrently.
 
-    The pool is finite (254 /24s); callers MUST `release` when they
-    teardown the bridge or the worker eventually exhausts the pool.
+    `worker_index` (0-15) partitions the second octet so up to 16
+    workers on the same host coexist without /24 collisions. Multi-
+    worker hosts MUST set distinct indices on each worker process,
+    typically via `LOOM_WORKER_INDEX` env (read by the worker
+    settings loader, not here). Default 0 preserves the single-worker
+    behavior pre-fixup.
+
+    The pool is finite (254 /24s per worker); callers MUST `release`
+    when they teardown the bridge or the worker eventually exhausts
+    the pool.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, worker_index: int = 0) -> None:
+        if not 0 <= worker_index <= _MAX_WORKER_INDEX:
+            raise SandboxNetworkError(
+                f"worker_index must be 0..{_MAX_WORKER_INDEX}, "
+                f"got {worker_index}",
+            )
+        self._second_octet = _BASE_SECOND_OCTET + worker_index
         self._in_use: set[int] = set()
         self._lock = threading.Lock()
 
@@ -78,9 +99,13 @@ class SandboxNetworkAllocator:
             for i in range(_MIN_INDEX, _MAX_INDEX + 1):
                 if i not in self._in_use:
                     self._in_use.add(i)
-                    return i, _SUBNET_TEMPLATE.format(i)
+                    return i, _SUBNET_TEMPLATE.format(
+                        second_octet=self._second_octet,
+                        third_octet=i,
+                    )
         raise SandboxNetworkError(
-            f"sandbox subnet pool exhausted ({_MAX_INDEX} in use)",
+            f"sandbox subnet pool exhausted ({_MAX_INDEX} in use) "
+            f"on worker with second_octet={self._second_octet}",
         )
 
     def release(self, index: int) -> None:

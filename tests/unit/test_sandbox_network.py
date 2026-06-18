@@ -80,6 +80,30 @@ def test_allocator_exhaustion_raises() -> None:
         a.acquire()
 
 
+def test_worker_index_partitions_second_octet() -> None:
+    # Two allocators with distinct worker_index must produce CIDRs
+    # in disjoint /16s so multi-worker hosts can coexist.
+    a0 = SandboxNetworkAllocator(worker_index=0)
+    a3 = SandboxNetworkAllocator(worker_index=3)
+    _, s0 = a0.acquire()
+    _, s3 = a3.acquire()
+    assert s0 == "10.42.1.0/24"
+    assert s3 == "10.45.1.0/24"
+
+
+def test_worker_index_out_of_range_rejects() -> None:
+    with pytest.raises(SandboxNetworkError, match="worker_index must be"):
+        SandboxNetworkAllocator(worker_index=-1)
+    with pytest.raises(SandboxNetworkError, match="worker_index must be"):
+        SandboxNetworkAllocator(worker_index=16)
+
+
+def test_worker_index_15_at_upper_bound_ok() -> None:
+    a = SandboxNetworkAllocator(worker_index=15)
+    _, s = a.acquire()
+    assert s == "10.57.1.0/24"  # 42 + 15
+
+
 # ─── create_sandbox_bridge ────────────────────────────────────────────
 
 
