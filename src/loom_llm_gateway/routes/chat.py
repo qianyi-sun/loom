@@ -283,7 +283,23 @@ async def chat_completions(
         # The cost branch below routes through ``compute_facade_cost_usd``
         # rather than the legacy entry-based path; ``entry`` stays None
         # to make the type checker happy.
-        litellm_model = raw_model
+        #
+        # litellm dispatches by the model string's provider prefix:
+        # `anthropic/X` → POST {api_base}/v1/messages, `openai/X` →
+        # POST {api_base}/chat/completions, etc. For openai-compatible
+        # BYO endpoints (yibuapi, openrouter, deepinfra, …) the proxy
+        # serves every model via the OpenAI dialect — so force the
+        # model string to `openai/<name>` regardless of what the agent
+        # claimed the upstream provider was. Otherwise base_urls like
+        # `https://yibuapi.com/v1` get doubled to `/v1/v1/messages`
+        # because litellm's anthropic transport appends `/v1/messages`.
+        if byo_row.provider_type in ("openai-compatible", "custom"):
+            litellm_model = f"openai/{model_name}"
+        else:
+            # `anthropic` / `google` BYO endpoints: pass through —
+            # litellm's native transport for that provider will
+            # construct the upstream URL itself.
+            litellm_model = raw_model
         api_key = byo_api_key
         api_base = byo_row.base_url
         entry = None
