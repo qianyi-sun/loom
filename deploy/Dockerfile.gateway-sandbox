@@ -1,0 +1,37 @@
+# loom-llm-gateway-sandbox — per-node TLS-terminating HTTP CONNECT
+# proxy (#78 Phase B). Sandbox containers reach LLM gateways
+# through this binary instead of having direct host network access.
+#
+# Multi-stage: golang-alpine builder, distroless static runtime. The
+# final image is ~12 MB (cf. ~80 MB for a python alternative).
+#
+# Pinned Go toolchain version so reproducible across machines + CI.
+# Distroless tag pinned to a digest-equivalent label; bumps need a
+# matching CI workflow update.
+
+FROM golang:1.23-alpine AS builder
+WORKDIR /src
+
+# Copy go.mod + go.sum first so layer caches on dep changes only.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/loom-llm-gateway-sandbox ./cmd/loom-llm-gateway-sandbox
+
+# Static build so the distroless image can run it without libc.
+# CGO disabled + netgo tag forces pure-Go DNS resolution; no glibc
+# dependency leaks via getaddrinfo.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -tags netgo \
+    -ldflags "-s -w -extldflags '-static'" \
+    -o /out/loom-llm-gateway-sandbox \
+    ./cmd/loom-llm-gateway-sandbox
+
+# Distroless static (no shell, no libc, runs as uid 65532). Smallest
+# practical runtime — the binary is the only thing in the image.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/loom-llm-gateway-sandbox /loom-llm-gateway-sandbox
+
+EXPOSE 8443
+USER nonroot:nonroot
+ENTRYPOINT ["/loom-llm-gateway-sandbox"]

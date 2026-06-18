@@ -186,6 +186,33 @@ jobs:
         if: steps.docs_only.outputs.docs_only != 'true'
         run: uv run coverage report --fail-under=70
 
+  # Go binary checks (#78 Phase B). Separate from repository-checks
+  # because Go is its own toolchain — running it here keeps Python CI
+  # latency low and avoids cross-language contamination. Not required
+  # by branch protection; signal-only until Phase B lands in earnest.
+  go-checks:
+    name: go-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go.sum
+      - name: gofmt
+        run: |
+          out=$(gofmt -l ./cmd/)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "gofmt found issues; run \`gofmt -w ./cmd/\` to fix"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./cmd/...
+      - name: go test
+        run: go test -race ./cmd/...
+
   # Fast integration tier — testcontainers Postgres + MinIO only.
   # Excludes the `@pytest.mark.docker` tests (real DockerDriver,
   # network-policy, trial-e2e, subprocess-agent, gateway-with-litellm).
