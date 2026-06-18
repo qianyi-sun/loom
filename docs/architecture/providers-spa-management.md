@@ -48,7 +48,7 @@ No dedicated rotate-key endpoint — rotation is `PATCH {api_key: "..."}`.
 | Route | Page | Purpose |
 |---|---|---|
 | `/providers` | `ProvidersList` | Table + "+ New connection" button. Empty-state CTA when none exist. |
-| `/providers/new` | `ProviderCreate` | Form: name, type, base_url, api_key, allowed_models. On success, redirect to `?returnTo` if set, else `/providers/:id`. |
+| `/providers/new` | `ProviderCreate` | Form: required fields (name, type, base_url, api_key) + optional `allowed_models` + collapsible **Advanced** section (pricing_source, pricing_data, rate_card_provider — defaults apply per provider type if omitted). On success, redirect to `?returnTo` if set, else `/providers/:id`. |
 | `/providers/:id` | `ProviderDetail` | Three tabs (component-local state, not URL): **Overview** / **Models** / **Settings**. |
 
 ### Nav
@@ -100,7 +100,7 @@ When `AgentModelPicker` finds no connections, render an empty-state CTA:
 </EmptyState>
 ```
 
-After create, the user returns to `/batches/new` via `returnTo`; the picker auto-refreshes via React Query invalidation.
+After create, the user returns to `/batches/new` via `returnTo`. The create mutation invalidates `["providers"]`; React Query auto-refetches the picker's query on remount. Note: `main.tsx` configures `refetchOnWindowFocus: false`, so refresh is invalidation-driven, not focus-driven.
 
 ## Components
 
@@ -200,8 +200,8 @@ All mutations are **pessimistic** (await server response). Provider state has re
 
 - **Existing `createProviderConnectionModel` call site**: one in the current codebase (in `AgentModelPicker` per the issue). Rename atomically in the same PR.
 - **Models fetch is unbounded**: backend returns all cached rows. SPA renders the full list; client-side filter input narrows the view. Real fix (server-side pagination) deferred until a provider with >500 cached models surfaces operationally.
-- **`ProviderForm` shared between Create + Edit**: `mode: 'create' | 'edit'` prop. `api_key` field renders only in `create` mode. Validation rules match the backend's per-field requirements.
-- **NewBatch picker refresh**: relies on React Query's window-focus refetch + the mutation invalidation on the providers create page. No special wiring needed in NewBatch.
+- **`ProviderForm` shared between Create + Edit**: `mode: 'create' | 'edit'` prop. `api_key` field renders only in `create` mode (rotation has its own modal). Validation rules match the backend's per-field requirements. Advanced (pricing) section is collapsible; defaults apply per provider type if untouched.
+- **NewBatch picker refresh**: relies on the create mutation invalidating `["providers"]`. The picker's `useQuery({ queryKey: ["providers"] })` refetches on next render after invalidation; no special wiring in NewBatch. (`refetchOnWindowFocus` is off globally.)
 
 ## Related
 
