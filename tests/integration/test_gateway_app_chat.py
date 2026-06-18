@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import RateCard, Team, Token
+from loom.db.schema import ProviderConnection, RateCard, Secret, Team, Token
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 
@@ -48,9 +48,12 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
         ))
         s.commit()
     yield team_id, raw_token
-    # Cleanup so tests are isolated.
+    # Cleanup so tests are isolated. Order matters: child tables before
+    # parents (ProviderConnection/Secret FK → Team).
     with session_factory() as s:
         from sqlalchemy import delete
+        s.execute(delete(ProviderConnection))
+        s.execute(delete(Secret))
         s.execute(delete(Token))
         s.execute(delete(Team))
         s.execute(delete(RateCard))
@@ -324,3 +327,219 @@ def test_chat_rejects_unknown_model_with_400(app, seed_data):  # type: ignore[no
         )
         assert r.status_code == 400
         assert "no entry" in r.json()["detail"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# BYO provider connection routing (#178 + #179)
+# ─────────────────────────────────────────────────────────────────────
+
+import base64  # noqa: E402
+
+from loom.security.secret_store import LocalEncryptedSecretStore  # noqa: E402
+
+# Deterministic key — matches facade tests so SecretStore decrypts.
+_TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
+
+
+@pytest.fixture
+def app_with_byo(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    seed_data: tuple[UUID, str],
+):
+    """Same as `app` but with the SecretStore master key wired."""
+    monkeypatch.setenv("LOOM_GW_DB_URL", postgres_url)
+    monkeypatch.setenv("LOOM_GW_ANTHROPIC_API_KEY", "stub-platform-key")
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", _TEST_MASTER_KEY)
+    settings = GatewaySettings(_env_file=None)
+    a = create_app(settings)
+
+    captured: dict[str, Any] = {}
+
+    async def capturing_stub(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "id": "stub",
+            "model": kwargs.get("model"),
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "stubbed"},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+            },
+        }
+    monkeypatch.setattr(
+        "loom_llm_gateway.litellm_wrapper.acompletion", capturing_stub,
+    )
+    return a, captured
+
+
+def _seed_byo_connection(
+    postgres_url: str, team_id: UUID, *,
+    api_key: str = "sk-real-byo-key",
+    base_url: str = "https://byo.example.com/v1",
+    provider_type: str = "openai-compatible",
+    pricing_source: str = "tokens-only",
+) -> UUID:
+    """Insert a provider connection with a SecretStore-encrypted api_key."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    async_url = postgres_url  # already postgresql+psycopg per test conftest
+    engine = create_async_engine(async_url)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def _insert() -> UUID:
+        async with sf() as s:
+            store = LocalEncryptedSecretStore(s)
+            ref = await store.put(
+                namespace=str(team_id),
+                value=api_key,
+            )
+            await s.commit()
+        conn_id = uuid4()
+        async with sf() as s:
+            await s.execute(insert(ProviderConnection).values(
+                id=conn_id, team_id=team_id,
+                provider_type=provider_type, display_name=f"byo-{conn_id}",
+                base_url=base_url, upstream_host="byo.example.com",
+                resolved_egress_ips=["192.0.2.1"],
+                encrypted_api_key_ref=ref,
+                pricing_source=pricing_source,
+                status="valid", created_by="team:test",
+            ))
+            await s.commit()
+        return conn_id
+
+    cid = asyncio.run(_insert())
+    asyncio.run(engine.dispose())
+    return cid
+
+
+def test_chat_byo_overrides_api_key_and_base_url(  # type: ignore[no-untyped-def]
+    app_with_byo, seed_data, postgres_url,
+):
+    """#178: when provider_connection_id is in the loom block, the
+    gateway forwards litellm.acompletion with the connection's api_key
+    + base_url, not the platform's anthropic key."""
+    app, captured = app_with_byo
+    team_id, raw_token = seed_data
+    conn_id = _seed_byo_connection(
+        postgres_url, team_id,
+        api_key="sk-real-byo-key", base_url="https://byo.example.com/v1",
+    )
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    # Critical assertion: litellm received the BYO key + base, NOT the
+    # platform's "stub-platform-key" or the anthropic default URL.
+    assert captured["api_key"] == "sk-real-byo-key"
+    assert captured["api_base"] == "https://byo.example.com/v1"
+
+
+def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untyped-def]
+    app_with_byo, seed_data, postgres_url,
+):
+    """#179: BYO connection with pricing_source=tokens-only on a model
+    NOT in the rate-card table should succeed with cost=0, NOT 400."""
+    app, _captured = app_with_byo
+    team_id, raw_token = seed_data
+    conn_id = _seed_byo_connection(
+        postgres_url, team_id, pricing_source="tokens-only",
+    )
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                # gpt-99 is intentionally NOT in any rate card
+                "model": "openai/gpt-99",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loom"]["cost_usd"] == 0.0
+    assert body["loom"]["rate_card_hash"] == "facade:tokens-only"
+
+
+def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]
+    app_with_byo, seed_data,
+):
+    """Malformed provider_connection_id is rejected upfront."""
+    app, _ = app_with_byo
+    team_id, raw_token = seed_data
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": "not-a-uuid",
+                },
+            },
+        )
+    assert r.status_code == 400
+    assert "valid UUID" in r.json()["detail"]
+
+
+def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
+    app_with_byo, seed_data, postgres_url,
+):
+    """A team's token cannot read another team's connection — the
+    backend returns 404 (not 403) to avoid leaking existence."""
+    app, _ = app_with_byo
+    team_id, raw_token = seed_data
+    # Seed a connection owned by a DIFFERENT team.
+    other_team = uuid4()
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    eng = _create_engine(postgres_url)
+    sf = _sessionmaker(eng)
+    with sf() as s:
+        s.execute(insert(Team).values(id=other_team, name="other"))
+        s.commit()
+    eng.dispose()
+    other_conn = _seed_byo_connection(postgres_url, other_team)
+    with TestClient(app) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(other_conn),
+                },
+            },
+        )
+    assert r.status_code == 404

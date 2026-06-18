@@ -1,23 +1,54 @@
-"""POST /v1/chat/completions — OpenAI-compatible endpoint with Loom attribution."""
+"""POST /v1/chat/completions — OpenAI-compatible endpoint with Loom attribution.
+
+Two modes:
+
+- **Platform-credentialed** (legacy): no ``loom.provider_connection_id``
+  in the body. Routes via litellm using the gateway-resident provider
+  API keys (LOOM_GW_ANTHROPIC_API_KEY etc). Cost from the static rate
+  card; missing entry → 400.
+- **BYO connection** (#178 + #179): ``loom.provider_connection_id`` is
+  set. Looks up the team's connection, decrypts its api_key from the
+  SecretStore, overrides litellm's ``api_key`` + ``api_base`` so the
+  request actually hits the BYO upstream. Pricing follows the
+  connection's ``pricing_source`` (matches facade routes): rate-card
+  goes through the rate-card lookup; operator-supplied / tokens-only
+  skip the rate-card entirely. Missing rate-card row degrades to
+  cost=0 instead of 400-ing the request.
+"""
 
 from __future__ import annotations
 
 import time
 import uuid as uuid_lib
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from loom.models.types import ModelSpec
+from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway import litellm_wrapper
 from loom_llm_gateway.auth import verify_bearer_token
+from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.routes._facade_common import (
+    compute_facade_cost_usd,
+    resolve_facade_connection,
+)
+
+# Provider types the chat route accepts for BYO routing. All four
+# upstream dialects are supported because litellm handles the on-wire
+# format from the model string's ``provider`` prefix — we just override
+# the destination + auth.
+_BYO_SUPPORTED_TYPES = frozenset({
+    "openai-compatible", "anthropic", "google", "custom",
+})
 
 router = APIRouter()
 
@@ -49,7 +80,13 @@ _SUPPORTED_PROVIDERS = frozenset({
 
 
 class _LoomBlock(BaseModel):
-    """Required Loom attribution block on every chat request."""
+    """Required Loom attribution block on every chat request.
+
+    ``provider_connection_id`` opts the request into BYO routing
+    (#178): the gateway looks up the team's connection, decrypts its
+    api_key, and overrides litellm's destination. When omitted, the
+    request goes through the platform-credentialed legacy path.
+    """
 
     model_config = ConfigDict(extra="allow")  # allow future-proof extras
     team_id: str = Field(min_length=1)
@@ -57,6 +94,7 @@ class _LoomBlock(BaseModel):
     step_id: str = Field(min_length=1)
     tier: str | None = None
     region: str | None = None
+    provider_connection_id: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -85,11 +123,48 @@ async def chat_completions(
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
 
-    # Authentication.
+    # Authentication. The session also covers the BYO provider-
+    # connection lookup + api_key decrypt below; keep it open through
+    # those reads so we don't pay an extra connection round-trip.
+    byo_row = None
+    byo_api_key: str | None = None
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
-    if ctx is None:
-        raise HTTPException(status_code=401, detail="invalid bearer token")
+        if ctx is None:
+            raise HTTPException(
+                status_code=401, detail="invalid bearer token",
+            )
+
+        # BYO routing (#178): if the request carries a
+        # ``provider_connection_id``, resolve + decrypt now while the
+        # session is open. The connection row + decrypted key feed the
+        # dispatch logic below.
+        if req.loom.provider_connection_id:
+            try:
+                conn_uuid = UUID(req.loom.provider_connection_id)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "loom.provider_connection_id is not a valid "
+                        f"UUID: {exc}"
+                    ),
+                ) from exc
+            if ctx.team_id is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "provider_connection_id requires a team-scoped "
+                        "token"
+                    ),
+                )
+            byo_row = await resolve_facade_connection(
+                session, conn_uuid, ctx.team_id,
+                supported_types=_BYO_SUPPORTED_TYPES,
+                dialect_label="chat-completions",
+            )
+            store = LocalEncryptedSecretStore(session)
+            byo_api_key = await store.get(byo_row.encrypted_api_key_ref)
 
     # Bug 1 fix: the bearer token's team_id is the source of truth. If the
     # token is team-scoped (ctx.team_id is not None), the client-supplied
@@ -187,6 +262,19 @@ async def chat_completions(
             entry = lookup_entry(table, spec)
         except RateCardNotFoundError:
             entry = None
+    elif byo_row is not None:
+        # BYO connection path (#178 + #179): override destination +
+        # auth so the call hits the team's upstream, not the platform-
+        # default endpoint. Cost honors the connection's
+        # ``pricing_source`` — tokens-only / operator-supplied skip the
+        # rate-card lookup that would otherwise 400 the request (#179).
+        # The cost branch below routes through ``compute_facade_cost_usd``
+        # rather than the legacy entry-based path; ``entry`` stays None
+        # to make the type checker happy.
+        litellm_model = raw_model
+        api_key = byo_api_key
+        api_base = byo_row.base_url
+        entry = None
     else:
         # Existing api-providers path (anthropic / openai / together).
         litellm_model = raw_model
@@ -221,9 +309,37 @@ async def chat_completions(
     # Parse + cost. PR-D: rate cards are optional for `local` and
     # `huggingface` paths; when entry is None we report cost=0 rather
     # than 400-ing the call. Future work: per-server pricing tables.
+    # #178/#179: BYO connections delegate cost to the facade helper,
+    # which honors the connection's ``pricing_source``.
     parsed = litellm_wrapper.parse_litellm_response(raw, provider=provider)
-    if entry is None:
+    rate_card_hash: str
+    if byo_row is not None:
+        # TokenUsage's cached_input_tokens / cache_write_tokens are
+        # computed properties summing dialect-specific extras keys;
+        # feed them via provider_extras using Anthropic's canonical
+        # names (matches the worker's parse_litellm_response output).
+        cost, rate_card_hash = await compute_facade_cost_usd(
+            byo_row,
+            model_name,
+            TokenUsage(
+                input_tokens=parsed.input_tokens,
+                output_tokens=parsed.output_tokens,
+                provider_extras={
+                    "cache_read_input_tokens": parsed.cached_input_tokens,
+                    "cache_creation_input_tokens": parsed.cache_write_tokens,
+                },
+            ),
+            rate_card_cache=request.app.state.rate_card_cache,
+        )
+    elif entry is None:
         cost = 0.0
+        # Build response. PR-D: `local` provider skips the rate-card
+        # lookup → no table was loaded; report a sentinel hash so the
+        # field still has a deterministic shape downstream.
+        rate_card_hash = (
+            "local-server-no-card" if provider == "local"
+            else hash_table(table)
+        )
     else:
         cost = compute_cost_usd(
             entry,
@@ -232,14 +348,7 @@ async def chat_completions(
             cached_input_tokens=parsed.cached_input_tokens,
             cache_write_tokens=parsed.cache_write_tokens,
         )
-
-    # Build response. PR-D: `local` provider skips the rate-card
-    # lookup → no table was loaded; report a sentinel hash so the
-    # field still has a deterministic shape downstream.
-    rate_card_hash = (
-        "local-server-no-card" if provider == "local"
-        else hash_table(table)
-    )
+        rate_card_hash = hash_table(table)
     loom_block = {
         "input_tokens": parsed.input_tokens,
         "cached_input_tokens": parsed.cached_input_tokens,
