@@ -62,6 +62,7 @@ async def claim_trial(
         return Response(status_code=204)
     CLAIM_LATENCY_SEC.labels(result="hit").observe(elapsed)
 
+    pc_id = row["provider_connection_id"]
     return JSONResponse({
         "trial_id": str(row["id"]),
         "team_id": str(row["team_id"]),
@@ -69,6 +70,9 @@ async def claim_trial(
         "config": row["config"],
         "requires_caps": row["requires_caps"],
         "attempt_count": row["attempt_count"],
+        "provider_connection_id": (
+            str(pc_id) if pc_id is not None else None
+        ),
         "state": "claimed",
     })
 

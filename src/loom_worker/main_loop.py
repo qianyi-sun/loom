@@ -282,6 +282,7 @@ async def _spawn_trial(
             team_id, trial_id,
             cp_client=cp_client,
             gateway_url=str(settings.gateway_url),
+            provider_connection_id=payload.get("provider_connection_id"),
         ),
         verifier_factory=lambda: PytestVerifier(),
         object_store=object_store,
@@ -380,6 +381,7 @@ def _default_agent_factory(
     *,
     cp_client: HttpControlPlaneClient,
     gateway_url: str,
+    provider_connection_id: str | None = None,
 ) -> AgentFactory:
     """Build the agent factory used by LocalTrialRunner. Routes by
     `agent_name` (read from `task_config.agent.name`):
@@ -413,6 +415,7 @@ def _default_agent_factory(
             agent = LiteLLMAgent(  # type: ignore[assignment]
                 model=model, gateway=gateway,
                 team_id=str(team_id), trial_id=trial_id,
+                provider_connection_id=provider_connection_id,
             )
         else:
             # Try the loom-launcher registry. Imports are lazy so the

@@ -48,6 +48,12 @@ class HttpLLMGatewayClient:
             body["loom"]["tier"] = request.model.tier
         if request.model.region:
             body["loom"]["region"] = request.model.region
+        # #178: forward BYO provider connection id so the gateway can
+        # decrypt + use the team's stored credential.
+        if request.provider_connection_id:
+            body["loom"]["provider_connection_id"] = (
+                request.provider_connection_id
+            )
 
         client = self._client or httpx.AsyncClient(
             base_url=self.base_url, timeout=self.timeout_sec,

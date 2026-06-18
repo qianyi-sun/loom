@@ -50,7 +50,7 @@ UPDATE trials t
   FROM next
  WHERE t.id = next.id
  RETURNING t.id, t.team_id, t.task_id, t.config, t.requires_caps,
-           t.attempt_count;
+           t.attempt_count, t.provider_connection_id;
 """)
 
 

@@ -43,6 +43,10 @@ class LiteLLMAgent:
     name: str = "litellm-agent"
     version: str = "1.0"
     supports_os: frozenset[OS] = field(default_factory=lambda: frozenset({"linux"}))
+    # #178: BYO provider connection. When set, forwarded to the gateway
+    # client on every chat request so the call routes via the team's
+    # stored credential + base_url rather than the platform default.
+    provider_connection_id: str | None = None
 
     async def run(
         self,
@@ -69,6 +73,7 @@ class LiteLLMAgent:
                 team_id=self.team_id,
                 trial_id=str(self.trial_id),
                 step_id=step_id,
+                provider_connection_id=self.provider_connection_id,
             )
             response: GatewayCallResponse = await self.gateway.call(request)
 

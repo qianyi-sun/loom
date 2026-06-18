@@ -25,6 +25,10 @@ class GatewayCallRequest:
     trial_id: str
     step_id: str
     cache_keys: tuple[str, ...] = ()
+    # #178: BYO provider connection. When set, the gateway routes the
+    # call via this connection's stored credential + base_url instead
+    # of the platform-resident provider key.
+    provider_connection_id: str | None = None
 
 
 @dataclass(frozen=True)
