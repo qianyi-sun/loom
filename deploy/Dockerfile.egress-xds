@@ -9,16 +9,21 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Runtime deps. Pinned by the spike (#196) at envoy-data-plane 2.x +
-# xds-protos 1.81 against Envoy v1.30. Bumping either probably needs
-# re-running the spike to confirm Cluster/Route proto shape didn't
-# drift.
+# Runtime deps. Pinned to the spike-tested versions (#196) against
+# Envoy v1.30. Version specifiers MUST be quoted — unquoted `<3.0`
+# is interpreted by /bin/sh as input redirection and the build
+# fails with "cannot open 3.0: No such file" (caught in post-merge
+# audit of #200).
 RUN pip install --no-cache-dir \
-        envoy-data-plane>=2.0,<3.0 \
-        xds-protos>=1.81,<2.0 \
-        grpcio>=1.81,<2.0 \
-        psycopg[binary]>=3.2,<4.0
+        "envoy-data-plane==2.1.0" \
+        "xds-protos==1.81.1" \
+        "grpcio>=1.81,<2.0" \
+        "psycopg[binary]>=3.2,<4.0"
 
+# Copy the package into /app and add /app to PYTHONPATH so
+# `python -m loom_egress_xds` resolves the package without a
+# `pip install -e .` step (which would require copying pyproject +
+# the whole src/ tree just for setuptools metadata).
 COPY src/loom_egress_xds /app/loom_egress_xds
 
 EXPOSE 18000
@@ -28,6 +33,7 @@ EXPOSE 18000
 # Secret; the rest are usually fine as-is.
 ENV LOOM_EGRESS_XDS_LISTEN_ADDR=0.0.0.0:18000 \
     LOOM_EGRESS_XDS_LOG_LEVEL=INFO \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
 
 ENTRYPOINT ["python", "-m", "loom_egress_xds"]

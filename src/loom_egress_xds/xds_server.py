@@ -31,8 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterable, AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 
 import grpc
 from envoy.service.cluster.v3 import cds_pb2_grpc
@@ -42,7 +41,9 @@ from envoy.service.discovery.v3.discovery_pb2 import (
 )
 from envoy.service.route.v3 import rds_pb2_grpc
 from google.protobuf.any_pb2 import Any as ProtoAny
+from google.protobuf.message import Message
 
+from loom_egress_xds.config_builder import Snapshot
 from loom_egress_xds.envoy_translator import (
     ROUTE_CONFIGURATION_NAME,
     EnvoyConfig,
@@ -91,12 +92,9 @@ class XdsSnapshotCache:
             len(config.route_configuration.virtual_hosts[0].routes),
         )
 
-    async def publish_snapshot(self, snapshot: Any) -> None:
+    async def publish_snapshot(self, snapshot: Snapshot) -> None:
         """Convenience: build the EnvoyConfig + publish in one call.
-        Wired into the watcher's `on_snapshot` callback in __main__.
-        The `Any` annotation accepts `loom_egress_xds.config_builder.
-        Snapshot` without importing it at module scope (keeps the
-        module's dependency surface minimal)."""
+        Wired into the watcher's `on_snapshot` callback in __main__."""
         await self.publish_envoy_config(build_envoy_config(snapshot))
 
     async def get_or_wait(
@@ -145,7 +143,7 @@ class _StreamHandler:
     async def run(
         self,
         request_iterator: AsyncIterable[DiscoveryRequest],
-        resources_for: Any,
+        resources_for: Callable[[EnvoyConfig], list[ProtoAny]],
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[DiscoveryResponse]:
         """`resources_for(config) -> list[ProtoAny]` builds the
@@ -254,7 +252,7 @@ class RouteDiscoveryServicer(
             yield response
 
 
-def _pack(message: Any, type_url: str) -> ProtoAny:
+def _pack(message: Message, type_url: str) -> ProtoAny:
     packed = ProtoAny()
     packed.Pack(message, type_url_prefix="type.googleapis.com")
     return packed

@@ -172,7 +172,9 @@ ignore_missing_imports = true
 module = [
   "envoy", "envoy.*",
   "grpc", "grpc.*",
-  "google.protobuf.any_pb2", "google.protobuf.duration_pb2",
+  "google.protobuf.any_pb2",
+  "google.protobuf.duration_pb2",
+  "google.protobuf.message",
   "psycopg", "psycopg.*",
 ]
 ignore_missing_imports = true

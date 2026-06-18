@@ -183,12 +183,20 @@ async def main() -> None:
                 )
     finally:
         logger.info("loom_egress_xds_shutting_down")
+        # `watcher.stop()` sets the stop event; the run loop checks
+        # it on every iteration AND on wake, so the task exits
+        # cleanly on its own. No explicit `.cancel()` needed.
+        # Bound the wait so a wedged watcher doesn't block the
+        # server's graceful drain.
         await watcher.stop()
-        watcher_task.cancel()
         try:
-            await watcher_task
-        except (Exception, asyncio.CancelledError):
-            pass
+            await asyncio.wait_for(watcher_task, timeout=5.0)
+        except (TimeoutError, Exception):
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except (Exception, asyncio.CancelledError):
+                pass
         await server.stop(grace=_GRACEFUL_STOP_SECONDS)
 
 

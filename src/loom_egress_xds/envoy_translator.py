@@ -41,7 +41,7 @@ from envoy.config.route.v3.route_pb2 import RouteConfiguration
 from envoy.type.matcher.v3.string_pb2 import StringMatcher
 from google.protobuf.duration_pb2 import Duration
 
-from loom_egress_xds.config_builder import Snapshot
+from loom_egress_xds.config_builder import ConnectionAllowlist, Snapshot
 
 # Default upstream port for TLS providers. CONNECT targets land here
 # (`<host>:443`); we don't currently allow non-443 upstreams (which
@@ -99,7 +99,7 @@ def _cluster_name_for(connection_id_str: str) -> str:
     return f"egress-{connection_id_str}"
 
 
-def _build_cluster(entry: object) -> Cluster:
+def _build_cluster(entry: ConnectionAllowlist) -> Cluster:
     """One static cluster per connection. `STATIC` type so Envoy
     doesn't try to DNS-resolve — we already have the IPs from
     `resolved_egress_ips`, and any resolution drift between our
@@ -111,11 +111,7 @@ def _build_cluster(entry: object) -> Cluster:
     Envoy's outlier detection (passive, observation-based) handles
     bad endpoints without active probes.
     """
-    # Late-bound to satisfy the Protocol shape — `entry` is a
-    # `ConnectionAllowlist` but we import from config_builder which
-    # declares it as a dataclass. Annotated `object` here so this
-    # module doesn't re-import the dataclass (clean module boundary).
-    connection_id_str = str(entry.connection_id)  # type: ignore[attr-defined]
+    connection_id_str = str(entry.connection_id)
     cluster_name = _cluster_name_for(connection_id_str)
     lb_endpoints = [
         LbEndpoint(endpoint=Endpoint(address=Address(
@@ -124,7 +120,7 @@ def _build_cluster(entry: object) -> Cluster:
                 port_value=_UPSTREAM_PORT,
             ),
         )))
-        for ip in entry.ips  # type: ignore[attr-defined]
+        for ip in entry.ips
     ]
     return Cluster(
         name=cluster_name,
@@ -163,10 +159,9 @@ def _build_route_configuration(snapshot: Snapshot) -> RouteConfiguration:
     )
 
 
-def _build_route(entry: object) -> Route:
-    connection_id_str = str(entry.connection_id)  # type: ignore[attr-defined]
-    upstream_host = entry.upstream_host  # type: ignore[attr-defined]
-    expected_authority = f"{upstream_host}:{_UPSTREAM_PORT}"
+def _build_route(entry: ConnectionAllowlist) -> Route:
+    connection_id_str = str(entry.connection_id)
+    expected_authority = f"{entry.upstream_host}:{_UPSTREAM_PORT}"
     return Route(
         match=RouteMatch(
             # `connect_matcher` (set to empty CONNECT match) tells
