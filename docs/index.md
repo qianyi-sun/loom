@@ -69,6 +69,10 @@ Start with the overview, drill into the area you care about:
   Pydantic Settings + k8s env blocks + Secret bootstrap + operator
   cluster knobs; `loom cluster doctor` + `loom cluster bootstrap-secrets`
   + `loom config codegen` (shipped #150)
+- **[architecture/providers-spa-management.md](architecture/providers-spa-management.md)** —
+  *(design, not yet shipped)* SPA management surface for provider
+  connections (create / test / edit / models / rotate / delete);
+  closes #167
 - **[architecture/drf-scheduling.md](architecture/drf-scheduling.md)**
   — the single-SQL claim query; DRF tie-break + priority + FIFO;
   caps eligibility; crash recovery
