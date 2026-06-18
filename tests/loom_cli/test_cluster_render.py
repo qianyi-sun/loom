@@ -29,6 +29,10 @@ _GOLDEN_FILES = (
     "postgres.yaml", "minio.yaml", "control-plane.yaml",
     "loom-service.yaml", "llm-gateway.yaml", "worker.yaml",
     "web.yaml", "ingress.yaml", "gateway-router.yaml",
+    # Phase C (#190) — egress proxy chain. Default replicas=0 so
+    # the resources exist in the manifest but no pods until
+    # operators scale up.
+    "egress-xds.yaml", "egress-proxy.yaml",
     "network-policies.yaml", "grafana-dashboards.yaml",
 )
 
@@ -121,24 +125,31 @@ def test_load_config_path_none_returns_defaults() -> None:
 
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
-    """Smoke: every document parses, the set covers the 5 Deployments
-    + 1 DaemonSet + 6 Services + 2 StatefulSets + 1 PVC + 1 Ingress
-    + 8 NetworkPolicies + 1 ConfigMap (Grafana dashboards) expected
-    by cluster-deploy.md §Component map + sandbox-isolation.md."""
+    """Smoke: every document parses, the set covers the 7 Deployments
+    + 1 DaemonSet + 8 Services + 2 StatefulSets + 1 PVC + 1 Ingress
+    + 8 NetworkPolicies + 2 ConfigMaps (Grafana dashboards + egress-
+    proxy bootstrap) expected by cluster-deploy.md §Component map +
+    sandbox-isolation.md."""
     text = render_manifests(ClusterConfig())
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
     assert kinds.count("StatefulSet") == 2   # postgres, minio
-    assert kinds.count("Deployment") == 5    # cp, service, gateway, worker, web
+    # cp, service, gateway, worker, web + egress-xds + egress-proxy
+    assert kinds.count("Deployment") == 7
     assert kinds.count("DaemonSet") == 1     # gateway-router
-    assert kinds.count("Service") == 6
+    # 6 service-Deployments + egress-xds + egress-proxy.
+    assert kinds.count("Service") == 8
     assert kinds.count("Ingress") == 1
     assert kinds.count("PersistentVolumeClaim") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
     # + web + gateway-router = 8.
+    # NOT yet covering egress-xds / egress-proxy — tracked in #201
+    # follow-up (intentional: NetworkPolicies for the egress chain
+    # need gateway-router as their first ingress source, which lands
+    # in PR-C2).
     assert kinds.count("NetworkPolicy") == 8
-    # Grafana dashboards ConfigMap (kube-prometheus-stack sidecar).
-    assert kinds.count("ConfigMap") == 1
+    # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
+    assert kinds.count("ConfigMap") == 2
 
 
 def test_render_default_matches_deploy_k8s_yamls() -> None:

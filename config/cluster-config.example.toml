@@ -20,3 +20,5 @@ control_plane = 2
 gateway = 2
 web = 0
 worker = 3
+egress_xds = 0
+egress_proxy = 0

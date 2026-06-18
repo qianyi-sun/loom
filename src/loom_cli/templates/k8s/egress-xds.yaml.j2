@@ -1,0 +1,55 @@
+{#-
+  Egress xDS control plane (#190 Phase C). Python service that reads
+  provider_connections from Postgres + serves Envoy CDS+RDS via
+  gRPC. Consumed by the egress-proxy sidecar.
+
+  No `env_block` macro use: this service has a fixed env set
+  (DB_URL via Secret, two literal env vars) and isn't worth a
+  schema entry just for that. Reuses the existing `cp-db-url`
+  Secret since egress-xds is read-only on the same connection.
+-#}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-egress-xds
+spec:
+  replicas: {{ replicas.egress_xds }}
+  selector:
+    matchLabels: { app: loom-egress-xds }
+  template:
+    metadata:
+      labels: { app: loom-egress-xds }
+    spec:
+      containers:
+        - name: egress-xds
+          image: loom-egress-xds:{{ image_tag }}
+          env:
+            - name: LOOM_EGRESS_XDS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  # Reuses control-plane's DB credential. Egress-xds
+                  # only ever runs a single SELECT against
+                  # provider_connections — separate credential isn't
+                  # worth the rotation overhead.
+                  key: cp-db-url
+            - name: LOOM_EGRESS_XDS_LISTEN_ADDR
+              value: "0.0.0.0:18000"
+            - name: LOOM_EGRESS_XDS_LOG_LEVEL
+              value: "info"
+          ports:
+            - containerPort: 18000
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-egress-xds
+spec:
+  selector: { app: loom-egress-xds }
+  ports:
+    - name: xds
+      port: 18000
+      targetPort: 18000

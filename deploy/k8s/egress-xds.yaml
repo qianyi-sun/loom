@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-egress-xds
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: loom-egress-xds
+  template:
+    metadata:
+      labels:
+        app: loom-egress-xds
+    spec:
+      containers:
+      - name: egress-xds
+        image: loom-egress-xds:0.7
+        env:
+        - name: LOOM_EGRESS_XDS_DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: cp-db-url
+        - name: LOOM_EGRESS_XDS_LISTEN_ADDR
+          value: 0.0.0.0:18000
+        - name: LOOM_EGRESS_XDS_LOG_LEVEL
+          value: info
+        ports:
+        - containerPort: 18000
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-egress-xds
+spec:
+  selector:
+    app: loom-egress-xds
+  ports:
+  - name: xds
+    port: 18000
+    targetPort: 18000

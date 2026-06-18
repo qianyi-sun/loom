@@ -451,6 +451,14 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # Docker containers a stable hostPort:30443 endpoint to dial the
     # in-cluster gateway through. Carries its own NetworkPolicy.
     "gateway-router.yaml.j2",
+    # Egress xDS control plane + Envoy proxy (#190 Phase C). The
+    # xds-server reads provider_connections from Postgres + serves
+    # CDS+RDS; Envoy fetches the dynamic config + acts as a forward
+    # proxy for outbound provider traffic. Default replicas = 0 in
+    # the schema; operators scale up when enabling sandbox-isolated
+    # egress. NOT yet consumed by gateway-router (PR-C2 wires that).
+    "egress-xds.yaml.j2",
+    "egress-proxy.yaml.j2",
     # NetworkPolicies last — they reference workloads via podSelectors,
     # and listing them after the workloads keeps the rendered output
     # naturally ordered for human review (workload, then its policy).
@@ -516,6 +524,13 @@ def render_manifests(config: ClusterConfig) -> str:
     ctx["llm_gateway_json"] = (_dashboards_dir / "llm-gateway.json").read_text()
     ctx["loom_service_json"] = (_dashboards_dir / "loom-service.json").read_text()
     ctx["worker_json"] = (_dashboards_dir / "worker.json").read_text()
+    # Egress proxy bootstrap (#190 Phase C). Mounted as a ConfigMap so
+    # operators can pin the Envoy config without a deploy/Dockerfile
+    # change. Source of truth lives at deploy/envoy/egress-proxy.yaml;
+    # the template embeds it via `| indent` into the ConfigMap data.
+    ctx["envoy_egress_bootstrap"] = (
+        _REPO_ROOT / "deploy" / "envoy" / "egress-proxy.yaml"
+    ).read_text()
     chunks: list[str] = []
     for name in _TEMPLATE_ORDER:
         rendered = env.get_template(name).render(**ctx)

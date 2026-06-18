@@ -333,4 +333,8 @@ default     = 100
 
 [render_config.replicas]
 python_type = "table"
-fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3 }
+# egress_xds + egress_proxy default 0 — Phase C is not yet wired
+# into gateway-router (PR-C2), so by default the components stay
+# scaled to zero. Operators flip both to 1+ when enabling sandbox-
+# isolated egress.
+fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0 }

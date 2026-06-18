@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loom-egress-proxy-bootstrap
+data:
+  envoy.yaml: "# Production Envoy egress-proxy config (#190 PR-C1b).\n#\n# Replaces\
+    \ the static spike configs (deploy/envoy/spike/*.yaml) with\n# an RDS-driven config\
+    \ that fetches Cluster + Route definitions from\n# `loom_egress_xds`. The xDS\
+    \ server publishes a new snapshot on every\n# `provider_connections_changed` NOTIFY\
+    \ (Postgres trigger from\n# migration 0026 in #192).\n#\n# Listener `:30443` is\
+    \ HTTP CONNECT forward proxy mode. The Loom\n# gateway-router HTTP client points\
+    \ at this listener via\n# `proxies={\"https://\": \"http://egress-proxy:30443\"\
+    }` and adds\n# `x-loom-connection-id: <id>` as a CONNECT-time header (NOT a request\n\
+    # header \u2014 see PR-C2 + spike notes for the curl gotcha).\n#\n# Defense layers:\n\
+    #   1. RDS route match on (x-loom-connection-id, :authority) pair \u2014\n#  \
+    \    both must equal the expected tenant + upstream_host.\n#   2. CDS cluster\
+    \ endpoints \u2014 Envoy can only physically reach IPs in\n#      `resolved_egress_ips`\
+    \ for that connection. Belt-and-braces.\n#\n# Failure modes:\n#   - Wrong header\
+    \ \u2192 404 from Envoy (no matching route).\n#   - Right header + wrong :authority\
+    \ \u2192 404 (same).\n#   - Right pair + IP drift between our re-resolver and\
+    \ CDN edge \u2192\n#     Cluster endpoint stale; TLS handshake fails. Mitigated\
+    \ by the\n#     30s poll fallback in the watcher.\n\nadmin:\n  address:\n    socket_address:\
+    \ { address: 0.0.0.0, port_value: 9901 }\n\n# Required by Envoy when xDS is in\
+    \ use. `id` is per-instance (useful\n# for ops debugging \u2014 set to the hostname/pod-name\
+    \ via env in k8s;\n# left static here for simplicity); `cluster` is shared across\n\
+    # instances of the same role.\nnode:\n  id: loom-egress-proxy\n  cluster: loom-egress\n\
+    \n# Bootstrap the xDS source. loom_egress_xds.__main__ binds to :18000\n# by default;\
+    \ deploy/k8s/loom-egress-xds.yaml exposes that as the\n# `loom-egress-xds` Service.\n\
+    dynamic_resources:\n  cds_config:\n    resource_api_version: V3\n    api_config_source:\n\
+    \      api_type: GRPC\n      transport_api_version: V3\n      grpc_services:\n\
+    \        - envoy_grpc:\n            cluster_name: xds_cluster\n\nstatic_resources:\n\
+    \  listeners:\n    - name: forward_proxy\n      address:\n        socket_address:\
+    \ { address: 0.0.0.0, port_value: 30443 }\n      filter_chains:\n        - filters:\n\
+    \            - name: envoy.filters.network.http_connection_manager\n         \
+    \     typed_config:\n                \"@type\": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager\n\
+    \                stat_prefix: forward_proxy\n                upgrade_configs:\n\
+    \                  - upgrade_type: CONNECT\n                # Route config lives\
+    \ in RDS; the name MUST match\n                # `loom_egress_xds.envoy_translator.\n\
+    \                # ROUTE_CONFIGURATION_NAME` exactly.\n                rds:\n\
+    \                  route_config_name: loom_egress_routes\n                  config_source:\n\
+    \                    resource_api_version: V3\n                    api_config_source:\n\
+    \                      api_type: GRPC\n                      transport_api_version:\
+    \ V3\n                      grpc_services:\n                        - envoy_grpc:\n\
+    \                            cluster_name: xds_cluster\n                http_filters:\n\
+    \                  - name: envoy.filters.http.router\n                    typed_config:\n\
+    \                      \"@type\": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router\n\
+    \n  clusters:\n    # The xDS control plane itself. Statically defined here so\
+    \ Envoy\n    # can bootstrap before any RDS/CDS has been served. K8s Service\n\
+    \    # name `loom-egress-xds` resolves to the xds-server pod(s).\n    - name:\
+    \ xds_cluster\n      type: STRICT_DNS\n      connect_timeout: 5s\n      lb_policy:\
+    \ ROUND_ROBIN\n      typed_extension_protocol_options:\n        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:\n\
+    \          \"@type\": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions\n\
+    \          explicit_http_config:\n            http2_protocol_options: {}\n   \
+    \   load_assignment:\n        cluster_name: xds_cluster\n        endpoints:\n\
+    \          - lb_endpoints:\n              - endpoint:\n                  address:\n\
+    \                    socket_address:\n                      address: loom-egress-xds\n\
+    \                      port_value: 18000\n"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-egress-proxy
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: loom-egress-proxy
+  template:
+    metadata:
+      labels:
+        app: loom-egress-proxy
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.30-latest
+        args:
+        - -c
+        - /etc/envoy/envoy.yaml
+        - --log-level
+        - warn
+        ports:
+        - name: forward-proxy
+          containerPort: 30443
+        - name: admin
+          containerPort: 9901
+        volumeMounts:
+        - name: bootstrap
+          mountPath: /etc/envoy
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 9901
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1
+            memory: 512Mi
+      volumes:
+      - name: bootstrap
+        configMap:
+          name: loom-egress-proxy-bootstrap
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-egress-proxy
+spec:
+  selector:
+    app: loom-egress-proxy
+  ports:
+  - name: forward-proxy
+    port: 30443
+    targetPort: 30443

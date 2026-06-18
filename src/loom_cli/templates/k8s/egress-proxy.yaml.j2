@@ -1,0 +1,72 @@
+{#-
+  Egress proxy (Envoy) for #190 Phase C. Mounts the production
+  bootstrap as a ConfigMap; fetches dynamic CDS+RDS from
+  loom-egress-xds. Each gateway-router instance routes outbound
+  provider traffic through this proxy (PR-C2 wires that up).
+-#}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loom-egress-proxy-bootstrap
+data:
+  envoy.yaml: |
+{{ envoy_egress_bootstrap | indent(4, first=True) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-egress-proxy
+spec:
+  replicas: {{ replicas.egress_proxy }}
+  selector:
+    matchLabels: { app: loom-egress-proxy }
+  template:
+    metadata:
+      labels: { app: loom-egress-proxy }
+    spec:
+      containers:
+        - name: envoy
+          # Pinned to the spike-tested version (#196). Bumps want a
+          # re-spike — Envoy filter behavior can drift across minors
+          # (e.g. HCM CONNECT semantics, dynamic_forward_proxy).
+          image: envoyproxy/envoy:v1.30-latest
+          args:
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "--log-level"
+            - "warn"
+          ports:
+            - name: forward-proxy
+              containerPort: 30443
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /etc/envoy
+              readOnly: true
+          # Envoy is a forward proxy doing TCP CONNECT-mode tunnels.
+          # /ready is the admin-served liveness — not strictly needed
+          # for traffic readiness (Envoy serves traffic before xDS
+          # converges; first request after start may hit 503 until
+          # CDS/RDS are received) but operationally useful.
+          readinessProbe:
+            httpGet: { path: /ready, port: 9901 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 1, memory: 512Mi }
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: loom-egress-proxy-bootstrap
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-egress-proxy
+spec:
+  selector: { app: loom-egress-proxy }
+  ports:
+    - name: forward-proxy
+      port: 30443
+      targetPort: 30443
