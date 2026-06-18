@@ -220,6 +220,33 @@ async def test_post_batch_rejects_unknown_agent_name(
     assert "agent" in r.json()["detail"].lower()
 
 
+async def test_post_batch_rejects_agent_name_without_agent_model(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "missing-agent-model",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent_name": "oracle"},
+            },
+        )
+        listed = await ac.get(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 400
+    assert "agent_model" in r.json()["detail"]
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+
+
 async def test_post_rejects_unknown_filter_key(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:

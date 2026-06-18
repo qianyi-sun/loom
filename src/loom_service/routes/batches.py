@@ -185,7 +185,16 @@ async def create_batch(
                         "trial_config. GET /api/v1/agents."
                     ),
                 )
-            model_raw = payload.trial_config.get("agent_model")
+            if "agent_model" not in payload.trial_config:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "trial_config.agent_model is required when "
+                        "trial_config.agent_name is supplied; use null "
+                        "for agents that do not call a model"
+                    ),
+                )
+            model_raw = payload.trial_config["agent_model"]
             model: ModelSpec | None
             if model_raw is None:
                 model = None
