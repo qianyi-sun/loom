@@ -6,7 +6,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api } from "../../api/client";
+import { api, type ProviderConnectionModelEntry } from "../../api/client";
 import { Button } from "../Button";
 import { Card } from "../Card";
 import { Input } from "../Input";
@@ -18,13 +18,6 @@ import {
   useUnhideModel,
 } from "../../hooks/providers";
 import AddManualModelModal from "./AddManualModelModal";
-
-type ModelRow = {
-  model_id: string;
-  source?: string;
-  hidden?: boolean;
-  display_name?: string;
-};
 
 export type ModelsTabProps = { id: string };
 
@@ -53,9 +46,12 @@ export default function ModelsTab({ id }: ModelsTabProps): JSX.Element {
     );
   }
 
-  const items = ((data?.items ?? []) as ModelRow[]).filter((m) =>
+  const items = (data?.items ?? []).filter((m) =>
     !filter || m.model_id.toLowerCase().includes(filter.toLowerCase()),
   );
+
+  const isHidden = (model: ProviderConnectionModelEntry) =>
+    model.visible === false || model.visibility === "hidden";
 
   const handleAdd = async (model: { model_id: string; display_name?: string }) => {
     await addManual.mutateAsync(model as Parameters<typeof addManual.mutateAsync>[0]);
@@ -93,31 +89,34 @@ export default function ModelsTab({ id }: ModelsTabProps): JSX.Element {
               </tr>
             </thead>
             <tbody>
-              {items.map((m) => (
-                <tr key={m.model_id} className="border-b border-slate-100">
-                  <td className="px-4 py-3 font-mono text-sm">{m.model_id}</td>
-                  <td className="px-4 py-3 text-sm text-slate-600">{m.source ?? "—"}</td>
-                  <td className="px-4 py-3 text-sm">
-                    {m.hidden ? (
-                      <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-600"
-                        title="Hidden models don't appear in New Batch's picker">
-                        hidden
-                      </span>
-                    ) : (<span className="text-slate-400">—</span>)}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {m.hidden ? (
-                      <Button onClick={() => unhide.mutate(m.model_id)} disabled={unhide.isPending}>
-                        Unhide
-                      </Button>
-                    ) : (
-                      <Button onClick={() => hide.mutate(m.model_id)} disabled={hide.isPending}>
-                        Hide
-                      </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {items.map((m) => {
+                const hidden = isHidden(m);
+                return (
+                  <tr key={m.model_id} className="border-b border-slate-100">
+                    <td className="px-4 py-3 font-mono text-sm">{m.model_id}</td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{m.source ?? "—"}</td>
+                    <td className="px-4 py-3 text-sm">
+                      {hidden ? (
+                        <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-600"
+                          title="Hidden models don't appear in New Batch's picker">
+                          hidden
+                        </span>
+                      ) : (<span className="text-slate-400">—</span>)}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {hidden ? (
+                        <Button onClick={() => unhide.mutate(m.model_id)} disabled={unhide.isPending}>
+                          Unhide
+                        </Button>
+                      ) : (
+                        <Button onClick={() => hide.mutate(m.model_id)} disabled={hide.isPending}>
+                          Hide
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

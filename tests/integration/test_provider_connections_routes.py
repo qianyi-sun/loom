@@ -960,6 +960,40 @@ def test_models_manual_entry_survives_refresh_when_absent_upstream(
     assert manual["recommended"] is True
 
 
+def test_models_manual_entry_can_be_hidden_and_unhidden_without_upstream_presence(
+    app_setup,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    created = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+        json={"model_id": "my-offline-vllm-model"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["upstream_present"] is False
+
+    hidden = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/my-offline-vllm-model/hide",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json()["visible"] is False
+    assert hidden.json()["hidden_reason"] == "operator-hidden"
+
+    unhidden = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/my-offline-vllm-model/unhide",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert unhidden.status_code == 200, unhidden.text
+    body = unhidden.json()
+    assert body["source"] == "manual"
+    assert body["visible"] is True
+    assert body["hidden_reason"] is None
+    assert body["upstream_present"] is False
+
+
 def test_models_refresh_populates_cache_then_list_returns_it(
     app_setup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

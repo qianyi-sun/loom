@@ -7,9 +7,14 @@ import ModelsTab from "../../../components/providers/ModelsTab";
 
 function renderTab(models: unknown[]) {
   const fetchMock = vi.fn().mockImplementation((_url: string, _init?: RequestInit) => {
-    // All list calls return the same items shape; refresh returns added/removed
+    // All list calls return the same items shape; refresh returns summary counts.
     if (_url.includes("/models/refresh")) {
-      return Promise.resolve(new Response(JSON.stringify({ added: 0, removed: 0 }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({
+        added: 0,
+        refreshed: 0,
+        missing: 0,
+        items: models,
+      }), { status: 200 }));
     }
     if (_url.endsWith("/hide") || _url.endsWith("/unhide")) {
       return Promise.resolve(new Response(null, { status: 204 }));
@@ -36,13 +41,28 @@ describe("ModelsTab", () => {
 
   it("renders a row per model with hidden state", async () => {
     renderTab([
-      { model_id: "gpt-4o", source: "upstream", hidden: false },
-      { model_id: "manual/x", source: "manual", hidden: true },
+      { model_id: "gpt-4o", source: "upstream", visible: true, visibility: "default" },
+      { model_id: "manual/x", source: "manual", visible: false, visibility: "hidden" },
     ]);
     await waitFor(() => {
       expect(screen.getByText("gpt-4o")).toBeInTheDocument();
       expect(screen.getByText("manual/x")).toBeInTheDocument();
     });
+  });
+
+  it("renders hidden rows from the provider models API visibility contract", async () => {
+    renderTab([
+      {
+        model_id: "manual/x",
+        source: "manual",
+        visible: false,
+        hidden_reason: "operator-hidden",
+        visibility: "hidden",
+      },
+    ]);
+    await waitFor(() => screen.getByText("manual/x"));
+    expect(screen.getByText("hidden")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^unhide$/i })).toBeInTheDocument();
   });
 
   it("Refresh button triggers POST .../models/refresh", async () => {
@@ -75,7 +95,7 @@ describe("ModelsTab", () => {
 
   it("Hide button on a non-hidden row POSTs .../hide", async () => {
     const { fetchMock } = renderTab([
-      { model_id: "gpt-4o", source: "upstream", hidden: false },
+      { model_id: "gpt-4o", source: "upstream", visible: true, visibility: "default" },
     ]);
     const user = userEvent.setup();
     await waitFor(() => screen.getByText("gpt-4o"));
@@ -90,7 +110,7 @@ describe("ModelsTab", () => {
 
   it("Unhide button on a hidden row POSTs .../unhide", async () => {
     const { fetchMock } = renderTab([
-      { model_id: "gpt-4o", source: "upstream", hidden: true },
+      { model_id: "gpt-4o", source: "upstream", visible: false, visibility: "hidden" },
     ]);
     const user = userEvent.setup();
     await waitFor(() => screen.getByText("gpt-4o"));

@@ -155,6 +155,21 @@ export interface ModelEntry {
   last_seen_at?: string | null;
 }
 
+export interface ProviderConnectionModelEntry {
+  model_id: string;
+  family?: string | null;
+  context_length?: number | null;
+  capabilities?: Record<string, unknown>;
+  visible: boolean;
+  hidden_reason?: string | null;
+  last_seen_at?: string | null;
+  upstream_present?: boolean;
+  source?: string;
+  agent_capable?: boolean;
+  recommended?: boolean;
+  visibility?: string;
+}
+
 export interface ProviderConnectionEntry {
   id: string;
   name: string;
@@ -194,7 +209,9 @@ export interface ProviderConnectionTestResult {
 
 export interface ProviderConnectionModelsRefreshResult {
   added: number;
-  removed: number;
+  refreshed: number;
+  missing: number;
+  items: ProviderConnectionModelEntry[];
 }
 
 export interface TeamRegistrationEntry {
@@ -326,14 +343,14 @@ export const api = {
       { method: "POST" },
     ),
   listProviderConnectionModels: (id: string) =>
-    apiFetch<{ items: ModelEntry[] }>(
+    apiFetch<{ items: ProviderConnectionModelEntry[] }>(
       `/api/v1/provider-connections/${id}/models`,
     ),
   addProviderConnectionModel: (
     connectionId: string,
     body: { model_id: string },
   ) =>
-    apiFetch<ModelEntry>(
+    apiFetch<ProviderConnectionModelEntry>(
       `/api/v1/provider-connections/${connectionId}/models`,
       { method: "POST", body: JSON.stringify(body) },
     ),

@@ -869,7 +869,9 @@ async def unhide_model(
     sets `visible=true, hidden_reason=NULL`. If the model is no longer
     upstream-present, sets `visible=false, hidden_reason='missing-upstream'`
     — operators can't make a missing model visible without re-refreshing
-    and finding it.
+    and finding it. Manual models are the exception: they are explicitly
+    operator-provided catalog rows for providers without upstream discovery,
+    so they can be made visible even when `upstream_present=false`.
 
     404 if the model isn't in the cache.
     """
@@ -889,7 +891,7 @@ async def unhide_model(
                 f"run POST /models/refresh first"
             ),
         )
-    if cache_row.upstream_present:
+    if cache_row.upstream_present or _is_manual_model(cache_row):
         cache_row.visible = True
         cache_row.hidden_reason = None
     else:
