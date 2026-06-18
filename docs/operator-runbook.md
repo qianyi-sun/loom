@@ -153,11 +153,13 @@ knob you need.
    kubectl rollout restart deploy/loom-service
    ```
 
-7. **(Optional) Configure a public MinIO endpoint for presigned URLs.** By
-   default, `loom_service` generates presigned URLs using the cluster-internal
-   MinIO address (`http://loom-minio:9000`). These URLs are not resolvable from
-   outside the cluster, so end-users (browsers, developer laptops) cannot
-   download trial artifacts, ATIF files, or trajectory data directly.
+7. **Configure a user-facing MinIO endpoint for presigned URLs.** Local dev
+   compose sets `LOOM_SVC_MINIO_PUBLIC_ENDPOINT=http://localhost:9000` by
+   default, so links returned to the SPA and host CLI are resolvable from the
+   developer machine. Production clusters must set the value explicitly. Without
+   it, `loom_service` generates presigned URLs using the cluster-internal MinIO
+   address (`http://loom-minio:9000`), which is not resolvable from outside the
+   cluster.
 
    If MinIO is reachable from the internet — either via its own Ingress or as a
    path under the main Loom Ingress — set `LOOM_SVC_MINIO_PUBLIC_ENDPOINT` to
@@ -172,10 +174,10 @@ knob you need.
    kubectl rollout restart deploy/loom-service
    ```
 
-   If the env var is unset, all presigned URLs point at the internal hostname
-   (existing behaviour). This is correct for deployments where workers and the
-   SPA both run inside the cluster, or when a reverse proxy forwards the public
-   domain to the internal MinIO.
+   If the env var is unset, all presigned URLs point at the internal hostname.
+   Keep that only for deployments where every API caller is inside the cluster.
+   Browser, laptop CLI, and shared-dev deployments need a user-facing endpoint
+   or a proxy path that forwards to MinIO.
 
 8. **Approve team registration requests.** Public registration is
    default-closed. A researcher can submit a request without a bearer token:

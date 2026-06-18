@@ -149,6 +149,10 @@ services:
     environment:
       LOOM_SVC_DB_URL: postgresql+psycopg://loom:loom@postgres/loom
       LOOM_SVC_MINIO_ENDPOINT: http://minio:9000
+      # User-facing presigned URLs must resolve from the browser/laptop,
+      # not from inside the compose network. Operators can override this
+      # in .env when MinIO is exposed through a different host or proxy.
+      LOOM_SVC_MINIO_PUBLIC_ENDPOINT: "${LOOM_SVC_MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}"
       LOOM_SVC_MINIO_ACCESS_KEY: loomdev
       LOOM_SVC_MINIO_SECRET_KEY: loomdev123
       LOOM_SVC_CONTROL_PLANE_URL: http://control-plane:8080/

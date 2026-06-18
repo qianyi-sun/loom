@@ -17,6 +17,7 @@ dialect route stays focused on the upstream contract.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -40,6 +41,10 @@ _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER = {
     "google": "google",
     "openai-compatible": "openai",
 }
+
+_BEARER_VALUE_RE = re.compile(
+    r"(?i)(\bBearer\s+)([A-Za-z0-9._~+/=-]{4,})",
+)
 
 
 async def verify_facade_auth(
@@ -254,4 +259,5 @@ def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:
     excerpt = (text or "")[:limit]
     if api_key and len(api_key) >= 4:
         excerpt = excerpt.replace(api_key, "[REDACTED]")
+    excerpt = _BEARER_VALUE_RE.sub(r"\1[REDACTED]", excerpt)
     return excerpt

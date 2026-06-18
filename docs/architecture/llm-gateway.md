@@ -125,6 +125,7 @@ top-4 providers because:
 |----------------------------------------|---------------------------------------|
 | Upstream timeout (>120s)               | 504, `llm_calls` row inserted with `error_kind` |
 | Upstream non-2xx                       | Forwarded verbatim, `llm_calls` row with `error_kind` |
+| LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
 | `stream=true`                          | 400 with explicit "not supported v1" |

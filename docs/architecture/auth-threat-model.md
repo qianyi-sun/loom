@@ -93,6 +93,9 @@ Out of scope for this document:
 - **Production startup guard:** production service startup fails if the admin
   secret file is absent, unreadable, world-readable, or configured through an
   unsafe broad environment injection path.
+- **Provider error redaction:** gateway upstream-error handling must redact
+  provider API keys and `Authorization: Bearer` values before writing logs or
+  returning diagnostics to callers.
 - **Public repo safety:** external PRs and ordinary CI runs stay read-only and
   do not receive deployment, provider, object-store, or publishing secrets.
 

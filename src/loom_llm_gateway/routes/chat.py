@@ -18,6 +18,7 @@ Two modes:
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid as uuid_lib
 from typing import Any
@@ -39,6 +40,7 @@ from loom_llm_gateway.rate_card import (
 )
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
+    redact_api_key,
     resolve_facade_connection,
 )
 
@@ -51,6 +53,7 @@ _BYO_SUPPORTED_TYPES = frozenset({
 })
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Reserved kwargs we never forward as a splat from `body`. The chat route
 # passes these explicitly to acompletion; if a client (accidentally or
@@ -331,7 +334,18 @@ async def chat_completions(
     )
     if api_base is not None:
         acompletion_kwargs["api_base"] = api_base
-    raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
+    try:
+        raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
+    except Exception as exc:
+        detail = _redact_provider_exception(exc, api_key)
+        logger.warning(
+            "upstream LiteLLM completion failed provider=%s model=%s error=%s",
+            provider, model_name, detail,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"upstream provider call failed: {detail}",
+        ) from None
     duration_sec = time.monotonic() - started
 
     # Parse + cost. PR-D: rate cards are optional for `local` and
@@ -405,3 +419,8 @@ def _pick_api_key(provider: str, settings: Any) -> str | None:
     if provider == "together" and settings.together_api_key is not None:
         return str(settings.together_api_key.get_secret_value())
     return None
+
+
+def _redact_provider_exception(exc: Exception, api_key: str | None) -> str:
+    detail = redact_api_key(str(exc), api_key or "")
+    return detail or exc.__class__.__name__

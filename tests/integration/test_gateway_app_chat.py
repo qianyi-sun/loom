@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -482,6 +483,61 @@ def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untype
     body = r.json()
     assert body["loom"]["cost_usd"] == 0.0
     assert body["loom"]["rate_card_hash"] == "facade:tokens-only"
+
+
+def test_chat_byo_litellm_exception_redacts_authorization_header(  # type: ignore[no-untyped-def]
+    app_with_byo, seed_data, postgres_url, monkeypatch, caplog,
+):
+    """LiteLLM exception payloads can echo upstream response headers.
+
+    The gateway must not let provider Authorization values reach logs or
+    user-visible error text when a BYO provider call fails.
+    """
+    app, _captured = app_with_byo
+    team_id, raw_token = seed_data
+    api_key = "sk-live-upstream-secret"
+    conn_id = _seed_byo_connection(
+        postgres_url, team_id,
+        api_key=api_key, base_url="https://httpbin.org/anything",
+    )
+
+    async def leaking_stub(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["api_key"] == api_key
+        raise RuntimeError(
+            "litellm upstream failure: "
+            "received_args.response_object.headers="
+            f"{{Authorization: Bearer {api_key}, "
+            "Content-Type: application/json}}"
+        )
+
+    monkeypatch.setattr(
+        "loom_llm_gateway.litellm_wrapper.acompletion", leaking_stub,
+    )
+    caplog.set_level(logging.WARNING, logger="loom_llm_gateway.routes.chat")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+
+    assert r.status_code == 502
+    combined = "\n".join(
+        [r.text, *(record.getMessage() for record in caplog.records)],
+    )
+    assert api_key not in combined
+    assert f"Bearer {api_key}" not in combined
+    assert "[REDACTED]" in combined
 
 
 def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]

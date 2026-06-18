@@ -53,6 +53,16 @@ def test_redact_api_key_strips_known_secret() -> None:
     assert "[REDACTED]" in out
 
 
+def test_redact_api_key_strips_bearer_header_value_without_known_secret() -> None:
+    out = redact_api_key(
+        "received_args.response_object.headers={Authorization: Bearer sk-LIVE-XYZ}",
+        "",
+    )
+
+    assert "sk-LIVE-XYZ" not in out
+    assert "Bearer [REDACTED]" in out
+
+
 def test_redact_api_key_truncates_to_limit() -> None:
     """500-char default truncation matches the facade routes' behavior."""
     long_body = "x" * 2000

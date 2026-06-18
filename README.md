@@ -216,6 +216,13 @@ URLs printed at the end of `loom service up`:
 | Health (no auth) | http://localhost:8090/api/v1/health |
 | MinIO console | http://localhost:9001/ |
 
+Dev artifact, ATIF, and trajectory download links are rewritten to
+`http://localhost:9000` by default through
+`LOOM_SVC_MINIO_PUBLIC_ENDPOINT`, so links returned by `GET
+/api/v1/trials/{id}` resolve from the browser or host CLI. Override that
+env var in `.env` only when MinIO is exposed through a different local
+proxy.
+
 Submit a trial directly via the REST surface:
 
 ```bash
