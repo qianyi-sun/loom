@@ -1,50 +1,41 @@
-# k8s NetworkPolicy resources for in-cluster components (#78 slice C).
-#
-# Each policy locks the listed component down to only the
-# ingress/egress it needs to do its job. Order doesn't matter for
-# correctness (k8s evaluates the union across all NetworkPolicies
-# selecting a pod), but the file lists pods top-down by tier:
-# storage → control → compute → public.
-#
-# Important: NetworkPolicy is CNI-enforced. Kind's default CNI does
-# NOT enforce them; the policies still apply cleanly (kubectl accepts)
-# but you need calico / cilium / a real CNI in production for the
-# rules to actually drop traffic. `loom cluster audit` checks
-# presence, not enforcement.
-#
-# DNS allowances target kube-system's kube-dns pod via labels. Most
-# clusters use that label; clusters with a custom CoreDNS deployment
-# should adjust.
-
----
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: loom-postgres
 spec:
   podSelector:
-    matchLabels: { app: loom-postgres }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-postgres
+  policyTypes:
+  - Ingress
+  - Egress
   ingress:
-    # Postgres is reached by every component that touches state.
-    - from:
-        - podSelector: { matchLabels: { app: loom-control-plane } }
-        - podSelector: { matchLabels: { app: loom-llm-gateway } }
-        - podSelector: { matchLabels: { app: loom-service } }
-      ports:
-        - { port: 5432, protocol: TCP }
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loom-control-plane
+    - podSelector:
+        matchLabels:
+          app: loom-llm-gateway
+    - podSelector:
+        matchLabels:
+          app: loom-service
+    ports:
+    - port: 5432
+      protocol: TCP
   egress:
-    # DNS only — Postgres doesn't call other services.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
-
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -52,27 +43,38 @@ metadata:
   name: loom-minio
 spec:
   podSelector:
-    matchLabels: { app: loom-minio }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-minio
+  policyTypes:
+  - Ingress
+  - Egress
   ingress:
-    # MinIO is the object store: trajectories + artifacts.
-    - from:
-        - podSelector: { matchLabels: { app: loom-service } }
-        - podSelector: { matchLabels: { app: loom-worker } }
-        - podSelector: { matchLabels: { app: loom-llm-gateway } }
-      ports:
-        - { port: 9000, protocol: TCP }
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loom-service
+    - podSelector:
+        matchLabels:
+          app: loom-worker
+    - podSelector:
+        matchLabels:
+          app: loom-llm-gateway
+    ports:
+    - port: 9000
+      protocol: TCP
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
-
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -80,32 +82,42 @@ metadata:
   name: loom-control-plane
 spec:
   podSelector:
-    matchLabels: { app: loom-control-plane }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-control-plane
+  policyTypes:
+  - Ingress
+  - Egress
   ingress:
-    # CP is reached by workers (claim, state PATCH) and by
-    # loom-service forwarders. NOT exposed via Ingress per #77.
-    - from:
-        - podSelector: { matchLabels: { app: loom-worker } }
-        - podSelector: { matchLabels: { app: loom-service } }
-      ports:
-        - { port: 8080, protocol: TCP }
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loom-worker
+    - podSelector:
+        matchLabels:
+          app: loom-service
+    ports:
+    - port: 8080
+      protocol: TCP
   egress:
-    # Postgres for state + DNS.
-    - to:
-        - podSelector: { matchLabels: { app: loom-postgres } }
-      ports:
-        - { port: 5432, protocol: TCP }
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
-
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -113,56 +125,62 @@ metadata:
   name: loom-llm-gateway
 spec:
   podSelector:
-    matchLabels: { app: loom-llm-gateway }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-llm-gateway
+  policyTypes:
+  - Ingress
+  - Egress
   ingress:
-    # Gateway is reached by workers (LLM calls via gateway-router
-    # in production; direct in single-cluster mode) and by loom-service
-    # (facade routes).
-    - from:
-        - podSelector: { matchLabels: { app: loom-worker } }
-        - podSelector: { matchLabels: { app: loom-service } }
-      ports:
-        - { port: 9100, protocol: TCP }
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loom-worker
+    - podSelector:
+        matchLabels:
+          app: loom-service
+    ports:
+    - port: 9100
+      protocol: TCP
   egress:
-    # DB for rate cards + provider connections, MinIO for upload-fail
-    # diagnostic dumps, DNS, and external providers (the actual
-    # internet egress). The "any external" rule below is necessary
-    # until loom-egress-proxy ships (slice E) — at that point this
-    # opens up only to the proxy.
-    - to:
-        - podSelector: { matchLabels: { app: loom-postgres } }
-      ports:
-        - { port: 5432, protocol: TCP }
-    - to:
-        - podSelector: { matchLabels: { app: loom-minio } }
-      ports:
-        - { port: 9000, protocol: TCP }
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
-    # External provider endpoints. Listing 0.0.0.0/0 here is wider
-    # than ideal — the egress-proxy slice (#78 E) replaces this with
-    # a per-connection IP allowlist sourced from
-    # `resolved_egress_ips`.
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-              - 169.254.0.0/16
-      ports:
-        - { port: 443, protocol: TCP }
-        - { port: 80, protocol: TCP }
-
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+    ports:
+    - port: 443
+      protocol: TCP
+    - port: 80
+      protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -170,38 +188,46 @@ metadata:
   name: loom-worker
 spec:
   podSelector:
-    matchLabels: { app: loom-worker }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-worker
+  policyTypes:
+  - Ingress
+  - Egress
   ingress: []
   egress:
-    # Workers talk only to in-cluster services + DNS. No direct
-    # external internet — all model traffic flows through the
-    # gateway. The sandbox containers the worker spawns are
-    # Docker-network, not k8s pods; their isolation is handled by
-    # `network_policy.py` iptables rules, NOT by this k8s policy
-    # (see sandbox-isolation.md).
-    - to:
-        - podSelector: { matchLabels: { app: loom-control-plane } }
-      ports:
-        - { port: 8080, protocol: TCP }
-    - to:
-        - podSelector: { matchLabels: { app: loom-llm-gateway } }
-      ports:
-        - { port: 9100, protocol: TCP }
-    - to:
-        - podSelector: { matchLabels: { app: loom-minio } }
-      ports:
-        - { port: 9000, protocol: TCP }
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
-
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-control-plane
+    ports:
+    - port: 8080
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-llm-gateway
+    ports:
+    - port: 9100
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -209,42 +235,54 @@ metadata:
   name: loom-service
 spec:
   podSelector:
-    matchLabels: { app: loom-service }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-service
+  policyTypes:
+  - Ingress
+  - Egress
   ingress:
-    # loom-service is the public REST API. Ingress allows ANY pod
-    # (the ingress controller lives in another namespace and is hard
-    # to identify by label across CNIs). Defense-in-depth is at the
-    # auth layer.
-    - {}
+  - {}
   egress:
-    # Talks to every in-cluster service it forwards to + DNS.
-    - to:
-        - podSelector: { matchLabels: { app: loom-control-plane } }
-      ports:
-        - { port: 8080, protocol: TCP }
-    - to:
-        - podSelector: { matchLabels: { app: loom-llm-gateway } }
-      ports:
-        - { port: 9100, protocol: TCP }
-    - to:
-        - podSelector: { matchLabels: { app: loom-postgres } }
-      ports:
-        - { port: 5432, protocol: TCP }
-    - to:
-        - podSelector: { matchLabels: { app: loom-minio } }
-      ports:
-        - { port: 9000, protocol: TCP }
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
-
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-control-plane
+    ports:
+    - port: 8080
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-llm-gateway
+    ports:
+    - port: 9100
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -252,20 +290,106 @@ metadata:
   name: loom-web
 spec:
   podSelector:
-    matchLabels: { app: loom-web }
-  policyTypes: [Ingress, Egress]
+    matchLabels:
+      app: loom-web
+  policyTypes:
+  - Ingress
+  - Egress
   ingress:
-    # The SPA: same Ingress-controller-on-any-namespace rationale
-    # as loom-service.
-    - {}
+  - {}
   egress:
-    # Static SPA — only DNS for nginx internals.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
-      ports:
-        - { port: 53, protocol: UDP }
-        - { port: 53, protocol: TCP }
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-egress-xds
+spec:
+  podSelector:
+    matchLabels:
+      app: loom-egress-xds
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loom-egress-proxy
+    ports:
+    - port: 18000
+      protocol: TCP
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-egress-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app: loom-egress-proxy
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loom-llm-gateway
+    ports:
+    - port: 30443
+      protocol: TCP
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-egress-xds
+    ports:
+    - port: 18000
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - ports:
+    - port: 443
+      protocol: TCP

@@ -142,12 +142,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     assert kinds.count("Ingress") == 1
     assert kinds.count("PersistentVolumeClaim") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
-    # + web + gateway-router = 8.
-    # NOT yet covering egress-xds / egress-proxy — tracked in #201
-    # follow-up (intentional: NetworkPolicies for the egress chain
-    # need gateway-router as their first ingress source, which lands
-    # in PR-C2).
-    assert kinds.count("NetworkPolicy") == 8
+    # + web + gateway-router + egress-xds + egress-proxy = 10.
+    assert kinds.count("NetworkPolicy") == 10
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2
 

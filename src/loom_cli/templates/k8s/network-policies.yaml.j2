@@ -269,3 +269,75 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+
+---
+# #190 PR-C1c follow-up: lock down the egress chain.
+#
+# loom-egress-xds — xDS control plane. ONLY loom-egress-proxy needs
+# to reach it (for CDS/RDS); nothing else should. Egress: Postgres
+# (read provider_connections) + DNS only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-egress-xds
+spec:
+  podSelector:
+    matchLabels: { app: loom-egress-xds }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: loom-egress-proxy } }
+      ports:
+        - { port: 18000, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-postgres } }
+      ports:
+        - { port: 5432, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+
+---
+# loom-egress-proxy — Envoy forward proxy for outbound provider
+# traffic. Ingress: ONLY loom-llm-gateway (the consumer per PR-C2).
+# Egress: xDS server + DNS + ALL external on :443 — the proxy's
+# whole job is to reach provider IPs; per-connection IP allowlisting
+# lives in Envoy's RDS/CDS, not at the NetworkPolicy layer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-egress-proxy
+spec:
+  podSelector:
+    matchLabels: { app: loom-egress-proxy }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: loom-llm-gateway } }
+      ports:
+        - { port: 30443, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-egress-xds } }
+      ports:
+        - { port: 18000, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # External provider IPs on HTTPS. Envoy's per-connection
+    # IP allowlist (CDS endpoints) gates the actual destination.
+    - ports:
+        - { port: 443, protocol: TCP }
