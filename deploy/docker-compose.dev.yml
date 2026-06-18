@@ -208,6 +208,56 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # #190 PR-C1c: egress-proxy + egress-xds wired into the dev stack.
+  # Mirrors the production deploy: gateway-router's outbound provider
+  # traffic flows through Envoy on :30443 (HTTP CONNECT forward
+  # proxy), and Envoy fetches its CDS+RDS config from the xds-server
+  # on :18000 (which reads from Postgres).
+  #
+  # NOT yet wired into gateway-router (PR-C2 changes the gateway's
+  # httpx client to use the proxy + adds the x-loom-connection-id
+  # CONNECT header). Standing the services up here lets devs iterate
+  # on egress-xds + Envoy config without rebuilding the cluster.
+  egress-xds:
+    image: loom-egress-xds:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.egress-xds
+    environment:
+      LOOM_EGRESS_XDS_DB_URL: postgresql://loom:loom@postgres:5432/loom
+      LOOM_EGRESS_XDS_LISTEN_ADDR: 0.0.0.0:18000
+      LOOM_EGRESS_XDS_LOG_LEVEL: info
+    # The production Envoy bootstrap (deploy/envoy/egress-proxy.yaml)
+    # references this hostname for the static `xds_cluster`. Aliasing
+    # in compose so the bootstrap works unchanged in both compose +
+    # k8s — k8s uses the loom-egress-xds Service name.
+    networks:
+      default:
+        aliases:
+          - loom-egress-xds
+    ports:
+      - "18000:18000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  egress-proxy:
+    image: envoyproxy/envoy:v1.30-latest
+    # Bind-mount the production bootstrap so edits to
+    # deploy/envoy/egress-proxy.yaml take effect on `docker compose
+    # restart egress-proxy` — no rebuild needed.
+    volumes:
+      - ./envoy/egress-proxy.yaml:/etc/envoy/envoy.yaml:ro
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+    ports:
+      - "30443:30443"
+      - "9901:9901"   # Envoy admin
+    depends_on:
+      egress-xds:
+        condition: service_started
+    restart: on-failure
+
   # React SPA — Vite dev server with HMR. `npm ci` installs from the
   # lockfile while keeping node_modules on a named volume instead of
   # the bind-mounted source tree.

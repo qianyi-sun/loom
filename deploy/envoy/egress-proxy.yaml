@@ -29,11 +29,20 @@ admin:
   address:
     socket_address: { address: 0.0.0.0, port_value: 9901 }
 
+# Required by Envoy when xDS is in use. `id` is per-instance (useful
+# for ops debugging — set to the hostname/pod-name via env in k8s;
+# left static here for simplicity); `cluster` is shared across
+# instances of the same role.
+node:
+  id: loom-egress-proxy
+  cluster: loom-egress
+
 # Bootstrap the xDS source. loom_egress_xds.__main__ binds to :18000
 # by default; deploy/k8s/loom-egress-xds.yaml exposes that as the
 # `loom-egress-xds` Service.
 dynamic_resources:
   cds_config:
+    resource_api_version: V3
     api_config_source:
       api_type: GRPC
       transport_api_version: V3
@@ -60,6 +69,7 @@ static_resources:
                 rds:
                   route_config_name: loom_egress_routes
                   config_source:
+                    resource_api_version: V3
                     api_config_source:
                       api_type: GRPC
                       transport_api_version: V3
