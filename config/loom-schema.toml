@@ -145,6 +145,12 @@ used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 120.0
 
+[service_config.egress_proxy_url]
+used_by     = ["llm-gateway"]
+python_type = "str"
+default     = ""
+description = "Envoy egress-proxy URL (#190 PR-C2). Empty disables proxy mode → upstream HTTP goes direct. Set to e.g. `http://loom-egress-proxy:30443` to route every facade/native passthrough through the Envoy egress chain."
+
 # ─── loom-service only ───
 
 [service_config.team_registration_open]

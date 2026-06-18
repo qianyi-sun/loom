@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
     admin,
@@ -56,9 +57,19 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         app.state.upstream_client = httpx.AsyncClient(
             timeout=settings.upstream_timeout_sec,
         )
+        # #190 PR-C2: per-connection-id egress-proxy client pool. When
+        # `egress_proxy_url` is empty (default), `pool.get(...)` falls
+        # through to the shared upstream_client — egress mode opt-in,
+        # rollback is one env-var flip + restart.
+        app.state.egress_client_pool = EgressClientPool(
+            upstream_client=app.state.upstream_client,
+            proxy_url=settings.egress_proxy_url,
+            upstream_timeout_sec=settings.upstream_timeout_sec,
+        )
         try:
             yield
         finally:
+            await app.state.egress_client_pool.aclose()
             await app.state.upstream_client.aclose()
             await engine.dispose()
 

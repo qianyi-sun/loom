@@ -127,7 +127,13 @@ async def anthropic_messages_facade(
         "anthropic-version": _ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
-    upstream: httpx.AsyncClient = request.app.state.upstream_client
+    # #190 PR-C2: when egress mode is on, this resolves to a
+    # per-connection_id client whose CONNECT carries the routing
+    # header Envoy matches against. When off (default), it returns
+    # the shared upstream_client and the call goes direct.
+    upstream: httpx.AsyncClient = await (
+        request.app.state.egress_client_pool.get(connection_id)
+    )
     try:
         upstream_response = await upstream.post(
             upstream_url,

@@ -121,7 +121,10 @@ async def google_generate_content_facade(
     upstream_url = (
         f"{row.base_url.rstrip('/')}/v1beta/models/{model_path}"
     )
-    upstream: httpx.AsyncClient = request.app.state.upstream_client
+    # #190 PR-C2: per-connection egress proxy when LOOM_GW_EGRESS_PROXY_URL set.
+    upstream: httpx.AsyncClient = await (
+        request.app.state.egress_client_pool.get(connection_id)
+    )
     try:
         upstream_response = await upstream.post(
             upstream_url,

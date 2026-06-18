@@ -23,6 +23,7 @@ class GatewaySettings(BaseSettings):
     bind_port: int = 9100
     db_url: PostgresDsn
     dev_reload: bool = False
+    egress_proxy_url: str = ""
     google_api_key: SecretStr | None = None
     huggingface_api_key: SecretStr | None = None
     log_level: LogLevel = "info"

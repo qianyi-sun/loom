@@ -29,6 +29,11 @@
     "default": "False",
     "required": false
   },
+  "egress_proxy_url": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "google_api_key": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",
