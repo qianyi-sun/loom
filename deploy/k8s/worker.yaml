@@ -56,6 +56,8 @@ spec:
           value: loom-llm-gateway-sandbox:dev
         - name: LOOM_WORKER_SANDBOX_SINGLETON_SECRETS_DIR
           value: /var/lib/loom/sandbox-secrets
+        - name: LOOM_WORKER_SANDBOX_STEP_JWT_TTL_SEC
+          value: '600'
         - name: LOOM_WORKER_SANDBOX_WORKER_INDEX
           value: '0'
         - name: LOOM_WORKER_TOKEN

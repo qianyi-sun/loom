@@ -25,6 +25,7 @@ from loom.models.types import ModelSpec
 from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.base import Verifier
+from loom_worker.jwt_rotator import JWTRotator
 from loom_worker.sandbox_network import (
     SandboxBridge,
     SandboxNetworkAllocator,
@@ -88,6 +89,18 @@ class LocalTrialRunner:
     # legacy behavior (driver attaches to default docker network).
     sandbox_allocator: SandboxNetworkAllocator | None = None
     sandbox_singleton: SandboxSingletonManager | None = None
+    # Phase D: JWT mint callback + per-trial bind-mount root. When
+    # `sandbox_mint_token` is set AND the bridge/singleton are
+    # configured, the runner builds a JWTRotator around the trial
+    # lifecycle: initial-token write + atomic rotation every
+    # `sandbox_step_jwt_ttl_sec / 2`. `sandbox_secrets_root` is the
+    # parent dir under which `<trial_id>/run/loom/` is created and
+    # bind-mounted at `/run/loom/` in the sandbox.
+    sandbox_mint_token: (
+        Callable[[UUID], Awaitable[str]] | None
+    ) = None
+    sandbox_secrets_root: Path | None = None
+    sandbox_step_jwt_ttl_sec: int = 600
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
@@ -122,6 +135,32 @@ class LocalTrialRunner:
                 await self.sandbox_singleton.attach_to_bridge(sandbox_bridge)
 
             on_driver_started_cb = _attach_singleton
+
+        # Phase D: per-trial JWT rotator. Built when isolation is on
+        # AND mint+secrets-root are configured. The rotator writes
+        # the initial JWT BEFORE the driver starts so the bind-mounted
+        # file is already populated by the time the container sees it.
+        sandbox_volumes: tuple[tuple[str, str, str], ...] = ()
+        jwt_rotator: JWTRotator | None = None
+        if (
+            sandbox_bridge is not None
+            and self.sandbox_mint_token is not None
+            and self.sandbox_secrets_root is not None
+        ):
+            jwt_dir = (
+                self.sandbox_secrets_root / str(self.trial_id) / "run" / "loom"
+            )
+            jwt_rotator = JWTRotator(
+                trial_id=self.trial_id,
+                jwt_dir=jwt_dir,
+                mint_callback=self.sandbox_mint_token,
+                expiry_sec=self.sandbox_step_jwt_ttl_sec,
+            )
+            # Bind-mount the dir read-only at /run/loom/ inside the
+            # sandbox. The rotator owns the file on the HOST side; the
+            # sandbox sees atomic-replaced contents.
+            sandbox_volumes = ((str(jwt_dir), "/run/loom", "ro"),)
+
         # Plan 23: agent + model live on TrialConfig and are required.
         # TaskConfig.agent.* is no longer consulted for service-mode
         # trials — every submission specifies which agent + model run.
@@ -167,6 +206,7 @@ class LocalTrialRunner:
                 sandbox_bridge.name if sandbox_bridge is not None else None
             ),
             on_driver_started=on_driver_started_cb,
+            sandbox_volumes=sandbox_volumes,
         )
 
         async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
@@ -189,6 +229,14 @@ class LocalTrialRunner:
                 )
 
         trial = Trial(ctx=ctx, state_patch=_patch)
+        # Phase D: when a rotator is configured, wrap the trial body
+        # in its async context. `__aenter__` writes the initial JWT
+        # (so the container's first read sees a valid token) and
+        # spawns the rotation task; `__aexit__` cancels the task.
+        # The bind-mount path is already in ctx.sandbox_volumes so
+        # driver.start picks it up.
+        if jwt_rotator is not None:
+            await jwt_rotator.__aenter__()
         try:
             result = await trial.run()
             await self._patch_output_projection(result)
@@ -213,6 +261,17 @@ class LocalTrialRunner:
                 return result
             raise
         finally:
+            # Phase D: stop the rotator BEFORE bridge teardown so the
+            # rotation task isn't competing with the bind-mount source
+            # dir going away.
+            if jwt_rotator is not None:
+                try:
+                    await jwt_rotator.__aexit__(None, None, None)
+                except Exception:
+                    logger.exception(
+                        "jwt_rotator_teardown_failed trial=%s",
+                        self.trial_id,
+                    )
             # #188: release the per-trial bridge. Runs unconditionally
             # — even if Trial.run raised — so a half-started trial
             # doesn't leak the /24. Singleton's network endpoint is

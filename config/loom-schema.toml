@@ -257,6 +257,12 @@ python_type = "int"
 default     = 0
 description = "Partitions the per-trial subnet pool when multiple workers run on the same host (see #189). 0..15."
 
+[service_config.sandbox_step_jwt_ttl_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 600
+description = "Step-JWT TTL the worker requests when minting tokens for rotation (Phase D PR-D1). Rotation cadence is TTL/2 — so a 600s TTL rotates every 5 minutes."
+
 [service_config.drain_timeout_sec]
 used_by     = ["worker"]
 python_type = "int"

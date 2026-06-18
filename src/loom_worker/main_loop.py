@@ -21,6 +21,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -338,6 +339,21 @@ async def _spawn_trial(
             sandbox_allocator if sandbox_singleton is not None else None
         ),
         sandbox_singleton=sandbox_singleton,
+        # Phase D: step-JWT minting + rotation. Only wired when
+        # singleton started (isolation on); the mint_callback closes
+        # over `cp_client` so the rotator hits POST /admin/step-tokens
+        # with a stable step_id (per-step attribution is a future
+        # improvement — for now sandbox isolation prioritizes session
+        # continuity over per-step cost attribution).
+        sandbox_mint_token=(
+            _build_mint_callback(cp_client, team_id)
+            if sandbox_singleton is not None else None
+        ),
+        sandbox_secrets_root=(
+            Path(settings.sandbox_singleton_secrets_dir) / "trials"
+            if sandbox_singleton is not None else None
+        ),
+        sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
     )
 
     async def _run_and_cleanup() -> None:
@@ -351,6 +367,22 @@ async def _spawn_trial(
             shutil.rmtree(task_dir, ignore_errors=True)
 
     await pool.spawn(_run_and_cleanup())
+
+
+def _build_mint_callback(
+    cp_client: HttpControlPlaneClient, team_id: UUID,
+) -> Callable[[UUID], Awaitable[str]]:
+    """Closure the rotator calls on each tick. Stable step_id
+    `"sandbox-rotated"` because Phase D's primary goal is sandbox
+    isolation; per-step cost-attribution refinements are a follow-up."""
+    async def _mint(trial_id: UUID) -> str:
+        return await cp_client.mint_step_token(
+            team_id=team_id,
+            trial_id=trial_id,
+            step_id="sandbox-rotated",
+            ttl_sec=600,
+        )
+    return _mint
 
 
 async def _mark_setup_failed(

@@ -83,6 +83,11 @@ class TrialContext:
     # Both default None → pre-Phase-B behavior unchanged.
     sandbox_network: str | None = None
     on_driver_started: Callable[[], Awaitable[None]] | None = None
+    # Phase D PR-D1: bind-mounts the driver applies at create time.
+    # When sandbox isolation is on, the worker passes the rotator's
+    # jwt_dir here mounted at `/run/loom/`. Empty tuple → no mounts
+    # (unchanged behavior).
+    sandbox_volumes: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def task_id(self) -> str:
@@ -166,6 +171,7 @@ class Trial:
                     await self.ctx.driver.start(options=StartOptions(
                         force_build=self.ctx.trial_config.force_build,
                         network=self.ctx.sandbox_network,
+                        volumes=self.ctx.sandbox_volumes,
                     ))
                     driver_started = True
                     # #188 / Phase B: attach the per-node singleton

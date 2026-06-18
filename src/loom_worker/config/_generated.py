@@ -36,6 +36,7 @@ class WorkerSettings(BaseSettings):
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
     sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"
+    sandbox_step_jwt_ttl_sec: int = 600
     sandbox_worker_index: int = 0
     token: SecretStr
     trajectory_cache_dir: Path = Path("/var/lib/loom/trajectories")

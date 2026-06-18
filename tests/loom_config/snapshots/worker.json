@@ -94,6 +94,11 @@
     "default": "'/var/lib/loom/sandbox-secrets'",
     "required": false
   },
+  "sandbox_step_jwt_ttl_sec": {
+    "annotation": "<class 'int'>",
+    "default": "600",
+    "required": false
+  },
   "sandbox_worker_index": {
     "annotation": "<class 'int'>",
     "default": "0",
