@@ -255,12 +255,13 @@ loom providers models NAME [--refresh] [--hide MODEL] [--unhide MODEL]
 loom providers update NAME [--base-url URL] [--api-key SOURCE] ...
 loom providers delete NAME                                         # soft-delete
 
-loom eval run --provider N --model M --agent A --benchmark B
-    [--task ID | --task-filter JSON] [--backend B] [--name N]
-loom eval batch create --provider N --model M --agent A --benchmark B
-    [--combinations FILE | --task-filter JSON] [--concurrency N] [--name N]
+loom eval run --provider N --model M --agent A --task ID
+    [--backend B] [--name N]
+loom eval batch create --provider N --model M --agent A --name N
+    [--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]
 loom eval batch {list,show,cancel}
-loom eval trial {list,show} | trajectory ID | atif ID
+loom eval trial {list,show}
+loom eval trial show TRIAL_ID     # includes presigned atif_url + trajectory_url when ready
 ```
 
 Argv hygiene: every secret-bearing flag accepts only `env:VAR`, `file:PATH`, or `-` (stdin). Literals are rejected at argparse-time.

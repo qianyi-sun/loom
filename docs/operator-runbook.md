@@ -568,8 +568,8 @@ with a missing entry still record tokens and use
 Provider discovery is cached per connection:
 
 ```bash
-loom providers models refresh lab-vllm
-loom providers models list lab-vllm
+loom providers models lab-vllm --refresh
+loom providers models lab-vllm
 ```
 
 The service launch catalog at `GET /api/v1/models` defaults to
@@ -725,8 +725,8 @@ concrete command or UI action.
    ```
    `test` must return `status=valid`; `http_status` shows the upstream
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
-6. **Model discovery.** `loom providers models refresh smoke-openai`
-   followed by `loom providers models list smoke-openai` returns a
+6. **Model discovery.** `loom providers models smoke-openai --refresh`
+   followed by `loom providers models smoke-openai` returns a
    non-empty catalog. `curl /api/v1/models` from a team token shows
    the agent-capable view.
 7. **Submit a small batch.** Pick `hello-world` (or another canonical
@@ -734,8 +734,8 @@ concrete command or UI action.
    ```bash
    loom eval batch create \
      --name smoke-$(date +%s) \
-     --benchmark hello-world \
-     --provider smoke-openai --model gpt-4o-mini --agent oracle \
+     --task-filter '{"task_ids":["hello-world"]}' \
+     --provider smoke-openai --model gpt-4o-mini --agent litellm \
      --n-per-task 1
    # then tail it:
    loom eval batch show <batch-id>
