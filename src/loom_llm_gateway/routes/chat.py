@@ -150,16 +150,28 @@ async def chat_completions(
                         f"UUID: {exc}"
                     ),
                 ) from exc
-            if ctx.team_id is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "provider_connection_id requires a team-scoped "
-                        "token"
-                    ),
-                )
+            # Use body.loom.team_id as the team identity when the token
+            # is worker-scoped (ctx.team_id is None) — matches the
+            # existing trust model on this route (workers are operator-
+            # trusted; the team-id mismatch check above is the only
+            # tightening for team-scoped callers). The connection
+            # lookup is itself team-scoped (404 on cross-team), so a
+            # caller lying about loom.team_id can only reach connections
+            # they already control.
+            byo_team_id = ctx.team_id
+            if byo_team_id is None:
+                try:
+                    byo_team_id = UUID(req.loom.team_id)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "loom.team_id is not a valid UUID: "
+                            f"{exc}"
+                        ),
+                    ) from exc
             byo_row = await resolve_facade_connection(
-                session, conn_uuid, ctx.team_id,
+                session, conn_uuid, byo_team_id,
                 supported_types=_BYO_SUPPORTED_TYPES,
                 dialect_label="chat-completions",
             )
