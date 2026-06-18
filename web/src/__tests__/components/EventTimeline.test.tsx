@@ -33,6 +33,31 @@ describe("EventTimeline", () => {
     expect(screen.getByText(/Trial ended/)).toBeInTheDocument();
   });
 
+  it("formats object model specs in LLM call summaries", () => {
+    render(
+      <EventTimeline
+        events={[
+          {
+            kind: "llm_call",
+            seq: 1,
+            step_id: "main",
+            model: {
+              provider: "openai",
+              name: "gpt-4o-mini",
+              source: "api",
+            },
+            input_tokens: 39,
+            output_tokens: 97,
+            cost_usd_snapshot: 0,
+            emitted_at: "2026-06-08T12:00:01Z",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/LLM call — openai\/gpt-4o-mini/)).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+  });
+
   it("expands a row to show the full JSON on click", async () => {
     const user = userEvent.setup();
     render(

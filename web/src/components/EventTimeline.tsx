@@ -13,6 +13,7 @@ import { useState } from "react";
 
 import type { components } from "../api/schema";
 import { cn } from "../lib/cn";
+import { modelLabel } from "../lib/modelLabel";
 import EmptyState from "./EmptyState";
 import JsonViewer from "./JsonViewer";
 
@@ -48,11 +49,12 @@ function summary(e: Event): string {
       }`;
     }
     case "llm_call": {
-      const model = (e.model as string | undefined) ?? "?";
+      const model = modelLabel(e.model);
+      const modelText = model === "—" ? "?" : model;
       const inT = (e.input_tokens as number | undefined) ?? 0;
       const outT = (e.output_tokens as number | undefined) ?? 0;
       const cost = (e.cost_usd_snapshot as number | undefined) ?? null;
-      return `LLM call — ${model} (${inT} in, ${outT} out${
+      return `LLM call — ${modelText} (${inT} in, ${outT} out${
         cost !== null ? `, $${cost.toFixed(4)}` : ""
       })`;
     }
