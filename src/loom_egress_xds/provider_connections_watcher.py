@@ -157,14 +157,13 @@ class ProviderConnectionsWatcher:
                         # via CancelledError (we just cancelled it)
                         # OR via the connection-drop exception that
                         # caused this iteration to exit — both are
-                        # already handled, so swallow whatever it
-                        # raises. `BaseException` (not just
-                        # `Exception`) is required because
-                        # CancelledError is BaseException-derived
-                        # since Python 3.8.
+                        # already handled. Catch (Exception,
+                        # CancelledError) but NOT BaseException so
+                        # SystemExit / KeyboardInterrupt still
+                        # propagate cleanly during process shutdown.
                         try:
                             await listener_task
-                        except BaseException:
+                        except (Exception, asyncio.CancelledError):
                             pass
                     if conn is not None:
                         async with _suppress_exceptions():
@@ -257,19 +256,15 @@ class ProviderConnectionsWatcher:
 
     async def _listen_loop(self, conn: WatcherConnection) -> None:
         """Consume the connection's NOTIFY stream forever. Each
-        notification sets the wake event; we don't carry payload."""
-        try:
-            async for _ in conn.notifies():
-                self._wake.set()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Re-raise so the outer loop reconnects.
-            logger.warning(
-                "provider_connections_watcher_listen_disconnect",
-                exc_info=True,
-            )
-            raise
+        notification sets the wake event; we don't carry payload.
+
+        Re-raises any exception so the outer reconnect loop sees it.
+        Logging happens ONCE in `run()`'s reconnect branch; this
+        method intentionally does NOT log to avoid the same error
+        landing in the logs twice with the same stack.
+        """
+        async for _ in conn.notifies():
+            self._wake.set()
 
     async def _poll_loop(self) -> None:
         """Tick the wake event every poll_interval. Belt-and-braces
@@ -310,11 +305,15 @@ CHANNEL_NAME = _CHANNEL
 def make_row_fetcher_query() -> str:
     """SQL the production row_fetcher runs against `provider_connections`.
     Exported so tests can pin the query against the live schema; the
-    watcher itself doesn't run SQL (so it stays driver-agnostic)."""
+    watcher itself doesn't run SQL (so it stays driver-agnostic).
+
+    Column set matches the `ProviderConnectionRow` Protocol exactly
+    — adding columns here without updating the Protocol risks the
+    fetcher returning fields nothing consumes, which is exactly the
+    bug this query had pre-fixup (phantom `team_id` left over from
+    an earlier draft)."""
     return (
-        "SELECT id, resolved_egress_ips, upstream_host, "
-        "       deleted_at, "
-        "       NULL::uuid AS team_id "
+        "SELECT id, resolved_egress_ips, upstream_host, deleted_at "
         "FROM provider_connections"
     )
 

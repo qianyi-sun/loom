@@ -58,13 +58,24 @@ class PytestVerifier:
         # doesn't ship pytest. Install on demand if missing — pip is
         # fast-path (~1s) when already installed. Task authors who care
         # about cold-start latency can bake pytest into the image.
+        #
+        # The `{...} && cd && pytest || true` chain matters:
+        # - `&&` between ensure-pytest and cd means a pip-install
+        #   failure short-circuits BEFORE cd+pytest, surfacing as a
+        #   clear shell error in stderr rather than silently leaving
+        #   junit.xml unwritten and getting misattributed as
+        #   "missing_tests" by the post-exec download (#187 fixup).
+        # - `|| true` only wraps pytest itself, since non-zero is
+        #   expected on failing tests; we read the XML for the truth.
         cmd = (
-            "python -c 'import pytest' 2>/dev/null || "
-            "pip install --quiet pytest >/dev/null 2>&1; "
+            "{ python -c 'import pytest' 2>/dev/null || "
+            "pip install --quiet --root-user-action=ignore pytest "
+            "1>/dev/null; } && "
             f"cd {self.tests_dir.as_posix()} && "
+            "{ "
             f"pytest --junitxml={_JUNIT_PATH.as_posix()} "
             + " ".join(self.pytest_args)
-            + " || true"   # exec non-zero is expected on failing tests; we read XML
+            + " || true; }"
         )
         await env.exec(cmd, user=self.user)
 
