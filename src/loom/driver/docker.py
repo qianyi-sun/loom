@@ -50,6 +50,9 @@ def _default_caps() -> Capabilities:
         dynamic_network_policy=True,
         mounted_fs=True,
         resource_modes=frozenset(["auto", "limit", "guarantee"]),
+        # DockerDriver honors StartOptions.network — required for #78
+        # sandbox isolation (attach to per-trial --internal bridge).
+        supports_custom_network=True,
     )
 
 
@@ -79,9 +82,7 @@ class DockerDriver:
             self._client = docker.from_env()
             await asyncio.to_thread(self._ensure_image, opts)
 
-            self._container = await asyncio.to_thread(
-                self._client.containers.run,
-                self.image,
+            run_kwargs: dict[str, Any] = dict(
                 command=_KEEPALIVE_CMD,
                 name=self.container_name,
                 detach=True,
@@ -94,6 +95,23 @@ class DockerDriver:
                 # iptables is unaffected. Required for Allowlist + NoNetwork.
                 cap_add=["NET_ADMIN"],
             )
+            if opts.network is not None:
+                # Phase B (#188): attach to a specific docker network
+                # at create time. With sandbox isolation on, this is
+                # the per-trial `--internal` bridge from #189, which
+                # blocks all host egress — the singleton (PR-B2 #221)
+                # is the only attached endpoint the sandbox can reach.
+                run_kwargs["network"] = opts.network
+            # to_thread can't unify the **kwargs overloads of
+            # docker-py's containers.run, so wrap the call in a
+            # closure whose signature is unambiguous to mypy.
+            client = self._client
+            assert client is not None
+
+            def _run_container() -> Any:
+                return client.containers.run(self.image, **run_kwargs)
+
+            self._container = await asyncio.to_thread(_run_container)
             await self._wait_until_running()
             # Mark running BEFORE applying baseline policy —
             # set_network_policy() calls _require_running() which checks state.

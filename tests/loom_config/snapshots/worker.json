@@ -79,6 +79,26 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "sandbox_isolation": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "sandbox_singleton_image": {
+    "annotation": "<class 'str'>",
+    "default": "'loom-llm-gateway-sandbox:dev'",
+    "required": false
+  },
+  "sandbox_singleton_secrets_dir": {
+    "annotation": "<class 'str'>",
+    "default": "'/var/lib/loom/sandbox-secrets'",
+    "required": false
+  },
+  "sandbox_worker_index": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
   "token": {
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",

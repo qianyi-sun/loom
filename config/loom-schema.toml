@@ -233,6 +233,30 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 5
 
+[service_config.sandbox_isolation]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+description = "Enable #78 Phase B sandbox isolation: per-trial --internal docker bridge + per-node loom-llm-gateway-sandbox singleton. Default off → pre-Phase-B behavior. When true, the worker needs a writable singleton-secrets dir + the loom-llm-gateway-sandbox image pulled."
+
+[service_config.sandbox_singleton_image]
+used_by     = ["worker"]
+python_type = "str"
+default     = "loom-llm-gateway-sandbox:dev"
+description = "Container image for the per-node CONNECT proxy singleton (Phase B PR-B1)."
+
+[service_config.sandbox_singleton_secrets_dir]
+used_by     = ["worker"]
+python_type = "str"
+default     = "/var/lib/loom/sandbox-secrets"
+description = "Host directory mounted into the singleton container at /run/loom. Contains the loom-ca cert + step-JWT signing key. Operator-provisioned."
+
+[service_config.sandbox_worker_index]
+used_by     = ["worker"]
+python_type = "int"
+default     = 0
+description = "Partitions the per-trial subnet pool when multiple workers run on the same host (see #189). 0..15."
+
 [service_config.drain_timeout_sec]
 used_by     = ["worker"]
 python_type = "int"

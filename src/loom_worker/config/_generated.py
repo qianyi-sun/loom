@@ -33,6 +33,10 @@ class WorkerSettings(BaseSettings):
     minio_endpoint: str = "http://loom-minio:9000"
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    sandbox_isolation: bool = False
+    sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
+    sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"
+    sandbox_worker_index: int = 0
     token: SecretStr
     trajectory_cache_dir: Path = Path("/var/lib/loom/trajectories")
     vllm_gpu_memory_utilization: float = 0.9

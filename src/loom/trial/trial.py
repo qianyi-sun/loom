@@ -70,6 +70,19 @@ class TrialContext:
     # rows are injected (legacy v0.7 behavior — agents that bypassed
     # the Gateway have no llm_calls).
     llm_calls_fetcher: Callable[[UUID], Awaitable[list[dict[str, Any]]]] | None = None
+    # #188 / Phase B: sandbox-isolation hooks. When the worker has
+    # `LOOM_WORKER_SANDBOX_ISOLATION=1`, these are populated:
+    # - `sandbox_network` is the per-trial bridge name passed to
+    #   `StartOptions.network` so the container attaches there at
+    #   create time.
+    # - `on_driver_started` runs RIGHT AFTER `driver.start()`
+    #   succeeds. The worker uses it to attach the
+    #   `loom-llm-gateway-sandbox` singleton (PR-B2 #221) to the
+    #   bridge — without that hop, the sandbox has no reachable
+    #   outbound endpoint.
+    # Both default None → pre-Phase-B behavior unchanged.
+    sandbox_network: str | None = None
+    on_driver_started: Callable[[], Awaitable[None]] | None = None
 
     @property
     def task_id(self) -> str:
@@ -152,8 +165,16 @@ class Trial:
                     # of propagating raw out of Trial.run.
                     await self.ctx.driver.start(options=StartOptions(
                         force_build=self.ctx.trial_config.force_build,
+                        network=self.ctx.sandbox_network,
                     ))
                     driver_started = True
+                    # #188 / Phase B: attach the per-node singleton
+                    # to this trial's bridge AFTER container creation.
+                    # Failure to attach is a hard error — the sandbox
+                    # has no other reachable endpoint, so trying to
+                    # run the agent would just hang.
+                    if self.ctx.on_driver_started is not None:
+                        await self.ctx.on_driver_started()
                     await writer.append(TrialStartEvent(
                         emitted_at=datetime.now(UTC),
                         trial_id=self.ctx.trial_id, step_id="__trial__",

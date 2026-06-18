@@ -25,6 +25,13 @@ from loom.models.types import ModelSpec
 from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.base import Verifier
+from loom_worker.sandbox_network import (
+    SandboxBridge,
+    SandboxNetworkAllocator,
+    create_sandbox_bridge,
+    teardown_sandbox_bridge,
+)
+from loom_worker.sandbox_singleton import SandboxSingletonManager
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 logger = logging.getLogger(__name__)
@@ -75,9 +82,46 @@ class LocalTrialRunner:
     # trial requesting `ModelSpec.source=hf, hf_execution=local-vllm`
     # surfaces an AgentError instead of silently routing elsewhere.
     vllm_registry: WorkerVLLMRegistry | None = None
+    # #188 / Phase B: optional sandbox-isolation hooks. When BOTH are
+    # set, the runner creates a per-trial bridge before driver.start
+    # and attaches the singleton to it once the driver is up. None →
+    # legacy behavior (driver attaches to default docker network).
+    sandbox_allocator: SandboxNetworkAllocator | None = None
+    sandbox_singleton: SandboxSingletonManager | None = None
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
+
+        # #188 / Phase B: per-trial sandbox bridge + singleton attach.
+        # Only when BOTH allocator AND singleton are provided (the
+        # worker main_loop wires both when LOOM_WORKER_SANDBOX_ISOLATION
+        # is on AND the singleton started cleanly). Fails closed: if
+        # the driver can't honor a custom network, raise rather than
+        # silently start the trial without isolation.
+        sandbox_bridge: SandboxBridge | None = None
+        on_driver_started_cb: Callable[[], Awaitable[None]] | None = None
+        if (
+            self.sandbox_allocator is not None
+            and self.sandbox_singleton is not None
+        ):
+            if not driver.capabilities.supports_custom_network:
+                raise RuntimeError(
+                    "sandbox isolation enabled but driver "
+                    f"{type(driver).__name__} does not support "
+                    "StartOptions.network; pair isolation with a "
+                    "DockerDriver-backed worker",
+                )
+            sandbox_bridge = await create_sandbox_bridge(
+                trial_id=self.trial_id,
+                allocator=self.sandbox_allocator,
+            )
+
+            async def _attach_singleton() -> None:
+                assert sandbox_bridge is not None
+                assert self.sandbox_singleton is not None
+                await self.sandbox_singleton.attach_to_bridge(sandbox_bridge)
+
+            on_driver_started_cb = _attach_singleton
         # Plan 23: agent + model live on TrialConfig and are required.
         # TaskConfig.agent.* is no longer consulted for service-mode
         # trials — every submission specifies which agent + model run.
@@ -119,6 +163,10 @@ class LocalTrialRunner:
                 self.local_trajectory_root / f"{self.trial_id}.jsonl"
             ),
             llm_calls_fetcher=self.llm_calls_fetcher,
+            sandbox_network=(
+                sandbox_bridge.name if sandbox_bridge is not None else None
+            ),
+            on_driver_started=on_driver_started_cb,
         )
 
         async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
@@ -164,6 +212,22 @@ class LocalTrialRunner:
                 )
                 return result
             raise
+        finally:
+            # #188: release the per-trial bridge. Runs unconditionally
+            # — even if Trial.run raised — so a half-started trial
+            # doesn't leak the /24. Singleton's network endpoint is
+            # cleaned up by docker network rm.
+            if sandbox_bridge is not None and self.sandbox_allocator is not None:
+                try:
+                    await teardown_sandbox_bridge(
+                        bridge=sandbox_bridge,
+                        allocator=self.sandbox_allocator,
+                    )
+                except Exception:
+                    logger.exception(
+                        "sandbox_bridge_teardown_failed trial=%s name=%s",
+                        self.trial_id, sandbox_bridge.name,
+                    )
 
     async def _patch_output_projection(self, result: TrialResult) -> None:
         if self.output_projection_callback is None:

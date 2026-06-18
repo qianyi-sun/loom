@@ -50,6 +50,11 @@ from loom_worker.materializers import (
 )
 from loom_worker.orphan_cleanup import cleanup_orphan_trajectories
 from loom_worker.runner_pool import RunnerPool
+from loom_worker.sandbox_network import SandboxNetworkAllocator
+from loom_worker.sandbox_singleton import (
+    SandboxSingletonManager,
+    SingletonStartupError,
+)
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
@@ -138,6 +143,30 @@ async def run_worker(settings: WorkerSettings) -> None:
                 ),
             )
 
+            # #188 / Phase B: per-worker sandbox-isolation resources.
+            # Allocator is always built (cheap); singleton is started
+            # only when isolation is on so default-off workers don't
+            # need the singleton image pulled.
+            sandbox_allocator = SandboxNetworkAllocator(
+                worker_index=settings.sandbox_worker_index,
+            )
+            sandbox_singleton: SandboxSingletonManager | None = None
+            if settings.sandbox_isolation:
+                sandbox_singleton = SandboxSingletonManager(
+                    worker_id=worker_id,
+                    image=settings.sandbox_singleton_image,
+                    secrets_host_dir=settings.sandbox_singleton_secrets_dir,
+                )
+                try:
+                    await sandbox_singleton.start()
+                except SingletonStartupError as exc:
+                    logger.error(
+                        "sandbox_singleton_start_failed err=%s — "
+                        "isolation disabled for this worker",
+                        exc,
+                    )
+                    sandbox_singleton = None
+
             while not state.shutting_down:
                 if pool.in_flight < settings.max_concurrent:
                     trial_payload = await cp_client.claim(
@@ -152,6 +181,8 @@ async def run_worker(settings: WorkerSettings) -> None:
                             worker_id=worker_id,
                             payload=trial_payload,
                             vllm_registry=vllm_registry,
+                            sandbox_allocator=sandbox_allocator,
+                            sandbox_singleton=sandbox_singleton,
                         )
                 await asyncio.sleep(settings.claim_poll_interval_sec)
 
@@ -225,6 +256,8 @@ async def _spawn_trial(
     worker_id: UUID,
     payload: dict[str, Any],
     vllm_registry: WorkerVLLMRegistry,
+    sandbox_allocator: SandboxNetworkAllocator | None = None,
+    sandbox_singleton: SandboxSingletonManager | None = None,
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
@@ -298,6 +331,13 @@ async def _spawn_trial(
         # claimed by this worker process so the 1-3 min vLLM startup
         # is amortised across many same-model trials.
         vllm_registry=vllm_registry,
+        # #188 / Phase B: per-trial sandbox isolation. Both None →
+        # legacy direct-network behavior. Both populated → per-trial
+        # bridge + singleton attach.
+        sandbox_allocator=(
+            sandbox_allocator if sandbox_singleton is not None else None
+        ),
+        sandbox_singleton=sandbox_singleton,
     )
 
     async def _run_and_cleanup() -> None:

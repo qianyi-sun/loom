@@ -25,6 +25,13 @@ class Capabilities(BaseModel):
     # and Daytona this is always empty (no GPU passthrough). For Modal it
     # lists the modal-supported GPU strings.
     gpu_types: frozenset[str] = frozenset()
+    # Phase B (#78 / #188): can the backend honor `StartOptions.network`
+    # (attach the sandbox container to a specific docker network)?
+    # True for DockerDriver. False for Daytona/Modal (cloud sandboxes
+    # don't expose docker networking). When the worker has sandbox
+    # isolation on AND this is False, the trial fails loudly with
+    # CapabilityError rather than silently degrading.
+    supports_custom_network: bool = False
 
 
 class RequiredCapabilities(BaseModel):

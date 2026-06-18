@@ -29,6 +29,12 @@ class StartOptions:
 
     force_build: bool = False
     pull: bool = True
+    # Phase B (#78 / #188): attach the container to a specific docker
+    # network on creation. None means "default network" (current
+    # behavior). Set to the per-trial sandbox bridge name when sandbox
+    # isolation is on. Honored only by drivers whose
+    # `capabilities.supports_custom_network` is True.
+    network: str | None = None
 
 
 @dataclass
