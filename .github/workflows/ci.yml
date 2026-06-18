@@ -70,6 +70,12 @@ jobs:
                 case "$path" in
                   *.md|docs/*|.gitignore|LICENSE|.editorconfig)
                     ;;
+                  .github/CODEOWNERS)
+                    ;;
+                  .github/PULL_REQUEST_TEMPLATE.md)
+                    ;;
+                  .github/ISSUE_TEMPLATE/*)
+                    ;;
                   *)
                     docs_only=false
                     break

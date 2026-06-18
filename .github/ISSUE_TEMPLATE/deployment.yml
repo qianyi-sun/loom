@@ -1,7 +1,7 @@
 name: Deployment / Operations
 description: Track dev, staging, production, CI/CD, or runtime environment work
 title: "[Deploy] "
-labels: ["workstream:infra", "type:deployment"]
+labels: ["workstream:infra", "type:deployment", "area:deploy"]
 body:
   - type: dropdown
     id: environment
@@ -9,10 +9,11 @@ body:
       label: Environment
       options:
         - Local developer Docker
-        - Shared dev
+        - platform-dev shared dev
         - Staging
         - Production
         - CI/CD
+        - Remote worker pool
     validations:
       required: true
   - type: textarea

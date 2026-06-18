@@ -15,15 +15,16 @@ body:
     attributes:
       label: Component
       options:
-        - Run lifecycle
-        - Data contract
-        - Benchmark adapter
-        - Model provider
-        - Sandbox backend
-        - Evaluator
-        - Storage / artifacts
-        - Dashboard / reporting
-        - Deployment / operations
+        - Run lifecycle / scheduler
+        - Service API / auth
+        - Model provider / LLM gateway
+        - Benchmark catalog / task materialization
+        - Agent adapter / sandbox runtime
+        - Evaluator / scoring
+        - Storage / artifacts / trajectories
+        - Web SPA / dashboard
+        - Deployment / operations / observability
+        - Governance / release
     validations:
       required: true
   - type: textarea

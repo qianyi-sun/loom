@@ -1,10 +1,22 @@
-# Default ownership until subsystem-specific owners are defined.
-* @carinrc/platform-maintainers
+# Default review ownership for accepted maintainers with write/admin access.
+* @qianyi-sun @Hongjian-Gu
 
-# Governance and CI changes need platform-owner review.
-/.github/ @carinrc/platform-admins
-/deploy/ @carinrc/platform-admins
-/migrations/ @carinrc/platform-admins
-/CONTRIBUTING.md @carinrc/platform-admins
-/SECURITY.md @carinrc/platform-admins
-/LICENSE @carinrc/platform-admins
+# Governance, CI, release, and security boundaries.
+/.github/ @qianyi-sun @Hongjian-Gu
+/CONTRIBUTING.md @qianyi-sun @Hongjian-Gu
+/SECURITY.md @qianyi-sun @Hongjian-Gu
+/LICENSE @qianyi-sun @Hongjian-Gu
+
+# Runtime, deployment, and persistence surfaces.
+/deploy/ @qianyi-sun @Hongjian-Gu
+/migrations/ @qianyi-sun @Hongjian-Gu
+/src/loom_control_plane/ @qianyi-sun @Hongjian-Gu
+/src/loom_llm_gateway/ @qianyi-sun @Hongjian-Gu
+/src/loom_service/ @qianyi-sun @Hongjian-Gu
+/src/loom_worker/ @qianyi-sun @Hongjian-Gu
+
+# User-facing CLI, web, adapters, and docs.
+/src/loom_cli/ @qianyi-sun @Hongjian-Gu
+/web/ @qianyi-sun @Hongjian-Gu
+/packages/ @qianyi-sun @Hongjian-Gu
+/docs/ @qianyi-sun @Hongjian-Gu

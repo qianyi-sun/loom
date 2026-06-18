@@ -16,9 +16,9 @@ body:
     validations:
       required: true
   - type: textarea
-    id: workflow
+    id: evaluation_flow
     attributes:
-      label: Workflow
+      label: Evaluation Flow
       description: What generation, evaluation, or reporting workflow needs platform support?
     validations:
       required: true
@@ -26,14 +26,14 @@ body:
     id: inputs
     attributes:
       label: Inputs
-      description: Models, agents, benchmarks, tasks, datasets, sandboxes, or secrets needed.
+      description: Models, provider connections, agents, benchmarks, tasks, datasets, sandbox policies, or secret references needed.
     validations:
       required: true
   - type: textarea
     id: outputs
     attributes:
       label: Outputs
-      description: Artifacts, trajectory data, metrics, evaluator feedback, or dashboard views expected.
+      description: Artifacts, trajectories, ATIF, metrics, evaluator feedback, or dashboard views expected.
     validations:
       required: true
   - type: textarea

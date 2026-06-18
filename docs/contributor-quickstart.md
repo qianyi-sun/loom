@@ -122,13 +122,17 @@ tuning work.
 
 ## Workflow
 
-Use PRs into `dev` for normal development; `main` is release-only and
-receives promotion PRs from `dev`. See
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for commit style, PR
-requirements, and the definition of done. Public-readiness work was
-completed in [`#12`](https://github.com/carinrc/loom/issues/12), and
-the broader GitHub-flow cleanup remains tracked at
-[`#6`](https://github.com/carinrc/loom/issues/6).
+Use issue-scoped PRs into `dev` for normal development; `main` is
+release-only and receives promotion PRs from `dev`. See
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for issue ownership, commit
+style, PR requirements, and the definition of done.
+
+New contributors should start from an open issue or discuss scope in a
+new issue before implementing. PRs use
+[`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md)
+and must link the issue they advance. Maintainers mark actively owned
+issues with a `[WIP] ` title prefix, keep the project status current,
+and squash-merge after the required checks and review state are clean.
 
 Merge mechanics:
 - Squash-only (no rebase merge, no merge commits)
@@ -139,6 +143,9 @@ Merge mechanics:
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and
   must not receive publish or deployment secrets.
+- PRs from forks or external contributor branches must not depend on
+  protected secrets; maintainers can rerun protected workflows from a
+  trusted branch when needed.
 - The benchmark publishing workflow uses the protected
   `huggingface-publish` environment and should only expose `HF_TOKEN`
   after branch restrictions and maintainer approval pass.

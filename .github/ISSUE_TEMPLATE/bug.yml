@@ -8,14 +8,16 @@ body:
     attributes:
       label: Area
       options:
-        - Backend / API
-        - Data contract
-        - Benchmark adapter
-        - Sandbox / runner
-        - Evaluator
-        - Storage / artifacts
-        - Dashboard / UI
-        - CI / deployment
+        - API / service
+        - Auth / teams / tokens
+        - Model provider / LLM gateway
+        - Benchmark catalog / task bundle
+        - Batch / trial lifecycle
+        - Worker / sandbox runtime
+        - Storage / artifacts / trajectories
+        - Web SPA
+        - CLI
+        - CI / deployment / operations
         - Documentation
     validations:
       required: true

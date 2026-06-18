@@ -12,7 +12,9 @@ body:
         - Documentation
         - CI/CD
         - Dev environment
-        - GitHub/project management
+        - GitHub issue/project management
+        - Release / governance
+        - Benchmark catalog
         - Research intake
         - Operations
     validations:

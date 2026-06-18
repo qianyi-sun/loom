@@ -1,5 +1,5 @@
 name: Feature
-description: Track a product, platform, or workflow feature
+description: Track a user-facing or platform capability
 title: "[Feature] "
 labels: ["enhancement", "type:feature"]
 body:
@@ -8,13 +8,14 @@ body:
     attributes:
       label: Workstream
       options:
-        - Stakeholders / scope
-        - Infra / deployment
-        - Requirements
-        - Product / architecture
-        - Engineering system
-        - Operations / governance
-        - MVP pilot
+        - User evaluation flow
+        - API / service
+        - Model provider / gateway
+        - Benchmark catalog / task data
+        - Agent adapter / sandbox runtime
+        - Web SPA / monitoring
+        - Deployment / operations
+        - Governance / release
     validations:
       required: true
   - type: dropdown
