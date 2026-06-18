@@ -93,6 +93,15 @@ class LocalTrialRunner:
             self.trial_config.agent_model,
             self.trial_config.agent_name,
         )
+        # #184: if the agent opts in (LiteLLMAgent), surface the task's
+        # declared artifact paths so it can write the LLM's final
+        # response somewhere the verifier can grade. Duck-typed so
+        # Protocol-respecting agents that write their own artifacts
+        # (oracle, claude-code, opencode, …) are unaffected.
+        if hasattr(agent, "artifact_paths"):
+            agent.artifact_paths = [
+                a for step in self.task_config.steps for a in step.artifacts
+            ]
         verifier = self.verifier_factory()
 
         ctx = TrialContext(

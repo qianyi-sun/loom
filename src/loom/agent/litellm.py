@@ -47,6 +47,12 @@ class LiteLLMAgent:
     # client on every chat request so the call routes via the team's
     # stored credential + base_url rather than the platform default.
     provider_connection_id: str | None = None
+    # #184: paths (relative to sandbox /workspace) where the agent's
+    # final LLM response should be written so file-artifact benchmarks'
+    # verifiers (pytest etc.) can grade it. Set by the runner from
+    # task_config.steps[*].artifacts when LiteLLMAgent is used. If
+    # empty, no artifact write happens (chat-only tasks).
+    artifact_paths: list[str] = field(default_factory=list)
 
     async def run(
         self,
@@ -107,8 +113,57 @@ class LiteLLMAgent:
 
             messages.append(response.response)
             if response.finish_reason == "stop":
+                raw_content = response.response.content
+                content_str = (
+                    raw_content if isinstance(raw_content, str)
+                    else "" if raw_content is None
+                    else "".join(
+                        str(p.get("text", "")) if isinstance(p, dict) else str(p)
+                        for p in raw_content
+                    )
+                )
+                await self._write_artifacts(env, content_str)
                 return
 
         raise AgentError(
             f"LiteLLMAgent exhausted max_turns={self.max_turns} without 'stop'",
         )
+
+    async def _write_artifacts(self, env: Driver, content: str) -> None:
+        """#184: write the LLM's final response into the declared
+        artifact paths so file-artifact benchmarks (pytest etc.) can
+        grade it. Extracts the first fenced code block when present;
+        falls back to raw content. Each path is written individually
+        to `/workspace/{path}` via the driver's upload.
+        """
+        if not self.artifact_paths:
+            return
+        body = _extract_first_code_block(content)
+        import tempfile
+        from pathlib import Path
+        for rel_path in self.artifact_paths:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".out", delete=False, encoding="utf-8",
+            ) as tf:
+                tf.write(body)
+                tmp = Path(tf.name)
+            try:
+                dst = PurePosixPath("/workspace") / rel_path
+                await env.upload(tmp, dst)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+
+def _extract_first_code_block(text: str) -> str:
+    """Return the first ```lang...``` fenced block's content, or the
+    full text if no fence is present. Trims surrounding whitespace.
+
+    The model is prompted to wrap solutions in fences; for safety
+    against models that just return raw code, fall through to the
+    full text.
+    """
+    import re
+    m = re.search(r"```[a-zA-Z0-9_-]*\n(.*?)```", text, re.DOTALL)
+    if m is None:
+        return text.strip()
+    return m.group(1).rstrip()
