@@ -61,6 +61,14 @@ cluster = [
 vllm = [
   "vllm>=0.6,<1.0",
 ]
+# `loom_egress_xds` (#78 Phase C) is a standalone process whose
+# Envoy/gRPC deps (`envoy-data-plane`, `xds-protos`) require
+# `protobuf>=6`, which conflicts with `google-generativeai`'s
+# `protobuf<6` pin. Rather than crippling the main project's
+# uv-resolution by adding an incompatible extra, those deps live in
+# the standalone `deploy/Dockerfile.egress-xds` requirements (added
+# in PR-C1b). This PR's code (config_builder + watcher) has no
+# Envoy/gRPC imports — they live in the gRPC server module only.
 dev = [
   "hypothesis>=6.100,<7.0",
   "mypy>=1.10,<2.0",
