@@ -284,7 +284,7 @@ async def _spawn_trial(
             gateway_url=str(settings.gateway_url),
             provider_connection_id=payload.get("provider_connection_id"),
         ),
-        verifier_factory=lambda: PytestVerifier(),
+        verifier_factory=lambda: PytestVerifier(**task_config.verifier.args),
         object_store=object_store,
         gateway_client=gateway_client,
         local_trajectory_root=settings.trajectory_cache_dir,

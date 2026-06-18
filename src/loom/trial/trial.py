@@ -8,7 +8,7 @@ import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -35,6 +35,7 @@ from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.finalize import finalize_trajectory
 from loom.trial.step_runner import run_step
+from loom.trial.workspace import materialize_workspace
 from loom.verifier.base import Verifier
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,16 @@ class Trial:
                         agent_name=self.ctx.agent.name,
                         agent_mode=self.ctx.agent.mode,
                     ))
+                    # #186: upload the materialized task bundle into the
+                    # sandbox so the agent sees instructions / scaffolding
+                    # AND the verifier sees grading tests at /workspace/
+                    # tests. Mirrors what oracle_runner does for the
+                    # verify CLI. Skips `task.toml` (host-side metadata).
+                    await materialize_workspace(
+                        driver=self.ctx.driver,
+                        task_dir=self.ctx.task_dir,
+                        dst=PurePosixPath("/workspace"),
+                    )
                     if isinstance(self.ctx.agent, InBoxAgentRuntime):
                         await self.ctx.agent.setup(env=self.ctx.driver)
 

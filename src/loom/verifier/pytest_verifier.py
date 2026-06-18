@@ -29,12 +29,21 @@ _JUNIT_PATH = PurePosixPath("/loom/verifier/junit.xml")
 class PytestVerifier:
     name: str = "pytest"
     tests_dir: PurePosixPath = field(
-        default_factory=lambda: PurePosixPath("/tests"),
+        default_factory=lambda: PurePosixPath("/workspace/tests"),
     )
     pytest_args: tuple[str, ...] = field(
         default_factory=lambda: ("--maxfail=0", "-q"),
     )
     user: str | int | None = None
+
+    def __post_init__(self) -> None:
+        # #186: task.toml ships verifier args as JSON-friendly types
+        # (str / list). Coerce so the worker can pass `task_config.
+        # verifier.args` straight through without an adapter layer.
+        if isinstance(self.tests_dir, str):
+            self.tests_dir = PurePosixPath(self.tests_dir)
+        if isinstance(self.pytest_args, list):
+            self.pytest_args = tuple(self.pytest_args)
 
     async def verify(
         self,
@@ -45,7 +54,13 @@ class PytestVerifier:
         trajectory: TrajectoryReader,
     ) -> VerifierResult:
         await env.exec("mkdir -p /loom/verifier", user="root")
+        # #186: bare `python:3.11-slim` (HumanEval's default image)
+        # doesn't ship pytest. Install on demand if missing — pip is
+        # fast-path (~1s) when already installed. Task authors who care
+        # about cold-start latency can bake pytest into the image.
         cmd = (
+            "python -c 'import pytest' 2>/dev/null || "
+            "pip install --quiet pytest >/dev/null 2>&1; "
             f"cd {self.tests_dir.as_posix()} && "
             f"pytest --junitxml={_JUNIT_PATH.as_posix()} "
             + " ".join(self.pytest_args)
