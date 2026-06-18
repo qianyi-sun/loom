@@ -1,8 +1,9 @@
 """FastAPI factory for loom_service (spec §2).
 
 Stateless service. The lifespan opens a per-process async SQLAlchemy
-engine, a boto3 S3 client (for Plan 18+ presigned URLs), and an httpx
-AsyncClient pointed at the Control Plane (for Plan 18+ forwarders).
+engine, boto3 S3 clients for internal object-store operations and
+user-facing presigned URLs, and an httpx AsyncClient pointed at the
+Control Plane (for Plan 18+ forwarders).
 Routes pull these off `request.app.state`.
 """
 
@@ -14,9 +15,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import boto3
 import httpx
-from botocore.config import Config
 from fastapi import FastAPI, Request
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -52,6 +51,10 @@ from loom_service.routes import (
     trials,
     usage,
 )
+from loom_service.storage import (
+    create_minio_client,
+    create_minio_presign_client,
+)
 
 
 def _load_admin_secret_verifier(
@@ -72,14 +75,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
-        minio_client = boto3.client(
-            "s3",
-            endpoint_url=settings.minio_endpoint,
-            aws_access_key_id=settings.minio_access_key.get_secret_value(),
-            aws_secret_access_key=settings.minio_secret_key.get_secret_value(),
-            region_name=settings.minio_region,
-            config=Config(signature_version="s3v4"),
+        minio_client = create_minio_client(
+            settings, endpoint_url=settings.minio_endpoint,
         )
+        minio_presign_client = create_minio_presign_client(settings)
 
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url), timeout=10.0,
@@ -108,6 +107,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
+        app.state.minio_presign_client = minio_presign_client
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
 

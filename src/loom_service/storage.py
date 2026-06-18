@@ -1,30 +1,62 @@
-"""MinIO / S3 storage helpers for loom_service.
-
-Currently provides the presigned-URL public-endpoint rewrite so that URLs
-generated against the cluster-internal MinIO hostname can be returned as
-publicly resolvable URLs when ``LOOM_SVC_MINIO_PUBLIC_ENDPOINT`` is set.
-"""
+"""MinIO / S3 storage helpers for loom_service."""
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import urlparse, urlunparse
+
+import boto3
+from botocore.config import Config
 
 from loom_service.config import LoomServiceSettings
 
 
+def create_minio_client(
+    settings: LoomServiceSettings, *, endpoint_url: str,
+) -> Any:
+    """Create a boto3 S3 client for the configured MinIO-compatible store."""
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=settings.minio_access_key.get_secret_value(),
+        aws_secret_access_key=settings.minio_secret_key.get_secret_value(),
+        region_name=settings.minio_region,
+        config=Config(signature_version="s3v4"),
+    )
+
+
+def create_minio_presign_client(settings: LoomServiceSettings) -> Any:
+    """Create the client used for user-facing presigned GET URLs.
+
+    SigV4 presigned URLs bind the request ``Host`` header through
+    ``X-Amz-SignedHeaders=host``. If Loom serves API callers outside the
+    cluster, the URL must therefore be signed with the public endpoint the
+    caller will use, not signed internally and rewritten afterward.
+    """
+    return create_minio_client(
+        settings,
+        endpoint_url=settings.minio_public_endpoint or settings.minio_endpoint,
+    )
+
+
+def get_minio_presign_client(app_state: Any) -> Any:
+    """Return the public presign client, falling back for older test fixtures."""
+    return getattr(app_state, "minio_presign_client", app_state.minio_client)
+
+
 def rewrite_to_public(url: str, settings: LoomServiceSettings) -> str:
-    """Rewrite a presigned URL's host:port to the public MinIO endpoint.
+    """Rewrite a URL's host:port to the public MinIO endpoint.
+
+    This helper is retained for non-SigV4 and legacy callers. Do not use it for
+    SigV4 presigned URLs returned to users; those must be generated with
+    :func:`create_minio_presign_client` so the signed ``Host`` header matches
+    the public endpoint.
 
     If ``settings.minio_public_endpoint`` is *not* set the URL is returned
     unchanged, preserving byte-identical behaviour for existing deployments.
 
-    The query string (``?X-Amz-Algorithm=...``) is preserved verbatim — the
-    AWS signature is bound to the path, not the hostname, so only host:port
-    replacement is needed when MinIO uses path-style addressing (the default
-    Loom configuration).
-
     Args:
-        url: Presigned URL as returned by ``boto3.generate_presigned_url()``.
+        url: URL to rewrite.
         settings: Loaded ``LoomServiceSettings`` instance.
 
     Returns:

@@ -163,9 +163,12 @@ knob you need.
 
    If MinIO is reachable from the internet — either via its own Ingress or as a
    path under the main Loom Ingress — set `LOOM_SVC_MINIO_PUBLIC_ENDPOINT` to
-   the public base URL. `loom_service` will rewrite every presigned URL's
-   host:port to that value before returning it to API callers. The internal boto3
-   client continues to use `LOOM_SVC_MINIO_ENDPOINT` for bucket operations.
+   the public base URL. `loom_service` uses `LOOM_SVC_MINIO_ENDPOINT` for
+   internal bucket operations and a separate presign client pointed at
+   `LOOM_SVC_MINIO_PUBLIC_ENDPOINT` for URLs returned to API callers. This is
+   required because SigV4 presigned URLs bind the request `Host` header; signing
+   against the internal hostname and rewriting the URL afterward will fail with
+   `SignatureDoesNotMatch` from browsers and laptop CLIs.
 
    ```bash
    kubectl patch secret loom-secrets \

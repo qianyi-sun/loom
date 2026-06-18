@@ -19,7 +19,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
-from loom_service.storage import rewrite_to_public
+from loom_service.storage import get_minio_presign_client
 
 router = APIRouter()
 
@@ -40,15 +40,14 @@ async def atif_redirect(
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
 
-    url = rewrite_to_public(
-        request.app.state.minio_client.generate_presigned_url(
-            "get_object",
-            Params={
-                "Bucket": settings.trajectories_bucket,
-                "Key": f"{trial.team_id}/{trial.id}/atif.json",
-            },
-            ExpiresIn=settings.signed_url_expiry_sec,
-        ),
-        settings,
+    url = get_minio_presign_client(
+        request.app.state,
+    ).generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": settings.trajectories_bucket,
+            "Key": f"{trial.team_id}/{trial.id}/atif.json",
+        },
+        ExpiresIn=settings.signed_url_expiry_sec,
     )
     return RedirectResponse(url=url, status_code=302)

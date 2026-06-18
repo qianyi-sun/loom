@@ -1,12 +1,14 @@
-"""Unit tests for presigned-URL public-endpoint rewrite (issue #160).
+"""Unit tests for MinIO public-endpoint URL helpers.
 
 Covers:
 1. Default (no minio_public_endpoint) → URL unchanged.
 2. Public endpoint set → host:port rewritten, scheme promoted, path + query
    string preserved.
 3. Public endpoint includes port → host AND port both rewritten.
-4. Route-level wiring for get_trial (atif_url, trajectory_url,
-   artifacts[].download_url), atif_redirect, and download_trajectory.
+
+SigV4 presigned URLs returned to users are covered by integration tests that
+assert routes use the public presign client instead of this legacy rewrite
+helper.
 """
 
 from __future__ import annotations
@@ -131,7 +133,7 @@ def test_rewrite_http_to_http_preserves_scheme() -> None:
     assert result.startswith("http://public-minio.internal:9001")
 
 
-# ─── 4. Route-level wiring: build a minimal FastAPI app and verify URLs ───────
+# ─── 4. Legacy route fixture retained for compatibility experiments ──────────
 
 def _make_app(minio_public_endpoint: str | None = None) -> FastAPI:
     """Build the loom_service FastAPI app with mocked minio + settings."""

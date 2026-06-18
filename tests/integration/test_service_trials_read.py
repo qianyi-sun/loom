@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import boto3
@@ -100,6 +102,7 @@ async def trials_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Trial))
+            s.execute(delete(Batch))
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
@@ -326,6 +329,70 @@ async def test_trial_detail_exposes_projected_artifacts(
     assert "X-Amz-Signature" in body["artifacts"][0]["download_url"]
 
 
+async def test_trial_detail_uses_public_presign_client_for_download_urls(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    artifact_key = f"{team_id}/{trial_ids[0]}/main/result.txt"
+
+    public_presign_client = MagicMock()
+
+    def _public_url(
+        _op: str, *, Params: dict[str, Any], ExpiresIn: int,  # noqa: N803
+    ) -> str:
+        assert ExpiresIn == 3600
+        return (
+            f"http://localhost:9000/{Params['Bucket']}/{Params['Key']}"
+            "?X-Amz-SignedHeaders=host&X-Amz-Signature=publicsig"
+        )
+
+    public_presign_client.generate_presigned_url.side_effect = _public_url
+    app.state.minio_presign_client = public_presign_client
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[0])
+            .values(trajectory_index={
+                "trajectory_uri": (
+                    f"s3://trajectories/{team_id}/{trial_ids[0]}/events.jsonl"
+                ),
+                "atif_uri": f"s3://trajectories/{team_id}/{trial_ids[0]}/atif.json",
+                "artifacts": [{
+                    "step_name": "main",
+                    "bucket": "artifacts",
+                    "key": artifact_key,
+                    "size": 5,
+                }],
+            }),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    urls = [
+        body["atif_url"],
+        body["trajectory_url"],
+        body["artifacts"][0]["download_url"],
+    ]
+    assert all(url.startswith("http://localhost:9000/") for url in urls)
+    assert all("X-Amz-Signature=publicsig" in url for url in urls)
+    assert all("minio:9000" not in url for url in urls)
+    assert public_presign_client.generate_presigned_url.call_count == 3
+
+
 async def test_trial_detail_not_found(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:
@@ -446,6 +513,7 @@ async def test_filter_by_batch_id(
         s.execute(insert(Batch).values(
             id=batch_id, team_id=team_id, name="qa-batch-161",
             task_filter={}, trial_config={},
+            created_by_token_prefix="abcdef12",
         ))
         s.execute(
             update(Trial)

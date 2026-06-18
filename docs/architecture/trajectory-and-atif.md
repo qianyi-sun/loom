@@ -170,8 +170,12 @@ path:
   uploaded artifact's `step_name`, bucket, object key, and size.
 
 `GET /api/v1/trials/{id}` reads this projection to return ready flags
-and presigned artifact download URLs. A succeeded trial should not
-require clients to scan object storage or guess artifact keys.
+and presigned ATIF, trajectory, and artifact download URLs. In
+deployments with a user-facing object-store endpoint, `loom_service`
+signs these URLs with the public MinIO/S3 endpoint rather than signing
+with the cluster-internal endpoint and rewriting the host afterward;
+SigV4 includes `Host` in the signed headers. A succeeded trial should
+not require clients to scan object storage or guess artifact keys.
 
 ## Trajectory ↔ ATIF in code
 
