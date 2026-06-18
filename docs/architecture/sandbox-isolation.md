@@ -1,17 +1,17 @@
 # Sandbox isolation — current trust boundary
 
-**Status: design + as-shipped state, 2026-06-16.**
+**Status: as-shipped state, 2026-06-18. Epic [#78](https://github.com/carinrc/loom/issues/78) closed.**
 
 What this doc is: an honest description of the sandbox isolation Loom
-ships **today**, including known gaps, so operators can make informed
-decisions about which network policy to use for which workload.
+ships **today**, so operators can make informed decisions about which
+network policy + isolation mode to use for which workload.
 
-What this doc is NOT: the full target architecture described in
-`cluster-deploy.md` §Sandbox→gateway flow — that includes
-`loom-egress-proxy` + `loom-egress-xds` + per-trial Docker bridges +
-`loom-llm-gateway-sandbox` singleton, which are partly shipped (basic
-gateway + SSRF defense) and partly aspirational (per-trial bridges +
-sandbox singleton). Tracked by epic [#78](https://github.com/carinrc/loom/issues/78).
+The full chain described in `cluster-deploy.md` §Sandbox→gateway
+flow — per-trial Docker bridges, `loom-llm-gateway-sandbox`
+singleton, `loom-egress-proxy` + `loom-egress-xds`, step-JWT
+rotation — is **shipped** as of #78's close. Default-off
+(`LOOM_WORKER_SANDBOX_ISOLATION=0`) preserves the pre-#78 single-
+bridge behavior so operators can roll it out per environment.
 
 ## Trust model
 
@@ -170,36 +170,112 @@ These are checks an operator can run today:
    for a gateway call referencing trial B's connection — gateway
    returns 401 with the `wrong_trial` claim mismatch.
 
-4. **No provider keys in trajectory.** `loom eval trial show <id>`
-   then download the trajectory:
+4. **No provider keys in trajectory.** Use the bundled audit script:
    ```bash
-   grep -i 'sk-\|anthropic\|api[-_]key' events.jsonl
+   ./scripts/check_no_provider_keys_in_artifacts.py <trial-id>
    ```
-   Should return nothing for any trial. If it does, file a bug.
+   Exit 0 = clean; exit 1 = pattern hit (with a redacted preview).
+   Patterns cover: `sk-ant-*` (anthropic), `sk-*` (openai),
+   `AIza*` (google), `xai-*`, `gsk_*` (groq), `nvapi-*`, `tgp_v1_*`,
+   `r8_*` (replicate). Both modes: local-path or remote-trial-via-
+   MinIO.
 
-## Roadmap
+5. **Sandbox can't bypass the singleton.** With
+   `LOOM_WORKER_SANDBOX_ISOLATION=1`, exec into a sandbox container
+   and verify host egress is denied:
+   ```bash
+   docker exec -it <sandbox> wget -T 3 -O- http://1.1.1.1/  # times out
+   docker exec -it <sandbox> curl -k https://loom-sandbox-gateway.local:8443/healthz  # OK
+   ```
+   The first fails because the `--internal` bridge has no host
+   route; the second works because the singleton is attached.
 
-The remaining slices of #78, in priority order:
+## Sandbox-isolation mode (#78 — shipped)
 
-1. **Per-trial Docker bridges.** Move from shared bridge to a
-   `--internal` per-trial bridge with the worker spawning a
-   `loom-llm-gateway-sandbox` singleton (architecture per
-   cluster-deploy.md §Sandbox→gateway flow). Worker code change.
-2. **`loom-gateway-router` DaemonSet.** Implements the
-   sandbox-Docker-network → in-cluster-Service hop with hostPort
-   30443. New k8s component.
-3. **Egress proxy.** `loom-egress-proxy` Envoy + `loom-egress-xds`
-   provider-CDS feeds for "even a compromised gateway can only
-   reach approved provider IPs." Replaces the loom-llm-gateway
-   egress allow-0.0.0.0/0 rule with a per-connection IP allowlist.
+Operators turn the full chain on via `LOOM_WORKER_SANDBOX_ISOLATION=1`
+on the worker. Default off → pre-#78 single-bridge behavior, no
+breaking change for existing deployments.
 
-Each slice updates this doc as it lands.
+When on, every claimed trial:
 
-Shipped slices:
+1. **Per-trial bridge.** Worker allocates a free `/24` from the
+   `10.{42+worker_index}.{1..254}.0/24` pool and runs
+   `docker network create --internal …` — no host route. The container
+   attaches via `StartOptions.network`. (Phase A, PR [#189](https://github.com/carinrc/loom/pull/189) + [#195](https://github.com/carinrc/loom/pull/195).)
+2. **Per-node singleton.** Worker spawns ONE
+   `loom-llm-gateway-sandbox` container per worker process (Go binary,
+   ~14 MB distroless) and attaches it to every per-trial bridge. The
+   singleton TLS-terminates on `loom-sandbox-gateway.local:8443`,
+   validates step-JWTs (HS256, shared signing key), and reverse-
+   proxies to `gateway-router`. (Phase B, PR [#220](https://github.com/carinrc/loom/pull/220) + [#221](https://github.com/carinrc/loom/pull/221) + [#224](https://github.com/carinrc/loom/pull/224).)
+3. **Egress chain.** Gateway-router's outbound provider calls go
+   through `loom-egress-proxy` (Envoy) which fetches per-connection
+   CDS+RDS from `loom-egress-xds` (gRPC). Routes match on
+   `(x-loom-connection-id, :authority)` pair so a tenant header alone
+   isn't enough — destination hostname must also match. Cluster
+   endpoints are `provider_connections.resolved_egress_ips`, so a
+   compromised gateway can ONLY reach the IPs the connection was
+   verified to resolve to. (Phase C, PRs [#192](https://github.com/carinrc/loom/pull/192) + [#200](https://github.com/carinrc/loom/pull/200) + [#209](https://github.com/carinrc/loom/pull/209) + [#215](https://github.com/carinrc/loom/pull/215) + [#217](https://github.com/carinrc/loom/pull/217).)
+4. **Step-JWT rotation.** Worker mounts
+   `/var/lib/loom/sandbox-secrets/trials/<trial>/run/loom/` into the
+   sandbox at `/run/loom/`. A rotator writes the initial token before
+   `driver.start()`, then atomically replaces `step-jwt` every
+   `TTL/2` (default 300s) via `write(tmp) + os.replace(tmp, dst)` —
+   POSIX-atomic. Concurrent readers see old-or-new contents, never
+   partial. (Phase D, PR [#225](https://github.com/carinrc/loom/pull/225) + [#230](https://github.com/carinrc/loom/pull/230).)
 
-- **Slice A** (PR #116): this doc, honest as-shipped trust boundary.
-- **Slice B** (PR #117): always-blocked CIDRs for metadata + link-local IPs.
-- **Slice C** (this PR): k8s NetworkPolicies for in-cluster components.
+The chain fails closed at every layer:
+
+- Driver doesn't support `StartOptions.network` → `RuntimeError`
+  before any state change (`Capabilities.supports_custom_network`).
+- Singleton fails to start → isolation disabled for the worker
+  process (logged), but worker keeps claiming trials so legacy
+  paths still work.
+- JWT mint fails mid-rotation → the previous token stays valid
+  until its real expiry. The rotator logs + retries on the next tick.
+- Envoy can't reach `loom-egress-xds` → no routes published →
+  sandbox CONNECTs return 404 from Envoy.
+
+### Operator switches
+
+| Env | Default | Effect |
+|---|---|---|
+| `LOOM_WORKER_SANDBOX_ISOLATION` | `false` | Master switch. On = bridge + singleton + rotator + bind-mount. |
+| `LOOM_WORKER_SANDBOX_SINGLETON_IMAGE` | `loom-llm-gateway-sandbox:dev` | Image tag for the per-node Go singleton. |
+| `LOOM_WORKER_SANDBOX_SINGLETON_SECRETS_DIR` | `/var/lib/loom/sandbox-secrets` | Host-side root the rotator writes step-JWT files into. Mounted into the sandbox at `/run/loom/`. |
+| `LOOM_WORKER_SANDBOX_WORKER_INDEX` | `0` | 0..15. Partitions the `/24` pool so multiple workers per host don't collide. |
+| `LOOM_WORKER_SANDBOX_STEP_JWT_TTL_SEC` | `600` | TTL the worker requests for minted step-JWTs. Rotation cadence = TTL/2. |
+| `LOOM_GW_EGRESS_PROXY_URL` | `""` (direct) | Gateway-side: when set, facade routes (`/openai/*`, `/anthropic/*`, `/google/*`) route through Envoy with per-connection CONNECT header. |
+
+### Acceptance evidence
+
+- `tests/integration/test_sandbox_isolation_acceptance.py` — pins
+  the full chain order with a recording fake docker runner.
+- `tests/integration/test_sandbox_network_docker.py` — real-docker
+  proof that a `--internal` bridge denies `wget http://1.1.1.1/`.
+- `tests/integration/test_egress_xds_envoy.py` — Postgres-fed xDS
+  server publishes the expected Cluster + Route shapes.
+- `deploy/envoy/spike/` — manual reproducible CONNECT proxy spike
+  ([#196 findings](https://github.com/carinrc/loom/issues/196#issuecomment-4743811525)) that surfaced the
+  `(header, :authority)` pair-match requirement (CDN-fronted
+  providers share IPs).
+- `deploy/docker-compose.dev.yml` — egress chain runs end-to-end in
+  dev compose by default.
+- `scripts/check_no_provider_keys_in_artifacts.py` — auditable
+  proof a trial's artifacts contain no provider-key prefixes.
+
+### Known limits
+
+- **Per-step cost attribution** is coarse under isolation: the
+  rotator mints with a fixed `step_id="sandbox-rotated"` rather than
+  the live step. Cost attribution stays correct at the trial level;
+  per-step granularity is a follow-up.
+- **`routes/chat.py` (litellm path)** does NOT yet route through
+  the egress proxy — litellm creates its own httpx client per call
+  and per-CONNECT header injection requires either monkey-patching
+  litellm or bypassing it. Sandboxes that should be IP-allowlisted
+  MUST use the facade routes (`/openai/v1/*`, `/anthropic/v1/*`,
+  `/google/v1beta/*`). Tracked at [#216](https://github.com/carinrc/loom/issues/216).
 
 ## See also
 
