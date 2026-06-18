@@ -4,10 +4,12 @@
 > and is operated as an issue-scoped GitHub-flow project. Normal
 > changes land through PRs into `dev`; `main` remains reserved for
 > release promotion from `dev`. `repository-checks` remains the required
-> fast CI gate, and external pull requests are accepted for issue-scoped
-> work that follows the templates below. Workflows that need publish or
-> deployment secrets must use protected GitHub Environments and must not
-> expose secrets to pull request code.
+> fast CI gate. Normal `dev` PRs use GitHub auto-merge, so GitHub
+> squash-merges once required checks and required review state pass.
+> External pull requests are accepted for issue-scoped work that follows
+> the templates below. Workflows that need publish or deployment secrets
+> must use protected GitHub Environments and must not expose secrets to
+> pull request code.
 
 ## Active Workflow
 
@@ -117,10 +119,14 @@ for release promotion PRs from `dev`.
 - Link to a GitHub issue with acceptance criteria
 - Keep one concern per PR
 - Use the PR template
-- Wait for CI green before merge; human review is required only on
-  branches or environments whose protection rules demand it, and for
-  external PRs before a maintainer squash-merges
-- Squash-merge to keep `dev` linear
+- Enable GitHub auto-merge on normal `dev` PRs after opening them.
+  GitHub squash-merges when `repository-checks` and any required review
+  state pass; do not hand-merge eligible `dev` PRs just because CI is
+  green.
+- Human review is required only on branches or environments whose
+  protection rules demand it, and for external PRs before enabling or
+  approving auto-merge
+- Squash merge is the only allowed merge method, keeping `dev` linear
 - Do not add credentials, private endpoints, local environment files, or
   generated run artifacts
 - Do not expect publish/deploy secrets to be available in PR workflows
@@ -136,5 +142,7 @@ for release promotion PRs from `dev`.
    the user-facing changelog (auto-generated from squash-merge PR
    titles between tags)
 3. Open a PR from `dev` to `main`
-4. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
+4. Merge the release PR only after the release owner confirms the staging
+   evidence; production release PRs do not rely on routine `dev` auto-merge
+5. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
    release

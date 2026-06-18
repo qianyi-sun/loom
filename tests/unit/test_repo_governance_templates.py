@@ -18,6 +18,17 @@ def test_contributing_and_pr_template_accept_issue_scoped_external_prs() -> None
     assert "pull request code must not rely on protected secrets" in pr_template
 
 
+def test_normal_dev_prs_use_auto_merge_after_required_ci() -> None:
+    contributing = _read("CONTRIBUTING.md")
+    quickstart = _read("docs/contributor-quickstart.md")
+    pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
+
+    assert "Wait for CI green before merge" not in contributing
+    assert "Enable GitHub auto-merge on normal `dev` PRs" in contributing
+    assert "GitHub auto-merge squash-merges normal `dev` PRs" in quickstart
+    assert "I enabled GitHub auto-merge for this `dev` PR" in pr_template
+
+
 def test_issue_templates_use_current_loom_language() -> None:
     template_dir = ROOT / ".github" / "ISSUE_TEMPLATE"
     template_text = "\n".join(

@@ -16,6 +16,7 @@
 ## Target Branch
 
 - [ ] This PR targets `dev` for normal development.
+- [ ] I enabled GitHub auto-merge for this `dev` PR.
 - [ ] This PR targets `main` only for a production release promotion from `dev`.
 
 ## Scope

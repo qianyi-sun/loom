@@ -132,12 +132,19 @@ new issue before implementing. PRs use
 [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md)
 and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
-and squash-merge after the required checks and review state are clean.
+and enable GitHub auto-merge for normal `dev` PRs.
+
+GitHub auto-merge squash-merges normal `dev` PRs after the required
+`repository-checks` gate and any required review state pass. Maintainers
+should not manually merge an eligible `dev` PR just because CI is green;
+release-promotion PRs to `main` remain explicitly managed by the release
+owner.
 
 Merge mechanics:
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks` is the only required status check
+- `allow_auto_merge: true`; enable auto-merge on normal `dev` PRs
 - `enforce_admins: true` on `dev` - admins go through the gate too
 
 Secrets and side-effect workflows:
