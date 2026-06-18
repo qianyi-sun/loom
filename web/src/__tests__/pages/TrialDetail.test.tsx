@@ -24,7 +24,10 @@ const TRIAL_BODY = {
   task_id: "hello-world",
   state: "queued",
   agent_name: "oracle",
-  model: null,
+  model: {
+    provider: "openai-compatible",
+    name: "gpt-5-mini",
+  },
   aggregate_reward: null,
   cost_usd: 0,
   submitted_at: "2026-06-11T00:00:00Z",
@@ -92,6 +95,9 @@ describe("TrialDetail trajectory section", () => {
     await waitFor(() =>
       expect(screen.getByText(/No events yet/i)).toBeInTheDocument(),
     );
+    expect(
+      screen.getByText("openai-compatible/gpt-5-mini"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Load more/i }),
     ).not.toBeInTheDocument();

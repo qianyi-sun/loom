@@ -5,9 +5,10 @@
  * - On `setToken(t)`: clear React Query cache (no stale data from a
  *   previous team leaks into the new session) AND kick off a probe
  *   against the authenticated `/api/v1/tokens` endpoint. On 401, the
- *   global unauthorized handler clears the token and sets `tokenError`
- *   so the sign-in form can surface an inline message. On any other
- *   error, set `tokenError` to a short descriptive string.
+ *   global unauthorized handler clears the token and keeps the probe's
+ *   `tokenError` visible even if another in-flight authenticated query
+ *   also returns 401. On any other error, set `tokenError` to a short
+ *   descriptive string.
  * - `clearToken()` also clears the cache so post-sign-out state is
  *   clean for the next sign-in.
  * - `tokenError` is cleared automatically on a successful sign-in or
@@ -64,15 +65,18 @@ export function AuthProvider({
   // unauthorized-handler callback to know it should set tokenError
   // (vs background-request 401s, which just sign the user out silently).
   const probeInFlight = useRef(false);
+  const probeErrorVisible = useRef(false);
 
   const clearToken = (): void => {
     window.localStorage.removeItem(STORAGE_KEY);
     setTokenState(null);
+    probeErrorVisible.current = false;
     setTokenError(null);
     queryClient.clear();
   };
 
   const setToken = (t: string): void => {
+    probeErrorVisible.current = false;
     setTokenError(null);
     queryClient.clear();
     window.localStorage.setItem(STORAGE_KEY, t);
@@ -85,6 +89,7 @@ export function AuthProvider({
     apiFetch<unknown>("/api/v1/tokens")
       .then(() => {
         probeInFlight.current = false;
+        probeErrorVisible.current = false;
       })
       .catch((err) => {
         probeInFlight.current = false;
@@ -111,9 +116,11 @@ export function AuthProvider({
       window.localStorage.removeItem(STORAGE_KEY);
       setTokenState(null);
       queryClient.clear();
-      if (wasProbe) {
+      if (wasProbe || probeErrorVisible.current) {
+        probeErrorVisible.current = true;
         setTokenError("Token is invalid or has been revoked.");
       } else {
+        probeErrorVisible.current = false;
         setTokenError(null);
       }
     });

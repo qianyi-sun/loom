@@ -289,7 +289,18 @@ export interface components {
       aggregate_reward: number | null;
       cost_usd: number;
       agent_name: string | null;
-      model: string | null;
+      model: components["schemas"]["ModelSpec"] | null;
+    };
+    ModelSpec: {
+      provider: string;
+      name: string;
+      source?: string;
+      local_server?: string | null;
+      hf_execution?: string;
+      tier?: string | null;
+      region?: string | null;
+      max_input_tokens?: number | null;
+      max_output_tokens?: number | null;
     };
     TrialList: {
       items: components["schemas"]["Trial"][];

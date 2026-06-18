@@ -32,7 +32,8 @@ from loom_service.config import LoomServiceSettings
 
 @pytest.fixture
 async def trials_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str, UUID, list[UUID]]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -48,7 +49,8 @@ async def trials_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -72,28 +74,38 @@ async def trials_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["read:own", "submit"], team_id=team_id,
-            issued_at=now, expires_at=None,
-        ))
-        s.execute(insert(Task).values(
-            id=task_id, checksum="x" * 64,
-            config={"task": {"id": task_id, "name": "t"}},
-            source="local", license="MIT",
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["read:own", "submit"],
+                team_id=team_id,
+                issued_at=now,
+                expires_at=None,
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config={"task": {"id": task_id, "name": "t"}},
+                source="local",
+                license="MIT",
+            )
+        )
         for i, tid in enumerate(trial_ids):
-            s.execute(insert(Trial).values(
-                id=tid, task_id=task_id, team_id=team_id,
-                state="succeeded" if i % 2 == 0 else "running",
-                config={"agent": {"name": "oracle", "model": None}},
-                requires_caps={},
-                submitted_at=now - timedelta(minutes=i),
-                result=(
-                    {"aggregate_reward": 1.0, "cost_usd": 0.05}
-                    if i % 2 == 0 else None
-                ),
-            ))
+            s.execute(
+                insert(Trial).values(
+                    id=tid,
+                    task_id=task_id,
+                    team_id=team_id,
+                    state="succeeded" if i % 2 == 0 else "running",
+                    config={"agent": {"name": "oracle", "model": None}},
+                    requires_caps={},
+                    submitted_at=now - timedelta(minutes=i),
+                    result=({"aggregate_reward": 1.0, "cost_usd": 0.05} if i % 2 == 0 else None),
+                )
+            )
         s.commit()
     try:
         yield app, raw, team_id, trial_ids
@@ -117,7 +129,8 @@ async def test_list_my_trials(
     app, raw, _team_id, trial_ids = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/trials",
@@ -139,13 +152,70 @@ async def test_list_my_trials(
     assert "failure_message" in items[0]
 
 
+async def test_trial_list_and_detail_project_current_agent_config_shape(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    model = {"provider": "openai-compatible", "name": "gpt-5-mini"}
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[0])
+            .values(config={"agent_name": "oracle", "agent_model": None}),
+        )
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[1])
+            .values(config={"agent_name": "litellm", "agent_model": model}),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        list_resp = await ac.get(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        detail_resp = await ac.get(
+            f"/api/v1/trials/{trial_ids[1]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert list_resp.status_code == 200, list_resp.text
+    items_by_id = {item["id"]: item for item in list_resp.json()["items"]}
+    assert items_by_id[str(trial_ids[0])]["agent_name"] == "oracle"
+    assert items_by_id[str(trial_ids[0])]["model"] is None
+    assert items_by_id[str(trial_ids[1])]["agent_name"] == "litellm"
+    assert items_by_id[str(trial_ids[1])]["model"] == {
+        "provider": "openai-compatible",
+        "name": "gpt-5-mini",
+    }
+
+    assert detail_resp.status_code == 200, detail_resp.text
+    detail = detail_resp.json()
+    assert detail["agent_name"] == "litellm"
+    assert detail["model"] == {
+        "provider": "openai-compatible",
+        "name": "gpt-5-mini",
+    }
+
+
 async def test_filter_by_state_succeeded_only(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:
     app, raw, _team_id, _t = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/trials?state=succeeded",
@@ -163,7 +233,8 @@ async def test_filter_by_multi_state(
     app, raw, _team_id, _t = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/trials?state=succeeded,running",
@@ -179,7 +250,8 @@ async def test_pagination_cursor(
     app, raw, _team_id, _t = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r1 = await ac.get(
             "/api/v1/trials?limit=2",
@@ -204,7 +276,8 @@ async def test_invalid_cursor_returns_400(
     app, raw, _team_id, _t = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/trials?cursor=!!!not-a-cursor",
@@ -220,7 +293,8 @@ async def test_cross_team_forbidden_for_team(
     other_team = uuid4()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials?team_id={other_team}",
@@ -238,16 +312,21 @@ async def test_no_read_own_scope_forbidden(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(no_scope_raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(no_scope_raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/trials",
@@ -262,7 +341,8 @@ async def test_trial_detail_returns_presigned_urls(
     app, raw, _team_id, trial_ids = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials/{trial_ids[0]}",
@@ -294,25 +374,28 @@ async def test_trial_detail_exposes_projected_artifacts(
         s.execute(
             update(Trial)
             .where(Trial.id == trial_ids[0])
-            .values(trajectory_index={
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_ids[0]}/events.jsonl"
-                ),
-                "atif_uri": f"s3://trajectories/{team_id}/{trial_ids[0]}/atif.json",
-                "artifacts": [{
-                    "step_name": "main",
-                    "bucket": "artifacts",
-                    "key": artifact_key,
-                    "size": 5,
-                }],
-            }),
+            .values(
+                trajectory_index={
+                    "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_ids[0]}/events.jsonl"),
+                    "atif_uri": f"s3://trajectories/{team_id}/{trial_ids[0]}/atif.json",
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": "artifacts",
+                            "key": artifact_key,
+                            "size": 5,
+                        }
+                    ],
+                }
+            ),
         )
         s.commit()
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials/{trial_ids[0]}",
@@ -320,12 +403,14 @@ async def test_trial_detail_exposes_projected_artifacts(
         )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["artifacts"] == [{
-        "step_name": "main",
-        "key": artifact_key,
-        "size": 5,
-        "download_url": body["artifacts"][0]["download_url"],
-    }]
+    assert body["artifacts"] == [
+        {
+            "step_name": "main",
+            "key": artifact_key,
+            "size": 5,
+            "download_url": body["artifacts"][0]["download_url"],
+        }
+    ]
     assert "X-Amz-Signature" in body["artifacts"][0]["download_url"]
 
 
@@ -339,7 +424,10 @@ async def test_trial_detail_uses_public_presign_client_for_download_urls(
     public_presign_client = MagicMock()
 
     def _public_url(
-        _op: str, *, Params: dict[str, Any], ExpiresIn: int,  # noqa: N803
+        _op: str,
+        *,
+        Params: dict[str, Any],  # noqa: N803
+        ExpiresIn: int,  # noqa: N803
     ) -> str:
         assert ExpiresIn == 3600
         return (
@@ -356,25 +444,28 @@ async def test_trial_detail_uses_public_presign_client_for_download_urls(
         s.execute(
             update(Trial)
             .where(Trial.id == trial_ids[0])
-            .values(trajectory_index={
-                "trajectory_uri": (
-                    f"s3://trajectories/{team_id}/{trial_ids[0]}/events.jsonl"
-                ),
-                "atif_uri": f"s3://trajectories/{team_id}/{trial_ids[0]}/atif.json",
-                "artifacts": [{
-                    "step_name": "main",
-                    "bucket": "artifacts",
-                    "key": artifact_key,
-                    "size": 5,
-                }],
-            }),
+            .values(
+                trajectory_index={
+                    "trajectory_uri": (f"s3://trajectories/{team_id}/{trial_ids[0]}/events.jsonl"),
+                    "atif_uri": f"s3://trajectories/{team_id}/{trial_ids[0]}/atif.json",
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": "artifacts",
+                            "key": artifact_key,
+                            "size": 5,
+                        }
+                    ],
+                }
+            ),
         )
         s.commit()
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials/{trial_ids[0]}",
@@ -399,7 +490,8 @@ async def test_trial_detail_not_found(
     app, raw, _team_id, _t = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials/{uuid4()}",
@@ -420,17 +512,22 @@ async def test_trial_detail_cross_team_forbidden(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=other_team, name=f"o-{other_team}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(other_raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=other_team,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(other_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=other_team,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://svc",
+            transport=transport,
+            base_url="http://svc",
         ) as ac:
             r = await ac.get(
                 f"/api/v1/trials/{trial_ids_a[0]}",
@@ -442,12 +539,17 @@ async def test_trial_detail_cross_team_forbidden(
         sl = sessionmaker(sync_engine)
         with sl() as s:
             from loom.db.schema import Token as TokenModel
-            s.execute(delete(TokenModel).where(
-                TokenModel.team_id == other_team,
-            ))
-            s.execute(delete(TeamQuota).where(
-                TeamQuota.team_id == other_team,
-            ))
+
+            s.execute(
+                delete(TokenModel).where(
+                    TokenModel.team_id == other_team,
+                )
+            )
+            s.execute(
+                delete(TeamQuota).where(
+                    TeamQuota.team_id == other_team,
+                )
+            )
             s.execute(delete(Team).where(Team.id == other_team))
             s.commit()
         sync_engine.dispose()
@@ -462,7 +564,8 @@ async def test_trial_detail_carries_ready_flags(
     app, raw, _team_id, trial_ids = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials/{trial_ids[0]}",
@@ -481,7 +584,8 @@ async def test_filter_by_task_id(
     app, raw, _team_id, _t = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/trials",
@@ -510,22 +614,26 @@ async def test_filter_by_batch_id(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Batch).values(
-            id=batch_id, team_id=team_id, name="qa-batch-161",
-            task_filter={}, trial_config={},
-            created_by_token_prefix="abcdef12",
-        ))
         s.execute(
-            update(Trial)
-            .where(Trial.id.in_(trial_ids[:2]))
-            .values(batch_id=batch_id),
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="qa-batch-161",
+                task_filter={},
+                trial_config={},
+                created_by_token_prefix="abcdef12",
+            )
+        )
+        s.execute(
+            update(Trial).where(Trial.id.in_(trial_ids[:2])).values(batch_id=batch_id),
         )
         s.commit()
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/trials?batch_id={batch_id}",

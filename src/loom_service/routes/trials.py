@@ -11,7 +11,9 @@ Write forwarders (Task 8):
 Field extraction notes: the v0.7 `trials` table does NOT carry
 `aggregate_reward`, `cost_usd`, or `batch_id` columns. Reward + cost
 are extracted from `Trial.result` (the JSONB the worker writes at
-finalize). Agent name + model are pulled from `Trial.config["agent"]`.
+finalize). Agent name + model are pulled from current top-level
+`Trial.config["agent_name"]` / `Trial.config["agent_model"]`, with
+legacy `Trial.config["agent"]` fallback for older rows.
 """
 
 from __future__ import annotations
@@ -80,8 +82,33 @@ def _extract_cost(result: dict[str, Any] | None) -> float:
         return 0.0
 
 
+def _extract_agent_projection(
+    config: dict[str, Any] | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    if not isinstance(config, dict):
+        return None, None
+
+    if "agent_name" in config or "agent_model" in config:
+        name = config.get("agent_name")
+        model = config.get("agent_model")
+        return (
+            name if isinstance(name, str) and name else None,
+            model if isinstance(model, dict) else None,
+        )
+
+    agent = config.get("agent")
+    if not isinstance(agent, dict):
+        return None, None
+    name = agent.get("name")
+    model = agent.get("model")
+    return (
+        name if isinstance(name, str) and name else None,
+        model if isinstance(model, dict) else None,
+    )
+
+
 def _trial_row(t: Trial) -> dict[str, Any]:
-    agent = (t.config or {}).get("agent") or {}
+    agent_name, model = _extract_agent_projection(t.config)
     return {
         "id": str(t.id),
         "task_id": t.task_id,
@@ -91,14 +118,12 @@ def _trial_row(t: Trial) -> dict[str, Any]:
         "failure_message": t.failure_message,
         "submitted_at": t.submitted_at.isoformat(),
         "started_at": t.started_at.isoformat() if t.started_at else None,
-        "finished_at": (
-            t.finished_at.isoformat() if t.finished_at else None
-        ),
+        "finished_at": (t.finished_at.isoformat() if t.finished_at else None),
         "attempt_count": t.attempt_count,
         "aggregate_reward": _extract_reward(t.result),
         "cost_usd": _extract_cost(t.result),
-        "agent_name": agent.get("name"),
-        "model": agent.get("model"),
+        "agent_name": agent_name,
+        "model": model,
     }
 
 
@@ -130,7 +155,8 @@ async def list_trials(
         target_team = ctx.team_id
 
     stmt = select(Trial).order_by(
-        Trial.submitted_at.desc(), Trial.id.desc(),
+        Trial.submitted_at.desc(),
+        Trial.id.desc(),
     )
     if target_team is not None:
         stmt = stmt.where(Trial.team_id == target_team)
@@ -147,7 +173,8 @@ async def list_trials(
             c = decode_cursor(cursor)
         except ValueError as exc:
             raise HTTPException(
-                status_code=400, detail=str(exc),
+                status_code=400,
+                detail=str(exc),
             ) from exc
         # Composite (submitted_at, id) key: rows strictly LESS than
         # the cursor (DESC ordering).
@@ -178,7 +205,10 @@ async def list_trials(
 
 
 def _presign_get(
-    client: Any, bucket: str, key: str, expires_sec: int,
+    client: Any,
+    bucket: str,
+    key: str,
+    expires_sec: int,
 ) -> str:
     url: str = client.generate_presigned_url(
         "get_object",
@@ -242,9 +272,11 @@ async def get_trial(
     settings = request.app.state.settings
     s, ctx = sc
     require_scope(ctx, "read:own")
-    trial = (await s.execute(
-        select(Trial).where(Trial.id == trial_id),
-    )).scalar_one_or_none()
+    trial = (
+        await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )
+    ).scalar_one_or_none()
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
@@ -313,10 +345,7 @@ def _validate_agent_name(config: dict[str, Any]) -> None:
     if agent_name not in known_names():
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"unknown agent_name {agent_name!r}. "
-                "GET /api/v1/agents for the catalog."
-            ),
+            detail=(f"unknown agent_name {agent_name!r}. GET /api/v1/agents for the catalog."),
         )
     model_raw = config.get("agent_model")
     model: ModelSpec | None
@@ -356,12 +385,15 @@ async def submit_trial(
     # supplied input.
     if payload.provider_connection_id is not None and ctx.team_id is not None:
         await validate_provider_connection(
-            s, payload.provider_connection_id, team_id=ctx.team_id,
+            s,
+            payload.provider_connection_id,
+            team_id=ctx.team_id,
         )
 
     resp = await forward(
         request.app.state.http_client,
-        method="POST", path="/trials",
+        method="POST",
+        path="/trials",
         authorization=authorization,
         json_body=payload.model_dump(mode="json"),
     )
@@ -379,9 +411,11 @@ async def cancel_trial(
     a CP round-trip when the caller is unauthorized."""
     s, ctx = sc
     require_scope(ctx, "submit")
-    trial = (await s.execute(
-        select(Trial).where(Trial.id == trial_id),
-    )).scalar_one_or_none()
+    trial = (
+        await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )
+    ).scalar_one_or_none()
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)

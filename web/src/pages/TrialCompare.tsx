@@ -22,6 +22,7 @@ import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
+import { modelLabel } from "../lib/modelLabel";
 import { trialStateVariant } from "../lib/statusVariant";
 
 type Trial = components["schemas"]["TrialDetail"];
@@ -71,7 +72,7 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
 
         <div className="grid grid-cols-2 gap-3">
           <StatCard label="Agent" value={t.agent_name ?? "—"} />
-          <StatCard label="Model" value={t.model ?? "—"} />
+          <StatCard label="Model" value={modelLabel(t.model)} />
           <StatCard
             label="Reward"
             value={

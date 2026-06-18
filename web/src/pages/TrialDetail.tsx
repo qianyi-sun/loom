@@ -18,6 +18,7 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { modelLabel } from "../lib/modelLabel";
 import { trialStateVariant } from "../lib/statusVariant";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
@@ -59,7 +60,7 @@ function TrialHeader({
 
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
           <StatCard label="Agent" value={trial.agent_name ?? "—"} />
-          <StatCard label="Model" value={trial.model ?? "—"} />
+          <StatCard label="Model" value={modelLabel(trial.model)} />
           <StatCard
             label="Reward"
             value={

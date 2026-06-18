@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
+import { apiFetch } from "../api/client";
 
 function Display(): JSX.Element {
   const { token, tokenError, setToken, clearToken } = useAuth();
@@ -146,6 +147,58 @@ describe("AuthContext", () => {
     await waitFor(() => {
       expect(screen.getByTestId("err").textContent).toMatch(/invalid|revoked/i);
     });
+    expect(window.localStorage.getItem("loom_token")).toBe(null);
+    expect(screen.getByTestId("t").textContent).toBe("none");
+  });
+
+  it("keeps the invalid token message visible when a background 401 follows the sign-in probe", async () => {
+    let resolveProbe: ((response: Response) => void) | undefined;
+    let resolveBackground: ((response: Response) => void) | undefined;
+    const unauthorized = () =>
+      new Response(JSON.stringify({ detail: "invalid bearer token" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<Response>((resolve) => (resolveProbe = resolve)),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => (resolveBackground = resolve)),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    render(
+      withQueryClient(
+        <AuthProvider>
+          <Display />
+        </AuthProvider>,
+      ),
+    );
+
+    await user.click(screen.getByText("set"));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      resolveProbe?.(unauthorized());
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("err").textContent).toMatch(/invalid|revoked/i);
+    });
+
+    const backgroundRequest = apiFetch<unknown>("/api/v1/batches").catch(
+      () => undefined,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      resolveBackground?.(unauthorized());
+      await backgroundRequest;
+    });
+
+    expect(screen.getByTestId("err").textContent).toMatch(/invalid|revoked/i);
     expect(window.localStorage.getItem("loom_token")).toBe(null);
     expect(screen.getByTestId("t").textContent).toBe("none");
   });
