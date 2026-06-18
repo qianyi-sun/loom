@@ -28,6 +28,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
   api,
@@ -348,10 +349,16 @@ export function AgentModelPicker({
         </select>
       </label>
 
-      {connectionList.length === 0 && fallbackCatalogModels.length > 0 ? (
-        <p className="text-xs text-slate-500">
-          No provider connections are registered; showing legacy catalog models.
-        </p>
+      {connectionList.length === 0 && !providerConnections.isPending ? (
+        <div className="rounded border border-slate-200 bg-slate-50 p-4 text-center text-sm">
+          <p className="text-slate-600">No provider connections yet.</p>
+          <Link
+            to="/providers/new?returnTo=/batches/new"
+            className="mt-2 inline-block rounded-md bg-accent px-3 py-1.5 text-white hover:bg-accent-hover"
+          >
+            Create a provider
+          </Link>
+        </div>
       ) : null}
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">

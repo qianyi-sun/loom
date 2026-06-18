@@ -163,6 +163,40 @@ export interface ProviderConnectionEntry {
   rate_card_provider?: string | null;
 }
 
+export interface ProviderConnectionDetail extends ProviderConnectionEntry {
+  base_url?: string | null;
+  allowed_models?: string[] | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProviderConnectionCreateBody {
+  name: string;
+  type: string;
+  base_url: string;
+  api_key: string;
+  allowed_models?: string[] | null;
+  rate_card_provider?: string | null;
+}
+
+export interface ProviderConnectionPatchBody {
+  name?: string;
+  base_url?: string;
+  api_key?: string;
+  allowed_models?: string[] | null;
+  rate_card_provider?: string | null;
+}
+
+export interface ProviderConnectionTestResult {
+  status: string;
+  message?: string | null;
+}
+
+export interface ProviderConnectionModelsRefreshResult {
+  added: number;
+  removed: number;
+}
+
 export interface TeamRegistrationEntry {
   id: string;
   name: string;
@@ -272,13 +306,51 @@ export const api = {
     apiFetch<{ items: ProviderConnectionEntry[] }>(
       "/api/v1/provider-connections",
     ),
-  createProviderConnectionModel: (
+  getProviderConnection: (id: string) =>
+    apiFetch<ProviderConnectionDetail>(`/api/v1/provider-connections/${id}`),
+  createProviderConnection: (payload: ProviderConnectionCreateBody) =>
+    apiFetch<ProviderConnectionDetail>("/api/v1/provider-connections", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateProviderConnection: (id: string, patch: ProviderConnectionPatchBody) =>
+    apiFetch<ProviderConnectionDetail>(
+      `/api/v1/provider-connections/${id}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  deleteProviderConnection: (id: string) =>
+    apiFetch<void>(`/api/v1/provider-connections/${id}`, { method: "DELETE" }),
+  testProviderConnection: (id: string) =>
+    apiFetch<ProviderConnectionTestResult>(
+      `/api/v1/provider-connections/${id}/test`,
+      { method: "POST" },
+    ),
+  listProviderConnectionModels: (id: string) =>
+    apiFetch<{ items: ModelEntry[] }>(
+      `/api/v1/provider-connections/${id}/models`,
+    ),
+  addProviderConnectionModel: (
     connectionId: string,
     body: { model_id: string },
   ) =>
     apiFetch<ModelEntry>(
-      `/api/v1/provider-connections/${encodeURIComponent(connectionId)}/models`,
+      `/api/v1/provider-connections/${connectionId}/models`,
       { method: "POST", body: JSON.stringify(body) },
+    ),
+  refreshProviderConnectionModels: (id: string) =>
+    apiFetch<ProviderConnectionModelsRefreshResult>(
+      `/api/v1/provider-connections/${id}/models/refresh`,
+      { method: "POST" },
+    ),
+  hideProviderConnectionModel: (id: string, modelId: string) =>
+    apiFetch<void>(
+      `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/hide`,
+      { method: "POST" },
+    ),
+  unhideProviderConnectionModel: (id: string, modelId: string) =>
+    apiFetch<void>(
+      `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/unhide`,
+      { method: "POST" },
     ),
   listTokens: () => apiFetch<TokenList>("/api/v1/tokens"),
   createToken: (body: {

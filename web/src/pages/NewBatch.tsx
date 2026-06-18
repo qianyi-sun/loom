@@ -964,7 +964,7 @@ export default function NewBatch(): JSX.Element {
     const providerOverride = providerSelection.value;
     try {
       if (providerOverride?.manual_model) {
-        await api.createProviderConnectionModel(
+        await api.addProviderConnectionModel(
           providerOverride.provider_connection_id,
           { model_id: providerOverride.provider_model_id },
         );

@@ -3,6 +3,9 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import AdminAccess from "./pages/AdminAccess";
 import Benchmarks from "./pages/Benchmarks";
+import ProviderCreate from "./pages/ProviderCreate";
+import ProviderDetail from "./pages/ProviderDetail";
+import ProvidersList from "./pages/ProvidersList";
 import BatchDetail from "./pages/BatchDetail";
 import Monitor from "./pages/Monitor";
 import NewBatch from "./pages/NewBatch";
@@ -32,6 +35,9 @@ export default function App(): JSX.Element {
         <Route path="tasks" element={<Tasks />} />
         <Route path="benchmarks" element={<Benchmarks />} />
         <Route path="usage" element={<UsageDashboard />} />
+        <Route path="providers/new" element={<ProviderCreate />} />
+        <Route path="providers/:id" element={<ProviderDetail />} />
+        <Route path="providers" element={<ProvidersList />} />
         <Route path="admin/access" element={<AdminAccess />} />
         <Route path="rate-cards" element={<RateCardsAdmin />} />
         <Route path="settings" element={<Settings />} />

@@ -73,7 +73,7 @@ export function SubmitTrialModal({
     setSubmitting(true);
     try {
       if (providerOverride?.manual_model) {
-        await api.createProviderConnectionModel(
+        await api.addProviderConnectionModel(
           providerOverride.provider_connection_id,
           { model_id: providerOverride.provider_model_id },
         );
