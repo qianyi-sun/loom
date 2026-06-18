@@ -1,0 +1,98 @@
+# Envoy spike B — per-connection cluster + header-driven routing.
+#
+# Validates the production pattern: each provider_connections row
+# becomes a Cluster whose endpoints are its allowlisted IPs; HCM
+# route table dispatches based on `x-loom-connection-id` header.
+#
+# Two test clusters:
+#   egress-A: endpoint 172.66.147.243 (example.com only)
+#   egress-B: endpoint 162.159.140.245 (api.openai.com only)
+#
+# Expected behavior:
+#   curl -x ...:30443 -H 'x-loom-connection-id: A' https://example.com
+#     → tunnel to 172.66.147.243:443 → TLS handshake to example.com cert → 200
+#   curl -x ...:30443 -H 'x-loom-connection-id: A' https://api.openai.com
+#     → tunnel to 172.66.147.243:443 → TLS handshake fails (cert is example.com)
+#     → curl returns SSL error; bytes leaked ONLY to the allowlisted IP
+#   curl -x ...:30443 (no header) → 404 from Envoy (no matching virtual host)
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: forward_proxy
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 30443 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: forward_proxy
+                upgrade_configs:
+                  - upgrade_type: CONNECT
+                route_config:
+                  name: per_connection_route
+                  # Two virtual_hosts keyed on `x-loom-connection-id`
+                  # header. `headers` match on the virtual host route
+                  # is a clean per-tenant dispatch model.
+                  virtual_hosts:
+                    - name: connection_A
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            connect_matcher: {}
+                            headers:
+                              - name: x-loom-connection-id
+                                string_match: { exact: "A" }
+                          route:
+                            cluster: egress-A
+                            upgrade_configs:
+                              - upgrade_type: CONNECT
+                                connect_config: {}
+                        - match:
+                            connect_matcher: {}
+                            headers:
+                              - name: x-loom-connection-id
+                                string_match: { exact: "B" }
+                          route:
+                            cluster: egress-B
+                            upgrade_configs:
+                              - upgrade_type: CONNECT
+                                connect_config: {}
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    # Each cluster's endpoints are the ONLY IPs traffic can reach.
+    # Per-tenant IP allowlist enforced by the cluster's endpoint set.
+    - name: egress-A
+      connect_timeout: 5s
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: egress-A
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 172.66.147.243  # example.com
+                      port_value: 443
+    - name: egress-B
+      connect_timeout: 5s
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: egress-B
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 162.159.140.245  # api.openai.com
+                      port_value: 443
