@@ -36,10 +36,11 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
 | Route                    | Dialect             | Forwarded to                       |
 |--------------------------|---------------------|------------------------------------|
 | `POST /v1/messages`      | Anthropic native    | `anthropic.AsyncAnthropic.messages.create` |
-| `POST /v1/chat/completions` | OpenAI Chat       | `openai.AsyncOpenAI.chat.completions.create` |
+| `POST /v1/chat/completions` | OpenAI Chat / BYO OpenAI-compatible chat | Native OpenAI path or direct httpx through `EgressClientPool` when `loom.provider_connection_id` resolves to `openai-compatible` / `custom` |
 | `POST /v1/responses`     | OpenAI Responses    | `openai.AsyncOpenAI.responses.create` |
 | `POST /v1/models/{model}:generateContent` | Gemini  | `google.generativeai.GenerativeModel.generate_content_async` |
-| `POST /v1/chat/completions` *(via litellm)* | OpenAI-compat shim | tail providers (Cohere, Mistral, etc.) |
+| `POST /v1/chat/completions` *(via litellm)* | Tail-provider shim | non-BYO and non-OpenAI-compatible fallback providers |
+| `POST /openai/v1/chat/completions`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
 
 The Gateway is **not** a single unified shape — each dialect's
 response is forwarded verbatim. Agents see exactly the native
@@ -111,20 +112,28 @@ ship the same `Trial.run()` on a laptop.
 LiteLLM provides a single `acompletion(model=..., ...)` call that
 dispatches to ~100 providers. We use it as the **tail-provider
 adapter** — anything not covered by Anthropic / OpenAI Chat /
-Responses / Gemini routes through LiteLLM. We don't use it for the
-top-4 providers because:
+Responses / Gemini routes through LiteLLM. BYO OpenAI-compatible
+connections are also excluded from LiteLLM on the service-mode gateway
+path: the route owns that wire shape and forwards with the pooled
+httpx client from `EgressClientPool`, so Envoy sees the
+`x-loom-connection-id` CONNECT header for the selected
+`provider_connection_id`. We don't use LiteLLM for the top-4 providers
+or BYO OpenAI-compatible dispatch because:
 
 - Native dialect responses are verbatim — LiteLLM's normalised
   response shape would obscure provider-specific fields.
 - Token-usage extraction is per-dialect; we'd lose
   `cache_creation_input_tokens` etc. through LiteLLM's filter.
+- LiteLLM does not provide a stable per-call hook for proxy CONNECT
+  headers; the egress proxy's per-connection allowlist depends on that
+  header.
 
 ## Failure modes + behavior
 
 | Failure                                | Response                              |
 |----------------------------------------|---------------------------------------|
 | Upstream timeout (>120s)               | 504, `llm_calls` row inserted with `error_kind` |
-| Upstream non-2xx                       | Forwarded verbatim, `llm_calls` row with `error_kind` |
+| Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; `llm_calls` row with `error_kind` where the dialect path records failed calls |
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |

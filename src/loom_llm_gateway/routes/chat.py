@@ -24,6 +24,7 @@ import uuid as uuid_lib
 from typing import Any
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -48,9 +49,14 @@ from loom_llm_gateway.routes._facade_common import (
 # upstream dialects are supported because litellm handles the on-wire
 # format from the model string's ``provider`` prefix — we just override
 # the destination + auth.
-_BYO_SUPPORTED_TYPES = frozenset({
-    "openai-compatible", "anthropic", "google", "custom",
-})
+_BYO_SUPPORTED_TYPES = frozenset(
+    {
+        "openai-compatible",
+        "anthropic",
+        "google",
+        "custom",
+    }
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -76,10 +82,16 @@ _RESERVED_BODY_KEYS = frozenset(
 # - `local-vllm`: reserved for worker-spawned vLLM (`source=hf` +
 #   `hf_execution=local-vllm`). The worker handles this directly without
 #   round-tripping the gateway; if a request lands here we surface 501.
-_SUPPORTED_PROVIDERS = frozenset({
-    "anthropic", "openai", "together",
-    "local", "huggingface", "local-vllm",
-})
+_SUPPORTED_PROVIDERS = frozenset(
+    {
+        "anthropic",
+        "openai",
+        "together",
+        "local",
+        "huggingface",
+        "local-vllm",
+    }
+)
 
 
 class _LoomBlock(BaseModel):
@@ -135,7 +147,8 @@ async def chat_completions(
         ctx = await verify_bearer_token(session, authorization)
         if ctx is None:
             raise HTTPException(
-                status_code=401, detail="invalid bearer token",
+                status_code=401,
+                detail="invalid bearer token",
             )
 
         # BYO routing (#178): if the request carries a
@@ -148,10 +161,7 @@ async def chat_completions(
             except ValueError as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "loom.provider_connection_id is not a valid "
-                        f"UUID: {exc}"
-                    ),
+                    detail=(f"loom.provider_connection_id is not a valid UUID: {exc}"),
                 ) from exc
             # Use body.loom.team_id as the team identity when the token
             # is worker-scoped (ctx.team_id is None) — matches the
@@ -168,13 +178,12 @@ async def chat_completions(
                 except ValueError as exc:
                     raise HTTPException(
                         status_code=400,
-                        detail=(
-                            "loom.team_id is not a valid UUID: "
-                            f"{exc}"
-                        ),
+                        detail=(f"loom.team_id is not a valid UUID: {exc}"),
                     ) from exc
             byo_row = await resolve_facade_connection(
-                session, conn_uuid, byo_team_id,
+                session,
+                conn_uuid,
+                byo_team_id,
                 supported_types=_BYO_SUPPORTED_TYPES,
                 dialect_label="chat-completions",
             )
@@ -204,10 +213,7 @@ async def chat_completions(
     if provider not in _SUPPORTED_PROVIDERS:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"unsupported provider {provider!r}; "
-                f"allowed: {sorted(_SUPPORTED_PROVIDERS)}"
-            ),
+            detail=(f"unsupported provider {provider!r}; allowed: {sorted(_SUPPORTED_PROVIDERS)}"),
         )
 
     # PR-D: worker-spawned vLLM bypasses the gateway entirely. If a
@@ -240,8 +246,7 @@ async def chat_completions(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "local model string must be "
-                    f"'local/<server>/<model_id>', got {raw_model!r}"
+                    f"local model string must be 'local/<server>/<model_id>', got {raw_model!r}"
                 ),
             ) from exc
         cfg = settings.local_providers.get(server_name)
@@ -264,14 +269,18 @@ async def chat_completions(
         # Endpoints. Requires HF_TOKEN in the gateway env (LiteLLM
         # auto-reads it).
         litellm_model = raw_model
-        api_key = settings.huggingface_api_key.get_secret_value() if (
-            settings.huggingface_api_key is not None
-        ) else None
+        api_key = (
+            settings.huggingface_api_key.get_secret_value()
+            if (settings.huggingface_api_key is not None)
+            else None
+        )
         # HF models may not have a rate card; allow None → cost=0.
         table = await request.app.state.rate_card_cache.get()
         spec = ModelSpec(
-            provider=provider, name=model_name,
-            tier=req.loom.tier, region=req.loom.region,
+            provider=provider,
+            name=model_name,
+            tier=req.loom.tier,
+            region=req.loom.region,
         )
         try:
             entry = lookup_entry(table, spec)
@@ -312,40 +321,53 @@ async def chat_completions(
         api_key = _pick_api_key(provider, settings)
         table = await request.app.state.rate_card_cache.get()
         spec = ModelSpec(
-            provider=provider, name=model_name,
-            tier=req.loom.tier, region=req.loom.region,
+            provider=provider,
+            name=model_name,
+            tier=req.loom.tier,
+            region=req.loom.region,
         )
         try:
             entry = lookup_entry(table, spec)
         except RateCardNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    extra_kwargs = {
-        k: v for k, v in raw_body.items()
-        if k not in _RESERVED_BODY_KEYS
-    }
+    extra_kwargs = {k: v for k, v in raw_body.items() if k not in _RESERVED_BODY_KEYS}
     started = time.monotonic()
-    acompletion_kwargs = dict(
-        model=litellm_model,
-        messages=req.messages,
-        api_key=api_key,
-        timeout=settings.upstream_timeout_sec,
-        **extra_kwargs,
-    )
-    if api_base is not None:
-        acompletion_kwargs["api_base"] = api_base
-    try:
-        raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
-    except Exception as exc:
-        detail = _redact_provider_exception(exc, api_key)
-        logger.warning(
-            "upstream LiteLLM completion failed provider=%s model=%s error=%s",
-            provider, model_name, detail,
+    if byo_row is not None and byo_row.provider_type in ("openai-compatible", "custom"):
+        raw = await _forward_openai_compatible_byo_chat(
+            egress_client_pool=request.app.state.egress_client_pool,
+            connection_id=byo_row.id,
+            base_url=byo_row.base_url,
+            api_key=api_key or "",
+            model_name=model_name,
+            messages=req.messages,
+            extra_kwargs=extra_kwargs,
+            timeout=settings.upstream_timeout_sec,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"upstream provider call failed: {detail}",
-        ) from None
+    else:
+        acompletion_kwargs = dict(
+            model=litellm_model,
+            messages=req.messages,
+            api_key=api_key,
+            timeout=settings.upstream_timeout_sec,
+            **extra_kwargs,
+        )
+        if api_base is not None:
+            acompletion_kwargs["api_base"] = api_base
+        try:
+            raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
+        except Exception as exc:
+            detail = _redact_provider_exception(exc, api_key)
+            logger.warning(
+                "upstream LiteLLM completion failed provider=%s model=%s error=%s",
+                provider,
+                model_name,
+                detail,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"upstream provider call failed: {detail}",
+            ) from None
     duration_sec = time.monotonic() - started
 
     # Parse + cost. PR-D: rate cards are optional for `local` and
@@ -378,10 +400,7 @@ async def chat_completions(
         # Build response. PR-D: `local` provider skips the rate-card
         # lookup → no table was loaded; report a sentinel hash so the
         # field still has a deterministic shape downstream.
-        rate_card_hash = (
-            "local-server-no-card" if provider == "local"
-            else hash_table(table)
-        )
+        rate_card_hash = "local-server-no-card" if provider == "local" else hash_table(table)
     else:
         cost = compute_cost_usd(
             entry,
@@ -424,3 +443,76 @@ def _pick_api_key(provider: str, settings: Any) -> str | None:
 def _redact_provider_exception(exc: Exception, api_key: str | None) -> str:
     detail = redact_api_key(str(exc), api_key or "")
     return detail or exc.__class__.__name__
+
+
+async def _forward_openai_compatible_byo_chat(
+    *,
+    egress_client_pool: Any,
+    connection_id: UUID,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    extra_kwargs: dict[str, Any],
+    timeout: float,
+) -> dict[str, Any]:
+    """Forward BYO OpenAI-compatible chat through the egress client pool.
+
+    LiteLLM cannot reliably inject the CONNECT-level
+    ``x-loom-connection-id`` proxy header Envoy matches on. For
+    OpenAI-compatible BYO endpoints we own the wire shape, so the chat
+    route sends the request directly through ``EgressClientPool``.
+    """
+    upstream_url = f"{base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        **extra_kwargs,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "content-type": "application/json",
+    }
+    upstream: httpx.AsyncClient = await egress_client_pool.get(connection_id)
+    try:
+        upstream_response = await upstream.post(
+            upstream_url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=False,
+        )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=f"upstream timeout against {upstream_url}: {exc}",
+        ) from exc
+    except httpx.RequestError as exc:
+        detail = redact_api_key(str(exc), api_key)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"upstream request error against {upstream_url}: {type(exc).__name__}: {detail}"
+            ),
+        ) from exc
+
+    if upstream_response.status_code >= 400:
+        excerpt = redact_api_key(upstream_response.text, api_key)
+        raise HTTPException(
+            status_code=upstream_response.status_code,
+            detail=(f"upstream returned {upstream_response.status_code}: {excerpt}"),
+        )
+
+    try:
+        body = upstream_response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"upstream returned non-JSON body: {exc}",
+        ) from exc
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="upstream returned a non-object JSON body",
+        )
+    return body

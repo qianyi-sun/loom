@@ -27,32 +27,42 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
     raw_token = f"loom_team_{uuid4().hex}"
     with session_factory() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_token.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-            expires_at=None,
-        ))
-        s.execute(insert(RateCard).values(
-            id="card-1", captured_at=datetime.now(UTC),
-            table={
-                "id": "card-1",
-                "entries": [{
-                    "provider": "anthropic",
-                    "model": "claude-opus-4-7",
-                    "input_per_mtok": 3.0,
-                    "output_per_mtok": 15.0,
-                    "cache_read_per_mtok": 0.3,
-                    "cache_write_per_mtok": 3.75,
-                }],
-            },
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_token.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            )
+        )
+        s.execute(
+            insert(RateCard).values(
+                id="card-1",
+                captured_at=datetime.now(UTC),
+                table={
+                    "id": "card-1",
+                    "entries": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-7",
+                            "input_per_mtok": 3.0,
+                            "output_per_mtok": 15.0,
+                            "cache_read_per_mtok": 0.3,
+                            "cache_write_per_mtok": 3.75,
+                        }
+                    ],
+                },
+            )
+        )
         s.commit()
     yield team_id, raw_token
     # Cleanup so tests are isolated. Order matters: child tables before
     # parents (ProviderConnection/Secret FK → Team).
     with session_factory() as s:
         from sqlalchemy import delete
+
         s.execute(delete(ProviderConnection))
         s.execute(delete(Secret))
         s.execute(delete(Token))
@@ -64,7 +74,8 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
 
 @pytest.fixture
 def app(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
     seed_data: tuple[UUID, str],
 ):
     monkeypatch.setenv("LOOM_GW_DB_URL", postgres_url)
@@ -76,15 +87,20 @@ def app(
         return {
             "id": "stub",
             "model": kwargs.get("model"),
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "stubbed"},
-                "finish_reason": "stop",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "stubbed"},
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {
-                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
             },
         }
+
     monkeypatch.setattr("loom_llm_gateway.litellm_wrapper.acompletion", stub)
     return a
 
@@ -335,6 +351,9 @@ def test_chat_rejects_unknown_model_with_400(app, seed_data):  # type: ignore[no
 # ─────────────────────────────────────────────────────────────────────
 
 import base64  # noqa: E402
+import json  # noqa: E402
+
+import httpx  # noqa: E402
 
 from loom.security.secret_store import LocalEncryptedSecretStore  # noqa: E402
 
@@ -344,7 +363,8 @@ _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 @pytest.fixture
 def app_with_byo(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
     seed_data: tuple[UUID, str],
 ):
     """Same as `app` but with the SecretStore master key wired."""
@@ -356,28 +376,24 @@ def app_with_byo(
 
     captured: dict[str, Any] = {}
 
-    async def capturing_stub(**kwargs: Any) -> dict[str, Any]:
+    async def unexpected_litellm_stub(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
-        return {
-            "id": "stub",
-            "model": kwargs.get("model"),
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "stubbed"},
-                "finish_reason": "stop",
-            }],
-            "usage": {
-                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
-            },
-        }
+        raise AssertionError(
+            "BYO openai-compatible chat must use the egress client pool, "
+            "not LiteLLM's internal HTTP client",
+        )
+
     monkeypatch.setattr(
-        "loom_llm_gateway.litellm_wrapper.acompletion", capturing_stub,
+        "loom_llm_gateway.litellm_wrapper.acompletion",
+        unexpected_litellm_stub,
     )
     return a, captured
 
 
 def _seed_byo_connection(
-    postgres_url: str, team_id: UUID, *,
+    postgres_url: str,
+    team_id: UUID,
+    *,
     api_key: str = "sk-real-byo-key",
     base_url: str = "https://byo.example.com/v1",
     provider_type: str = "openai-compatible",
@@ -402,15 +418,21 @@ def _seed_byo_connection(
             await s.commit()
         conn_id = uuid4()
         async with sf() as s:
-            await s.execute(insert(ProviderConnection).values(
-                id=conn_id, team_id=team_id,
-                provider_type=provider_type, display_name=f"byo-{conn_id}",
-                base_url=base_url, upstream_host="byo.example.com",
-                resolved_egress_ips=["192.0.2.1"],
-                encrypted_api_key_ref=ref,
-                pricing_source=pricing_source,
-                status="valid", created_by="team:test",
-            ))
+            await s.execute(
+                insert(ProviderConnection).values(
+                    id=conn_id,
+                    team_id=team_id,
+                    provider_type=provider_type,
+                    display_name=f"byo-{conn_id}",
+                    base_url=base_url,
+                    upstream_host="byo.example.com",
+                    resolved_egress_ips=["192.0.2.1"],
+                    encrypted_api_key_ref=ref,
+                    pricing_source=pricing_source,
+                    status="valid",
+                    created_by="team:test",
+                )
+            )
             await s.commit()
         return conn_id
 
@@ -419,19 +441,63 @@ def _seed_byo_connection(
     return cid
 
 
-def test_chat_byo_overrides_api_key_and_base_url(  # type: ignore[no-untyped-def]
-    app_with_byo, seed_data, postgres_url,
+class _CapturingEgressPool:
+    def __init__(self, response: httpx.Response | None = None) -> None:
+        self.connection_ids: list[Any] = []
+        self.requests: list[httpx.Request] = []
+        self.response = response or httpx.Response(
+            200,
+            json={
+                "id": "stub",
+                "model": "some-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "stubbed"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        )
+        self.client = httpx.AsyncClient(
+            transport=httpx.MockTransport(self._handle),
+        )
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self.response
+
+    async def get(self, connection_id: Any) -> httpx.AsyncClient:
+        self.connection_ids.append(connection_id)
+        return self.client
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+
+def test_chat_byo_uses_egress_pool_for_openai_compatible(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
 ):
-    """#178: when provider_connection_id is in the loom block, the
-    gateway forwards litellm.acompletion with the connection's api_key
-    + base_url, not the platform's anthropic key."""
+    """#216: BYO openai-compatible chat must use EgressClientPool so
+    Envoy sees the per-connection CONNECT header configured by the pool."""
     app, captured = app_with_byo
     team_id, raw_token = seed_data
     conn_id = _seed_byo_connection(
-        postgres_url, team_id,
-        api_key="sk-real-byo-key", base_url="https://byo.example.com/v1",
+        postgres_url,
+        team_id,
+        api_key="sk-real-byo-key",
+        base_url="https://byo.example.com/v1",
     )
+    pool = _CapturingEgressPool()
     with TestClient(app) as client:
+        app.state.egress_client_pool = pool
         r = client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {raw_token}"},
@@ -447,23 +513,36 @@ def test_chat_byo_overrides_api_key_and_base_url(  # type: ignore[no-untyped-def
             },
         )
     assert r.status_code == 200, r.text
-    # Critical assertion: litellm received the BYO key + base, NOT the
-    # platform's "stub-platform-key" or the anthropic default URL.
-    assert captured["api_key"] == "sk-real-byo-key"
-    assert captured["api_base"] == "https://byo.example.com/v1"
+    assert captured == {}
+    assert pool.connection_ids == [conn_id]
+    assert len(pool.requests) == 1
+    upstream_request = pool.requests[0]
+    assert upstream_request.method == "POST"
+    assert str(upstream_request.url) == ("https://byo.example.com/v1/chat/completions")
+    assert upstream_request.headers["Authorization"] == ("Bearer sk-real-byo-key")
+    assert json.loads(upstream_request.content) == {
+        "model": "some-model",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
 
 
 def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untyped-def]
-    app_with_byo, seed_data, postgres_url,
+    app_with_byo,
+    seed_data,
+    postgres_url,
 ):
     """#179: BYO connection with pricing_source=tokens-only on a model
     NOT in the rate-card table should succeed with cost=0, NOT 400."""
     app, _captured = app_with_byo
     team_id, raw_token = seed_data
     conn_id = _seed_byo_connection(
-        postgres_url, team_id, pricing_source="tokens-only",
+        postgres_url,
+        team_id,
+        pricing_source="tokens-only",
     )
+    pool = _CapturingEgressPool()
     with TestClient(app) as client:
+        app.state.egress_client_pool = pool
         r = client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {raw_token}"},
@@ -485,10 +564,13 @@ def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untype
     assert body["loom"]["rate_card_hash"] == "facade:tokens-only"
 
 
-def test_chat_byo_litellm_exception_redacts_authorization_header(  # type: ignore[no-untyped-def]
-    app_with_byo, seed_data, postgres_url, monkeypatch, caplog,
+def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+    caplog,
 ):
-    """LiteLLM exception payloads can echo upstream response headers.
+    """Upstream error bodies can echo provider Authorization headers.
 
     The gateway must not let provider Authorization values reach logs or
     user-visible error text when a BYO provider call fails.
@@ -497,25 +579,25 @@ def test_chat_byo_litellm_exception_redacts_authorization_header(  # type: ignor
     team_id, raw_token = seed_data
     api_key = "sk-live-upstream-secret"
     conn_id = _seed_byo_connection(
-        postgres_url, team_id,
-        api_key=api_key, base_url="https://httpbin.org/anything",
+        postgres_url,
+        team_id,
+        api_key=api_key,
+        base_url="https://httpbin.org/anything",
     )
-
-    async def leaking_stub(**kwargs: Any) -> dict[str, Any]:
-        assert kwargs["api_key"] == api_key
-        raise RuntimeError(
-            "litellm upstream failure: "
-            "received_args.response_object.headers="
-            f"{{Authorization: Bearer {api_key}, "
-            "Content-Type: application/json}}"
-        )
-
-    monkeypatch.setattr(
-        "loom_llm_gateway.litellm_wrapper.acompletion", leaking_stub,
+    pool = _CapturingEgressPool(
+        response=httpx.Response(
+            401,
+            text=(
+                "upstream failure: "
+                f"{{Authorization: Bearer {api_key}, "
+                "Content-Type: application/json}}"
+            ),
+        ),
     )
     caplog.set_level(logging.WARNING, logger="loom_llm_gateway.routes.chat")
 
     with TestClient(app, raise_server_exceptions=False) as client:
+        app.state.egress_client_pool = pool
         r = client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {raw_token}"},
@@ -541,7 +623,8 @@ def test_chat_byo_litellm_exception_redacts_authorization_header(  # type: ignor
 
 
 def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]
-    app_with_byo, seed_data,
+    app_with_byo,
+    seed_data,
 ):
     """Malformed provider_connection_id is rejected upfront."""
     app, _ = app_with_byo
@@ -566,7 +649,9 @@ def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]
 
 
 def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
-    app_with_byo, seed_data, postgres_url,
+    app_with_byo,
+    seed_data,
+    postgres_url,
 ):
     """A team's token cannot read another team's connection — the
     backend returns 404 (not 403) to avoid leaking existence."""
@@ -576,6 +661,7 @@ def test_chat_byo_cross_team_returns_404(  # type: ignore[no-untyped-def]
     other_team = uuid4()
     from sqlalchemy import create_engine as _create_engine
     from sqlalchemy.orm import sessionmaker as _sessionmaker
+
     eng = _create_engine(postgres_url)
     sf = _sessionmaker(eng)
     with sf() as s:
