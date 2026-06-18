@@ -34,6 +34,7 @@ from loom_llm_gateway import litellm_wrapper
 from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
+from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
     hash_table,
@@ -199,6 +200,22 @@ async def chat_completions(
             status_code=403,
             detail="loom.team_id does not match token's team",
         )
+
+    try:
+        audit_team_id = ctx.team_id if ctx.team_id is not None else UUID(req.loom.team_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"loom.team_id is not a valid UUID: {exc}"),
+        ) from exc
+    try:
+        audit_trial_id = ctx.trial_id if ctx.trial_id is not None else UUID(req.loom.trial_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"loom.trial_id is not a valid UUID: {exc}"),
+        ) from exc
+    audit_step_id = ctx.step_id if ctx.step_id is not None else req.loom.step_id
 
     # Provider extraction: "provider/name" or bare "name" (defaults openai).
     raw_model = req.model
@@ -425,6 +442,23 @@ async def chat_completions(
         "time_to_first_token_sec": None,
         "gateway_request_id": str(uuid_lib.uuid4()),
     }
+    async with request.app.state.session_factory() as audit_session:
+        await record_call(
+            audit_session,
+            team_id=audit_team_id,
+            trial_id=audit_trial_id,
+            step_id=audit_step_id,
+            dialect="openai_chat",
+            model=model_name,
+            usage=TokenUsage(
+                input_tokens=parsed.input_tokens,
+                output_tokens=parsed.output_tokens,
+                provider_extras=parsed.provider_extras,
+            ),
+            cost_usd=cost,
+            rate_card_hash=rate_card_hash,
+            provider=byo_row.provider_type if byo_row is not None else provider,
+        )
     response = dict(parsed.raw_response)
     response["loom"] = loom_block
     return response

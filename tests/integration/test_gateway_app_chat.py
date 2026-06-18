@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import ProviderConnection, RateCard, Secret, Team, Token
@@ -564,6 +564,65 @@ def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untype
     assert body["loom"]["rate_card_hash"] == "facade:tokens-only"
 
 
+def test_chat_byo_records_llm_call_for_usage_attribution(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):
+    """#222: successful BYO chat completions must persist llm_calls.
+
+    The `/api/v1/usage` rollup reads from llm_calls; returning a Loom
+    usage block without inserting this row makes BYO chat usage invisible.
+    """
+    app, _captured = app_with_byo
+    team_id, raw_token = seed_data
+    trial_id = uuid4()
+    conn_id = _seed_byo_connection(
+        postgres_url,
+        team_id,
+        pricing_source="tokens-only",
+    )
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/gpt-99",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(trial_id),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+
+    assert r.status_code == 200, r.text
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(
+            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+            {"trial_id": trial_id},
+        ))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["team_id"] == team_id
+    assert row["trial_id"] == trial_id
+    assert row["step_id"] == "main"
+    assert row["dialect"] == "openai_chat"
+    assert row["model"] == "gpt-99"
+    assert row["input_tokens"] == 10
+    assert row["output_tokens"] == 5
+    assert row["provider_extras"] == {}
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "facade:tokens-only"
+
+
 def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[no-untyped-def]
     app_with_byo,
     seed_data,
@@ -572,8 +631,9 @@ def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[n
 ):
     """Upstream error bodies can echo provider Authorization headers.
 
-    The gateway must not let provider Authorization values reach logs or
-    user-visible error text when a BYO provider call fails.
+    The gateway preserves the upstream status code, but must not let provider
+    Authorization values reach logs or user-visible error text when a BYO
+    provider call fails.
     """
     app, _captured = app_with_byo
     team_id, raw_token = seed_data
@@ -613,7 +673,7 @@ def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[n
             },
         )
 
-    assert r.status_code == 502
+    assert r.status_code == 401
     combined = "\n".join(
         [r.text, *(record.getMessage() for record in caplog.records)],
     )
