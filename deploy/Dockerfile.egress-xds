@@ -1,0 +1,33 @@
+# loom_egress_xds — Envoy egress-proxy control plane (#190 PR-C1b).
+#
+# Standalone Python image. envoy-data-plane + xds-protos conflict
+# with the main project's google-generativeai protobuf<6 pin (see
+# pyproject.toml comment in PR #192), so this image installs them
+# in its OWN venv rather than via a project extra.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Runtime deps. Pinned by the spike (#196) at envoy-data-plane 2.x +
+# xds-protos 1.81 against Envoy v1.30. Bumping either probably needs
+# re-running the spike to confirm Cluster/Route proto shape didn't
+# drift.
+RUN pip install --no-cache-dir \
+        envoy-data-plane>=2.0,<3.0 \
+        xds-protos>=1.81,<2.0 \
+        grpcio>=1.81,<2.0 \
+        psycopg[binary]>=3.2,<4.0
+
+COPY src/loom_egress_xds /app/loom_egress_xds
+
+EXPOSE 18000
+
+# Defaults match the bootstrap (deploy/envoy/egress-proxy.yaml) +
+# loom-egress-xds k8s Service. Override LOOM_EGRESS_XDS_DB_URL via
+# Secret; the rest are usually fine as-is.
+ENV LOOM_EGRESS_XDS_LISTEN_ADDR=0.0.0.0:18000 \
+    LOOM_EGRESS_XDS_LOG_LEVEL=INFO \
+    PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "-m", "loom_egress_xds"]

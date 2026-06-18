@@ -120,7 +120,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers"]
+files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package
@@ -161,6 +161,20 @@ ignore_missing_imports = true
 # datasets (HuggingFace) has no stubs; treat as untyped.
 [[tool.mypy.overrides]]
 module = ["datasets", "datasets.*"]
+ignore_missing_imports = true
+
+# loom_egress_xds (#190) imports Envoy protobuf bindings + grpc.
+# envoy-data-plane and xds-protos ship .py protobuf classes with no
+# stubs / py.typed; grpcio similarly. Suppressing missing-import at
+# the boundary so the package can be type-checked in CI without
+# pulling in types-grpcio (heavy + lags grpcio releases).
+[[tool.mypy.overrides]]
+module = [
+  "envoy", "envoy.*",
+  "grpc", "grpc.*",
+  "google.protobuf.any_pb2", "google.protobuf.duration_pb2",
+  "psycopg", "psycopg.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
