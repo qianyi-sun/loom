@@ -165,6 +165,28 @@ def test_run_resolves_provider_then_posts_trial(
     assert post_req.headers["Authorization"] == "Bearer loom_admin_test123456"
 
 
+def test_run_summary_uses_submitted_task_when_response_omits_task_id(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
+        201, json={"id": _TRIAL_ID, "state": "queued"},
+    )
+
+    rc = main([
+        "eval", "run",
+        "--provider", "openai-prod",
+        "--model", "gpt-4o",
+        "--agent", "claude-code",
+        "--task", "hello-world",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "task_id:          hello-world" in out
+    assert "task_id:          (unknown)" not in out
+
+
 def test_run_with_anthropic_provider_maps_type_to_provider(
     mock_server: MockServer,
 ) -> None:

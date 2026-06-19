@@ -165,6 +165,7 @@ def _run(args: argparse.Namespace) -> int:
             f"Submitted trial for task {args.task!r} via provider "
             f"{args.provider!r}:",
         )
+        body.setdefault("task_id", args.task)
         _print_trial_summary(body)
         return 0
 
