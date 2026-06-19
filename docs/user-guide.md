@@ -441,6 +441,14 @@ loom run
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,
   qwen-cli, kimi-cli)
 
+In service mode, the SPA and API only allow launch for agents whose
+runtime is ready in the deployed worker/sandbox contract. `GET
+/api/v1/agents` includes `service_mode_ready`, `readiness_message`, and
+`runtime_contract` metadata. The New batch form marks unavailable
+agents as `setup needed`, and submit routes reject bypassed requests
+with the same setup message instead of creating a batch that can only
+fail in the worker.
+
 ## Rate cards
 
 Rate cards live at `~/.config/loom/rate-cards.toml`, seeded on first

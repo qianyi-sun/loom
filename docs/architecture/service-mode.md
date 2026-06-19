@@ -37,6 +37,12 @@ The SPA's launch model picker is BYO-provider aware. It reads
 `hidden_reason` metadata for debugging. Manual model ids are stored with
 `POST /api/v1/provider-connections/{id}/models` and are submitted on
 Trial/Batch payloads as `provider_connection_id` + `provider_model_id`.
+`GET /api/v1/agents` also carries service-mode readiness metadata:
+`service_mode_ready`, `readiness_message`, and a `runtime_contract`
+covering sandbox executables/modules, provider dialect, env vars, and
+capture mode. The SPA disables unavailable agents with a setup-needed
+message, and service submit routes enforce the same readiness check so
+clients cannot create doomed batches by bypassing the browser.
 
 ## Process model
 

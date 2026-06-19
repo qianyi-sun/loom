@@ -43,6 +43,30 @@ const AGENTS_RESPONSE = {
       supported_providers: ["anthropic"],
       supported_model_sources: ["api"],
     },
+    {
+      name: "opencode",
+      needs_model: true,
+      kind: "adapter",
+      description: "Opencode CLI adapter.",
+      supported_providers: ["*"],
+      supported_model_sources: ["api", "local-server", "hf"],
+      service_mode_ready: false,
+      readiness_status: "unavailable",
+      readiness_message: "agent opencode requires executable opencode",
+      runtime_contract: {
+        execution: "subprocess-adapter",
+        capture: "stdout_jsonl",
+        required_executables: ["opencode"],
+        required_python_modules: [],
+        required_packages: ["opencode-ai"],
+        endpoint_dialect: "openai_chat",
+        api_key_env: "OPENAI_API_KEY",
+        base_url_env: "OPENAI_BASE_URL",
+        model_name_template: "openai/{model_id}",
+        sandbox_network: "gateway",
+        install_hint: "Provision executable opencode before enabling agent opencode.",
+      },
+    },
   ],
 };
 
@@ -311,6 +335,21 @@ describe("NewBatch", () => {
       "Backend",
     )) as HTMLSelectElement;
     expect(dropdown.value).toBe("docker");
+  });
+
+  it("marks agents without service runtime as setup-needed", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+
+    const unavailable = await screen.findByRole("option", {
+      name: /opencode .*setup needed/i,
+    });
+
+    expect(unavailable).toBeDisabled();
+    expect(unavailable).toHaveAttribute(
+      "title",
+      expect.stringContaining("executable opencode"),
+    );
   });
 
   it("blocks submit when no benchmark is picked", async () => {

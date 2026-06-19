@@ -35,6 +35,11 @@ import {
   type ModelEntry,
   type ProviderConnectionEntry,
 } from "../api/client";
+import {
+  agentReadinessMessage,
+  agentServiceModeReady,
+  type AgentReadinessLike,
+} from "../lib/agentReadiness";
 import { Button } from "./Button";
 import { Input } from "./Input";
 
@@ -62,13 +67,14 @@ export interface AgentModelPickerProps {
   disabled?: boolean;
 }
 
-interface AgentEntry {
+interface AgentEntry extends AgentReadinessLike {
   name: string;
   needs_model: boolean;
   kind: "builtin" | "adapter";
   description: string;
   supported_providers: string[];
   supported_model_sources: string[];
+  readiness_status?: "ready" | "unavailable";
 }
 
 interface LocalServerEntry {
@@ -136,13 +142,12 @@ export function AgentModelPicker({
   // current `agentName` isn't in it.
   useEffect(() => {
     if (!agents.data) return;
-    if (
-      value.agentName &&
-      agents.data.items.some((a) => a.name === value.agentName)
-    ) {
+    const current = agents.data.items.find((a) => a.name === value.agentName);
+    if (current && agentServiceModeReady(current)) {
       return;
     }
-    const first = agents.data.items[0];
+    const first = agents.data.items.find(agentServiceModeReady)
+      ?? agents.data.items[0];
     if (!first) return;
     const firstSource = (first.supported_model_sources[0] as ModelSource) ?? "api";
     onChange({
@@ -234,6 +239,9 @@ export function AgentModelPicker({
   }, [models.data, selectedAgent]);
 
   const needsModel = selectedAgent?.needs_model ?? true;
+  const selectedAgentReady = selectedAgent
+    ? agentServiceModeReady(selectedAgent)
+    : true;
 
   const inCatalog = useMemo(() => {
     if (!models.data) return false;
@@ -660,6 +668,7 @@ export function AgentModelPicker({
               onChange({ ...value, agentName: e.target.value });
               return;
             }
+            if (!agentServiceModeReady(next)) return;
             const nextSource =
               (next.supported_model_sources[0] as ModelSource) ?? "api";
             onChange({
@@ -679,21 +688,35 @@ export function AgentModelPicker({
           {agents.isPending ? (
             <option value="">Loading…</option>
           ) : (
-            agentList.map((a) => (
-              <option key={a.name} value={a.name}>
-                {a.name}
-              </option>
-            ))
+            agentList.map((a) => {
+              const ready = agentServiceModeReady(a);
+              const reason = ready ? a.description : agentReadinessMessage(a);
+              return (
+                <option
+                  key={a.name}
+                  value={a.name}
+                  disabled={!ready}
+                  title={reason}
+                >
+                  {a.name}{ready ? "" : " (setup needed)"}
+                </option>
+              );
+            })
           )}
         </select>
-        {selectedAgent ? (
+        {selectedAgent && selectedAgentReady ? (
           <p className="mt-1 text-xs text-slate-500">
             {selectedAgent.description}
           </p>
         ) : null}
+        {selectedAgent && !selectedAgentReady ? (
+          <p className="mt-1 text-xs text-amber-700">
+            Setup needed: {agentReadinessMessage(selectedAgent)}
+          </p>
+        ) : null}
       </label>
 
-      {needsModel ? (
+      {!selectedAgentReady ? null : needsModel ? (
         <div className="space-y-3">
           {availableSources.length > 1 ? (
             <div

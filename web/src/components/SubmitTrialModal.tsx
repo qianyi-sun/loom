@@ -19,6 +19,10 @@ import {
 } from "./AgentModelPicker";
 import { Button } from "./Button";
 import ErrorState from "./ErrorState";
+import {
+  agentReadinessMessage,
+  agentServiceModeReady,
+} from "../lib/agentReadiness";
 import { Modal } from "./Modal";
 
 export interface SubmitTrialModalProps {
@@ -56,6 +60,10 @@ export function SubmitTrialModal({
     const selected = agents.data?.items.find((a) => a.name === value.agentName);
     if (!selected) {
       setError(new Error("Pick an agent before submitting."));
+      return;
+    }
+    if (!agentServiceModeReady(selected)) {
+      setError(new Error(agentReadinessMessage(selected)));
       return;
     }
     const agentModel = buildAgentModel(value, selected.needs_model);

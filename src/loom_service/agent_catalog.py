@@ -31,11 +31,68 @@ that should restrict can be overridden in `_ADAPTER_OVERRIDES`).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from loom.models.types import ModelSpec
 
 AgentKind = Literal["builtin", "adapter"]
+ReadinessStatus = Literal["ready", "unavailable"]
+
+
+@dataclass(frozen=True)
+class RuntimeContract:
+    """Service-mode runtime requirements for one displayed agent.
+
+    This is declared metadata, not a `which` probe. The service process,
+    worker process, and trial sandbox can be different images, so readiness
+    has to reflect the product contract for service-mode execution.
+    """
+
+    execution: str
+    capture: str
+    required_executables: tuple[str, ...] = ()
+    required_python_modules: tuple[str, ...] = ()
+    required_packages: tuple[str, ...] = ()
+    endpoint_dialect: str | None = None
+    api_key_env: str | None = None
+    base_url_env: str | None = None
+    model_name_template: str | None = None
+    sandbox_network: str = "gateway"
+    install_hint: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "execution": self.execution,
+            "capture": self.capture,
+            "required_executables": list(self.required_executables),
+            "required_python_modules": list(self.required_python_modules),
+            "required_packages": list(self.required_packages),
+            "endpoint_dialect": self.endpoint_dialect,
+            "api_key_env": self.api_key_env,
+            "base_url_env": self.base_url_env,
+            "model_name_template": self.model_name_template,
+            "sandbox_network": self.sandbox_network,
+            "install_hint": self.install_hint,
+        }
+
+
+def _ready_builtin_contract(
+    *,
+    execution: str,
+    capture: str = "loom-trajectory",
+    endpoint_dialect: str | None = None,
+    api_key_env: str | None = None,
+    base_url_env: str | None = None,
+    model_name_template: str | None = None,
+) -> RuntimeContract:
+    return RuntimeContract(
+        execution=execution,
+        capture=capture,
+        endpoint_dialect=endpoint_dialect,
+        api_key_env=api_key_env,
+        base_url_env=base_url_env,
+        model_name_template=model_name_template,
+    )
 
 
 @dataclass(frozen=True)
@@ -46,6 +103,13 @@ class AgentEntry:
     description: str
     supported_providers: tuple[str, ...] = ()
     supported_model_sources: tuple[str, ...] = ()
+    runtime_contract: RuntimeContract = RuntimeContract(
+        execution="unknown",
+        capture="unknown",
+    )
+    service_mode_ready: bool = True
+    readiness_status: ReadinessStatus = "ready"
+    readiness_message: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -55,7 +119,19 @@ class AgentEntry:
             "description": self.description,
             "supported_providers": list(self.supported_providers),
             "supported_model_sources": list(self.supported_model_sources),
+            "runtime_contract": self.runtime_contract.to_dict(),
+            "service_mode_ready": self.service_mode_ready,
+            "readiness_status": self.readiness_status,
+            "readiness_message": self.readiness_message,
         }
+
+    def readiness_error(self) -> str | None:
+        if self.service_mode_ready:
+            return None
+        msg = self.readiness_message or (
+            f"agent {self.name!r} is not ready for service-mode runtime"
+        )
+        return f"{msg}. See GET /api/v1/agents for runtime setup details."
 
 
 # Built-in agents — the worker's `_default_agent_factory` knows these
@@ -69,6 +145,10 @@ _BUILTIN: tuple[AgentEntry, ...] = (
             "Runs the task's solution/solve.sh script as ground truth. "
             "Use for canary trials and smoke tests; no LLM call."
         ),
+        runtime_contract=_ready_builtin_contract(
+            execution="builtin-oracle",
+            capture="loom-trajectory",
+        ),
     ),
     AgentEntry(
         name="litellm",
@@ -81,6 +161,14 @@ _BUILTIN: tuple[AgentEntry, ...] = (
         ),
         supported_providers=("*",),
         supported_model_sources=("api", "local-server", "hf"),
+        runtime_contract=_ready_builtin_contract(
+            execution="builtin-litellm",
+            capture="gateway-llm-calls",
+            endpoint_dialect="openai_chat",
+            api_key_env="LOOM_STEP_TOKEN",
+            base_url_env="LOOM_GATEWAY_URL",
+            model_name_template="{provider}/{model_id}",
+        ),
     ),
     AgentEntry(
         name="claude-code-inbox",
@@ -92,6 +180,27 @@ _BUILTIN: tuple[AgentEntry, ...] = (
         ),
         supported_providers=("anthropic",),
         supported_model_sources=("api",),
+        runtime_contract=RuntimeContract(
+            execution="builtin-in-box-cli",
+            capture="loom-trajectory-jsonl",
+            required_executables=("claude",),
+            required_packages=("@anthropic-ai/claude-code",),
+            endpoint_dialect="anthropic",
+            api_key_env="ANTHROPIC_API_KEY",
+            base_url_env="ANTHROPIC_BASE_URL",
+            model_name_template="{model_id}",
+            install_hint=(
+                "Install the Claude Code CLI in every service-mode "
+                "sandbox image before enabling this agent."
+            ),
+        ),
+        service_mode_ready=False,
+        readiness_status="unavailable",
+        readiness_message=(
+            "agent claude-code-inbox requires executable claude in "
+            "the trial sandbox, and the default service-mode runtime does "
+            "not provision it"
+        ),
     ),
 )
 
@@ -118,8 +227,122 @@ _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "hello": (("*",), ("api", "local-server", "hf")),
 }
 _DEFAULT_ADAPTER_SUPPORT: tuple[tuple[str, ...], tuple[str, ...]] = (
-    ("*",), ("api", "local-server", "hf"),
+    ("*",),
+    ("api", "local-server", "hf"),
 )
+
+
+_ADAPTER_CAPTURE: dict[str, str] = {
+    "aider": "log_file",
+    "claude-code": "stdout_jsonl",
+    "codex": "pty",
+    "gemini-cli": "stdout_jsonl",
+    "hello": "stdout_jsonl",
+    "kimi-cli": "pty",
+    "mini-swe-agent": "stdout_jsonl",
+    "opencode": "stdout_jsonl",
+    "openhands": "http_poll",
+    "openhands-sdk": "stdout_jsonl",
+    "qwen-cli": "pty",
+    "swe-agent": "log_file",
+}
+
+
+_ADAPTER_REQUIRED_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    "aider": ("aider",),
+    "claude-code": ("sh", "claude"),
+    "codex": ("codex",),
+    "gemini-cli": ("gemini",),
+    "hello": ("echo",),
+    "kimi-cli": ("kimi",),
+    "mini-swe-agent": ("mini-swe-agent",),
+    "opencode": ("opencode",),
+    "qwen-cli": ("qwen",),
+}
+
+
+_ADAPTER_REQUIRED_PYTHON_MODULES: dict[str, tuple[str, ...]] = {
+    "openhands": ("openhands.server",),
+    "openhands-sdk": ("openhands_sdk.run",),
+    "swe-agent": ("sweagent.run.run_single",),
+}
+
+
+_ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
+    "aider": ("aider-chat",),
+    "claude-code": ("@anthropic-ai/claude-code",),
+    "codex": ("@openai/codex",),
+    "gemini-cli": ("@google/gemini-cli",),
+    "kimi-cli": ("@moonshot-ai/kimi-code",),
+    "mini-swe-agent": ("mini-swe-agent",),
+    "opencode": ("opencode-ai",),
+    "openhands": ("openhands-ai",),
+    "openhands-sdk": ("openhands-ai",),
+    "qwen-cli": ("@qwen-code/qwen-code",),
+    "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
+}
+
+
+_ADAPTER_RUNTIME_READY: dict[str, bool] = {
+    # The reference adapter only shells out to echo, which is available in
+    # every POSIX sandbox image Loom supports. Real external adapters remain
+    # gated until the sandbox image/provisioning path installs their runtime.
+    "hello": True,
+}
+
+
+def _adapter_runtime_contract(adapter: Any) -> RuntimeContract:
+    name = str(adapter.name)
+    required_executables = _ADAPTER_REQUIRED_EXECUTABLES.get(name, ())
+    required_modules = _ADAPTER_REQUIRED_PYTHON_MODULES.get(name, ())
+    required_packages = _ADAPTER_REQUIRED_PACKAGES.get(name, ())
+    install_hint: str | None
+    if name == "hello":
+        install_hint = None
+    else:
+        deps = [
+            *(f"executable {e!r}" for e in required_executables),
+            *(f"Python module {m!r}" for m in required_modules),
+        ]
+        dep_text = ", ".join(deps) if deps else "its agent runtime"
+        install_hint = (
+            f"Provision {dep_text} in every service-mode trial sandbox "
+            f"before enabling agent {name!r}."
+        )
+    return RuntimeContract(
+        execution="subprocess-adapter",
+        capture=_ADAPTER_CAPTURE.get(name, "unknown"),
+        required_executables=required_executables,
+        required_python_modules=required_modules,
+        required_packages=required_packages,
+        endpoint_dialect=str(getattr(adapter, "endpoint_dialect", "unknown")),
+        api_key_env=str(getattr(adapter, "api_key_env", "")),
+        base_url_env=str(getattr(adapter, "base_url_env", "")),
+        model_name_template=str(getattr(adapter, "model_name_template", "")),
+        sandbox_network="gateway",
+        install_hint=install_hint,
+    )
+
+
+def _adapter_readiness(adapter: Any) -> tuple[bool, ReadinessStatus, str | None]:
+    name = str(adapter.name)
+    ready = _ADAPTER_RUNTIME_READY.get(name, False)
+    if ready:
+        return True, "ready", None
+    contract = _adapter_runtime_contract(adapter)
+    missing = [
+        *(f"executable {e!r}" for e in contract.required_executables),
+        *(f"Python module {m!r}" for m in contract.required_python_modules),
+    ]
+    missing_text = ", ".join(missing) if missing else "runtime dependency"
+    return (
+        False,
+        "unavailable",
+        (
+            f"agent {name!r} requires {missing_text} in the trial sandbox, "
+            "and the default service-mode runtime does not provision it"
+        ),
+    )
 
 
 def list_agents() -> list[AgentEntry]:
@@ -138,8 +361,10 @@ def list_agents() -> list[AgentEntry]:
         return entries
     for adapter in all_adapters():
         providers, sources = _ADAPTER_OVERRIDES.get(
-            adapter.name, _DEFAULT_ADAPTER_SUPPORT,
+            adapter.name,
+            _DEFAULT_ADAPTER_SUPPORT,
         )
+        ready, readiness_status, readiness_message = _adapter_readiness(adapter)
         entries.append(
             AgentEntry(
                 name=adapter.name,
@@ -152,6 +377,10 @@ def list_agents() -> list[AgentEntry]:
                 ),
                 supported_providers=providers,
                 supported_model_sources=sources,
+                runtime_contract=_adapter_runtime_contract(adapter),
+                service_mode_ready=ready,
+                readiness_status=readiness_status,
+                readiness_message=readiness_message,
             ),
         )
     return entries
@@ -173,7 +402,8 @@ def get_agent(name: str) -> AgentEntry | None:
 
 
 def validate_agent_model_compat(
-    agent_name: str, model: ModelSpec | None,
+    agent_name: str,
+    model: ModelSpec | None,
 ) -> str | None:
     """Check that `(agent, model)` is a runnable combo.
 
@@ -185,14 +415,9 @@ def validate_agent_model_compat(
         return f"unknown agent_name {agent_name!r}"
 
     if agent.needs_model and model is None:
-        return (
-            f"agent {agent_name!r} requires a model — got null"
-        )
+        return f"agent {agent_name!r} requires a model — got null"
     if not agent.needs_model and model is not None:
-        return (
-            f"agent {agent_name!r} does not take a model — got "
-            f"{model.provider}/{model.name}"
-        )
+        return f"agent {agent_name!r} does not take a model — got {model.provider}/{model.name}"
     if model is None:
         return None
 
@@ -220,10 +445,11 @@ def validate_agent_model_compat(
             "to name an operator-configured server"
         )
     if model.source != "local-server" and model.local_server is not None:
-        return (
-            f"model.local_server set but source is {model.source!r} "
-            "(not 'local-server')"
-        )
+        return f"model.local_server set but source is {model.source!r} (not 'local-server')"
+
+    readiness_err = agent.readiness_error()
+    if readiness_err is not None:
+        return readiness_err
 
     return None
 
@@ -231,6 +457,7 @@ def validate_agent_model_compat(
 __all__ = [
     "AgentEntry",
     "AgentKind",
+    "RuntimeContract",
     "get_agent",
     "known_names",
     "list_agents",

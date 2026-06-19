@@ -31,7 +31,8 @@ from loom_service.config import LoomServiceSettings
 
 @pytest.fixture
 async def setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -47,10 +48,12 @@ async def setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
-        "s3", endpoint_url=settings.minio_endpoint,
+        "s3",
+        endpoint_url=settings.minio_endpoint,
         aws_access_key_id=settings.minio_access_key.get_secret_value(),
         aws_secret_access_key=settings.minio_secret_key.get_secret_value(),
         region_name=settings.minio_region,
@@ -66,57 +69,89 @@ async def setup(
     conn_id = uuid4()
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         # Two rate cards with overlapping provider+model entries —
         # /models must de-duplicate.
-        s.execute(insert(RateCard).values(
-            id="card-a", captured_at=datetime.now(UTC),
-            table={
-                "id": "card-a",
-                "entries": [
-                    {"provider": "anthropic", "model": "claude-opus-4-7",
-                     "input_per_mtok": 15, "output_per_mtok": 75,
-                     "cache_read_per_mtok": 0, "cache_write_per_mtok": 0},
-                    {"provider": "openai", "model": "gpt-4o",
-                     "input_per_mtok": 5, "output_per_mtok": 20,
-                     "cache_read_per_mtok": 0, "cache_write_per_mtok": 0},
-                ],
-            },
-        ))
-        s.execute(insert(RateCard).values(
-            id="card-b", captured_at=datetime.now(UTC),
-            table={
-                "id": "card-b",
-                "entries": [
-                    {"provider": "anthropic", "model": "claude-opus-4-7",
-                     "input_per_mtok": 10, "output_per_mtok": 50,
-                     "cache_read_per_mtok": 0, "cache_write_per_mtok": 0},
-                    {"provider": "google", "model": "gemini-2.5-pro",
-                     "input_per_mtok": 7, "output_per_mtok": 21,
-                     "cache_read_per_mtok": 0, "cache_write_per_mtok": 0},
-                ],
-            },
-        ))
-        s.execute(insert(ProviderConnection).values(
-            id=conn_id,
-            team_id=team_id,
-            provider_type="openai-compatible",
-            display_name="Lab vLLM",
-            base_url="https://api.openai.com/v1",
-            upstream_host="api.openai.com",
-            resolved_egress_ips=["104.18.0.1"],
-            encrypted_api_key_ref="test://lab-vllm",
-            allowed_models=None,
-            status="valid",
-            pricing_source="tokens-only",
-            pricing_data=None,
-            rate_card_provider="openai",
-            created_by="test:service-models",
-        ))
+        s.execute(
+            insert(RateCard).values(
+                id="card-a",
+                captured_at=datetime.now(UTC),
+                table={
+                    "id": "card-a",
+                    "entries": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-7",
+                            "input_per_mtok": 15,
+                            "output_per_mtok": 75,
+                            "cache_read_per_mtok": 0,
+                            "cache_write_per_mtok": 0,
+                        },
+                        {
+                            "provider": "openai",
+                            "model": "gpt-4o",
+                            "input_per_mtok": 5,
+                            "output_per_mtok": 20,
+                            "cache_read_per_mtok": 0,
+                            "cache_write_per_mtok": 0,
+                        },
+                    ],
+                },
+            )
+        )
+        s.execute(
+            insert(RateCard).values(
+                id="card-b",
+                captured_at=datetime.now(UTC),
+                table={
+                    "id": "card-b",
+                    "entries": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-7",
+                            "input_per_mtok": 10,
+                            "output_per_mtok": 50,
+                            "cache_read_per_mtok": 0,
+                            "cache_write_per_mtok": 0,
+                        },
+                        {
+                            "provider": "google",
+                            "model": "gemini-2.5-pro",
+                            "input_per_mtok": 7,
+                            "output_per_mtok": 21,
+                            "cache_read_per_mtok": 0,
+                            "cache_write_per_mtok": 0,
+                        },
+                    ],
+                },
+            )
+        )
+        s.execute(
+            insert(ProviderConnection).values(
+                id=conn_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name="Lab vLLM",
+                base_url="https://api.openai.com/v1",
+                upstream_host="api.openai.com",
+                resolved_egress_ips=["104.18.0.1"],
+                encrypted_api_key_ref="test://lab-vllm",
+                allowed_models=None,
+                status="valid",
+                pricing_source="tokens-only",
+                pricing_data=None,
+                rate_card_provider="openai",
+                created_by="test:service-models",
+            )
+        )
         now = datetime.now(UTC)
         for model_id in [
             "deepseek-chat",
@@ -124,14 +159,16 @@ async def setup(
             "apisports-afl-games",
             "tushare-stock-basic",
         ]:
-            s.execute(insert(ProviderModelCache).values(
-                provider_connection_id=conn_id,
-                model_id=model_id,
-                capabilities={},
-                visible=True,
-                last_seen_at=now,
-                upstream_present=True,
-            ))
+            s.execute(
+                insert(ProviderModelCache).values(
+                    provider_connection_id=conn_id,
+                    model_id=model_id,
+                    capabilities={},
+                    visible=True,
+                    last_seen_at=now,
+                    upstream_present=True,
+                )
+            )
         s.commit()
     try:
         yield app, raw
@@ -154,7 +191,8 @@ async def test_agents_includes_builtins_and_adapters(
     app, raw = setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/agents",
@@ -174,13 +212,26 @@ async def test_agents_includes_builtins_and_adapters(
     assert by_name["oracle"]["kind"] == "builtin"
     assert by_name["claude-code"]["kind"] == "adapter"
 
+    # #289 runtime readiness metadata: displayed agents must say whether
+    # service-mode can run them before users submit a doomed batch.
+    opencode = by_name["opencode"]
+    assert opencode["service_mode_ready"] is False
+    assert opencode["readiness_status"] == "unavailable"
+    assert "opencode" in opencode["readiness_message"]
+    assert opencode["runtime_contract"]["required_executables"] == ["opencode"]
+    assert opencode["runtime_contract"]["required_packages"] == ["opencode-ai"]
+    assert opencode["runtime_contract"]["capture"] == "stdout_jsonl"
+    assert opencode["runtime_contract"]["endpoint_dialect"] == "openai_chat"
+
     # PR-A metadata: providers + sources are surfaced so the SPA can
     # filter the model picker by agent.
     assert by_name["oracle"]["supported_providers"] == []
     assert by_name["oracle"]["supported_model_sources"] == []
     assert by_name["litellm"]["supported_providers"] == ["*"]
     assert set(by_name["litellm"]["supported_model_sources"]) == {
-        "api", "local-server", "hf",
+        "api",
+        "local-server",
+        "hf",
     }
     # CLI adapters lock down to their provider.
     assert by_name["claude-code"]["supported_providers"] == ["anthropic"]
@@ -193,7 +244,8 @@ async def test_models_deduplicates_across_rate_cards_and_adds_byo_metadata(
     app, raw = setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/models",
@@ -201,20 +253,14 @@ async def test_models_deduplicates_across_rate_cards_and_adds_byo_metadata(
         )
     assert r.status_code == 200
     items = r.json()["items"]
-    rate_card_pairs = [
-        (m["provider"], m["name"]) for m in items
-        if m["source"] == "rate-card"
-    ]
+    rate_card_pairs = [(m["provider"], m["name"]) for m in items if m["source"] == "rate-card"]
     # claude-opus-4-7 appears in both cards but only once here.
     assert rate_card_pairs == [
         ("anthropic", "claude-opus-4-7"),
         ("google", "gemini-2.5-pro"),
         ("openai", "gpt-4o"),
     ]
-    byo_items = [
-        m for m in items
-        if m.get("provider_connection_name") == "Lab vLLM"
-    ]
+    byo_items = [m for m in items if m.get("provider_connection_name") == "Lab vLLM"]
     assert [m["name"] for m in byo_items] == ["deepseek-chat"]
     item = byo_items[0]
     assert item["provider"] == "openai"
@@ -234,7 +280,8 @@ async def test_models_raw_view_explains_filtered_tool_api_entries(
     app, raw = setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/models?view=raw",
@@ -262,7 +309,8 @@ async def test_agents_unauthenticated_401(
     app, _raw = setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get("/api/v1/agents")
     assert r.status_code == 401
@@ -274,7 +322,8 @@ async def test_models_unauthenticated_401(
     app, _raw = setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get("/api/v1/models")
     assert r.status_code == 401

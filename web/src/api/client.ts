@@ -357,6 +357,22 @@ export const api = {
         supported_providers: string[];
         /** PR-A: subset of ["api","local-server","hf"]. Empty when needs_model=false. */
         supported_model_sources: string[];
+        service_mode_ready?: boolean;
+        readiness_status?: "ready" | "unavailable";
+        readiness_message?: string | null;
+        runtime_contract?: {
+          execution: string;
+          capture: string;
+          required_executables: string[];
+          required_python_modules: string[];
+          required_packages?: string[];
+          endpoint_dialect?: string | null;
+          api_key_env?: string | null;
+          base_url_env?: string | null;
+          model_name_template?: string | null;
+          sandbox_network?: string;
+          install_hint?: string | null;
+        };
       }[];
     }>("/api/v1/agents"),
   listLocalServers: () =>

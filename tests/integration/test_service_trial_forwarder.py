@@ -27,7 +27,8 @@ from loom_service.config import LoomServiceSettings
 
 @pytest.fixture
 async def fwd_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -43,7 +44,8 @@ async def fwd_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -57,12 +59,14 @@ async def fwd_setup(
     captured: dict[str, list[dict[str, str]]] = {"reqs": []}
 
     def handler(req: httpx.Request) -> httpx.Response:
-        captured["reqs"].append({
-            "method": req.method,
-            "url": str(req.url),
-            "body": req.content.decode() if req.content else "",
-            "auth": req.headers.get("authorization") or "",
-        })
+        captured["reqs"].append(
+            {
+                "method": req.method,
+                "url": str(req.url),
+                "body": req.content.decode() if req.content else "",
+                "auth": req.headers.get("authorization") or "",
+            }
+        )
         if req.url.path == "/trials" and req.method == "POST":
             return httpx.Response(
                 201,
@@ -86,11 +90,15 @@ async def fwd_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     try:
         yield app, raw, team_id, captured
@@ -113,7 +121,8 @@ async def test_post_trial_forwards(
     app, raw, _team_id, captured = fwd_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/trials",
@@ -142,26 +151,60 @@ async def test_post_trial_no_scope_403(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(other.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(other.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/trials",
             headers={"Authorization": f"Bearer {other}"},
-            json={"task_id": "local/task-1", "config": {"agent_name": "oracle", "agent_model": None}},
+            json={
+                "task_id": "local/task-1",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
         )
     assert r.status_code == 403
-    assert all(
-        req["auth"] != f"Bearer {other}" for req in captured["reqs"]
-    )
+    assert all(req["auth"] != f"Bearer {other}" for req in captured["reqs"])
+
+
+async def test_post_trial_rejects_agent_without_service_runtime(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+) -> None:
+    app, raw, _team_id, captured = fwd_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "local/task-1",
+                "config": {
+                    "agent_name": "opencode",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o"},
+                },
+            },
+        )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "opencode" in detail
+    assert "runtime" in detail.lower()
+    assert "GET /api/v1/agents" in detail
+    assert captured["reqs"] == []
 
 
 async def test_cancel_trial_forwards(
@@ -173,20 +216,31 @@ async def test_cancel_trial_forwards(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Task).values(
-            id="local/task-cancel", checksum="x" * 64, config={},
-            source="local",
-        ))
-        s.execute(insert(Trial).values(
-            id=trial_id, task_id="local/task-cancel", team_id=team_id,
-            state="running", config={}, requires_caps={},
-            submitted_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Task).values(
+                id="local/task-cancel",
+                checksum="x" * 64,
+                config={},
+                source="local",
+            )
+        )
+        s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id="local/task-cancel",
+                team_id=team_id,
+                state="running",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             f"/api/v1/trials/{trial_id}/cancel",
@@ -194,10 +248,7 @@ async def test_cancel_trial_forwards(
         )
     assert r.status_code == 200
     assert r.json()["state"] == "cancelled"
-    cancel_reqs = [
-        req for req in captured["reqs"]
-        if req["url"].endswith("/cancel")
-    ]
+    cancel_reqs = [req for req in captured["reqs"] if req["url"].endswith("/cancel")]
     assert len(cancel_reqs) == 1
     assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
 
@@ -208,7 +259,8 @@ async def test_cancel_unknown_trial_404(
     app, raw, _team_id, _captured = fwd_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             f"/api/v1/trials/{uuid4()}/cancel",
@@ -245,7 +297,8 @@ async def test_forwarder_propagates_retry_after(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/trials",
@@ -271,36 +324,51 @@ async def test_cancel_cross_team_403(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Team).values(
-            id=other_team, name=f"o-{other_team}",
-        ))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(other_raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=other_team,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Task).values(
-            id="local/task-xt", checksum="x" * 64, config={},
-            source="local",
-        ))
+        s.execute(
+            insert(Team).values(
+                id=other_team,
+                name=f"o-{other_team}",
+            )
+        )
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(other_raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=other_team,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="local/task-xt",
+                checksum="x" * 64,
+                config={},
+                source="local",
+            )
+        )
         # Trial belongs to team_a (the original fixture team).
-        s.execute(insert(Trial).values(
-            id=trial_id, task_id="local/task-xt", team_id=team_a,
-            state="running", config={}, requires_caps={},
-            submitted_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id="local/task-xt",
+                team_id=team_a,
+                state="running",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             f"/api/v1/trials/{trial_id}/cancel",
             headers={"Authorization": f"Bearer {other_raw}"},
         )
     assert r.status_code == 403
-    assert all(
-        req["auth"] != f"Bearer {other_raw}"
-        for req in captured["reqs"]
-    )
+    assert all(req["auth"] != f"Bearer {other_raw}" for req in captured["reqs"])

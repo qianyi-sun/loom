@@ -35,7 +35,8 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
 
 @pytest.fixture
 async def camp_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str, UUID]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -51,7 +52,8 @@ async def camp_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -70,40 +72,58 @@ async def camp_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["submit", "read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         # 3 MIT tasks + 2 Apache to test license-filter materialization.
         for i in range(3):
             tid = f"local/mit-{i}"
-            s.execute(insert(Task).values(
-                id=tid, checksum="x" * 64,
-                config=_valid_task_config(tid),
-                source="local", license="MIT",
-            ))
+            s.execute(
+                insert(Task).values(
+                    id=tid,
+                    checksum="x" * 64,
+                    config=_valid_task_config(tid),
+                    source="local",
+                    license="MIT",
+                )
+            )
         for i in range(2):
             tid = f"local/apache-{i}"
-            s.execute(insert(Task).values(
-                id=tid, checksum="x" * 64,
-                config=_valid_task_config(tid),
-                source="local", license="Apache-2.0",
-            ))
+            s.execute(
+                insert(Task).values(
+                    id=tid,
+                    checksum="x" * 64,
+                    config=_valid_task_config(tid),
+                    source="local",
+                    license="Apache-2.0",
+                )
+            )
         # Live worker advertising every backend Loom ships drivers for —
         # required by the POST /batches reject-when-no-worker check.
         # Individual tests that want to exercise the rejection path
         # delete this row before issuing their POST.
-        s.execute(insert(Worker).values(
-            id=uuid4(), hostname="fixture-worker", version="test",
-            capabilities=[
-                {"backend": "docker"}, {"backend": "fake"},
-                {"backend": "daytona"}, {"backend": "modal"},
-            ],
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC),
-            status="active",
-        ))
+        s.execute(
+            insert(Worker).values(
+                id=uuid4(),
+                hostname="fixture-worker",
+                version="test",
+                capabilities=[
+                    {"backend": "docker"},
+                    {"backend": "fake"},
+                    {"backend": "daytona"},
+                    {"backend": "modal"},
+                ],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
         s.commit()
     try:
         yield app, raw, team_id
@@ -128,7 +148,8 @@ async def test_post_batch_materializes_count(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -154,7 +175,8 @@ async def test_post_batch_with_n_per_task_multiplies_count(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -178,7 +200,8 @@ async def test_post_batch_rejects_n_per_task_out_of_range(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -202,7 +225,8 @@ async def test_post_batch_rejects_unknown_agent_name(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -226,7 +250,8 @@ async def test_post_batch_rejects_agent_name_without_agent_model(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -247,6 +272,42 @@ async def test_post_batch_rejects_agent_name_without_agent_model(
     assert listed.json()["items"] == []
 
 
+async def test_post_batch_rejects_agent_without_service_runtime(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """#289/#288: unsupported displayed adapters must fail before
+    fan-out, not after every child trial hits `command not found`."""
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "opencode-not-provisioned",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {
+                    "agent_name": "opencode",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o"},
+                },
+            },
+        )
+        listed = await ac.get(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "opencode" in detail
+    assert "runtime" in detail.lower()
+    assert "GET /api/v1/agents" in detail
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+
+
 async def test_post_rejects_unknown_filter_key(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
@@ -255,7 +316,8 @@ async def test_post_rejects_unknown_filter_key(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -279,7 +341,8 @@ async def test_post_rejects_empty_filter_match(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -301,18 +364,21 @@ async def test_post_rejects_invalid_task_config(
     app, raw, _team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(insert(Task).values(
-            id="local/broken-config",
-            checksum="b" * 64,
-            config={},
-            source="local",
-            license="BrokenFixture",
-        ))
+        conn.execute(
+            insert(Task).values(
+                id="local/broken-config",
+                checksum="b" * 64,
+                config={},
+                source="local",
+                license="BrokenFixture",
+            )
+        )
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -346,7 +412,8 @@ async def test_post_rejects_when_no_worker_advertises_backend(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -377,18 +444,23 @@ async def test_post_rejects_when_no_worker_serves_specific_backend(
     # Replace fixture worker with one that ONLY serves docker.
     with sl() as s:
         s.execute(delete(Worker))
-        s.execute(insert(Worker).values(
-            id=uuid4(), hostname="docker-only", version="test",
-            capabilities=[{"backend": "docker"}],
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC),
-            status="active",
-        ))
+        s.execute(
+            insert(Worker).values(
+                id=uuid4(),
+                hostname="docker-only",
+                version="test",
+                capabilities=[{"backend": "docker"}],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
         s.commit()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -423,14 +495,17 @@ async def test_post_rejects_when_only_worker_is_inactive(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "name": "stale-only", "task_filter": {"license": "MIT"},
-                "trial_config": {}, "backend": "docker",
+                "name": "stale-only",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "backend": "docker",
             },
         )
     sync_engine.dispose()
@@ -448,6 +523,7 @@ async def test_post_rejects_when_worker_heartbeat_is_stale(
     handing batches to a dead worker. Heartbeat older than 30s
     ⇒ excluded from the catalog."""
     from datetime import timedelta
+
     app, raw, _team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -455,21 +531,26 @@ async def test_post_rejects_when_worker_heartbeat_is_stale(
     # window. `status` stays 'active' — that's the bug we're guarding
     # against (no reaper updates status today).
     with sl() as s:
-        s.execute(Worker.__table__.update().values(
-            last_seen_at=datetime.now(UTC) - timedelta(seconds=120),
-        ))
+        s.execute(
+            Worker.__table__.update().values(
+                last_seen_at=datetime.now(UTC) - timedelta(seconds=120),
+            )
+        )
         s.commit()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "name": "stale-hb", "task_filter": {"license": "MIT"},
-                "trial_config": {}, "backend": "docker",
+                "name": "stale-hb",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "backend": "docker",
             },
         )
     sync_engine.dispose()
@@ -487,16 +568,21 @@ async def test_post_requires_submit_scope(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(no_submit_raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(no_submit_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/batches",
@@ -516,7 +602,8 @@ async def test_list_batches(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         await ac.post(
             "/api/v1/batches",
@@ -556,7 +643,8 @@ async def test_get_batch_detail_with_rollup(
     app, raw, team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         post = await ac.post(
             "/api/v1/batches",
@@ -574,27 +662,32 @@ async def test_get_batch_detail_with_rollup(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        for i, (state, result) in enumerate((
-            ("succeeded", {"aggregate_reward": 1.0, "cost_usd": 0.05}),
-            ("succeeded", {"aggregate_reward": 0.5, "cost_usd": 0.03}),
-            ("running", None),
-        )):
-            s.execute(insert(Trial).values(
-                id=uuid4(),
-                task_id=f"local/mit-{i}",
-                team_id=team_id,
-                state=state,
-                config={},
-                requires_caps={},
-                submitted_at=datetime.now(UTC),
-                batch_id=cid,
-                result=result,
-            ))
+        for i, (state, result) in enumerate(
+            (
+                ("succeeded", {"aggregate_reward": 1.0, "cost_usd": 0.05}),
+                ("succeeded", {"aggregate_reward": 0.5, "cost_usd": 0.03}),
+                ("running", None),
+            )
+        ):
+            s.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    task_id=f"local/mit-{i}",
+                    team_id=team_id,
+                    state=state,
+                    config={},
+                    requires_caps={},
+                    submitted_at=datetime.now(UTC),
+                    batch_id=cid,
+                    result=result,
+                )
+            )
         s.commit()
     sync_engine.dispose()
 
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/batches/{cid}",
@@ -616,36 +709,41 @@ async def test_get_batch_detail_exposes_fanout_failure(
 ) -> None:
     app, raw, team_id = camp_setup
     batch_id = uuid4()
-    fanout_errors = [{
-        "task_id": "local/mit-0",
-        "sample_idx": 0,
-        "combination_idx": None,
-        "idempotency_key": f"{batch_id}::local/mit-0::0",
-        "status_code": 403,
-        "detail": "task license proprietary-MAA not in team allowlist",
-        "seen_at": datetime.now(UTC).isoformat(),
-    }]
+    fanout_errors = [
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 0,
+            "combination_idx": None,
+            "idempotency_key": f"{batch_id}::local/mit-0::0",
+            "status_code": 403,
+            "detail": "task license proprietary-MAA not in team allowlist",
+            "seen_at": datetime.now(UTC).isoformat(),
+        }
+    ]
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(insert(Batch).values(
-            id=batch_id,
-            team_id=team_id,
-            name="policy-blocked",
-            task_filter={"license": "MIT"},
-            trial_config={},
-            state="finished",
-            created_by_token_prefix="abcdef12",
-            expected_trial_count=0,
-            result_status="all_failed",
-            fanout_errors=fanout_errors,
-            finished_at=datetime.now(UTC),
-        ))
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="policy-blocked",
+                task_filter={"license": "MIT"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=0,
+                result_status="all_failed",
+                fanout_errors=fanout_errors,
+                finished_at=datetime.now(UTC),
+            )
+        )
     sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/batches/{batch_id}",
@@ -665,7 +763,8 @@ async def test_get_batch_not_found(
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/batches/{uuid4()}",
@@ -681,7 +780,8 @@ async def test_cancel_batch_cascades_to_active_trials(
     app, raw, team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         post = await ac.post(
             "/api/v1/batches",
@@ -700,22 +800,37 @@ async def test_cancel_batch_cascades_to_active_trials(
     queued_id = uuid4()
     succ_id = uuid4()
     with sl() as s:
-        s.execute(insert(Trial).values(
-            id=queued_id, task_id="local/mit-0", team_id=team_id,
-            state="queued", config={}, requires_caps={},
-            submitted_at=datetime.now(UTC), batch_id=cid,
-        ))
-        s.execute(insert(Trial).values(
-            id=succ_id, task_id="local/mit-1", team_id=team_id,
-            state="succeeded", config={}, requires_caps={},
-            submitted_at=datetime.now(UTC), batch_id=cid,
-            result={"aggregate_reward": 1.0},
-        ))
+        s.execute(
+            insert(Trial).values(
+                id=queued_id,
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="queued",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=cid,
+            )
+        )
+        s.execute(
+            insert(Trial).values(
+                id=succ_id,
+                task_id="local/mit-1",
+                team_id=team_id,
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=cid,
+                result={"aggregate_reward": 1.0},
+            )
+        )
         s.commit()
     sync_engine.dispose()
 
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         cancel = await ac.post(
             f"/api/v1/batches/{cid}/cancel",
@@ -726,6 +841,7 @@ async def test_cancel_batch_cascades_to_active_trials(
 
     # Re-fetch trial states.
     from sqlalchemy import select
+
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:

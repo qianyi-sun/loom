@@ -43,6 +43,10 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import { Input, Textarea } from "../components/Input";
+import {
+  agentReadinessMessage,
+  agentServiceModeReady,
+} from "../lib/agentReadiness";
 import { EMPTY_BENCHMARK_HELP } from "../lib/helpText";
 import { parseTaskIds } from "../lib/parseTaskIds";
 
@@ -792,6 +796,12 @@ export default function NewBatch(): JSX.Element {
       );
       if (!selectedAgent) {
         return { ok: false, error: `Combination ${i + 1}: pick an agent.` };
+      }
+      if (!agentServiceModeReady(selectedAgent)) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: ${agentReadinessMessage(selectedAgent)}`,
+        };
       }
       const agentModel = buildAgentModel(r.picker, selectedAgent.needs_model);
       if (selectedAgent.needs_model && agentModel === null) {

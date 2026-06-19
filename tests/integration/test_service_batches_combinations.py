@@ -45,7 +45,8 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
 
 @pytest.fixture
 async def setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -61,7 +62,8 @@ async def setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -85,34 +87,46 @@ async def setup(
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["submit", "read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         # Seed 10 deterministic tasks under benchmark "humaneval".
         for i in range(10):
             task_id = f"humaneval/HumanEval/{i}"
-            s.execute(insert(Task).values(
-                id=task_id,
-                checksum="x" * 64,
-                config=_valid_task_config(task_id),
-                source="local",
-                license="MIT",
-                benchmark_id=None,
-            ))
+            s.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="x" * 64,
+                    config=_valid_task_config(task_id),
+                    source="local",
+                    license="MIT",
+                    benchmark_id=None,
+                )
+            )
         # Live worker advertising every backend Loom ships drivers for —
         # required by the POST /batches reject-when-no-worker check.
-        s.execute(insert(Worker).values(
-            id=uuid4(), hostname="fixture-worker", version="test",
-            capabilities=[
-                {"backend": "docker"}, {"backend": "fake"},
-                {"backend": "daytona"}, {"backend": "modal"},
-            ],
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC),
-            status="active",
-        ))
+        s.execute(
+            insert(Worker).values(
+                id=uuid4(),
+                hostname="fixture-worker",
+                version="test",
+                capabilities=[
+                    {"backend": "docker"},
+                    {"backend": "fake"},
+                    {"backend": "daytona"},
+                    {"backend": "modal"},
+                ],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
         s.commit()
 
     try:
@@ -137,7 +151,8 @@ async def setup(
 async def _post(app: FastAPI, raw: str, body: dict) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         return await ac.post(
             "/api/v1/batches",
@@ -153,18 +168,23 @@ async def _post(app: FastAPI, raw: str, body: dict) -> httpx.Response:
 
 async def test_subset_first_n(setup: tuple[FastAPI, str]) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "first-3",
-        "backend": "docker",
-        "task_filter": {
-            "license": "MIT",
-            "subset_kind": "first_n",
-            "n": 3,
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "first-3",
+            "backend": "docker",
+            "task_filter": {
+                "license": "MIT",
+                "subset_kind": "first_n",
+                "n": 3,
+            },
+            "trial_config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
         },
-        "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
-        },
-    })
+    )
     assert r.status_code == 201, r.text
     # First 3 by id-asc are HumanEval/0, /1, /2 (3 trials × 1 sample).
     assert r.json()["expected_trial_count"] == 3
@@ -172,17 +192,22 @@ async def test_subset_first_n(setup: tuple[FastAPI, str]) -> None:
 
 async def test_subset_last_n(setup: tuple[FastAPI, str]) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "last-2",
-        "task_filter": {
-            "license": "MIT",
-            "subset_kind": "last_n",
-            "n": 2,
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "last-2",
+            "task_filter": {
+                "license": "MIT",
+                "subset_kind": "last_n",
+                "n": 2,
+            },
+            "trial_config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
         },
-        "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
-        },
-    })
+    )
     assert r.status_code == 201
     assert r.json()["expected_trial_count"] == 2
 
@@ -197,10 +222,14 @@ async def test_subset_random_n_reproducible(
     body = {
         "name": "rand-5-seed-42",
         "task_filter": {
-            "license": "MIT", "subset_kind": "random_n", "n": 5, "seed": 42,
+            "license": "MIT",
+            "subset_kind": "random_n",
+            "n": 5,
+            "seed": 42,
         },
         "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
+            "agent_name": "oracle",
+            "agent_model": None,
         },
     }
     r1 = await _post(app, raw, body)
@@ -212,15 +241,22 @@ async def test_subset_random_n_requires_seed(
     setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "no-seed",
-        "task_filter": {
-            "license": "MIT", "subset_kind": "random_n", "n": 3,
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "no-seed",
+            "task_filter": {
+                "license": "MIT",
+                "subset_kind": "random_n",
+                "n": 3,
+            },
+            "trial_config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
         },
-        "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
-        },
-    })
+    )
     assert r.status_code == 400
     assert "seed" in r.json()["detail"].lower()
 
@@ -229,15 +265,22 @@ async def test_subset_unknown_kind_rejected(
     setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "phantom",
-        "task_filter": {
-            "license": "MIT", "subset_kind": "fancy_n", "n": 3,
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "phantom",
+            "task_filter": {
+                "license": "MIT",
+                "subset_kind": "fancy_n",
+                "n": 3,
+            },
+            "trial_config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
         },
-        "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
-        },
-    })
+    )
     assert r.status_code == 400
     assert "unknown subset_kind" in r.json()["detail"]
 
@@ -253,25 +296,29 @@ async def test_combinations_compute_expected_count(
     """Multi-combination batch: 10 tasks × 2 combinations (n=3 each)
     = 60 trials expected."""
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "multi-combo",
-        "task_filter": {"license": "MIT"},
-        "trial_config": {},
-        "combinations": [
-            {
-                "agent_name": "oracle",
-                "agent_model": None,
-                "n_per_task": 3,
-                "label": "oracle-3",
-            },
-            {
-                "agent_name": "oracle",
-                "agent_model": None,
-                "n_per_task": 3,
-                "label": "oracle-3-bis",
-            },
-        ],
-    })
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "multi-combo",
+            "task_filter": {"license": "MIT"},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "n_per_task": 3,
+                    "label": "oracle-3",
+                },
+                {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "n_per_task": 3,
+                    "label": "oracle-3-bis",
+                },
+            ],
+        },
+    )
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["expected_trial_count"] == 60
@@ -282,19 +329,26 @@ async def test_combinations_reject_agent_in_trial_config(
     setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "ambiguous",
-        "task_filter": {"license": "MIT"},
-        "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "ambiguous",
+            "task_filter": {"license": "MIT"},
+            "trial_config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
+            "combinations": [
+                {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "n_per_task": 1,
+                    "label": "x",
+                }
+            ],
         },
-        "combinations": [{
-            "agent_name": "oracle",
-            "agent_model": None,
-            "n_per_task": 1,
-            "label": "x",
-        }],
-    })
+    )
     assert r.status_code == 400
     assert "trial_config.agent_name must be absent" in r.json()["detail"]
 
@@ -303,21 +357,29 @@ async def test_combinations_unique_labels(
     setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "dupes",
-        "task_filter": {"license": "MIT"},
-        "trial_config": {},
-        "combinations": [
-            {
-                "agent_name": "oracle", "agent_model": None,
-                "n_per_task": 1, "label": "twin",
-            },
-            {
-                "agent_name": "oracle", "agent_model": None,
-                "n_per_task": 1, "label": "twin",
-            },
-        ],
-    })
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "dupes",
+            "task_filter": {"license": "MIT"},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "n_per_task": 1,
+                    "label": "twin",
+                },
+                {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "n_per_task": 1,
+                    "label": "twin",
+                },
+            ],
+        },
+    )
     assert r.status_code == 400
     assert "duplicated" in r.json()["detail"]
 
@@ -326,19 +388,54 @@ async def test_combinations_reject_unknown_agent(
     setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "ghost",
-        "task_filter": {"license": "MIT"},
-        "trial_config": {},
-        "combinations": [{
-            "agent_name": "not-a-real-agent",
-            "agent_model": None,
-            "n_per_task": 1,
-            "label": "x",
-        }],
-    })
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "ghost",
+            "task_filter": {"license": "MIT"},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "not-a-real-agent",
+                    "agent_model": None,
+                    "n_per_task": 1,
+                    "label": "x",
+                }
+            ],
+        },
+    )
     assert r.status_code == 400
     assert "agent catalog" in r.json()["detail"].lower()
+
+
+async def test_combinations_reject_agent_without_service_runtime(
+    setup: tuple[FastAPI, str],
+) -> None:
+    app, raw = setup
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "opencode-combo",
+            "task_filter": {"license": "MIT"},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "opencode",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o"},
+                    "n_per_task": 1,
+                    "label": "opencode",
+                }
+            ],
+        },
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "combinations[0]" in detail
+    assert "opencode" in detail
+    assert "runtime" in detail.lower()
+    assert "GET /api/v1/agents" in detail
 
 
 # ----------------------------------------------------------------
@@ -348,13 +445,18 @@ async def test_combinations_reject_unknown_agent(
 
 async def test_backend_stored_on_batch(setup: tuple[FastAPI, str]) -> None:
     app, raw = setup
-    r = await _post(app, raw, {
-        "name": "docker-batch",
-        "backend": "docker",
-        "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
-        "trial_config": {
-            "agent_name": "oracle", "agent_model": None,
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "docker-batch",
+            "backend": "docker",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {
+                "agent_name": "oracle",
+                "agent_model": None,
+            },
         },
-    })
+    )
     assert r.status_code == 201
     assert r.json()["backend"] == "docker"

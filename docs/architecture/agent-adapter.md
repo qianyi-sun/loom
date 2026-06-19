@@ -69,10 +69,10 @@ adapters compose one of them:
 
 | Helper | When agents emit | Used by |
 |---|---|---|
-| `stream_stdout_jsonl` | Each event as a JSON line on stdout | codex, opencode, aider |
-| `tail_log_file` | Events to a file path, tailed | swe-agent, mini-swe-agent |
-| `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | openhands, openhands-sdk |
-| `tail_pty` | ANSI terminal output (parsed) | claude-code, gemini-cli, qwen-cli, kimi-cli |
+| `stream_stdout_jsonl` | Each event as a JSON line on stdout | claude-code, gemini-cli, mini-swe-agent, opencode, openhands-sdk, hello |
+| `tail_log_file` | Events to a file path, tailed | aider, swe-agent |
+| `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | openhands |
+| `tail_pty` | ANSI terminal output (parsed) | codex, qwen-cli, kimi-cli |
 
 ## Shipped adapters
 
@@ -81,15 +81,15 @@ adapters compose one of them:
 
 | Slug | Capture | Notes |
 |---|---|---|
-| aider | stdout_jsonl | |
-| claude-code | tail_pty | Anthropic's CLI |
-| codex | stdout_jsonl | OpenAI Codex CLI |
-| gemini-cli | tail_pty | Google Gemini CLI |
+| aider | tail_log_file | |
+| claude-code | stdout_jsonl | Anthropic's CLI |
+| codex | tail_pty | OpenAI Codex CLI |
+| gemini-cli | stdout_jsonl | Google Gemini CLI |
 | kimi-cli | tail_pty | Moonshot Kimi CLI |
-| mini-swe-agent | tail_log_file | |
+| mini-swe-agent | stdout_jsonl | |
 | opencode | stdout_jsonl | |
 | openhands | poll_local_http | port 9999 |
-| openhands-sdk | poll_local_http | port 9999, SDK variant |
+| openhands-sdk | stdout_jsonl | SDK variant |
 | qwen-cli | tail_pty | Alibaba Qwen CLI |
 | swe-agent | tail_log_file | |
 | _hello_ | _stdout_jsonl_ | _Reference adapter shipped with the framework — used as a test fixture / minimal example. Not for production use._ |
@@ -106,17 +106,51 @@ import time. `loom_cli/__init__.py` eager-imports
 
 1. Mints a per-step JWT (so the launched CLI can call the Loom
    Gateway with bounded scope)
-2. Uploads the agent's binary + setup payload to the sandbox
-3. Calls `driver.exec_streaming(adapter.build_invocation(...))` to
+2. Calls `driver.exec_streaming(adapter.build_invocation(...))` to
    launch
-4. Drains `adapter.capture_events(...)` into the trajectory writer
-5. On step end, kills the subprocess via the ExecHandle
+3. Drains `adapter.capture_events(...)` into the trajectory writer
+4. On step end, kills the subprocess via the ExecHandle
+
+`SubprocessAgent` does **not** install external CLIs into the trial
+sandbox. The adapter package supplies metadata, argv construction,
+and capture logic; the sandbox image/provisioning path must already
+contain the required executable or Python module. In service mode the
+API catalog exposes this as `runtime_contract` and `service_mode_ready`
+metadata from `GET /api/v1/agents`, and submit routes reject agents
+whose default service-mode sandbox runtime is not provisioned yet.
 
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client
 dependency since there's no Control Plane to record llm_calls to.
 The launched CLI talks to the upstream provider directly using the
 env-var API key the CLI puts in the sandbox.
+
+## Service-mode readiness contract
+
+Every displayed service-mode agent entry includes runtime metadata:
+
+- `service_mode_ready`: whether the default service-mode worker and
+  trial sandbox contract can run this agent today.
+- `readiness_status` / `readiness_message`: user-facing setup state
+  and an actionable explanation when the agent is gated.
+- `runtime_contract.execution`: built-in agent, in-box CLI, or
+  subprocess adapter execution mode.
+- `runtime_contract.capture`: trajectory capture helper expected for
+  the adapter.
+- `runtime_contract.required_executables` and
+  `runtime_contract.required_python_modules`: sandbox runtime
+  dependencies that must exist before enabling the agent.
+- `runtime_contract.endpoint_dialect`, `api_key_env`, `base_url_env`,
+  and `model_name_template`: provider-facing contract used to validate
+  compatible model/provider choices.
+
+The current default service-mode runtime marks `oracle`, `litellm`,
+and the reference `hello` adapter ready. Real external CLI adapters
+remain gated until the worker/sandbox image or provisioning path
+installs their runtime dependency and a platform-dev end-to-end smoke
+proves the path. This prevents another catalog option such as
+`opencode` from creating an all-failed batch because the executable is
+missing.
 
 ## Adding a new agent adapter
 
