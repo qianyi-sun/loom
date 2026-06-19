@@ -320,9 +320,9 @@ Migrations: `migrations/versions/0001_initial_schema.py` through
 11 pages:
 
 - **TrialsList** — keyset cursor pagination, state filter
-- **TrialDetail** — header + paginated trajectory viewer +
-  EventTimeline (one row per kind, click-to-expand JSON) +
-  ATIF download button
+- **TrialDetail** — header + artifact download links + paginated
+  trajectory viewer + EventTimeline (one row per event,
+  click-to-expand JSON) + ATIF download button
 - **BatchesList** + **BatchDetail** — `refetchInterval: 5000`
   while state ∈ {submitted, running}; stops on terminal
 - **NewBatch** — textarea JSON parse for `task_filter` +

@@ -22,6 +22,7 @@ import { modelLabel } from "../lib/modelLabel";
 import { trialStateVariant } from "../lib/statusVariant";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
+type TrialArtifact = components["schemas"]["TrialDetail"]["artifacts"][number];
 
 const ACTIVE_TRIAL_STATES = new Set([
   "queued",
@@ -29,6 +30,23 @@ const ACTIVE_TRIAL_STATES = new Set([
   "claimed",
   "running",
 ]);
+
+function artifactLabel(artifact: TrialArtifact): string {
+  return artifact.key || artifact.step_name || "artifact";
+}
+
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  if (unit === 0) return `${Math.round(value)} ${units[unit]}`;
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unit]}`;
+}
 
 function TrialHeader({
   trial,
@@ -147,6 +165,36 @@ function TrialHeader({
             </Button>
           )}
         </div>
+
+        {trial.artifacts.length > 0 ? (
+          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Artifacts
+            </p>
+            <div className="space-y-2">
+              {trial.artifacts.map((artifact, index) => {
+                const label = artifactLabel(artifact);
+                return (
+                  <a
+                    key={`${artifact.key}-${index}`}
+                    href={artifact.download_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`Download artifact ${label}.`}
+                    className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm transition-colors hover:border-slate-300 hover:bg-slate-50"
+                  >
+                    <span className="min-w-0 truncate font-medium text-slate-700">
+                      Download artifact {label}
+                    </span>
+                    <span className="shrink-0 font-mono text-xs text-slate-400">
+                      {formatBytes(artifact.size)}
+                    </span>
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
       </Card.Body>
     </Card>
   );

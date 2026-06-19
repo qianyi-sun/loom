@@ -14,14 +14,16 @@ import { screen, waitFor } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { components } from "../../api/schema";
 import TrialDetail from "../../pages/TrialDetail";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const TRIAL_ID = "11111111-1111-1111-1111-111111111111";
 
-const TRIAL_BODY = {
+const TRIAL_BODY: components["schemas"]["TrialDetail"] = {
   id: TRIAL_ID,
   task_id: "hello-world",
+  team_id: "team-1",
   state: "queued",
   agent_name: "oracle",
   model: {
@@ -31,6 +33,7 @@ const TRIAL_BODY = {
   aggregate_reward: null,
   cost_usd: 0,
   submitted_at: "2026-06-11T00:00:00Z",
+  started_at: null,
   finished_at: null,
   attempt_count: 0,
   failure_reason: null,
@@ -38,20 +41,22 @@ const TRIAL_BODY = {
   atif_url: "",
   trajectory_ready: false,
   trajectory_url: "",
+  artifacts: [],
 };
 
 function fetchSpy(
   trajectory:
     | { ok: true; body: unknown }
     | { ok: false; status: number; body: unknown },
+  trialBody: typeof TRIAL_BODY = TRIAL_BODY,
 ): ReturnType<typeof vi.spyOn> {
   return vi
-    .spyOn(global, "fetch")
+    .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
       if (url.endsWith(`/trials/${TRIAL_ID}`)) {
         return Promise.resolve(
-          new Response(JSON.stringify(TRIAL_BODY), {
+          new Response(JSON.stringify(trialBody), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
@@ -104,6 +109,40 @@ describe("TrialDetail trajectory section", () => {
     expect(
       screen.queryByRole("button", { name: /Retry/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders artifact download links from trial detail metadata", async () => {
+    fetchSpy(
+      { ok: true, body: { events: [], next_cursor: null } },
+      {
+        ...TRIAL_BODY,
+        state: "succeeded",
+        finished_at: "2026-06-11T00:05:00Z",
+        artifacts: [
+          {
+            step_name: "main",
+            key: "main/result.txt",
+            size: 701,
+            download_url: "http://localhost:9000/artifacts/result.txt",
+          },
+        ],
+      },
+    );
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    const artifactLink = await screen.findByRole("link", {
+      name: /Download artifact main\/result\.txt/i,
+    });
+    expect(artifactLink).toHaveAttribute(
+      "href",
+      "http://localhost:9000/artifacts/result.txt",
+    );
+    expect(screen.getByText("701 B")).toBeInTheDocument();
   });
 
   it("shows Retry instead of Load more on trajectory error", async () => {

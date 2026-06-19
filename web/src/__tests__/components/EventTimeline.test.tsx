@@ -1,10 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import EventTimeline from "../../components/EventTimeline";
 
 describe("EventTimeline", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders an empty state when there are no events", () => {
     render(<EventTimeline events={[]} />);
     expect(screen.getByText(/No events yet/i)).toBeInTheDocument();
@@ -56,6 +60,43 @@ describe("EventTimeline", () => {
     );
     expect(screen.getByText(/LLM call — openai\/gpt-4o-mini/)).toBeInTheDocument();
     expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+  });
+
+  it("uses stable unique keys when duplicate seq and kind values appear", () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    render(
+      <EventTimeline
+        events={[
+          {
+            kind: "llm_call",
+            seq: 0,
+            step_id: "main",
+            model: "openai/qwen2.5-coder-7b-instruct",
+            input_tokens: 168,
+            output_tokens: 483,
+            emitted_at: "2026-06-19T02:15:44.358Z",
+          },
+          {
+            kind: "llm_call",
+            seq: 0,
+            step_id: "main",
+            model: "openai/qwen2.5-coder-7b-instruct",
+            input_tokens: 168,
+            output_tokens: 483,
+            emitted_at: "2026-06-19T02:15:44.340Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(
+      consoleError.mock.calls.some((call) =>
+        String(call[0]).includes("Encountered two children with the same key"),
+      ),
+    ).toBe(false);
   });
 
   it("expands a row to show the full JSON on click", async () => {

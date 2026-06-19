@@ -71,6 +71,25 @@ function summary(e: Event): string {
   }
 }
 
+function eventKey(event: Event, index: number): string {
+  const explicitId =
+    typeof event.id === "string"
+      ? event.id
+      : typeof event.event_id === "string"
+        ? event.event_id
+        : null;
+  const parts = [
+    explicitId ? `id:${explicitId}` : null,
+    typeof event.trial_id === "string" ? `trial:${event.trial_id}` : null,
+    typeof event.seq === "number" ? `seq:${event.seq}` : null,
+    `kind:${event.kind}`,
+    typeof event.step_id === "string" ? `step:${event.step_id}` : null,
+    typeof event.emitted_at === "string" ? `at:${event.emitted_at}` : null,
+    `index:${index}`,
+  ].filter(Boolean);
+  return parts.join("|");
+}
+
 function Row({ event }: { event: Event }): JSX.Element {
   const [open, setOpen] = useState(false);
   const badge = KIND_BADGE[event.kind] ?? KIND_DEFAULT;
@@ -124,7 +143,7 @@ export default function EventTimeline({
   return (
     <div className="rounded-lg border border-slate-200 bg-white">
       {events.map((e, i) => (
-        <Row key={`${e.seq ?? i}-${e.kind}`} event={e} />
+        <Row key={eventKey(e, i)} event={e} />
       ))}
     </div>
   );
