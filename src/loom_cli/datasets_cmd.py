@@ -609,7 +609,11 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
         ) if not v
     ]
     if missing:
-        print(f"error: publish-local requires: {', '.join(missing)}", file=sys.stderr)
+        print(
+            "error: publish-local requires a database URL and object-store "
+            "endpoint/credentials",
+            file=sys.stderr,
+        )
         return 2
 
     store = MinioObjectStore(
