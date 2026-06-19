@@ -21,23 +21,47 @@ from __future__ import annotations
 
 import os
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-_KEBAB = r"^[a-z0-9][a-z0-9-]*$"
+BENCHMARK_ID_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 
 LOOM_BENCHMARKS_CONFIG_PATH = "LOOM_BENCHMARKS_CONFIG_PATH"
 
 __all__ = [
+    "BENCHMARK_ID_PATTERN",
     "LOOM_BENCHMARKS_CONFIG_PATH",
     "BenchmarksConfig",
     "LocalBenchmarkEntry",
     "RemapBenchmarkEntry",
     "load_benchmarks_config",
+    "normalize_source_subdir",
     "resolve_config_path",
 ]
+
+
+def normalize_source_subdir(value: str | None) -> str | None:
+    """Validate a `[[local]].source_subdir` value.
+
+    The value is appended under `<fixtures_root>/<benchmark-id>/`, so it must
+    stay a relative POSIX path with no traversal. Returning the normalized
+    POSIX form keeps DB/materializer source strings stable.
+    """
+    if value is None:
+        return None
+    if "\\" in value:
+        raise ValueError("source_subdir must use POSIX '/' separators")
+    if value in {"", "."}:
+        raise ValueError("source_subdir must be a non-empty relative path")
+    raw_parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValueError("source_subdir must not contain '.', '..', or empty segments")
+    path = PurePosixPath(value)
+    if path.is_absolute():
+        raise ValueError("source_subdir must be a non-empty relative path")
+    return path.as_posix()
 
 
 class LocalBenchmarkEntry(BaseModel):
@@ -49,10 +73,16 @@ class LocalBenchmarkEntry(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
-    id: str = Field(min_length=1, pattern=_KEBAB)
+    id: str = Field(min_length=1, pattern=BENCHMARK_ID_PATTERN)
     display_name: str = Field(min_length=1)
     series: str = Field(min_length=1)
     license_spdx: str = Field(min_length=1)
+    source_subdir: str | None = None
+
+    @field_validator("source_subdir")
+    @classmethod
+    def _validate_source_subdir(cls, value: str | None) -> str | None:
+        return normalize_source_subdir(value)
 
 
 class RemapBenchmarkEntry(BaseModel):
@@ -63,7 +93,7 @@ class RemapBenchmarkEntry(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
-    id: str = Field(min_length=1, pattern=_KEBAB)
+    id: str = Field(min_length=1, pattern=BENCHMARK_ID_PATTERN)
     inherit: str = Field(min_length=1)
     display_name: str = Field(min_length=1)
     upstream_kind: Literal["huggingface", "git", "https-tarball"]

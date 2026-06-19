@@ -6,6 +6,7 @@ Subcommands:
 - install <slug>
 - refresh-catalog
 - import <slug> [--db-url --minio-* --bucket --cache-dir --limit ...]
+- publish-local <path> [--db-url --minio-* --bucket ...]
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
 - register <slug> [--hf-org --hf-token --db-url --revision]
 - verify <slug> [--limit --minio-* --bucket --seed]
@@ -133,6 +134,82 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("path", type=Path)
+    p.add_argument(
+        "--id",
+        dest="benchmark_id",
+        default=None,
+        help="Benchmark id when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--display-name",
+        default=None,
+        help="Benchmark display name when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--series",
+        default=None,
+        help="Benchmark series when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--license-spdx",
+        default=None,
+        help="Benchmark license SPDX id when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--source-subdir",
+        default=None,
+        help="Optional relative task-bundle subdir for direct-layout PATHs.",
+    )
+    p.add_argument("--json", dest="as_json", action="store_true")
+
+
+def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("path", type=Path)
+    p.add_argument("--db-url", default=os.environ.get("LOOM_DB_URL"))
+    p.add_argument(
+        "--minio-endpoint",
+        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+    )
+    p.add_argument(
+        "--minio-access-key",
+        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+    )
+    p.add_argument(
+        "--minio-secret-key",
+        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+    )
+    p.add_argument("--bucket", default="loom-benchmarks")
+    p.add_argument("--imported-by", default=None)
+    p.add_argument(
+        "--id",
+        dest="benchmark_id",
+        default=None,
+        help="Benchmark id when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--display-name",
+        default=None,
+        help="Benchmark display name when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--series",
+        default=None,
+        help="Benchmark series when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--license-spdx",
+        default=None,
+        help="Benchmark license SPDX id when PATH has no benchmark.toml.",
+    )
+    p.add_argument(
+        "--source-subdir",
+        default=None,
+        help="Optional relative task-bundle subdir for direct-layout PATHs.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom datasets")
     sub = p.add_subparsers(dest="subcmd", required=True)
@@ -179,6 +256,17 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_audit_args(sub.add_parser(
         "audit",
         help="Inspect benchmark readiness from registered catalog/task rows.",
+    ))
+
+    _add_validate_local_args(sub.add_parser(
+        "validate-local",
+        aliases=["validate"],
+        help="Validate a local user-owned benchmark folder and print a registry snippet.",
+    ))
+
+    _add_publish_local_args(sub.add_parser(
+        "publish-local",
+        help="Upload a validated local benchmark folder to object storage and register it.",
     ))
 
     p_sync = sub.add_parser(
@@ -469,6 +557,95 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validate_local(args: argparse.Namespace) -> int:
+    from loom_cli.local_benchmark_validate import (
+        LocalBenchmarkValidationError,
+        render_config_snippet,
+        render_validation_json,
+        validate_local_benchmark,
+    )
+
+    try:
+        result = validate_local_benchmark(
+            args.path,
+            benchmark_id=args.benchmark_id,
+            display_name=args.display_name,
+            series=args.series,
+            license_spdx=args.license_spdx,
+            source_subdir=args.source_subdir,
+        )
+    except LocalBenchmarkValidationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
+
+    if args.as_json:
+        print(render_validation_json(result))
+        return 0
+
+    print("valid local benchmark folder")
+    print(f"benchmark_id: {result.entry.id}")
+    print(f"display_name: {result.entry.display_name}")
+    print(f"series:       {result.entry.series}")
+    print(f"license:      {result.entry.license_spdx}")
+    if result.entry.source_subdir:
+        print(f"source_subdir: {result.entry.source_subdir}")
+    print(f"tasks:        {result.task_count} valid")
+    print("config snippet:")
+    print(render_config_snippet(result.entry))
+    return 0
+
+
+def _cmd_publish_local(args: argparse.Namespace) -> int:
+    from loom.trajectory.storage import MinioObjectStore
+    from loom_cli.local_benchmark_publish import publish_local_benchmark
+    from loom_cli.local_benchmark_validate import LocalBenchmarkValidationError
+
+    missing = [
+        f for f, v in (
+            ("--db-url / LOOM_DB_URL", args.db_url),
+            ("--minio-endpoint / LOOM_MINIO_ENDPOINT", args.minio_endpoint),
+            ("--minio-access-key / LOOM_MINIO_ACCESS_KEY", args.minio_access_key),
+            ("--minio-secret-key / LOOM_MINIO_SECRET_KEY", args.minio_secret_key),
+        ) if not v
+    ]
+    if missing:
+        print(f"error: publish-local requires: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    store = MinioObjectStore(
+        endpoint_url=args.minio_endpoint,
+        access_key=args.minio_access_key,
+        secret_key=args.minio_secret_key,
+    )
+    try:
+        stats = asyncio.run(publish_local_benchmark(
+            args.path,
+            db_url=args.db_url,
+            object_store=store,
+            bucket=args.bucket,
+            benchmark_id=args.benchmark_id,
+            display_name=args.display_name,
+            series=args.series,
+            license_spdx=args.license_spdx,
+            source_subdir=args.source_subdir,
+            imported_by=args.imported_by,
+        ))
+    except LocalBenchmarkValidationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
+
+    print(
+        f"publish-local {stats.benchmark_id}: "
+        f"tasks={stats.task_count} "
+        f"inserted={stats.inserted} "
+        f"updated={stats.updated} "
+        f"unchanged={stats.unchanged} "
+        f"uploaded_objects={stats.uploaded_objects} "
+        f"source={stats.source_prefix}",
+    )
+    return 0
+
+
 def _cmd_sync_config(args: argparse.Namespace) -> int:
     from loom_benchmarks.registry import REGISTRY
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -572,6 +749,9 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,
+    "validate-local": _cmd_validate_local,
+    "validate": _cmd_validate_local,
+    "publish-local": _cmd_publish_local,
     "sync-config": _cmd_sync_config,
 }
 

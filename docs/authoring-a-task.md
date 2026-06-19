@@ -146,7 +146,9 @@ There are three supported task-registration shapes today:
   `scripts/seed_test_data.py`.
 - Operator-owned folders of `task.toml` bundles can be registered as a
   benchmark through `config/benchmarks.toml` and
-  `loom datasets sync-config`.
+  `loom datasets sync-config`. For a user-owned benchmark folder, first
+  run `loom datasets validate-local <folder>`; it validates every
+  `task.toml` and prints the `[[local]]` snippet to add to the registry.
 - Adapter-backed benchmarks should go through
   `loom datasets publish` followed by `loom datasets register`.
   Publish validates each generated `task.toml`, writes a schema v3
@@ -181,7 +183,7 @@ placeholder with empty or incomplete `config` is not counted by benchmark
 `task_count` or `POST /api/v1/tasks/count`, so the New Batch screen shows
 the benchmark as needing publish instead of offering an evaluation run.
 
-For benchmark-level onboarding, prefer the manifest path:
+For first-party adapter-backed benchmarks, prefer the manifest path:
 
 ```bash
 loom datasets publish my-benchmark --hf-org "$LOOM_HF_ORG"
@@ -191,9 +193,50 @@ loom datasets register my-benchmark --hf-org "$LOOM_HF_ORG" \
 
 Legacy manifests without `task_config` remain metadata placeholders.
 They must be republished or backfilled before users can launch them
-from the batch UI. Folder-first user-owned publishing is tracked by
-the benchmark onboarding design; it should reuse the same validate,
-publish, register, and smoke primitives.
+from the batch UI.
+
+For user-owned local benchmarks that do not need a Python adapter, use the
+folder-first registry path instead:
+
+```text
+team-evals/
+  benchmark.toml
+  tasks/
+    alpha/
+      task.toml
+      instruction.md
+      solution/
+      tests/
+```
+
+```bash
+loom datasets validate-local "$LOOM_WORKER_FIXTURES_ROOT/team-evals"
+loom datasets sync-config \
+  --config ./config/benchmarks.toml \
+  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT" \
+  --db-url "$LOOM_DB_URL"
+loom datasets audit team-evals --db-url "$LOOM_DB_URL"
+```
+
+`benchmark.toml` carries benchmark-level metadata. The default
+`source_subdir` is `tasks`, so the DB task id is `team-evals/alpha` while the
+worker materializes `fixture://team-evals/tasks/alpha`.
+
+For production, publish the same validated folder to object storage instead of
+depending on a worker fixture mount:
+
+```bash
+loom datasets publish-local ./team-evals \
+  --db-url "$LOOM_DB_URL" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY" \
+  --bucket loom-benchmarks
+```
+
+That path registers task sources such as
+`s3://loom-benchmarks/team-evals/alpha/`, which the worker already materializes
+through the object-store backend.
 
 Once registered, submit a trial:
 

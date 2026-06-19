@@ -68,6 +68,22 @@ license_spdx = "MIT"
     )
 
 
+def _write_toml_with_source_subdir(
+    path: Path, entry_id: str, source_subdir: str,
+) -> None:
+    path.write_text(
+        f'''schema_version = 1
+
+[[local]]
+id = "{entry_id}"
+display_name = "Test bundle"
+series = "test"
+license_spdx = "MIT"
+source_subdir = "{source_subdir}"
+'''
+    )
+
+
 @pytest.fixture
 def fixtures_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("fixtures")
@@ -151,6 +167,46 @@ async def test_local_sync_creates_rows(
                     "alpha", "beta", "gamma",
                 }
                 assert len(t.checksum) == 64  # sha256 hex
+    finally:
+        async with factory() as session:
+            await _cleanup(session)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_local_sync_source_subdir_keeps_public_task_ids(
+    postgres_url: str, tmp_path: Path,
+) -> None:
+    fixtures_root = tmp_path / "fixtures"
+    bench_root = fixtures_root / "team-evals"
+    tasks_root = bench_root / "tasks"
+    tasks_root.mkdir(parents=True)
+    _write_bundle(tasks_root, "alpha")
+    toml_path = tmp_path / "benchmarks.toml"
+    _write_toml_with_source_subdir(toml_path, "team-evals", "tasks")
+    cfg = load_benchmarks_config(toml_path)
+    assert cfg is not None
+
+    engine = create_async_engine(postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            plan = await sync(
+                cfg,
+                fixtures_root=fixtures_root,
+                session=session,
+                registry_names=set(),
+            )
+        assert plan.tasks == {
+            "team-evals": TaskCounts(inserted=1, updated=0, unchanged=0),
+        }
+
+        async with factory() as session:
+            task = (await session.execute(
+                select(TaskRow).where(TaskRow.id == "team-evals/alpha"),
+            )).scalar_one()
+            assert task.source == "fixture://team-evals/tasks/alpha"
+            assert task.benchmark_id == "team-evals"
     finally:
         async with factory() as session:
             await _cleanup(session)

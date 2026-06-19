@@ -321,7 +321,9 @@ writing Python:
 
 - **`[[local]]`** — point at a folder of `task.toml` bundles on the
   worker's `fixtures_root`. The folder becomes a benchmark; each
-  bundle becomes a task.
+  bundle becomes a task. User-authored folders can include a
+  `benchmark.toml` file and keep bundles under `tasks/`; validate them
+  with `loom datasets validate-local PATH` before syncing.
 - **`[[remap]]`** — reuse an existing adapter's parsing against a
   different upstream (e.g., a HumanEval fork).
 
@@ -333,6 +335,46 @@ The file lives at `<repo>/config/benchmarks.toml` in dev or
 [`architecture/benchmark-adapter.md`](architecture/benchmark-adapter.md)
 under "Operator-facing TOML registry" for the schema and worked
 examples.
+
+Minimal user-owned local benchmark flow:
+
+```bash
+# Layout: $LOOM_WORKER_FIXTURES_ROOT/team-evals/benchmark.toml and
+# $LOOM_WORKER_FIXTURES_ROOT/team-evals/tasks/<task-id>/task.toml
+loom datasets validate-local "$LOOM_WORKER_FIXTURES_ROOT/team-evals"
+
+# Copy the printed [[local]] snippet into config/benchmarks.toml, then sync.
+loom datasets sync-config \
+  --config ./config/benchmarks.toml \
+  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT" \
+  --db-url "$LOOM_DB_URL"
+
+loom datasets audit team-evals --db-url "$LOOM_DB_URL"
+```
+
+The validated folder path is the same path the worker materializes later.
+With `source_subdir = "tasks"`, the task row is named
+`team-evals/<task-id>` while its source points at
+`fixture://team-evals/tasks/<task-id>`.
+
+Production deployments should publish the same validated folder to object
+storage instead of relying on a shared worker fixture mount:
+
+```bash
+loom datasets validate-local ./team-evals
+loom datasets publish-local ./team-evals \
+  --db-url "$LOOM_DB_URL" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY" \
+  --bucket loom-benchmarks
+
+loom datasets audit team-evals --db-url "$LOOM_DB_URL"
+```
+
+`publish-local` uploads each task bundle under
+`s3://loom-benchmarks/team-evals/<task-id>/` and registers task rows with those
+sources. The worker uses the existing object-store materializer at runtime.
 
 ### Benchmark readiness audit
 

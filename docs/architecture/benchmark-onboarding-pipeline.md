@@ -258,25 +258,58 @@ my-benchmark/
       data/
 ```
 
-Operator flow:
+Dev/local operator flow:
 
 ```bash
-loom datasets validate ./my-benchmark
-loom datasets publish-local ./my-benchmark --target s3 --benchmark my-benchmark
-loom datasets register my-benchmark --source s3://...
-loom datasets smoke my-benchmark --sample first:3 --agent oracle
+loom datasets validate-local ./my-benchmark
+
+# Copy the printed [[local]] snippet into config/benchmarks.toml, then sync it
+# against the worker fixtures root that contains ./my-benchmark as <id>/.
+loom datasets sync-config \
+  --config ./config/benchmarks.toml \
+  --fixtures-root "$LOOM_WORKER_FIXTURES_ROOT" \
+  --db-url "$LOOM_DB_URL"
+
+loom datasets audit my-benchmark --db-url "$LOOM_DB_URL"
 ```
 
-The `smoke --agent oracle` path intentionally uses the same task
-contract as production trial execution: tasks configured with
-`agent.name = "oracle"` must ship an executable `solution/solve.sh`.
+Production object-store operator flow:
+
+```bash
+loom datasets validate-local ./my-benchmark
+loom datasets publish-local ./my-benchmark \
+  --db-url "$LOOM_DB_URL" \
+  --minio-endpoint "$LOOM_MINIO_ENDPOINT" \
+  --minio-access-key "$LOOM_MINIO_ACCESS_KEY" \
+  --minio-secret-key "$LOOM_MINIO_SECRET_KEY" \
+  --bucket loom-benchmarks
+
+loom datasets audit my-benchmark --db-url "$LOOM_DB_URL"
+```
+
+`publish-local` stores each task bundle under
+`s3://<bucket>/<benchmark-id>/<task-id>/` and writes that prefix into
+`tasks.source`. Workers materialize those rows through the existing `s3://`
+materializer, so production does not require mounting the user's source folder.
+
+After audit passes, launch a small first_n=3 smoke from the New Batch UI, or
+through the existing batch API/CLI with a complete provider/model/agent config
+and task_filter.benchmark_id set to my-benchmark. The smoke path should
+exercise the same registered task rows that production evaluations will use.
+
+The `validate-local` path intentionally uses the same `TaskConfig` boundary as
+production trial execution: each discovered `task.toml` must validate before it
+can enter `sync-config`. Tasks configured with `agent.name = "oracle"` should
+ship an executable `solution/solve.sh` when the smoke path will use the oracle
+agent.
 For code benchmarks whose reference answer already lives in
 `solution/solution.py`, that script can be a no-op and the verifier
 tests provide the actual pass/fail signal.
 
-The first implementation can keep this CLI/operator owned. A later admin API can
-wrap the same validation and publication primitives. Browser upload should call
-the same backend path eventually, but it is not the default onboarding workflow.
+The current implementation is CLI/operator owned and folder-first. A later
+admin API can wrap the same validation, publish, and sync primitives. Browser
+upload should call the same backend path eventually, but it is not the default
+onboarding workflow.
 
 ## First Benchmark Wave
 

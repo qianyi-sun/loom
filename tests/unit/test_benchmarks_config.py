@@ -65,6 +65,52 @@ license_url = "https://example.org/LICENSE"
     assert cfg.remap[0].splits is None
 
 
+def test_local_source_subdir_loads(tmp_path: Path) -> None:
+    body = """
+schema_version = 1
+
+[[local]]
+id = "team-evals"
+display_name = "Internal team evaluations"
+series = "internal"
+license_spdx = "MIT"
+source_subdir = "tasks"
+"""
+    cfg = load_benchmarks_config(_write(tmp_path, body))
+    assert cfg is not None
+    assert cfg.local[0].source_subdir == "tasks"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/abs",
+        "../tasks",
+        "tasks/../x",
+        "tasks//x",
+        "tasks/",
+        "tasks/./x",
+        ".",
+        "",
+    ],
+)
+def test_local_source_subdir_rejects_unsafe_paths(
+    tmp_path: Path, bad: str,
+) -> None:
+    body = f"""
+schema_version = 1
+
+[[local]]
+id = "team-evals"
+display_name = "Internal team evaluations"
+series = "internal"
+license_spdx = "MIT"
+source_subdir = "{bad}"
+"""
+    with pytest.raises(ValidationError):
+        load_benchmarks_config(_write(tmp_path, body))
+
+
 def test_missing_required_field_raises(tmp_path: Path) -> None:
     body = """
 schema_version = 1

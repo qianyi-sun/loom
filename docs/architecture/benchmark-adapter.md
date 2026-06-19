@@ -339,15 +339,49 @@ id = "team-evals"                          # kebab-case, unique
 display_name = "Internal team evaluations"
 series = "internal"
 license_spdx = "proprietary"
+source_subdir = "tasks"                    # optional
 ```
 
-The source directory is *derived*: `<worker.fixtures_root>/<id>/`. So
-the example above expects bundles at
+The source directory is *derived*: `<worker.fixtures_root>/<id>/`, plus
+`source_subdir` when it is set. The example above expects bundles at
+`<worker.fixtures_root>/team-evals/tasks/<task>/task.toml`; without
+`source_subdir`, it expects
 `<worker.fixtures_root>/team-evals/<task>/task.toml`. Operators
-provision that directory out-of-band — host bind-mount in dev compose;
-PV / hostPath in k8s. The TOML carries the `id` only, not the path,
-to avoid drift between the configured path and the materializer's
-resolution.
+provision the directory out-of-band — host bind-mount in dev compose;
+PV / hostPath in k8s. The TOML carries the `id` and optional relative
+subdir only, not an absolute path, to avoid drift between the configured
+path and the worker materializer's resolution.
+
+For user-authored folders, prefer this root layout:
+
+```text
+team-evals/
+  benchmark.toml
+  tasks/
+    alpha/
+      task.toml
+      instruction.md
+      solution/
+      tests/
+```
+
+Validate it before syncing:
+
+```bash
+loom datasets validate-local "$LOOM_WORKER_FIXTURES_ROOT/team-evals"
+```
+
+`validate-local` checks `benchmark.toml`, validates every discovered
+`task.toml` against `TaskConfig`, and prints the `[[local]]` snippet to
+copy into `config/benchmarks.toml`. With `source_subdir = "tasks"`, the
+DB task id stays `team-evals/alpha` while the materializer source points
+at `fixture://team-evals/tasks/alpha`.
+
+For production, use `loom datasets publish-local <folder>` instead of
+`sync-config` when workers should materialize from object storage rather than a
+shared fixture mount. It uploads bundle files under
+`s3://<bucket>/<benchmark-id>/<task-id>/` and upserts DB rows with those
+sources, reusing the worker's existing `s3://` materializer.
 
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
@@ -370,6 +404,7 @@ Sync-time failure modes:
 | ID collides with REGISTRY entry-point  | error, abort      | 1    |
 | `[[local]]` source dir missing/empty   | WARN, skip entry  | 0    |
 | `task.toml` inside source dir invalid  | error, abort      | 1    |
+| unsafe `source_subdir`                 | error, abort      | 1    |
 
 Entries removed from the TOML do **not** delete their DB rows —
 trials may still reference them. Operators clean up manually.

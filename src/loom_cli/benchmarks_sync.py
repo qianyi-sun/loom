@@ -166,7 +166,10 @@ async def _sync_local(
     plan: SyncPlan,
     dry_run: bool,
 ) -> None:
-    source_dir = fixtures_root / entry.id
+    entry_root = fixtures_root / entry.id
+    source_dir = (
+        entry_root / entry.source_subdir if entry.source_subdir else entry_root
+    )
     if not source_dir.is_dir():
         logger.warning(
             "benchmarks_sync_skip kind=local id=%s reason=missing_source_dir path=%s",
@@ -178,7 +181,7 @@ async def _sync_local(
         )
         return
 
-    task_tomls = _walk_task_tomls(source_dir)
+    task_tomls = walk_task_tomls(source_dir)
     if not task_tomls:
         logger.warning(
             "benchmarks_sync_skip kind=local id=%s reason=empty_source_dir path=%s",
@@ -255,6 +258,7 @@ async def _sync_local_tasks(
         task_id = (
             entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
         )
+        source = _fixture_source(entry, rel)
 
         try:
             with task_toml.open("rb") as f:
@@ -285,7 +289,7 @@ async def _sync_local_tasks(
                 id=task_id,
                 checksum=checksum,
                 config=raw_cfg,
-                source=f"fixture://{task_id}",
+                source=source,
                 license=entry.license_spdx,
                 benchmark_id=entry.id,
             )
@@ -309,7 +313,16 @@ async def _sync_local_tasks(
     )
 
 
-def _walk_task_tomls(source_dir: Path) -> list[Path]:
+def _fixture_source(entry: LocalBenchmarkEntry, rel: Path) -> str:
+    parts = [entry.id]
+    if entry.source_subdir:
+        parts.extend(entry.source_subdir.split("/"))
+    if rel != Path("."):
+        parts.extend(rel.as_posix().split("/"))
+    return "fixture://" + "/".join(parts)
+
+
+def walk_task_tomls(source_dir: Path) -> list[Path]:
     """Find every `task.toml` under `source_dir`, no symlink-following.
 
     Returned paths are sorted for stable plan output.
