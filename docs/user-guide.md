@@ -472,6 +472,21 @@ agents as `setup needed`, and submit routes reject bypassed requests
 with the same setup message instead of creating a batch that can only
 fail in the worker.
 
+Before enabling an external agent runtime, audit the sandbox image that
+will run the task:
+
+```bash
+loom agents audit-runtime --image python:3.11-slim
+loom agents audit-runtime --image my-agent-sandbox:dev --agent opencode --json
+```
+
+The command exits `0` only when every audited agent is ready. It exits
+`1` when any agent is still `blocked` by missing dependencies or `gated`
+by the catalog readiness flag, and `2` for usage errors such as an
+unknown agent name. A passing audit proves dependency presence; close the
+loop with a normal trial or batch smoke before treating the agent as
+fully supported.
+
 ## Rate cards
 
 Rate cards live at `~/.config/loom/rate-cards.toml`, seeded on first

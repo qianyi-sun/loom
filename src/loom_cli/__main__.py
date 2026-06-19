@@ -197,6 +197,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Discover datasets (list/show/install/refresh-catalog)",
         add_help=False,
     )
+    sub.add_parser(
+        "agents",
+        help="Inspect agent catalog readiness and sandbox runtime dependencies",
+        add_help=False,
+    )
 
     # `loom service {up,down,status}` — one-liner wrapper around
     # docker-compose + migrations + test-data seeding for the dev stack.
@@ -321,6 +326,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "datasets":
         from loom_cli.datasets_cmd import dispatch as datasets_dispatch
         return datasets_dispatch(raw[1:])
+    if raw and raw[0] == "agents":
+        from loom_cli.agents_cmd import dispatch as agents_dispatch
+        return agents_dispatch(raw[1:])
     if raw and raw[0] == "auth":
         from loom_cli.auth_cmd import dispatch as auth_dispatch
         return auth_dispatch(raw[1:])

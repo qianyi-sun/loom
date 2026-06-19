@@ -152,6 +152,23 @@ proves the path. This prevents another catalog option such as
 `opencode` from creating an all-failed batch because the executable is
 missing.
 
+Operators can audit a concrete trial sandbox image before enabling an
+agent:
+
+```bash
+loom agents audit-runtime --image python:3.11-slim
+loom agents audit-runtime --image my-agent-sandbox:dev --agent opencode --json
+```
+
+The audit runs dependency probes inside the named Docker image and
+reports one row per displayed agent. `blocked` means an executable or
+Python module declared by `runtime_contract` is missing. `gated` means
+the image satisfies the declared dependency checks, but the catalog still
+marks the agent unavailable pending the product readiness flip and an
+end-to-end platform-dev smoke. The command does not pull images
+implicitly; build or pull the target sandbox image first so the audit
+checks exactly what workers will run.
+
 ## Adding a new agent adapter
 
 1. New module: `packages/loom-launcher/loom_launcher/adapters/<name>.py`.

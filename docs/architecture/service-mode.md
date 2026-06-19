@@ -44,6 +44,14 @@ capture mode. The SPA disables unavailable agents with a setup-needed
 message, and service submit routes enforce the same readiness check so
 clients cannot create doomed batches by bypassing the browser.
 
+Use `loom agents audit-runtime --image <trial-sandbox-image>` to verify
+that the image used by task `environment.docker_image` contains the
+executables and Python modules declared by the agent catalog. This checks
+the trial sandbox boundary, not the `loom-worker` container. A clean
+runtime audit is necessary before flipping an external adapter to
+`service_mode_ready=true`; it still must be followed by a live
+end-to-end smoke that proves the adapter can finish a platform trial.
+
 ## Process model
 
 ```

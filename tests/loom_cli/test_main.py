@@ -10,7 +10,9 @@ import sys
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "loom_cli", *args],
-        check=False, capture_output=True, text=True,
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -23,7 +25,7 @@ def test_no_args_prints_help_to_stderr_and_exits_2() -> None:
 def test_help_lists_top_level_subcommands() -> None:
     res = _run("--help")
     assert res.returncode == 0
-    for cmd in ("run", "config", "datasets"):
+    for cmd in ("run", "config", "datasets", "agents"):
         assert cmd in res.stdout
 
 
