@@ -148,6 +148,45 @@ def _alembic_upgrade(db_url: str) -> int:
     ).returncode
 
 
+def _benchmarks_sync_config(db_url: str) -> None:
+    """Run `loom datasets sync-config` after seed (issue #234).
+
+    No-op when there's no config/benchmarks.toml (legacy). Failures
+    log a WARN but don't fail `service up` — the registry layer is
+    not on the critical path.
+    """
+    from loom_cli.datasets_cmd import _resolve_config_path
+
+    config_path = _resolve_config_path(None)
+    if config_path is None:
+        return
+    fixtures_root = os.environ.get("LOOM_WORKER_FIXTURES_ROOT")
+    if not fixtures_root:
+        sys.stderr.write(
+            f"warning: {config_path} present but "
+            "LOOM_WORKER_FIXTURES_ROOT not set — skipping benchmarks "
+            "sync. Set the env var to the dir holding "
+            "<benchmark-id>/<task>/ bundles.\n",
+        )
+        return
+    print(f"→ syncing {config_path}")
+    env = os.environ.copy()
+    env["LOOM_DB_URL"] = db_url
+    rc = subprocess.run(
+        [sys.executable, "-m", "loom_cli", "datasets", "sync-config",
+         "--config", str(config_path),
+         "--fixtures-root", fixtures_root,
+         "--db-url", db_url],
+        env=env, check=False,
+    ).returncode
+    if rc != 0:
+        sys.stderr.write(
+            "warning: `loom datasets sync-config` exited non-zero; "
+            "skipping benchmark registry sync (this does not block "
+            "service start).\n",
+        )
+
+
 def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     """Run seed_test_data.py with `--mode dev --print all`. Dev mode
     registers the benchmark slate from HF Hub so the SPA dropdown is
@@ -380,6 +419,10 @@ def _up(args: argparse.Namespace) -> int:
     # token, batches accept (201) but sit at state=submitted forever.
     # We mint after seeding so the DB is fully migrated before the CP
     # receives any admin requests.
+    # Sync benchmarks.toml AFTER seed so seed-time entry-point benchmarks
+    # populate REGISTRY before the preflight collision check runs.
+    _benchmarks_sync_config(args.db_url)
+
     print("→ minting batch-runner CP token")
     batch_runner_token = _mint_batch_runner_cp_token(admin_token, args.cp_url)
     if batch_runner_token:

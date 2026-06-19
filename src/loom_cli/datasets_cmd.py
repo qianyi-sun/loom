@@ -160,6 +160,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Sample tasks from a benchmark + run the oracle agent end-to-end.",
     ))
 
+    p_sync = sub.add_parser(
+        "sync-config",
+        help="Sync config/benchmarks.toml into the benchmarks + tasks tables (issue #234).",
+    )
+    p_sync.add_argument(
+        "--config", type=Path, default=None,
+        help="Path to benchmarks.toml. Defaults to "
+        "$LOOM_BENCHMARKS_CONFIG_PATH, then ./config/benchmarks.toml, "
+        "then /etc/loom/benchmarks.toml.",
+    )
+    p_sync.add_argument(
+        "--fixtures-root", type=Path, default=None,
+        help="Override the worker fixtures_root used to resolve "
+        "[[local]] entries. Defaults to $LOOM_WORKER_FIXTURES_ROOT.",
+    )
+    p_sync.add_argument(
+        "--db-url", default=os.environ.get("LOOM_DB_URL"),
+        help="Postgres URL (defaults to env LOOM_DB_URL).",
+    )
+    p_sync.add_argument(
+        "--dry-run", action="store_true",
+        help="Compute the plan + print it without writing to the DB.",
+    )
+
     return p
 
 
@@ -391,6 +415,117 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_config_path(explicit: Path | None) -> Path | None:
+    """Find the benchmarks.toml file. Returns None if it doesn't exist
+    so the caller can no-op cleanly (matches v3 plan: missing file = exit 0)."""
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    env = os.environ.get("LOOM_BENCHMARKS_CONFIG_PATH")
+    if env:
+        p = Path(env)
+        return p if p.exists() else None
+    for candidate in (
+        Path.cwd() / "config" / "benchmarks.toml",
+        Path("/etc/loom/benchmarks.toml"),
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _cmd_sync_config(args: argparse.Namespace) -> int:
+    from loom_benchmarks.registry import REGISTRY
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_cli.benchmarks_config import load_benchmarks_config
+    from loom_cli.benchmarks_sync import (
+        SyncError,
+        render_plan_table,
+        sync,
+    )
+
+    config_path = _resolve_config_path(args.config)
+    if config_path is None:
+        if args.config is not None:
+            print(
+                f"benchmarks.toml not found at {args.config}; nothing to sync",
+                file=sys.stderr,
+            )
+        else:
+            print("no benchmarks.toml found; nothing to sync")
+        return 0
+
+    try:
+        cfg = load_benchmarks_config(config_path)
+    except Exception as exc:
+        print(f"error: invalid {config_path}: {exc}", file=sys.stderr)
+        return 1
+    if cfg is None:
+        print("no benchmarks.toml found; nothing to sync")
+        return 0
+
+    fixtures_root = args.fixtures_root or (
+        Path(env) if (env := os.environ.get("LOOM_WORKER_FIXTURES_ROOT")) else None
+    )
+    if cfg.local and fixtures_root is None:
+        print(
+            "error: [[local]] entries require --fixtures-root or "
+            "$LOOM_WORKER_FIXTURES_ROOT (the directory holding "
+            "<benchmark-id>/<task>/ bundles)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not args.db_url:
+        print(
+            "error: sync-config requires --db-url / env LOOM_DB_URL",
+            file=sys.stderr,
+        )
+        return 2
+
+    db_url = args.db_url
+    if not db_url.startswith("postgresql+"):
+        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    async def _run() -> int:
+        engine = create_async_engine(db_url)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                plan = await sync(
+                    cfg,
+                    fixtures_root=fixtures_root or Path("/"),
+                    session=session,
+                    registry_names=set(REGISTRY),
+                    dry_run=args.dry_run,
+                )
+        finally:
+            await engine.dispose()
+
+        banner = (
+            "DRY RUN — no DB writes" if args.dry_run
+            else f"synced {config_path}"
+        )
+        print(banner)
+        print(render_plan_table(plan))
+        if plan.tasks:
+            print()
+            for bid, counts in sorted(plan.tasks.items()):
+                print(
+                    f"  {bid}: {counts.total} tasks "
+                    f"(inserted={counts.inserted} "
+                    f"updated={counts.updated} "
+                    f"unchanged={counts.unchanged})",
+                )
+        return 0
+
+    try:
+        return asyncio.run(_run())
+    except SyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "list": _cmd_list,
     "show": _cmd_show,
@@ -400,6 +535,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "publish": _cmd_publish,
     "register": _cmd_register,
     "verify": _cmd_verify,
+    "sync-config": _cmd_sync_config,
 }
 
 

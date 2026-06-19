@@ -281,6 +281,66 @@ get cleaned up via `rmtree` on the next call.
   `packages/<name>/tests/` must omit `__init__.py` so pytest doesn't
   collide it with the main repo's `tests/` root.
 
+## Operator-facing TOML registry: `config/benchmarks.toml`
+
+Most adapter work goes through Python (entry-points). Two operator
+scenarios don't need new Python and live in `config/benchmarks.toml`
+instead (issue #234):
+
+### Local task collections (`[[local]]`)
+
+When you already have a folder of `task.toml` bundles, register the
+folder rather than writing an adapter:
+
+```toml
+schema_version = 1
+
+[[local]]
+id = "team-evals"                          # kebab-case, unique
+display_name = "Internal team evaluations"
+series = "internal"
+license_spdx = "proprietary"
+```
+
+The source directory is *derived*: `<worker.fixtures_root>/<id>/`. So
+the example above expects bundles at
+`<worker.fixtures_root>/team-evals/<task>/task.toml`. Operators
+provision that directory out-of-band — host bind-mount in dev compose;
+PV / hostPath in k8s. The TOML carries the `id` only, not the path,
+to avoid drift between the configured path and the materializer's
+resolution.
+
+Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
+
+- Automatically on `loom service up` after seed, when
+  `config/benchmarks.toml` is present AND `LOOM_WORKER_FIXTURES_ROOT`
+  is set.
+- Manually via `loom datasets sync-config [--dry-run]`.
+
+In k8s, sync is operator-driven — there is no automatic CP-lifespan
+sync because the control-plane pod does not have the worker's data PV
+mounted (workload separation). Run sync from a one-shot Job that
+mounts the same PV.
+
+Sync-time failure modes:
+
+| Condition                              | Behavior          | Exit |
+|----------------------------------------|-------------------|------|
+| TOML file missing                      | no-op             | 0    |
+| TOML malformed / Pydantic validation   | error, abort      | 1    |
+| ID collides with REGISTRY entry-point  | error, abort      | 1    |
+| `[[local]]` source dir missing/empty   | WARN, skip entry  | 0    |
+| `task.toml` inside source dir invalid  | error, abort      | 1    |
+
+Entries removed from the TOML do **not** delete their DB rows —
+trials may still reference them. Operators clean up manually.
+
+### Adapter remaps (`[[remap]]`)
+
+Reserved for PR-2 (issue #234). The loader accepts `[[remap]]`
+entries today, but the sync engine reports them as SKIP with reason
+`remap support pending PR-2`.
+
 ## See also
 
 - [overview.md](overview.md)
