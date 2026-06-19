@@ -13,7 +13,7 @@ import pytest
 from loom.agent.oracle import OracleAgent
 from loom.driver.fake import FakeDriver, command_table_handler
 from loom.models.exec import ExecResult
-from loom.models.result import TrialState
+from loom.models.result import FailureReason, TrialState
 from loom.models.task import (
     AgentDefaults,
     EnvironmentConfig,
@@ -22,7 +22,7 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
-from loom.models.verifier import VerifierResult
+from loom.models.verifier import VerifierError, VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
 from tests._trial_config_defaults import stub_trial_config
@@ -35,6 +35,29 @@ class _AlwaysPassVerifier:
 
     async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
         return VerifierResult(rewards={"passed": 1.0})
+
+
+class _MissingTestsVerifier:
+    name = "missing-tests"
+
+    async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+        return VerifierResult(
+            rewards={},
+            error=VerifierError(
+                kind="missing_tests",
+                message="pytest did not produce /loom/verifier/junit.xml",
+            ),
+        )
+
+
+class _ScoredVerifierError:
+    name = "scored-error"
+
+    async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+        return VerifierResult(
+            rewards={"valid": 0.0},
+            error=VerifierError(kind="exec_failure", message="schema validation failed"),
+        )
 
 
 @pytest.fixture
@@ -258,10 +281,88 @@ async def test_trial_run_agent_error_marks_failed(hello_task: Path, tmp_path: Pa
         local_trajectory_path=tmp_path / "events.jsonl",
     )
     result = await Trial(ctx=ctx).run()
-    # AgentError caught inside run_step → step has error, but trial succeeds at top level.
-    # The trial-level state is SUCCEEDED because run_step records errors as StepError
-    # rather than propagating. Verifier still ran and returned passed=1.0.
-    # Step-level error is what surfaces the failure.
-    assert result.state == TrialState.SUCCEEDED
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.AGENT_ERROR
     assert result.steps[0].error is not None
     assert result.steps[0].error.phase == "agent"
+
+
+async def test_trial_run_empty_reward_verifier_error_marks_failed(
+    hello_task: Path, tmp_path: Path,
+):
+    """Verifier infrastructure errors without rewards are platform failures."""
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pytest"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=FakeDriver(exec_handler=handler),
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_MissingTestsVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.VERIFIER_ERROR
+    assert result.steps[0].error is None
+    assert result.steps[0].verifier_result is not None
+    assert result.steps[0].verifier_result.error is not None
+    assert result.steps[0].verifier_result.error.kind == "missing_tests"
+
+
+async def test_trial_run_scored_verifier_error_stays_succeeded(
+    hello_task: Path, tmp_path: Path,
+):
+    """Verifier errors with an explicit reward remain scored outcomes."""
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="structured"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=FakeDriver(exec_handler=handler),
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_ScoredVerifierError(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert result.failure_reason is None
+    assert result.reward == {"valid": 0.0}
+    assert result.steps[0].verifier_result is not None
+    assert result.steps[0].verifier_result.error is not None

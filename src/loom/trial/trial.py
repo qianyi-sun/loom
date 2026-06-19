@@ -216,10 +216,11 @@ class Trial:
                         )
                         result.steps.append(sr)
                     result.reward = _aggregate(self.ctx, result)
-                    artifact_error = _first_artifact_error(result)
-                    if artifact_error is not None:
+                    terminal_failure = _first_terminal_step_failure(result)
+                    if terminal_failure is not None:
                         result.state = TrialState.FAILED
-                        result.failure_reason = FailureReason.ARTIFACT_UPLOAD_FAILED
+                        result.failure_reason = terminal_failure[0]
+                        result.failure_message = terminal_failure[1]
                     else:
                         result.state = TrialState.SUCCEEDED
                 except asyncio.CancelledError:
@@ -460,11 +461,34 @@ def _aggregate(ctx: TrialContext, result: TrialResult) -> dict[str, float] | Non
     return {k: sum(r.get(k, 0.0) for r in rewards) / len(rewards) for k in keys}
 
 
-def _first_artifact_error(result: TrialResult) -> StepError | None:
+def _first_terminal_step_failure(result: TrialResult) -> tuple[FailureReason, str | None] | None:
     for step in result.steps:
-        if step.error is not None and step.error.phase == "artifacts":
-            return step.error
+        if step.error is not None:
+            return _failure_from_step_error(step.error)
+        verifier_result = step.verifier_result
+        if (
+            verifier_result is not None
+            and verifier_result.error is not None
+            and not verifier_result.rewards
+        ):
+            if verifier_result.error.kind == "timeout":
+                return FailureReason.VERIFIER_TIMEOUT, verifier_result.error.message
+            return FailureReason.VERIFIER_ERROR, verifier_result.error.message
     return None
+
+
+def _failure_from_step_error(error: StepError) -> tuple[FailureReason, str | None]:
+    if error.phase == "agent":
+        reason = FailureReason.AGENT_TIMEOUT if error.reason == "timeout" else FailureReason.AGENT_ERROR
+        return reason, error.message
+    if error.phase == "verifier":
+        reason = (
+            FailureReason.VERIFIER_TIMEOUT if error.reason == "timeout" else FailureReason.VERIFIER_ERROR
+        )
+        return reason, error.message
+    if error.phase == "artifacts":
+        return FailureReason.ARTIFACT_UPLOAD_FAILED, error.message
+    return FailureReason.INTERNAL_ERROR, error.message
 
 
 def _format_tb(exc: BaseException) -> str:

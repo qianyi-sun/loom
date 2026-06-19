@@ -83,6 +83,13 @@ Notes:
 - **`error` is data**, not control flow. Setting `error` does not
   invalidate `rewards` / `checks`; a verifier can both report a
   partial score AND flag what went wrong.
+- **Trial final-state promotion is stricter than ATIF projection.**
+  A per-step `StepError` always makes the trial `failed`, because the
+  agent/artifact/verifier phase itself failed. A `VerifierResult.error`
+  with an empty `rewards` dict also makes the trial `failed` because the
+  evaluator produced no usable score. A `VerifierResult.error` with
+  explicit rewards stays a scored outcome, so a model/agent can receive
+  `0.0` while the platform run still counts as `succeeded`.
 - **`confidence` is bounded [0, 1]** (Pydantic-validated). Used by
   LLM-judge to mark uncertain calls; downstream consumers can filter
   on it.

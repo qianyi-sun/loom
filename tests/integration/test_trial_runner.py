@@ -68,7 +68,11 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
 ):
     state_calls: list[tuple[str, str | None]] = []
 
-    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+    async def fake_state_patch(
+        state: str,
+        failure_reason: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         state_calls.append((state, failure_reason))
         return True
 
@@ -108,7 +112,11 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
     logs the warning and lets Trial.run() continue."""
     calls: list[tuple[str, str | None]] = []
 
-    async def flaky_patch(state: str, fr: str | None) -> bool:
+    async def flaky_patch(
+        state: str,
+        fr: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         calls.append((state, fr))
         if state == "running":
             raise RuntimeError("simulated network blip")
@@ -161,7 +169,11 @@ async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type:
 
     calls: list[tuple[str, str | None]] = []
 
-    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+    async def fake_state_patch(
+        state: str,
+        failure_reason: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         calls.append((state, failure_reason))
         return True
 
@@ -212,7 +224,11 @@ async def test_runner_marks_failed_when_artifact_upload_fails(  # type: ignore[n
 
     calls: list[tuple[str, str | None]] = []
 
-    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+    async def fake_state_patch(
+        state: str,
+        failure_reason: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         calls.append((state, failure_reason))
         return True
 
@@ -265,7 +281,11 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     state_calls: list[tuple[str, str | None]] = []
     projection_calls: list[dict[str, Any]] = []
 
-    async def fake_state_patch(state: str, failure_reason: str | None) -> bool:
+    async def fake_state_patch(
+        state: str,
+        failure_reason: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         state_calls.append((state, failure_reason))
         return True
 
@@ -338,7 +358,11 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
     hello_task, tmp_path: Path, caplog,
 ):
-    async def fenced_patch(state: str, fr: str | None) -> bool:
+    async def fenced_patch(
+        state: str,
+        fr: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         return state != "running"  # Pretend `running` PATCH was fenced
 
     handler = command_table_handler({
@@ -393,7 +417,11 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
     })
     explicit_model = ModelSpec(provider="anthropic", name="claude-opus-4-7")
 
-    async def noop_patch(state: str, _fr: str | None) -> bool:
+    async def noop_patch(
+        state: str,
+        _fr: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
         return True
 
     # Task says oracle/None; TrialConfig says claude-code-inbox/claude-opus-4-7
