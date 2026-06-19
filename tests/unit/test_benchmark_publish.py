@@ -45,6 +45,10 @@ name = "main"
 """
 
 
+def _task_toml(task_id: str) -> str:
+    return _TASK_TOML.replace("fake-bench/task-001", task_id)
+
+
 def test_repo_id_for_uses_loom_benchmark_prefix() -> None:
     assert repo_id_for("PRHW", "humaneval") == "PRHW/loom-benchmark-humaneval"
 
@@ -169,3 +173,85 @@ def test_run_publish_includes_valid_task_config_in_manifest(
     task = cast(dict[str, Any], captured_manifest["tasks"][0])
     assert task["task_config"]["task"]["id"] == "fake-bench/task-001"
     assert task["task_config"]["environment"]["docker_image"] == "python:3.12-slim"
+
+
+def test_run_publish_filters_specific_instance_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from loom_benchmark_tool import publish_cmd
+
+    class FakeAdapter:
+        name = "fake-bench"
+        display_name = "Fake Bench"
+        upstream_source = UpstreamSource(kind="huggingface", locator="fake/source")
+        license_spdx = "MIT"
+        license_url = ""
+        splits = ("test",)
+        series = "fake"
+
+        def list_instances(
+            self,
+            *,
+            source_dir: Path,
+            split: str,
+        ) -> list[BenchmarkInstance]:
+            return [
+                BenchmarkInstance(instance_id="task-001", split=split, raw={}),
+                BenchmarkInstance(instance_id="task-002", split=split, raw={}),
+            ]
+
+        def convert_instance(
+            self,
+            instance: BenchmarkInstance,
+            *,
+            out_dir: Path,
+        ) -> ConvertedTask:
+            task_id = f"fake-bench/{instance.instance_id}"
+            (out_dir / "task.toml").write_text(_task_toml(task_id))
+            (out_dir / "instruction.md").write_text("solve it\n")
+            return ConvertedTask(
+                task_id=task_id,
+                checksum=_bundle_checksum(out_dir),
+                license_spdx="MIT",
+                warnings=(),
+            )
+
+    captured_manifest: dict[str, Any] = {}
+
+    class FakeHfApi:
+        def __init__(self, *, token: str) -> None:
+            self.token = token
+
+        def create_repo(self, **_kwargs: object) -> None:
+            return None
+
+        def upload_folder(self, **kwargs: object) -> object:
+            folder = Path(str(kwargs["folder_path"]))
+            captured_manifest.update(
+                json.loads((folder / "manifest.json").read_text()),
+            )
+            return SimpleNamespace(oid="fake-revision")
+
+    monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
+    monkeypatch.setattr(
+        publish_cmd,
+        "fetch_upstream",
+        lambda *_args, **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(publish_cmd, "HfApi", FakeHfApi)
+
+    stats = publish_cmd.run_publish(
+        benchmark="fake-bench",
+        hf_org="fake-org",
+        hf_token="fake-token",
+        cache_dir=tmp_path / "cache",
+        instance_ids={"task-002"},
+    )
+
+    assert stats["published"] == 1
+    assert captured_manifest["task_count"] == 1
+    task = cast(dict[str, Any], captured_manifest["tasks"][0])
+    assert task["instance_id"] == "task-002"
+    assert task["task_id"] == "fake-bench/task-002"
+    assert task["task_config"]["task"]["id"] == "fake-bench/task-002"

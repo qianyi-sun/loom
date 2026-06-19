@@ -42,7 +42,9 @@ from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
+from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
+from loom.verifier.script_verifier import ScriptVerifier
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
 from loom_worker.heartbeat import HeartbeatThread
@@ -62,6 +64,11 @@ from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 logger = logging.getLogger(__name__)
+
+_VERIFIER_CTORS: dict[str, Callable[..., Verifier]] = {
+    "pytest": PytestVerifier,
+    "script": ScriptVerifier,
+}
 
 
 _DEFAULT_CAPS = [
@@ -389,6 +396,7 @@ async def _spawn_trial(
             trial_config=trial_config,
             driver_factory=lambda: DockerDriver(
                 image=task_config.environment.docker_image or "alpine",
+                workspace=task_config.environment.workdir,
             ),
             agent_factory=_default_agent_factory(
                 team_id,
@@ -397,7 +405,7 @@ async def _spawn_trial(
                 gateway_url=str(settings.gateway_url),
                 provider_connection_id=payload.get("provider_connection_id"),
             ),
-            verifier_factory=lambda: PytestVerifier(**task_config.verifier.args),
+            verifier_factory=_verifier_factory(task_config),
             object_store=object_store,
             gateway_client=gateway_client,
             local_trajectory_root=settings.trajectory_cache_dir,
@@ -435,10 +443,31 @@ async def _spawn_trial(
 
         try:
             await runner.run()
+        except Exception as exc:
+            logger.exception(
+                "trial_runner_failed trial_id=%s worker_id=%s",
+                trial_id,
+                worker_id,
+            )
+            await _mark_setup_failed(
+                cp_client=cp_client,
+                trial_id=trial_id,
+                worker_id=worker_id,
+                detail=str(exc),
+            )
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
 
     await pool.spawn(_setup_run_and_cleanup())
+
+
+def _verifier_factory(task_config: TaskConfig) -> Callable[[], Verifier]:
+    name = task_config.verifier.name
+    ctor = _VERIFIER_CTORS.get(name)
+    if ctor is None:
+        raise ValueError(f"unknown verifier: {name!r}")
+    args = dict(task_config.verifier.args)
+    return lambda: ctor(**args)
 
 
 def _build_mint_callback(

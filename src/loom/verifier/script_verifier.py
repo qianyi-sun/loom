@@ -29,6 +29,10 @@ class ScriptVerifier:
     name: str = "script"
     user: str | int | None = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.script_path, str):
+            self.script_path = PurePosixPath(self.script_path)
+
     async def verify(
         self,
         *,

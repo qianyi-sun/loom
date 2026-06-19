@@ -25,6 +25,20 @@ The native Loom ATIF lands in `./runs/<trial>/atif.json`; the TB-2
 canonical result JSON (matching `terminal_bench.harness_models.BenchmarkResults`)
 lands at the `--tb2-report` path.
 
+For platform onboarding or CI smoke, import a small slice first:
+
+```bash
+loom datasets import terminal-bench-2 --instance-id hello-world ...
+loom datasets audit terminal-bench-2 --db-url "$LOOM_DB_URL"
+```
+
+Converted TB-2 tasks set `[environment].workdir = "/app"` because upstream
+instructions, tests, and Docker images use `/app` as the terminal workspace.
+The adapter materializes the upstream `tests/` tree under
+`/app/environment/tb2-tests` and uses a script verifier at
+`/app/verifier/run.sh` that executes upstream `run-tests.sh` with `bash` and
+emits Loom `VerifierResult` JSON through `LOOM_VERIFIER_OUTPUT`.
+
 ## License
 
 Apache-2.0 (mirrors TB-2 upstream).

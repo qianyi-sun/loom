@@ -485,7 +485,7 @@ def _driver_factory(
             )
         if backend == "fake":
             return FakeDriver
-        return lambda: DockerDriver(image=image)
+        return lambda: DockerDriver(image=image, workspace=cfg.environment.workdir)
     if backend == "daytona":
         if gpu is not None:
             raise UnsupportedFlagError(

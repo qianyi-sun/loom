@@ -8,7 +8,7 @@ import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -196,14 +196,18 @@ class Trial:
                     )
                     # #186: upload the materialized task bundle into the
                     # sandbox so the agent sees instructions / scaffolding
-                    # AND the verifier sees grading tests at /workspace/
-                    # tests. Mirrors what oracle_runner does for the
+                    # AND the verifier sees grading tests under the task
+                    # workdir. Mirrors what oracle_runner does for the
                     # verify CLI. Skips `task.toml` (host-side metadata).
+                    workdir = self.ctx.task_config.environment.workdir
                     await materialize_workspace(
                         driver=self.ctx.driver,
                         task_dir=self.ctx.task_dir,
-                        dst=PurePosixPath("/workspace"),
+                        dst=workdir,
                     )
+                    if hasattr(self.ctx.agent, "workdir"):
+                        self.ctx.agent.workdir = workdir
+
                     if isinstance(self.ctx.agent, InBoxAgentRuntime):
                         await self.ctx.agent.setup(env=self.ctx.driver)
 

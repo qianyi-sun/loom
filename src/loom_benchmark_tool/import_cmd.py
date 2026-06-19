@@ -24,10 +24,11 @@ import os
 import re
 import tempfile
 import tomllib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from loom_benchmarks.base import BenchmarkAdapter, UpstreamSource
+from loom_benchmarks.base import BenchmarkAdapter, BenchmarkInstance, UpstreamSource
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -57,6 +58,61 @@ def _validate_instance_id(instance_id: str) -> None:
         raise ValueError(
             f"instance_id {instance_id!r} contains empty / .. / . segments; reject",
         )
+
+
+def _normalize_instance_ids(
+    instance_ids: Iterable[str] | None,
+) -> frozenset[str] | None:
+    if instance_ids is None:
+        return None
+    normalized = frozenset(i.strip() for i in instance_ids if i.strip())
+    if not normalized:
+        return None
+    for instance_id in normalized:
+        _validate_instance_id(instance_id)
+    return normalized
+
+
+def _select_instances(
+    adapter: BenchmarkAdapter,
+    *,
+    source_dir: Path,
+    instance_ids: Iterable[str] | None,
+    limit: int | None,
+) -> list[tuple[str, BenchmarkInstance]]:
+    """Return the adapter instances selected for conversion.
+
+    Without explicit ids, `limit` preserves the historical per-split cap.
+    With explicit ids, scan every split to confirm all requested ids exist
+    before callers write DB rows or publish a partial HF staging tree.
+    """
+    requested = _normalize_instance_ids(instance_ids)
+    selected: list[tuple[str, BenchmarkInstance]] = []
+    found: set[str] = set()
+
+    for split in adapter.splits:
+        count = 0
+        for inst in adapter.list_instances(source_dir=source_dir, split=split):
+            if requested is not None:
+                if inst.instance_id not in requested:
+                    continue
+                found.add(inst.instance_id)
+                if limit is None or len(selected) < limit:
+                    selected.append((split, inst))
+                continue
+
+            if limit is not None and count >= limit:
+                break
+            selected.append((split, inst))
+            count += 1
+
+    if requested is not None:
+        missing = sorted(requested - found)
+        if missing:
+            formatted = ", ".join(missing)
+            raise ValueError(f"requested instance_id(s) not found: {formatted}")
+
+    return selected
 
 
 def _resolve_adapter(
@@ -126,6 +182,7 @@ async def run_import(
     bucket: str,
     cache_dir: Path,
     limit: int | None = None,
+    instance_ids: Iterable[str] | None = None,
     imported_by: str | None = None,
     refresh: bool = False,
     benchmarks_config_path: Path | None = None,
@@ -147,6 +204,12 @@ async def run_import(
     cache_dir.mkdir(parents=True, exist_ok=True)
     source_dir = fetch_upstream(
         adapter.upstream_source, cache_root=cache_dir, refresh=refresh,
+    )
+    selected_instances = _select_instances(
+        adapter,
+        source_dir=source_dir,
+        instance_ids=instance_ids,
+        limit=limit,
     )
 
     engine = create_async_engine(normalize_db_url(db_url))
@@ -178,50 +241,45 @@ async def run_import(
 
     stats = {"converted": 0, "warnings": 0}
 
-    for split in adapter.splits:
-        count = 0
-        for inst in adapter.list_instances(source_dir=source_dir, split=split):
-            if limit is not None and count >= limit:
-                break
-            count += 1
-            _validate_instance_id(inst.instance_id)
-            with tempfile.TemporaryDirectory() as tmp:
-                out_dir = Path(tmp) / inst.instance_id.replace("/", "__")
-                out_dir.mkdir(parents=True, exist_ok=True)
-                converted = adapter.convert_instance(inst, out_dir=out_dir)
-                prefix = f"{adapter.name}/{inst.instance_id}/"
-                await upload_task_dir(
-                    store=object_store, bucket=bucket,
-                    prefix=prefix, task_dir=out_dir,
-                )
+    for _split, inst in selected_instances:
+        _validate_instance_id(inst.instance_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / inst.instance_id.replace("/", "__")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            converted = adapter.convert_instance(inst, out_dir=out_dir)
+            prefix = f"{adapter.name}/{inst.instance_id}/"
+            await upload_task_dir(
+                store=object_store, bucket=bucket,
+                prefix=prefix, task_dir=out_dir,
+            )
 
-                cfg: dict[str, Any] = tomllib.loads(
-                    (out_dir / "task.toml").read_text(),
+            cfg: dict[str, Any] = tomllib.loads(
+                (out_dir / "task.toml").read_text(),
+            )
+            source_uri = f"s3://{bucket}/{prefix}"
+            async with session_factory() as session:
+                await session.execute(
+                    pg_insert(TaskRow).values(
+                        id=converted.task_id,
+                        checksum=converted.checksum,
+                        config=cfg,
+                        source=source_uri,
+                        license=converted.license_spdx,
+                        benchmark_id=adapter.name,
+                    ).on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={
+                            "checksum": converted.checksum,
+                            "config": cfg,
+                            "source": source_uri,
+                            "license": converted.license_spdx,
+                            "benchmark_id": adapter.name,
+                        },
+                    ),
                 )
-                source_uri = f"s3://{bucket}/{prefix}"
-                async with session_factory() as session:
-                    await session.execute(
-                        pg_insert(TaskRow).values(
-                            id=converted.task_id,
-                            checksum=converted.checksum,
-                            config=cfg,
-                            source=source_uri,
-                            license=converted.license_spdx,
-                            benchmark_id=adapter.name,
-                        ).on_conflict_do_update(
-                            index_elements=["id"],
-                            set_={
-                                "checksum": converted.checksum,
-                                "config": cfg,
-                                "source": source_uri,
-                                "license": converted.license_spdx,
-                                "benchmark_id": adapter.name,
-                            },
-                        ),
-                    )
-                    await session.commit()
-                stats["converted"] += 1
-                stats["warnings"] += len(converted.warnings)
+                await session.commit()
+            stats["converted"] += 1
+            stats["warnings"] += len(converted.warnings)
 
     await engine.dispose()
     return stats

@@ -63,6 +63,13 @@ def _add_import_args(p: argparse.ArgumentParser) -> None:
         "--cache-dir", type=Path, default=Path("/tmp/loom-benchmark-cache"),
     )
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument(
+        "--instance-id",
+        dest="instance_ids",
+        action="append",
+        default=None,
+        help="Import only the requested adapter instance id. Repeat for multiple ids.",
+    )
     p.add_argument("--imported-by", default=None)
     p.add_argument("--refresh", action="store_true")
 
@@ -86,6 +93,13 @@ def _add_publish_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument(
+        "--instance-id",
+        dest="instance_ids",
+        action="append",
+        default=None,
+        help="Publish only the requested adapter instance id. Repeat for multiple ids.",
+    )
     p.add_argument("--private", action="store_true")
     p.add_argument("--refresh", action="store_true")
 
@@ -410,16 +424,21 @@ def _cmd_import(args: argparse.Namespace) -> int:
         access_key=args.minio_access_key,
         secret_key=args.minio_secret_key,
     )
-    stats = asyncio.run(run_import(
-        benchmark=args.benchmark,
-        db_url=args.db_url,
-        object_store=store,
-        bucket=args.bucket,
-        cache_dir=args.cache_dir,
-        limit=args.limit,
-        imported_by=args.imported_by,
-        refresh=args.refresh,
-    ))
+    try:
+        stats = asyncio.run(run_import(
+            benchmark=args.benchmark,
+            db_url=args.db_url,
+            object_store=store,
+            bucket=args.bucket,
+            cache_dir=args.cache_dir,
+            limit=args.limit,
+            instance_ids=set(args.instance_ids) if args.instance_ids else None,
+            imported_by=args.imported_by,
+            refresh=args.refresh,
+        ))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(f"converted={stats['converted']} warnings={stats['warnings']}")
     return 0
 
@@ -433,15 +452,20 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    result = run_publish(
-        benchmark=args.benchmark,
-        hf_org=args.hf_org,
-        hf_token=args.hf_token,
-        cache_dir=args.cache_dir,
-        limit=args.limit,
-        private=args.private,
-        refresh=args.refresh,
-    )
+    try:
+        result = run_publish(
+            benchmark=args.benchmark,
+            hf_org=args.hf_org,
+            hf_token=args.hf_token,
+            cache_dir=args.cache_dir,
+            limit=args.limit,
+            instance_ids=set(args.instance_ids) if args.instance_ids else None,
+            private=args.private,
+            refresh=args.refresh,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(
         f"publish {args.benchmark}: "
         f"published={result['published']} "

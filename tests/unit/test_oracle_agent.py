@@ -73,6 +73,47 @@ async def test_oracle_runs_solve_script(
     assert exec_events[0].trial_id == trial_id
 
 
+async def test_oracle_runs_from_custom_workdir(
+    writer: TrajectoryWriter, task_dir: Path,
+):
+    seen: list[PurePosixPath | None] = []
+
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        seen.append(cwd)
+        if cmd == "chmod +x /app/solve.sh && /app/solve.sh":
+            return ExecResult(
+                return_code=0, stdout=b"solved\n", stderr=b"",
+                truncated=False, duration_sec=0.05,
+            )
+        return ExecResult(
+            return_code=127, stdout=b"", stderr=b"unexpected",
+            truncated=False, duration_sec=0.01,
+        )
+
+    driver = FakeDriver(exec_handler=handler)
+    await driver.start(options=StartOptions())
+
+    trial_id = uuid4()
+    agent = OracleAgent(
+        task_dir=task_dir,
+        trial_id=trial_id,
+        workdir=PurePosixPath("/app"),
+    )
+    await agent.run(
+        instruction="hello", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert PurePosixPath("/app/solve.sh") in driver.filesystem
+    assert seen == [PurePosixPath("/app")]
+
+    from loom.models.trajectory import EventKind
+    from loom.trajectory.reader import TrajectoryReader
+    reader = TrajectoryReader(writer.local_path)
+    exec_events = list(reader.iter_kind(EventKind.ENV_EXEC))
+    assert exec_events[0].cwd == "/app"
+
+
 async def test_oracle_missing_solve_raises(writer: TrajectoryWriter, tmp_path: Path):
     """Missing solve.sh is a user-setup error → AgentError, so step_runner
     catches it as phase=agent and classify_failure → AGENT_ERROR (Bug 5)."""

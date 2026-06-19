@@ -38,8 +38,8 @@ class TerminalBench2Adapter:
     def list_instances(
         self, *, source_dir: Path, split: str,
     ) -> Iterator[BenchmarkInstance]:
-        tasks_root = source_dir / TASK_SUBDIR
-        if not tasks_root.is_dir():
+        tasks_root = self._resolve_tasks_root(source_dir)
+        if tasks_root is None:
             return
         for child in sorted(tasks_root.iterdir()):
             if not child.is_dir():
@@ -52,6 +52,13 @@ class TerminalBench2Adapter:
             yield BenchmarkInstance(
                 instance_id=child.name, split=split, raw=parsed,
             )
+
+    @staticmethod
+    def _resolve_tasks_root(source_dir: Path) -> Path | None:
+        for candidate in (source_dir / TASK_SUBDIR, source_dir / "repo" / TASK_SUBDIR):
+            if candidate.is_dir():
+                return candidate
+        return None
 
     def convert_instance(
         self, instance: BenchmarkInstance, *, out_dir: Path,
@@ -84,6 +91,7 @@ class TerminalBench2Adapter:
             [environment]
             os = "linux"
             docker_image = {toml_image}
+            workdir = "/app"
 
             [agent]
             name = "oracle"
@@ -94,7 +102,7 @@ class TerminalBench2Adapter:
             timeout_sec = {verifier_timeout}
 
             [verifier.args]
-            script_path = "/loom/verifier/run.sh"
+            script_path = "/app/verifier/run.sh"
 
             [[steps]]
             name = "main"
@@ -102,6 +110,7 @@ class TerminalBench2Adapter:
         """).strip() + "\n")
 
         self._copy_tests(r, out_dir)
+        self._copy_solution(r, out_dir)
         self._write_verifier_shim(out_dir)
 
         return ConvertedTask(
@@ -163,10 +172,10 @@ class TerminalBench2Adapter:
 
     def _copy_tests(self, raw: dict[str, Any], out_dir: Path) -> None:
         """Stage TB-2's tests/ subtree + run-tests.sh under
-        environment/tb2-tests/ so the prepare phase can mount it into
-        the container at /tb2-tests (the path the shim points TEST_DIR
-        at). Missing pieces are silently skipped — some TB-2 tasks have
-        no auxiliary test scripts.
+        environment/tb2-tests/ so the shared workspace materializer uploads
+        it into the sandbox at /app/environment/tb2-tests, which is the
+        shim default TEST_DIR. Missing pieces are silently skipped — some
+        TB-2 tasks have no auxiliary test scripts.
 
         Symlinks are skipped to prevent a malicious upstream task at a
         future SHA from smuggling host file contents (e.g.
@@ -191,6 +200,25 @@ class TerminalBench2Adapter:
         run_tests = src / "run-tests.sh"
         if run_tests.is_file() and not run_tests.is_symlink():
             shutil.copy2(run_tests, staged / "run-tests.sh")
+
+    def _copy_solution(self, raw: dict[str, Any], out_dir: Path) -> None:
+        """Copy TB-2's reference solution when upstream ships one.
+
+        Loom's oracle agent expects `solution/solve.sh`. TB-2 names the
+        same reference script `solution.sh` at the task root. Keeping this
+        mapping in the adapter gives operators a deterministic baseline
+        smoke without changing model-backed agent behavior.
+        """
+        import shutil
+
+        src = Path(raw["__source_path"]) / "solution.sh"
+        if not src.is_file() or src.is_symlink():
+            return
+        solution_dir = out_dir / "solution"
+        solution_dir.mkdir(parents=True, exist_ok=True)
+        dst = solution_dir / "solve.sh"
+        shutil.copy2(src, dst)
+        dst.chmod(dst.stat().st_mode | 0o755)
 
     def _write_verifier_shim(self, out_dir: Path) -> None:
         """Install the bundled verifier_shim.sh as verifier/run.sh —

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from loom_benchmark_terminal_bench_2.adapter import TerminalBench2Adapter
 from loom_benchmarks.base import BenchmarkInstance
 
 from loom.models.task import TaskConfig
+from loom.models.verifier import VerifierResult
 
 
 @pytest.fixture
@@ -52,7 +54,9 @@ def test_convert_writes_task_toml_with_required_fields(
     assert cfg.task.name.endswith("hello-world")
     assert cfg.environment.os == "linux"
     assert cfg.environment.docker_image is not None
+    assert str(cfg.environment.workdir) == "/app"
     assert cfg.verifier.name == "script"
+    assert cfg.verifier.args["script_path"] == "/app/verifier/run.sh"
     assert cfg.agent.name == "oracle"
 
 
@@ -91,6 +95,19 @@ def test_convert_copies_tb2_test_tree(
     assert (tb2 / "run-tests.sh").read_text().startswith("#!/bin/bash")
 
 
+def test_convert_copies_reference_solution_for_oracle_smoke(
+    hello_world_instance: BenchmarkInstance, tmp_path: Path,
+) -> None:
+    out = tmp_path / "out"
+    TerminalBench2Adapter().convert_instance(
+        hello_world_instance, out_dir=out,
+    )
+    solve = out / "solution" / "solve.sh"
+    assert solve.exists()
+    assert solve.stat().st_mode & 0o111
+    assert "Hello, world!" in solve.read_text()
+
+
 def test_convert_writes_verifier_shim(
     hello_world_instance: BenchmarkInstance, tmp_path: Path,
 ) -> None:
@@ -103,8 +120,44 @@ def test_convert_writes_verifier_shim(
     assert shim.stat().st_mode & 0o111  # executable
     body = shim.read_text()
     assert "$LOOM_VERIFIER_OUTPUT" in body
+    assert 'TEST_DIR="${TEST_DIR:-/app/environment/tb2-tests}"' in body
     assert "run-tests.sh" in body
     assert '"rewards":' in body
+
+
+def test_generated_verifier_shim_emits_loom_verifier_result(
+    hello_world_instance: BenchmarkInstance, tmp_path: Path,
+) -> None:
+    out = tmp_path / "out"
+    TerminalBench2Adapter().convert_instance(
+        hello_world_instance, out_dir=out,
+    )
+    output = tmp_path / "verifier-output.json"
+    test_dir = tmp_path / "tb2-tests"
+    test_dir.mkdir()
+    (test_dir / "setup.sh").write_text("export TB2_SHIM_OK=1\n")
+    (test_dir / "run-tests.sh").write_text(
+        "#!/bin/bash\nsource \"$TEST_DIR/setup.sh\"\n"
+        "test \"$TB2_SHIM_OK\" = 1\n"
+    )
+
+    completed = subprocess.run(
+        ["sh", str(out / "verifier" / "run.sh")],
+        env={
+            "LOOM_VERIFIER_OUTPUT": str(output),
+            "TEST_DIR": str(test_dir),
+        },
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0
+    result = VerifierResult.model_validate_json(output.read_text())
+    assert result.rewards == {"resolved": 1.0}
+    assert result.checks[0].name == "tb2_run_tests"
+    assert result.checks[0].passed is True
+    assert result.checks[0].message == "exit=0"
 
 
 @pytest.fixture

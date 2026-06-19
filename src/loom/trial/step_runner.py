@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from loom.errors import AgentError
@@ -45,6 +44,7 @@ async def run_step(
 
     instruction = _resolve_instruction(ctx, step)
     seq = _SeqCounter()
+    workdir = ctx.task_config.environment.workdir
 
     await trajectory.append(StepStartEvent(
         emitted_at=datetime.now(UTC),
@@ -90,6 +90,7 @@ async def run_step(
         team_id=str(ctx.team_id), trial_id=str(ctx.trial_id),
         step_name=step.name,
         local_root=ctx.local_trajectory_path.parent / "artifacts" / step.name,
+        workspace_root=workdir,
     )
     artifacts_uri: str | None = None
     artifacts: list[ArtifactRef] = []
@@ -129,7 +130,7 @@ async def run_step(
                 verifier_result = await asyncio.wait_for(
                     ctx.verifier.verify(
                         task=ctx.task_config, env=ctx.driver,
-                        artifacts_dir=PurePosixPath("/workspace"),
+                        artifacts_dir=workdir,
                         trajectory=reader,
                     ),
                     timeout=verifier_timeout,

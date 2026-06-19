@@ -127,6 +127,9 @@ class SubprocessAgent:
     name: str = field(init=False)
     version: str = "1.0"
     supports_os: frozenset[OS] = field(init=False)
+    workdir: PurePosixPath = field(
+        default_factory=lambda: PurePosixPath("/workspace"),
+    )
 
     # Optional per-step JWT TTL override; defaults to 1800s (30 min) per
     # spec §6.1 typical step_timeout.
@@ -168,7 +171,7 @@ class SubprocessAgent:
             self.adapter.api_key_env: step_token,
             self.adapter.base_url_env: self.gateway_url,
         }
-        cwd = PurePosixPath("/workspace")
+        cwd = self.workdir
         argv = self.adapter.build_invocation(
             instruction=instruction,
             workdir=cwd,

@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ from huggingface_hub import HfApi
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
 
-from loom_benchmark_tool.import_cmd import _validate_instance_id
+from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
 from loom_benchmark_tool.manifest import (
     MANIFEST_FILENAME,
     load_task_config_from_bundle,
@@ -113,6 +114,7 @@ def run_publish(
     hf_token: str,
     cache_dir: Path,
     limit: int | None = None,
+    instance_ids: Iterable[str] | None = None,
     private: bool = False,
     refresh: bool = False,
 ) -> dict[str, Any]:
@@ -138,6 +140,12 @@ def run_publish(
         cache_root=cache_dir,
         refresh=refresh,
     )
+    selected_instances = _select_instances(
+        adapter,
+        source_dir=source_dir,
+        instance_ids=instance_ids,
+        limit=limit,
+    )
 
     api = HfApi(token=hf_token)
     repo_id = repo_id_for(hf_org, benchmark)
@@ -156,45 +164,37 @@ def run_publish(
     with tempfile.TemporaryDirectory() as staging:
         staging_dir = Path(staging)
 
-        for split in adapter.splits:
-            count = 0
-            for inst in adapter.list_instances(
-                source_dir=source_dir,
-                split=split,
-            ):
-                if limit is not None and count >= limit:
-                    break
-                count += 1
-                _validate_instance_id(inst.instance_id)
-                safe_name = _safe_dirname(inst.instance_id)
-                bundle_dir = staging_dir / safe_name
-                bundle_dir.mkdir(parents=True, exist_ok=True)
-                converted = adapter.convert_instance(inst, out_dir=bundle_dir)
-                checksum = _bundle_checksum(bundle_dir)
-                # Sanity-check the adapter's claimed checksum matches
-                # our recomputed one. Misalignment would mean the DB
-                # row's checksum (set at register time) won't match what
-                # the worker fetches. Fail loudly here rather than at
-                # claim time on a remote box.
-                if converted.checksum != checksum:
-                    stats["warnings"] += 1
-                task_config = load_task_config_from_bundle(bundle_dir)
-                task_entries.append(
-                    {
-                        "task_id": converted.task_id,
-                        "instance_id": inst.instance_id,
-                        "hf_path": f"{safe_name}/",
-                        "checksum": checksum,
-                        "license_spdx": converted.license_spdx,
-                        "split": split,
-                        # PR-1 (series/tags): per-task metadata. Empty for
-                        # adapters that haven't been reworked yet — register
-                        # treats absent + {} identically.
-                        "tags": dict(inst.tags),
-                        "task_config": task_config,
-                    }
-                )
-                stats["published"] += 1
+        for split, inst in selected_instances:
+            _validate_instance_id(inst.instance_id)
+            safe_name = _safe_dirname(inst.instance_id)
+            bundle_dir = staging_dir / safe_name
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            converted = adapter.convert_instance(inst, out_dir=bundle_dir)
+            checksum = _bundle_checksum(bundle_dir)
+            # Sanity-check the adapter's claimed checksum matches
+            # our recomputed one. Misalignment would mean the DB
+            # row's checksum (set at register time) won't match what
+            # the worker fetches. Fail loudly here rather than at
+            # claim time on a remote box.
+            if converted.checksum != checksum:
+                stats["warnings"] += 1
+            task_config = load_task_config_from_bundle(bundle_dir)
+            task_entries.append(
+                {
+                    "task_id": converted.task_id,
+                    "instance_id": inst.instance_id,
+                    "hf_path": f"{safe_name}/",
+                    "checksum": checksum,
+                    "license_spdx": converted.license_spdx,
+                    "split": split,
+                    # PR-1 (series/tags): per-task metadata. Empty for
+                    # adapters that haven't been reworked yet - register
+                    # treats absent + {} identically.
+                    "tags": dict(inst.tags),
+                    "task_config": task_config,
+                }
+            )
+            stats["published"] += 1
 
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,

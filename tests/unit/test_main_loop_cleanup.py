@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from loom.models.result import FailureReason
+from loom.verifier.script_verifier import ScriptVerifier
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 
@@ -196,6 +197,85 @@ async def test_tempdir_cleaned_on_success() -> None:
 async def test_tempdir_cleaned_on_runner_exception() -> None:
     task_dir = await _drive_spawn(_FailingRunner())
     assert not task_dir.exists(), f"task_dir {task_dir} leaked after a failing trial"
+
+
+async def test_runner_exception_marks_claimed_trial_failed() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    with patch.object(ml, "LocalTrialRunner") as fake_runner_cls:
+        fake_runner_cls.return_value = _FailingRunner()
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    assert {
+        "trial_id": trial_id,
+        "worker_id": worker_id,
+        "state": "failed",
+        "failure_reason": FailureReason.INTERNAL_ERROR.value,
+    } in cp.patch_calls
+
+
+async def test_spawn_uses_script_verifier_from_task_config() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    cp.bundle["config"]["verifier"] = {
+        "name": "script",
+        "args": {"script_path": "/loom/verifier/run.sh"},
+    }
+    pool = RunnerPool(max_concurrent=1)
+    captured: dict[str, object] = {}
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run(self) -> None:
+            return None
+
+    with patch.object(ml, "LocalTrialRunner", _CapturingRunner):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=uuid4(),
+            payload={
+                "trial_id": str(uuid4()),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    verifier_factory = captured["verifier_factory"]
+    verifier = verifier_factory()  # type: ignore[operator]
+    assert isinstance(verifier, ScriptVerifier)
+    assert verifier.script_path == PurePosixPath("/loom/verifier/run.sh")
 
 
 async def test_tempdir_cleaned_on_cancellation() -> None:

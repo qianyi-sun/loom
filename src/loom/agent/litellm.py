@@ -57,6 +57,9 @@ class LiteLLMAgent:
     # task_config.steps[*].artifacts when LiteLLMAgent is used. If
     # empty, no artifact write happens (chat-only tasks).
     artifact_paths: list[str] = field(default_factory=list)
+    workdir: PurePosixPath = field(
+        default_factory=lambda: PurePosixPath("/workspace"),
+    )
 
     async def run(
         self,
@@ -160,7 +163,7 @@ class LiteLLMAgent:
                 tf.write(body)
                 tmp = Path(tf.name)
             try:
-                dst = PurePosixPath("/workspace") / rel_path
+                dst = self.workdir / rel_path
                 await env.upload(tmp, dst)
             finally:
                 tmp.unlink(missing_ok=True)

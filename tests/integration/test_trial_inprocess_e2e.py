@@ -5,7 +5,7 @@ Exercises the entire Plan 3 stack end-to-end against fakes.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
@@ -115,6 +115,56 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
     assert (
         ctx.trajectory_bucket, f"{ctx.team_id}/{ctx.trial_id}/atif.json",
     ) in store.objects
+
+
+async def test_trial_run_respects_environment_workdir(
+    hello_task: Path, tmp_path: Path,
+):
+    class _WorkdirVerifier:
+        name = "workdir"
+
+        async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+            assert artifacts_dir == PurePosixPath("/app")
+            return VerifierResult(rewards={"passed": 1.0})
+
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(
+            os="linux",
+            docker_image="alpine",
+            workdir=PurePosixPath("/app"),
+        ),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler({
+        "chmod +x /app/solve.sh && /app/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    driver = FakeDriver(exec_handler=handler)
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=driver,
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_WorkdirVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert PurePosixPath("/app/instruction.md") in driver.filesystem
+    assert PurePosixPath("/workspace/instruction.md") not in driver.filesystem
 
 
 async def test_trial_run_driver_start_failure_classified(

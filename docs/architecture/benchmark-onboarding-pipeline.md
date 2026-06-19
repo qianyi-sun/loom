@@ -319,7 +319,10 @@ surfaces:
 - HumanEval: regression baseline and already partially runnable.
 - MBPP: second code benchmark, cheap and simple.
 - AIME slice: lightweight provider/model smoke.
-- Terminal-Bench-2 core slice: terminal sandbox and artifact behavior.
+- Terminal-Bench-2 core slice: terminal sandbox behavior. The first registered
+  slice is `terminal-bench-2/hello-world`; it declares `workdir = "/app"`,
+  runs the upstream bash `run-tests.sh` through the script verifier, and has a
+  Docker oracle smoke with reward `1.0` on `platform-dev`.
 - SkillFlow or SkillLearnBench slice: research-demanded agentic skill learning
   path, if adapter/runtime requirements are ready.
 

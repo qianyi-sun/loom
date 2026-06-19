@@ -154,6 +154,78 @@ def test_refresh_catalog_purges_cache(
     assert "purged" in capsys.readouterr().out.lower()
 
 
+def test_import_passes_instance_ids_to_benchmark_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeObjectStore:
+        def __init__(self, **kwargs: object) -> None:
+            captured["store_kwargs"] = kwargs
+
+    async def fake_run_import(**kwargs: object) -> dict[str, int]:
+        captured.update(kwargs)
+        return {"converted": 2, "warnings": 0}
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+    monkeypatch.setattr("loom_benchmark_tool.import_cmd.run_import", fake_run_import)
+
+    rc = dispatch([
+        "import",
+        "humaneval",
+        "--db-url",
+        "postgresql://loom:loom@db/loom",
+        "--minio-endpoint",
+        "http://minio:9000",
+        "--minio-access-key",
+        "access",
+        "--minio-secret-key",
+        "secret",
+        "--instance-id",
+        "HumanEval/1",
+        "--instance-id",
+        "HumanEval/0",
+    ])
+
+    assert rc == 0
+    assert captured["instance_ids"] == {"HumanEval/0", "HumanEval/1"}
+    assert "converted=2" in capsys.readouterr().out
+
+
+def test_publish_passes_instance_ids_to_benchmark_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_publish(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "published": 1,
+            "warnings": 0,
+            "repo_id": "fake-org/loom-benchmark-humaneval",
+            "revision": "fake-rev",
+        }
+
+    monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
+
+    rc = dispatch([
+        "publish",
+        "humaneval",
+        "--hf-org",
+        "fake-org",
+        "--hf-token",
+        "fake-token",
+        "--instance-id",
+        "HumanEval/1",
+    ])
+
+    assert rc == 0
+    assert captured["instance_ids"] == {"HumanEval/1"}
+    assert "published=1" in capsys.readouterr().out
+
+
 def test_top_level_main_routes_to_datasets(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:

@@ -42,6 +42,9 @@ class OracleAgent:
     version: str = "1.0"
     supports_os: frozenset[OS] = field(default_factory=lambda: frozenset({"linux"}))
     model: ModelSpec | None = None
+    workdir: PurePosixPath = field(
+        default_factory=lambda: PurePosixPath("/workspace"),
+    )
 
     async def run(
         self,
@@ -63,11 +66,11 @@ class OracleAgent:
                 f"OracleAgent requires {local_solve}; not found",
             )
 
-        dst = PurePosixPath("/workspace") / _SOLVE_SCRIPT_NAME
+        dst = self.workdir / _SOLVE_SCRIPT_NAME
 
         await env.upload(local_solve, dst)
         cmd = f"chmod +x {dst.as_posix()} && {dst.as_posix()}"
-        result: ExecResult = await env.exec(cmd)
+        result: ExecResult = await env.exec(cmd, cwd=self.workdir)
 
         await trajectory.append(EnvExecEvent(
             emitted_at=datetime.now(UTC),
@@ -76,7 +79,7 @@ class OracleAgent:
             seq=0,
             cmd=cmd,
             user=None,
-            cwd=None,
+            cwd=self.workdir.as_posix(),
             return_code=result.return_code,
             stdout_bytes=len(result.stdout),
             stderr_bytes=len(result.stderr),

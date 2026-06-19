@@ -252,12 +252,14 @@ worker to pull via `bundle["source"]`.
 
 ## Gotchas
 
-- **Solve script paths.** `solve.sh` runs with `/workspace` as cwd in
-  the sandbox; `tests/` runs the same way. Write tests relative to
-  `/workspace/`, not the host fixture dir. For code-completion
-  benchmarks that already ship a canonical `solution/solution.py`, a
-  no-op `solve.sh` is enough for oracle smoke; the pytest verifier does
-  the correctness check.
+- **Solve script paths.** `solve.sh`, artifact collection, and verifier
+  artifact access run under `[environment].workdir`, which defaults to
+  `/workspace`. Write tests relative to that sandbox path, not the host
+  fixture dir. If an upstream benchmark expects another root, declare it in
+  `task.toml`; for example Terminal-Bench-2 uses `workdir = "/app"`. For
+  code-completion benchmarks that already ship a canonical
+  `solution/solution.py`, a no-op `solve.sh` is enough for oracle smoke; the
+  pytest verifier does the correctness check.
 - **Shared verifier env.** v1 runs the pytest verifier in the same
   container as the agent. The agent's image must therefore ship
   `pytest` (and any test deps) — see `hello-world/environment/Dockerfile`

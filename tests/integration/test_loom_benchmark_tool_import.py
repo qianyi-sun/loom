@@ -122,6 +122,71 @@ async def test_import_humaneval_with_fixture(
     assert b"has_close_elements" in body
 
 
+async def test_import_filters_specific_instance_ids(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _cleanup: None,
+) -> None:
+    """Operators can import a deterministic smoke slice without relying
+    on adapter iteration order. This is the same path first-wave benchmark
+    onboarding uses for cheap Terminal-Bench-2 smoke tests."""
+    from loom_benchmarks.adapters import humaneval as hv
+    from loom_benchmarks.base import BenchmarkInstance
+
+    fixture_records = json.loads(_FIXTURE.read_text())
+    skipped_id = fixture_records[0]["task_id"]
+    target_id = fixture_records[1]["task_id"]
+
+    def _fake_list(
+        self: hv.HumanEvalAdapter, *, source_dir: Path, split: str,
+    ) -> Iterator[BenchmarkInstance]:
+        for r in fixture_records:
+            yield BenchmarkInstance(
+                instance_id=r["task_id"], split=split, raw=r,
+            )
+
+    monkeypatch.setattr(hv.HumanEvalAdapter, "list_instances", _fake_list)
+    monkeypatch.setattr(
+        "loom_benchmark_tool.import_cmd.fetch_upstream",
+        lambda *a, **kw: tmp_path / "stub-source",
+    )
+
+    store = FakeObjectStore()
+    bucket = "loom-benchmarks"
+
+    stats = await run_import(
+        benchmark="humaneval",
+        db_url=postgres_url,
+        object_store=store,
+        bucket=bucket,
+        cache_dir=tmp_path / "cache",
+        instance_ids={target_id},
+        imported_by="ci",
+    )
+
+    assert stats["converted"] == 1
+    assert stats["warnings"] == 0
+
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        task_ids = conn.execute(text(
+            "SELECT id FROM tasks WHERE benchmark_id = :benchmark_id ORDER BY id",
+        ), {"benchmark_id": "humaneval"}).scalars().all()
+    engine.dispose()
+
+    assert task_ids == [f"humaneval/{target_id}"]
+
+    body = await store.get_object(
+        bucket=bucket, key=f"humaneval/{target_id}/task.toml",
+    )
+    assert b"schema_version" in body
+    with pytest.raises(KeyError):
+        await store.get_object(
+            bucket=bucket, key=f"humaneval/{skipped_id}/task.toml",
+        )
+
+
 async def test_import_idempotent(
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,

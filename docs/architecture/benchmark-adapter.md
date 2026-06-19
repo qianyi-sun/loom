@@ -101,6 +101,7 @@ name = "<display>"
 [environment]
 os = "linux"
 docker_image = "python:3.12-slim"
+workdir = "/workspace"   # default; override for upstreams that expect /app
 gpu_vendor = "none"
 network_policies_supported = ["public", "allowlist"]
 baseline_network_policy = { kind = "public" }
@@ -114,18 +115,26 @@ name = "pytest"
 timeout_sec = 300
 
 [verifier.args]      # per-verifier-kind kwargs
-# script_path = "/loom/verifier/run.sh"   # ScriptVerifier
+# script_path = "/workspace/verifier/run.sh"   # ScriptVerifier
 # test_dir = "tests/"                      # PytestVerifier (default)
 
 [[steps]]
 name = "main"
 instruction_file = "instruction.md"
-artifacts = ["tb2-verifier.json"]
+artifacts = ["result.json"]
 ```
 
 The full pydantic models live in `src/loom/models/task.py`. `extra =
 "forbid"` is enforced — `convert_instance` output that adds fields
 not in the schema will fail to load.
+
+`environment.workdir` is the sandbox root for the materialized task bundle,
+agent working directory, artifact collection root, and verifier artifact
+directory. Most Loom-authored tasks use the default `/workspace`; adapters for
+upstreams with their own convention should declare it explicitly. For example,
+Terminal-Bench-2 tasks use `/app`, so their script verifier path is
+`/app/verifier/run.sh` and their test tree lands under
+`/app/environment/tb2-tests`.
 
 ## Publish/Register Boundary
 
