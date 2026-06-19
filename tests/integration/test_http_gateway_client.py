@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
@@ -110,6 +111,64 @@ async def test_http_client_round_trip(gateway_app):  # type: ignore[no-untyped-d
         assert response.output_tokens == 1
         assert response.cost_usd >= 0
         assert response.rate_card_hash
+
+
+async def test_http_client_omits_unset_chat_message_fields() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "stub",
+                "model": "some-model",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "loom": {
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 1,
+                    "thinking_tokens": 0,
+                    "provider_extras": {},
+                    "cost_usd": 0.0,
+                    "rate_card_hash": "test-card",
+                    "finish_reason": "stop",
+                    "duration_sec": 0.01,
+                    "streamed": False,
+                    "time_to_first_token_sec": None,
+                    "gateway_request_id": "gw-test",
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://gateway",
+    ) as client:
+        gc = HttpLLMGatewayClient(
+            base_url="http://gateway",
+            token="loom_team_test",
+            _client=client,
+        )
+        await gc.call(GatewayCallRequest(
+            model=ModelSpec(provider="openai", name="some-model"),
+            messages=[ChatMessage(role="user", content="hi")],
+            system_prompt="be brief",
+            tools=None,
+            tool_choice=None,
+            team_id=str(uuid4()),
+            trial_id=str(uuid4()),
+            step_id="main",
+        ))
+
+    assert captured["body"]["messages"] == [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"},
+    ]
 
 
 async def test_http_client_propagates_401(gateway_app):  # type: ignore[no-untyped-def]

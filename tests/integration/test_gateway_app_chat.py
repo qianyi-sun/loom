@@ -442,9 +442,15 @@ def _seed_byo_connection(
 
 
 class _CapturingEgressPool:
-    def __init__(self, response: httpx.Response | None = None) -> None:
+    def __init__(
+        self,
+        response: httpx.Response | None = None,
+        *,
+        reject_null_message_fields: bool = False,
+    ) -> None:
         self.connection_ids: list[Any] = []
         self.requests: list[httpx.Request] = []
+        self.reject_null_message_fields = reject_null_message_fields
         self.response = response or httpx.Response(
             200,
             json={
@@ -470,6 +476,17 @@ class _CapturingEgressPool:
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if self.reject_null_message_fields:
+            body = json.loads(request.content)
+            for message in body.get("messages", []):
+                if any(
+                    message.get(field) is None and field in message
+                    for field in ("name", "tool_calls", "tool_call_id")
+                ):
+                    return httpx.Response(
+                        400,
+                        json={"error": "explicit null chat message field"},
+                    )
         return self.response
 
     async def get(self, connection_id: Any) -> httpx.AsyncClient:
@@ -524,6 +541,57 @@ def test_chat_byo_uses_egress_pool_for_openai_compatible(  # type: ignore[no-unt
         "model": "some-model",
         "messages": [{"role": "user", "content": "hi"}],
     }
+
+
+def test_chat_byo_omits_null_optional_message_fields_before_forwarding(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):
+    """Strict OpenAI-compatible providers reject explicit null fields.
+
+    The gateway should forward the compact chat wire shape upstream even if
+    a platform client sends Pydantic defaults such as ``tool_calls=None``.
+    """
+    app, captured = app_with_byo
+    team_id, raw_token = seed_data
+    conn_id = _seed_byo_connection(
+        postgres_url,
+        team_id,
+        api_key="sk-real-byo-key",
+        base_url="https://byo.example.com/v1",
+    )
+    pool = _CapturingEgressPool(reject_null_message_fields=True)
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/some-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hi",
+                        "name": None,
+                        "tool_calls": None,
+                        "tool_call_id": None,
+                    }
+                ],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert captured == {}
+    assert len(pool.requests) == 1
+    assert json.loads(pool.requests[0].content)["messages"] == [
+        {"role": "user", "content": "hi"},
+    ]
 
 
 def test_chat_byo_tokens_only_skips_missing_rate_card(  # type: ignore[no-untyped-def]

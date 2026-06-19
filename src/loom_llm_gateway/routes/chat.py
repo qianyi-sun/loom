@@ -349,6 +349,7 @@ async def chat_completions(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     extra_kwargs = {k: v for k, v in raw_body.items() if k not in _RESERVED_BODY_KEYS}
+    chat_messages = _omit_none_chat_message_fields(req.messages)
     started = time.monotonic()
     if byo_row is not None and byo_row.provider_type in ("openai-compatible", "custom"):
         raw = await _forward_openai_compatible_byo_chat(
@@ -357,14 +358,14 @@ async def chat_completions(
             base_url=byo_row.base_url,
             api_key=api_key or "",
             model_name=model_name,
-            messages=req.messages,
+            messages=chat_messages,
             extra_kwargs=extra_kwargs,
             timeout=settings.upstream_timeout_sec,
         )
     else:
         acompletion_kwargs = dict(
             model=litellm_model,
-            messages=req.messages,
+            messages=chat_messages,
             api_key=api_key,
             timeout=settings.upstream_timeout_sec,
             **extra_kwargs,
@@ -477,6 +478,15 @@ def _pick_api_key(provider: str, settings: Any) -> str | None:
 def _redact_provider_exception(exc: Exception, api_key: str | None) -> str:
     detail = redact_api_key(str(exc), api_key or "")
     return detail or exc.__class__.__name__
+
+
+def _omit_none_chat_message_fields(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in message.items() if value is not None}
+        for message in messages
+    ]
 
 
 async def _forward_openai_compatible_byo_chat(
