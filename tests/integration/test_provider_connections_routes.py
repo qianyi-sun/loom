@@ -37,6 +37,7 @@ from loom_service.config import LoomServiceSettings
 
 # Use a fixed test master key so tests are deterministic.
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
+_WRONG_TEST_MASTER_KEY = base64.b64encode(bytes(reversed(range(32)))).decode()
 RAW_ADMIN_TOKEN = "loom_admin_" + "P" * 43
 
 
@@ -781,6 +782,47 @@ def test_test_invalid_persists_error_message(
     assert "bad key" in show["last_validation_error"]
 
 
+def test_test_secret_decrypt_failure_returns_actionable_503(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider test should not leak SecretStore decrypt failures as 500s."""
+    called = {"count": 0}
+
+    async def _fake_probe(*args, **kwargs):  # type: ignore[no-untyped-def]
+        called["count"] += 1
+        raise AssertionError("upstream probe must not run without an api key")
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, _ = app_setup
+    c = TestClient(app, raise_server_exceptions=False)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+        json={"name": "n", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/", "api_key": "sk-XYZ"},
+    )
+    conn_id = create.json()["id"]
+
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", _WRONG_TEST_MASTER_KEY)
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert "stored provider secret" in detail
+    assert "restore" in detail.lower()
+    assert "rotate" in detail.lower()
+    assert "AEAD" not in detail
+    assert "loom://" not in detail
+    assert "sk-XYZ" not in detail
+    assert called["count"] == 0
+
+
 def test_test_cross_team_returns_404(
     app_setup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1140,6 +1182,31 @@ def test_models_refresh_upstream_502_does_not_partially_commit(
         headers=_auth(tokens["team_a"]),
     ).json()
     assert [it["model_id"] for it in listed["items"]] == ["gpt-4o"]
+
+
+def test_models_refresh_secret_decrypt_failure_returns_actionable_503(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model refresh should fail before contacting upstream if key unwrap fails."""
+    state = _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    app, tokens, _ = app_setup
+    c = TestClient(app, raise_server_exceptions=False)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", _WRONG_TEST_MASTER_KEY)
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert "stored provider secret" in detail
+    assert "restore" in detail.lower()
+    assert "rotate" in detail.lower()
+    assert "AEAD" not in detail
+    assert "loom://" not in detail
+    assert int(state["call_count"]) == 0
 
 
 def test_models_hide_404_for_uncached_model(app_setup) -> None:

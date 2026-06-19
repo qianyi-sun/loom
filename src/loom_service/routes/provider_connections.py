@@ -35,7 +35,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection, ProviderModelCache, TeamQuota
-from loom.security.secret_store import LocalEncryptedSecretStore, SecretStore
+from loom.security.secret_store import (
+    LocalEncryptedSecretStore,
+    SecretStore,
+    SecretStoreError,
+)
 from loom_service.auth_guards import is_admin
 from loom_service.dependencies import SessionAndCtx
 from loom_service.provider_connections_service import (
@@ -65,6 +69,11 @@ router = APIRouter()
 # happens at the DB layer via the migration's CHECK constraint, so
 # we don't need to re-list it in Pydantic-Literal form.
 _PROVIDER_TYPES = ("openai-compatible", "anthropic", "google", "custom")
+_PROVIDER_SECRET_UNREADABLE_DETAIL = (
+    "stored provider secret cannot be decrypted or read. Restore the "
+    "SecretStore master key/fallback key, run secret-store rewrap if a "
+    "rotation is in progress, or rotate/re-enter the provider API key."
+)
 
 
 class ProviderConnectionCreate(BaseModel):
@@ -269,6 +278,20 @@ def _make_secret_store(session: AsyncSession) -> SecretStore:
     the SecretStore Protocol.
     """
     return LocalEncryptedSecretStore(session)
+
+
+async def _get_provider_api_key(
+    session: AsyncSession,
+    row: ProviderConnection,
+) -> str:
+    secret_store = _make_secret_store(session)
+    try:
+        return await secret_store.get(row.encrypted_api_key_ref)
+    except SecretStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_PROVIDER_SECRET_UNREADABLE_DETAIL,
+        ) from exc
 
 
 async def _get_active_connection(
@@ -554,8 +577,7 @@ async def test_connection(
     session, ctx = sc
     row = await _get_active_connection(session, connection_id, ctx)
 
-    secret_store = _make_secret_store(session)
-    api_key = await secret_store.get(row.encrypted_api_key_ref)
+    api_key = await _get_provider_api_key(session, row)
 
     result = await probe_connection(
         row.provider_type, row.base_url, api_key,
@@ -691,8 +713,7 @@ async def refresh_models(
     session, ctx = sc
     row = await _get_active_connection(session, connection_id, ctx)
 
-    secret_store = _make_secret_store(session)
-    api_key = await secret_store.get(row.encrypted_api_key_ref)
+    api_key = await _get_provider_api_key(session, row)
 
     try:
         upstream_ids = await fetch_upstream_models(

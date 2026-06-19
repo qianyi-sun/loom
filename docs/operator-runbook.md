@@ -513,6 +513,15 @@ kubectl rollout status deploy/loom-service
 Rotation is complete. Verify with `loom providers test <name>` to
 confirm provider connections are still readable.
 
+If provider validation or model discovery returns HTTP 503 with
+`stored provider secret cannot be decrypted or read`, treat it as a
+SecretStore key/configuration problem rather than an upstream provider
+outage. Restore the correct `LOOM_SECRET_STORE_MASTER_KEY`, deploy the
+old key as a fallback in `LOOM_SECRET_STORE_MASTER_KEYS` during rotation,
+or rotate/re-enter the provider API key. Do not debug the provider's
+`/models` endpoint until `loom providers test <name>` can decrypt the
+stored key.
+
 **Audit trail**
 
 Each call to the rewrap endpoint writes one `secret_store.rewrap` event
