@@ -416,36 +416,18 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_config_path(explicit: Path | None) -> Path | None:
-    """Find the benchmarks.toml file. Returns None if it doesn't exist
-    so the caller can no-op cleanly (matches v3 plan: missing file = exit 0)."""
-    if explicit is not None:
-        return explicit if explicit.exists() else None
-    env = os.environ.get("LOOM_BENCHMARKS_CONFIG_PATH")
-    if env:
-        p = Path(env)
-        return p if p.exists() else None
-    for candidate in (
-        Path.cwd() / "config" / "benchmarks.toml",
-        Path("/etc/loom/benchmarks.toml"),
-    ):
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def _cmd_sync_config(args: argparse.Namespace) -> int:
     from loom_benchmarks.registry import REGISTRY
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from loom_cli.benchmarks_config import load_benchmarks_config
+    from loom.config.benchmarks import load_benchmarks_config, resolve_config_path
     from loom_cli.benchmarks_sync import (
         SyncError,
         render_plan_table,
         sync,
     )
 
-    config_path = _resolve_config_path(args.config)
+    config_path = resolve_config_path(args.config)
     if config_path is None:
         if args.config is not None:
             print(

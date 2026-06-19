@@ -141,7 +141,7 @@ license_url = "https://example.org/L"
 def test_resolve_with_no_toml_and_unknown_benchmark_raises(
     tmp_path: Path,
 ) -> None:
-    # No benchmarks.toml at all (path returns None from _resolve_config_path).
+    # No benchmarks.toml at all (path returns None from resolve_config_path).
     with pytest.raises(KeyError, match="no benchmark adapter"):
         _resolve_adapter(
             "unknown", benchmarks_config_path=tmp_path / "nope.toml",

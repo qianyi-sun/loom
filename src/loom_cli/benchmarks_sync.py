@@ -25,15 +25,15 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import Benchmark
-from loom.db.schema import Task as TaskRow
-from loom.models.task import TaskConfig
-from loom.models.task_checksum import task_checksum
-from loom_cli.benchmarks_config import (
+from loom.config.benchmarks import (
     BenchmarksConfig,
     LocalBenchmarkEntry,
     RemapBenchmarkEntry,
 )
+from loom.db.schema import Benchmark
+from loom.db.schema import Task as TaskRow
+from loom.models.task import TaskConfig
+from loom.models.task_checksum import task_checksum
 
 logger = logging.getLogger(__name__)
 

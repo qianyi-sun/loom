@@ -13,8 +13,8 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.config.benchmarks import load_benchmarks_config
 from loom.db.schema import Benchmark
-from loom_cli.benchmarks_config import load_benchmarks_config
 from loom_cli.benchmarks_sync import SyncError, sync
 
 

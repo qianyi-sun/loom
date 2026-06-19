@@ -1,19 +1,25 @@
 """Operator-facing benchmark registry — `config/benchmarks.toml`.
 
-Loads a TOML file declaring `[[local]]` (folders of task.toml bundles)
-and `[[remap]]` (existing adapter against an alternate upstream)
-entries. See issue #234 for the full design.
+Loads a TOML file declaring `[[local]]` (folders of `task.toml`
+bundles) and `[[remap]]` (existing adapter against an alternate
+upstream) entries. See issue #234 for the full design.
 
-This module is the *parse* layer only. UPSERT into the `benchmarks` and
-`tasks` tables lives in `benchmarks_sync.py`; the CLI subcommand lives
-in `datasets_cmd.py`.
+This module is the *parse + locate* layer. UPSERT into the
+`benchmarks` and `tasks` tables lives in
+`loom_cli.benchmarks_sync`; the CLI subcommand lives in
+`loom_cli.datasets_cmd`.
 
-The TOML file is missing → `load_benchmarks_config` returns None
-(legacy no-op behavior). The file is malformed → raises so callers can
-exit with a clear error.
+The file is missing → `load_benchmarks_config` returns None
+(legacy no-op behavior). Malformed → raises so callers can exit
+with a clear error.
+
+Lives under `loom.config` (not `loom_cli`) so the lower-layer
+`loom_benchmark_tool` can use it without an upward dependency on
+the CLI package.
 """
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -21,6 +27,17 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 _KEBAB = r"^[a-z0-9][a-z0-9-]*$"
+
+LOOM_BENCHMARKS_CONFIG_PATH = "LOOM_BENCHMARKS_CONFIG_PATH"
+
+__all__ = [
+    "LOOM_BENCHMARKS_CONFIG_PATH",
+    "BenchmarksConfig",
+    "LocalBenchmarkEntry",
+    "RemapBenchmarkEntry",
+    "load_benchmarks_config",
+    "resolve_config_path",
+]
 
 
 class LocalBenchmarkEntry(BaseModel):
@@ -86,3 +103,33 @@ def load_benchmarks_config(path: Path | None) -> BenchmarksConfig | None:
     with path.open("rb") as f:
         raw = tomllib.load(f)
     return BenchmarksConfig.model_validate(raw)
+
+
+def resolve_config_path(explicit: Path | None = None) -> Path | None:
+    """Locate `benchmarks.toml`. Returns None if it doesn't exist so
+    the caller can no-op cleanly (matches v3 plan: missing file = exit 0).
+
+    Resolution order:
+    1. `explicit` arg from caller
+    2. `$LOOM_BENCHMARKS_CONFIG_PATH` env
+    3. `<CWD>/config/benchmarks.toml` (dev convention)
+    4. `/etc/loom/benchmarks.toml` (prod FHS)
+
+    The env-var branch is fail-fast: if `$LOOM_BENCHMARKS_CONFIG_PATH`
+    is set but points at a missing file, return None — do NOT silently
+    fall through to the cwd / /etc lookup. Operator who set the env
+    var explicitly is telling us *that* file or nothing.
+    """
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    env = os.environ.get(LOOM_BENCHMARKS_CONFIG_PATH)
+    if env:
+        p = Path(env)
+        return p if p.exists() else None
+    for candidate in (
+        Path.cwd() / "config" / "benchmarks.toml",
+        Path("/etc/loom/benchmarks.toml"),
+    ):
+        if candidate.exists():
+            return candidate
+    return None

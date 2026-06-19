@@ -6,11 +6,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from loom_cli.benchmarks_config import (
+from loom.config.benchmarks import (
+    LOOM_BENCHMARKS_CONFIG_PATH,
     BenchmarksConfig,
     LocalBenchmarkEntry,
     RemapBenchmarkEntry,
     load_benchmarks_config,
+    resolve_config_path,
 )
 
 
@@ -201,3 +203,64 @@ def test_default_empty_config_is_valid() -> None:
     assert cfg.schema_version == 1
     assert cfg.local == []
     assert cfg.remap == []
+
+
+# ─── resolve_config_path ─────────────────────────────────────────────
+
+
+def test_resolve_explicit_existing_returns_path(tmp_path: Path) -> None:
+    p = tmp_path / "explicit.toml"
+    p.write_text("schema_version = 1\n")
+    assert resolve_config_path(p) == p
+
+
+def test_resolve_explicit_missing_returns_none(tmp_path: Path) -> None:
+    """Explicit-but-missing path returns None — the CLI converts this
+    to a `--config <path>; nothing to sync` warning."""
+    assert resolve_config_path(tmp_path / "nope.toml") is None
+
+
+def test_resolve_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = tmp_path / "env.toml"
+    p.write_text("schema_version = 1\n")
+    monkeypatch.setenv(LOOM_BENCHMARKS_CONFIG_PATH, str(p))
+    monkeypatch.chdir(tmp_path)  # isolate from any real cwd config
+    assert resolve_config_path() == p
+
+
+def test_resolve_env_missing_returns_none_not_cwd_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If env var is set but the path doesn't exist, return None — do
+    NOT silently fall through to the cwd / /etc lookup. Operator who
+    sets the env var explicitly is telling us *this* file or nothing."""
+    cwd_cfg = tmp_path / "config" / "benchmarks.toml"
+    cwd_cfg.parent.mkdir()
+    cwd_cfg.write_text("schema_version = 1\n")
+    monkeypatch.setenv(LOOM_BENCHMARKS_CONFIG_PATH, str(tmp_path / "nope.toml"))
+    monkeypatch.chdir(tmp_path)
+    assert resolve_config_path() is None
+
+
+def test_resolve_cwd_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cwd_cfg = tmp_path / "config" / "benchmarks.toml"
+    cwd_cfg.parent.mkdir()
+    cwd_cfg.write_text("schema_version = 1\n")
+    monkeypatch.delenv(LOOM_BENCHMARKS_CONFIG_PATH, raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert resolve_config_path() == cwd_cfg
+
+
+def test_resolve_none_when_nothing_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty cwd + no env + no /etc/loom/ → None (auto-sync no-op)."""
+    monkeypatch.delenv(LOOM_BENCHMARKS_CONFIG_PATH, raising=False)
+    monkeypatch.chdir(tmp_path)  # tmp_path has no config/ subdir
+    # We can't easily blank /etc/loom/, but on dev / CI it shouldn't
+    # exist. If it does, this test will spuriously pass — accept that.
+    assert resolve_config_path() is None

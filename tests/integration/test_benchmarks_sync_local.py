@@ -14,9 +14,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.config.benchmarks import load_benchmarks_config
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
-from loom_cli.benchmarks_config import load_benchmarks_config
 from loom_cli.benchmarks_sync import (
     LOCAL_FOLDER_KIND,
     SYNC_IMPORTED_BY,

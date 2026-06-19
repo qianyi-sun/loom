@@ -83,10 +83,9 @@ def _resolve_adapter(
     if benchmark in REGISTRY:
         return REGISTRY[benchmark]
 
-    from loom_cli.benchmarks_config import load_benchmarks_config
-    from loom_cli.datasets_cmd import _resolve_config_path
+    from loom.config.benchmarks import load_benchmarks_config, resolve_config_path
 
-    cfg_path = benchmarks_config_path or _resolve_config_path(None)
+    cfg_path = benchmarks_config_path or resolve_config_path()
     cfg = load_benchmarks_config(cfg_path) if cfg_path else None
     if cfg is None:
         raise KeyError(

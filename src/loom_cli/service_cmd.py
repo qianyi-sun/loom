@@ -155,9 +155,9 @@ def _benchmarks_sync_config(db_url: str) -> None:
     log a WARN but don't fail `service up` — the registry layer is
     not on the critical path.
     """
-    from loom_cli.datasets_cmd import _resolve_config_path
+    from loom.config.benchmarks import resolve_config_path
 
-    config_path = _resolve_config_path(None)
+    config_path = resolve_config_path()
     if config_path is None:
         return
     fixtures_root = os.environ.get("LOOM_WORKER_FIXTURES_ROOT")
