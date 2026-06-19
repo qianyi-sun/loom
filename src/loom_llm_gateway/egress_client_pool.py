@@ -3,16 +3,16 @@
 When `LOOM_GW_EGRESS_PROXY_URL` is set, every upstream HTTP call
 from this gateway must route through the Envoy egress proxy on that
 URL AND carry `x-loom-connection-id: <connection_id>` on the
-**CONNECT** request (not the wrapped HTTP request — spike #196
-documents the failure mode).
+proxy request. HTTPS upstreams carry it on the CONNECT request; HTTP
+upstreams carry it on the forward-proxy request, and Envoy strips it
+before forwarding upstream.
 
-httpx supports CONNECT-level header injection only via
-`httpx.Proxy(headers=...)`, which is per-Proxy = per-client. So
-we maintain a small pool keyed on `connection_id`, lazily building
-a client per connection and reusing it for all of that connection's
-requests. The pool is bounded by the number of `provider_connections`
-rows (≤ team count × per-team connections, currently <1k in
-practice), so no LRU eviction is needed.
+httpx exposes proxy-header injection via `httpx.Proxy(headers=...)`,
+which is per-Proxy = per-client. So we maintain a small pool keyed on
+`connection_id`, lazily building a client per connection and reusing it
+for all of that connection's requests. The pool is bounded by the
+number of `provider_connections` rows (≤ team count × per-team
+connections, currently <1k in practice), so no LRU eviction is needed.
 
 When the env var is empty (default), `get_egress_client_for` falls
 through to the shared `upstream_client` and no per-connection

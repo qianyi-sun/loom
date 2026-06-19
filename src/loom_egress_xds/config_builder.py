@@ -20,6 +20,9 @@ Filtering rules:
 - Rows with `status != 'valid'` are still included — the egress
   proxy enforces IP allowlists regardless of validation status; a
   pending connection's IPs are still its IPs.
+- Rows whose `base_url` no longer parses as HTTP/HTTPS are excluded
+  so one corrupted row cannot prevent Envoy from receiving routes for
+  every other provider connection.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+from urllib.parse import urlparse
 from uuid import UUID
 
 
@@ -40,19 +44,24 @@ class ProviderConnectionRow(Protocol):
     id: UUID
     resolved_egress_ips: list[str]
     upstream_host: str
+    base_url: str
     deleted_at: datetime | None
 
 
 @dataclass(frozen=True)
 class ConnectionAllowlist:
     """One entry in the snapshot. `ips` is the sorted, deduped set
-    of egress IPs the connection is allowed to reach. `upstream_host`
-    is informational (Envoy filter logs it on deny) but is NOT used
-    for filtering — IP match is authoritative."""
+    of egress IPs the connection is allowed to reach. `upstream_host`,
+    `upstream_scheme`, and `upstream_port` come from the provider
+    `base_url`; Envoy uses the host+port authority match alongside
+    the IP endpoints so provider test/model discovery and proxied
+    execution share one routing contract."""
 
     connection_id: UUID
     ips: tuple[str, ...]
     upstream_host: str
+    upstream_scheme: str
+    upstream_port: int
 
 
 @dataclass(frozen=True)
@@ -87,11 +96,21 @@ def build_snapshot(rows: Iterable[ProviderConnectionRow]) -> Snapshot:
         ips = tuple(sorted(set(row.resolved_egress_ips)))
         if not ips:
             continue
-        entries.append(ConnectionAllowlist(
-            connection_id=row.id,
-            ips=ips,
-            upstream_host=row.upstream_host,
-        ))
+        try:
+            upstream_scheme, upstream_port = _derive_upstream_scheme_port(
+                row.base_url,
+            )
+        except ValueError:
+            continue
+        entries.append(
+            ConnectionAllowlist(
+                connection_id=row.id,
+                ips=ips,
+                upstream_host=row.upstream_host,
+                upstream_scheme=upstream_scheme,
+                upstream_port=upstream_port,
+            )
+        )
     entries.sort(key=lambda e: e.connection_id)
     version = _compute_version(entries)
     return Snapshot(entries=tuple(entries), version=version)
@@ -109,6 +128,7 @@ def _compute_version(entries: list[ConnectionAllowlist]) -> str:
     short-circuit).
     """
     import hashlib
+
     h = hashlib.sha256()
     for e in entries:
         h.update(str(e.connection_id).encode())
@@ -118,5 +138,25 @@ def _compute_version(entries: list[ConnectionAllowlist]) -> str:
             h.update(b",")
         h.update(b"|")
         h.update(e.upstream_host.encode())
+        h.update(b"|")
+        h.update(e.upstream_scheme.encode())
+        h.update(b":")
+        h.update(str(e.upstream_port).encode())
         h.update(b";")
     return h.hexdigest()[:16]
+
+
+def _derive_upstream_scheme_port(base_url: str) -> tuple[str, int]:
+    parsed = urlparse(base_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported provider base_url scheme: {scheme!r}")
+    try:
+        explicit_port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid provider base_url port: {base_url!r}") from exc
+    if explicit_port is not None:
+        return scheme, explicit_port
+    if scheme == "http":
+        return scheme, 80
+    return scheme, 443

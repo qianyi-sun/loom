@@ -215,14 +215,10 @@ services:
 
   # #190 PR-C1c: egress-proxy + egress-xds wired into the dev stack.
   # Mirrors the production deploy: gateway-router's outbound provider
-  # traffic flows through Envoy on :30443 (HTTP CONNECT forward
-  # proxy), and Envoy fetches its CDS+RDS config from the xds-server
-  # on :18000 (which reads from Postgres).
-  #
-  # NOT yet wired into gateway-router (PR-C2 changes the gateway's
-  # httpx client to use the proxy + adds the x-loom-connection-id
-  # CONNECT header). Standing the services up here lets devs iterate
-  # on egress-xds + Envoy config without rebuilding the cluster.
+  # traffic flows through Envoy on :30443. HTTPS provider calls use
+  # CONNECT; HTTP provider calls use ordinary forward-proxy routing.
+  # Envoy fetches its CDS+RDS config from the xds-server on :18000
+  # (which reads provider_connections from Postgres).
   egress-xds:
     image: loom-egress-xds:dev
     build:

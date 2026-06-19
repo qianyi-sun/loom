@@ -213,9 +213,13 @@ When on, every claimed trial:
    CDS+RDS from `loom-egress-xds` (gRPC). Routes match on
    `(x-loom-connection-id, :authority)` pair so a tenant header alone
    isn't enough — destination hostname must also match. Cluster
-   endpoints are `provider_connections.resolved_egress_ips`, so a
-   compromised gateway can ONLY reach the IPs the connection was
-   verified to resolve to. (Phase C, PRs [#192](https://github.com/carinrc/loom/pull/192) + [#200](https://github.com/carinrc/loom/pull/200) + [#209](https://github.com/carinrc/loom/pull/209) + [#215](https://github.com/carinrc/loom/pull/215) + [#217](https://github.com/carinrc/loom/pull/217).)
+   endpoints are `provider_connections.resolved_egress_ips` on the
+   port derived from `provider_connections.base_url`, so a compromised
+   gateway can ONLY reach the IPs and port the connection was verified
+   to resolve to. HTTPS providers use CONNECT routes; HTTP providers
+   use ordinary forward-proxy routes with the internal
+   `x-loom-connection-id` header stripped before upstream forwarding.
+   (Phase C, PRs [#192](https://github.com/carinrc/loom/pull/192) + [#200](https://github.com/carinrc/loom/pull/200) + [#209](https://github.com/carinrc/loom/pull/209) + [#215](https://github.com/carinrc/loom/pull/215) + [#217](https://github.com/carinrc/loom/pull/217).)
 4. **Step-JWT rotation.** Worker mounts
    `/var/lib/loom/sandbox-secrets/trials/<trial>/run/loom/` into the
    sandbox at `/run/loom/`. A rotator writes the initial token before

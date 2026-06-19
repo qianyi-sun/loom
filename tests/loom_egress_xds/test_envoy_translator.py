@@ -37,6 +37,7 @@ class _Row:
     id: UUID
     resolved_egress_ips: list[str] = field(default_factory=list)
     upstream_host: str = "api.openai.com"
+    base_url: str = "https://api.openai.com/v1"
     deleted_at: datetime | None = None
 
 
@@ -57,11 +58,13 @@ def test_empty_snapshot_yields_zero_clusters_one_routeconfig() -> None:
 
 
 def test_single_connection_yields_one_cluster_one_route() -> None:
-    rows = [_Row(
-        id=_C1,
-        resolved_egress_ips=["1.2.3.4", "5.6.7.8"],
-        upstream_host="api.openai.com",
-    )]
+    rows = [
+        _Row(
+            id=_C1,
+            resolved_egress_ips=["1.2.3.4", "5.6.7.8"],
+            upstream_host="api.openai.com",
+        )
+    ]
     snap = build_snapshot(rows)
     cfg = build_envoy_config(snap)
 
@@ -100,9 +103,7 @@ def test_single_connection_yields_one_cluster_one_route() -> None:
     assert by_name[":authority"].string_match.exact == "api.openai.com:443"
 
     # Route action: dispatch to the per-connection cluster.
-    assert route.route.cluster == (
-        "egress-00000000-0000-0000-0000-000000000001"
-    )
+    assert route.route.cluster == ("egress-00000000-0000-0000-0000-000000000001")
 
     # CONNECT upgrade config so Envoy terminates the CONNECT here.
     assert len(route.route.upgrade_configs) == 1
@@ -125,9 +126,7 @@ def test_multiple_connections_produce_clusters_in_order() -> None:
         "egress-00000000-0000-0000-0000-000000000001",
         "egress-00000000-0000-0000-0000-000000000002",
     ]
-    route_clusters = [
-        r.route.cluster for r in cfg.route_configuration.virtual_hosts[0].routes
-    ]
+    route_clusters = [r.route.cluster for r in cfg.route_configuration.virtual_hosts[0].routes]
     assert route_clusters == [
         "egress-00000000-0000-0000-0000-000000000001",
         "egress-00000000-0000-0000-0000-000000000002",
@@ -145,30 +144,61 @@ def test_version_info_passthrough() -> None:
 
 
 def test_upstream_host_drives_authority_match() -> None:
-    rows = [_Row(
-        id=_C1, resolved_egress_ips=["1.1.1.1"],
-        upstream_host="custom.host.example.com",
-    )]
+    rows = [
+        _Row(
+            id=_C1,
+            resolved_egress_ips=["1.1.1.1"],
+            upstream_host="custom.host.example.com",
+        )
+    ]
     snap = build_snapshot(rows)
     cfg = build_envoy_config(snap)
     routes = cfg.route_configuration.virtual_hosts[0].routes
-    authority_match = next(
-        h for h in routes[0].match.headers if h.name == ":authority"
-    )
-    assert authority_match.string_match.exact == (
-        "custom.host.example.com:443"
-    )
+    authority_match = next(h for h in routes[0].match.headers if h.name == ":authority")
+    assert authority_match.string_match.exact == ("custom.host.example.com:443")
 
 
-def test_cluster_endpoint_port_is_443() -> None:
-    # Provider APIs are all HTTPS; we don't currently support non-443.
-    # Pin the constant via test so a change is intentional.
+def test_https_cluster_endpoint_port_defaults_to_443() -> None:
     rows = [_Row(id=_C1, resolved_egress_ips=["1.1.1.1"])]
     snap = build_snapshot(rows)
     cfg = build_envoy_config(snap)
-    port = cfg.clusters[0].load_assignment.endpoints[0].lb_endpoints[0] \
+    port = (
+        cfg.clusters[0]
+        .load_assignment.endpoints[0]
+        .lb_endpoints[0]
         .endpoint.address.socket_address.port_value
+    )
     assert port == 443
+
+
+def test_http_non443_provider_uses_plain_http_route_and_configured_port() -> None:
+    rows = [
+        _Row(
+            id=_C1,
+            resolved_egress_ips=["192.168.32.1"],
+            upstream_host="192.168.32.1",
+            base_url="http://192.168.32.1:28001/v1",
+        )
+    ]
+    snap = build_snapshot(rows)
+    cfg = build_envoy_config(snap)
+
+    endpoint = (
+        cfg.clusters[0].load_assignment.endpoints[0].lb_endpoints[0].endpoint.address.socket_address
+    )
+    assert endpoint.address == "192.168.32.1"
+    assert endpoint.port_value == 28001
+
+    route = cfg.route_configuration.virtual_hosts[0].routes[0]
+    assert not route.match.HasField("connect_matcher")
+    assert route.match.prefix == "/"
+    by_name = {h.name: h for h in route.match.headers}
+    assert by_name[CONNECTION_ID_HEADER].string_match.exact == (
+        "00000000-0000-0000-0000-000000000001"
+    )
+    assert by_name[":authority"].string_match.exact == "192.168.32.1:28001"
+    assert list(route.request_headers_to_remove) == [CONNECTION_ID_HEADER]
+    assert list(route.route.upgrade_configs) == []
 
 
 def test_deleted_rows_propagate_through_build_snapshot() -> None:
@@ -179,13 +209,12 @@ def test_deleted_rows_propagate_through_build_snapshot() -> None:
     rows = [
         _Row(id=_C1, resolved_egress_ips=["1.1.1.1"]),
         _Row(
-            id=_C2, resolved_egress_ips=["2.2.2.2"],
+            id=_C2,
+            resolved_egress_ips=["2.2.2.2"],
             deleted_at=datetime.fromisoformat("2026-06-18T00:00:00+00:00"),
         ),
     ]
     snap = build_snapshot(rows)
     cfg = build_envoy_config(snap)
     assert len(cfg.clusters) == 1
-    assert cfg.clusters[0].name == (
-        "egress-00000000-0000-0000-0000-000000000001"
-    )
+    assert cfg.clusters[0].name == ("egress-00000000-0000-0000-0000-000000000001")

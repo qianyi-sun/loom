@@ -90,13 +90,14 @@ def _pick_free_port() -> int:
 def postgres_url() -> Iterator[str]:
     with PostgresContainer("postgres:16") as pg:
         url = pg.get_connection_url().replace(
-            "postgresql+psycopg2://", "postgresql+psycopg://",
+            "postgresql+psycopg2://",
+            "postgresql+psycopg://",
         )
         os.environ["LOOM_DB_URL"] = url
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c",
-             "migrations/alembic.ini", "upgrade", "head"],
-            cwd=_REPO_ROOT, check=True,
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=_REPO_ROOT,
+            check=True,
         )
         yield url
 
@@ -117,6 +118,7 @@ class _Row:
     id: UUID
     resolved_egress_ips: list[str]
     upstream_host: str
+    base_url: str
     deleted_at: datetime | None
 
 
@@ -137,10 +139,12 @@ def _make_row_fetcher(db_url: str):
                 id=r[0],
                 resolved_egress_ips=[str(ip) for ip in r[1]],
                 upstream_host=r[2],
-                deleted_at=r[3],
+                base_url=r[3],
+                deleted_at=r[4],
             )
             for r in rows
         ]
+
     return _fetch
 
 
@@ -156,17 +160,20 @@ async def test_xds_server_publishes_cluster_and_route_from_postgres(
     connection_id = uuid4()
     upstream_host = "test-upstream.example.com"
     allowed_ip = "10.99.99.99"
+    http_connection_id = uuid4()
+    http_upstream_host = "192.168.32.1"
+    http_allowed_ip = "192.168.32.1"
 
     psycopg_url = postgres_url.replace(
-        "postgresql+psycopg://", "postgresql://",
+        "postgresql+psycopg://",
+        "postgresql://",
     )
 
     # ── 1. Insert fixture rows ──────────────────────────────────────
     with psycopg.connect(psycopg_url, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO teams (id, name, created_at) "
-                "VALUES (%s, %s, NOW())",
+                "INSERT INTO teams (id, name, created_at) VALUES (%s, %s, NOW())",
                 (str(team_id), f"egress-xds-test-{team_id}"),
             )
             cur.execute(
@@ -185,6 +192,28 @@ async def test_xds_server_publishes_cluster_and_route_from_postgres(
                 )
                 """,
                 (str(connection_id), str(team_id), upstream_host, allowed_ip),
+            )
+            cur.execute(
+                """
+                INSERT INTO provider_connections (
+                    id, team_id, provider_type, display_name,
+                    base_url, upstream_host, resolved_egress_ips,
+                    encrypted_api_key_ref, created_by,
+                    created_at, updated_at
+                ) VALUES (
+                    %s, %s, 'openai-compatible',
+                    'xds-http-test', 'http://192.168.32.1:28001/v1',
+                    %s, ARRAY[%s]::inet[], 'loom://test',
+                    'test:egress-xds-integration',
+                    NOW(), NOW()
+                )
+                """,
+                (
+                    str(http_connection_id),
+                    str(team_id),
+                    http_upstream_host,
+                    http_allowed_ip,
+                ),
             )
 
     # ── 2. Build the in-process xds-server ─────────────────────────
@@ -211,9 +240,7 @@ async def test_xds_server_publishes_cluster_and_route_from_postgres(
             if cache._config is not None:
                 break
             await asyncio.sleep(0.05)
-        assert cache._config is not None, (
-            "watcher never published initial snapshot — fetch broken"
-        )
+        assert cache._config is not None, "watcher never published initial snapshot — fetch broken"
 
         # ── 3. Open a gRPC client + call StreamClusters ────────────
         async with grpc.aio.insecure_channel(f"127.0.0.1:{xds_port}") as ch:
@@ -224,38 +251,58 @@ async def test_xds_server_publishes_cluster_and_route_from_postgres(
             rds_resp = await _request_once(rds_stub.StreamRoutes)
 
         # ── 4. Assertions: CDS response shape ──────────────────────
-        assert cds_resp.type_url == (
-            "type.googleapis.com/envoy.config.cluster.v3.Cluster"
-        )
+        assert cds_resp.type_url == ("type.googleapis.com/envoy.config.cluster.v3.Cluster")
         clusters = [_unpack(r, Cluster) for r in cds_resp.resources]
-        assert len(clusters) == 1
-        cluster = clusters[0]
+        assert len(clusters) == 2
+        clusters_by_name = {c.name: c for c in clusters}
+        cluster = clusters_by_name[f"egress-{connection_id}"]
         assert cluster.name == f"egress-{connection_id}"
         assert cluster.type == Cluster.DiscoveryType.STATIC
         endpoints = cluster.load_assignment.endpoints[0].lb_endpoints
         addrs = [e.endpoint.address.socket_address.address for e in endpoints]
         assert addrs == [allowed_ip]
+        ports = [e.endpoint.address.socket_address.port_value for e in endpoints]
+        assert ports == [443]
+
+        http_cluster = clusters_by_name[f"egress-{http_connection_id}"]
+        http_endpoint = (
+            http_cluster.load_assignment.endpoints[0]
+            .lb_endpoints[0]
+            .endpoint.address.socket_address
+        )
+        assert http_endpoint.address == http_allowed_ip
+        assert http_endpoint.port_value == 28001
 
         # ── 5. Assertions: RDS response shape ──────────────────────
-        assert rds_resp.type_url == (
-            "type.googleapis.com/envoy.config.route.v3.RouteConfiguration"
-        )
+        assert rds_resp.type_url == ("type.googleapis.com/envoy.config.route.v3.RouteConfiguration")
         assert len(rds_resp.resources) == 1
         rc = _unpack(rds_resp.resources[0], RouteConfiguration)
         assert rc.name == "loom_egress_routes"
         assert len(rc.virtual_hosts) == 1
         routes = rc.virtual_hosts[0].routes
-        assert len(routes) == 1
-        route = routes[0]
-        by_name = {
-            h.name: h.string_match.exact
-            for h in route.match.headers
-        }
+        assert len(routes) == 2
+        routes_by_cluster = {r.route.cluster: r for r in routes}
+        route = routes_by_cluster[f"egress-{connection_id}"]
+        by_name = {h.name: h.string_match.exact for h in route.match.headers}
         assert by_name == {
             "x-loom-connection-id": str(connection_id),
             ":authority": f"{upstream_host}:443",
         }
+        assert route.match.HasField("connect_matcher")
         assert route.route.cluster == f"egress-{connection_id}"
+
+        http_route = routes_by_cluster[f"egress-{http_connection_id}"]
+        http_by_name = {h.name: h.string_match.exact for h in http_route.match.headers}
+        assert http_by_name == {
+            "x-loom-connection-id": str(http_connection_id),
+            ":authority": f"{http_upstream_host}:28001",
+        }
+        assert not http_route.match.HasField("connect_matcher")
+        assert http_route.match.prefix == "/"
+        assert list(http_route.request_headers_to_remove) == [
+            "x-loom-connection-id",
+        ]
+        assert http_route.route.cluster == f"egress-{http_connection_id}"
     finally:
         await watcher.stop()
         watcher_task.cancel()
@@ -270,6 +317,7 @@ async def _request_once(stream_method):
     """SOTW xDS request/response: send one empty DiscoveryRequest,
     read the first DiscoveryResponse, close. Mimics what Envoy does
     on initial connect."""
+
     async def _gen():
         yield DiscoveryRequest()
 

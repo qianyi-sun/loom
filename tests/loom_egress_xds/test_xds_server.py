@@ -39,6 +39,7 @@ class _Row:
     id: UUID
     resolved_egress_ips: list[str] = field(default_factory=list)
     upstream_host: str = "api.openai.com"
+    base_url: str = "https://api.openai.com/v1"
     deleted_at: datetime | None = None
 
 
@@ -97,9 +98,14 @@ async def test_publish_dedupe_skips_same_version() -> None:
     assert not waiter.done(), "waiter fired despite no version change"
 
     # New version: waiter fires.
-    snap2 = build_snapshot([_Row(
-        id=_C1, resolved_egress_ips=["1.1.1.1", "2.2.2.2"],
-    )])
+    snap2 = build_snapshot(
+        [
+            _Row(
+                id=_C1,
+                resolved_egress_ips=["1.1.1.1", "2.2.2.2"],
+            )
+        ]
+    )
     await cache.publish_snapshot(snap2)
     got = await asyncio.wait_for(waiter, timeout=1.0)
     assert got.version_info == snap2.version
@@ -107,10 +113,7 @@ async def test_publish_dedupe_skips_same_version() -> None:
 
 async def test_publish_notifies_multiple_waiters() -> None:
     cache = XdsSnapshotCache()
-    waiters = [
-        asyncio.create_task(cache.get_or_wait(last_version=None))
-        for _ in range(5)
-    ]
+    waiters = [asyncio.create_task(cache.get_or_wait(last_version=None)) for _ in range(5)]
     await asyncio.sleep(0.05)
     assert all(not w.done() for w in waiters)
 
@@ -128,10 +131,12 @@ async def test_cds_emits_clusters_after_publish() -> None:
     cache = XdsSnapshotCache()
     servicer = ClusterDiscoveryServicer(cache)
 
-    snap = build_snapshot([
-        _Row(id=_C1, resolved_egress_ips=["1.1.1.1"]),
-        _Row(id=_C2, resolved_egress_ips=["2.2.2.2"]),
-    ])
+    snap = build_snapshot(
+        [
+            _Row(id=_C1, resolved_egress_ips=["1.1.1.1"]),
+            _Row(id=_C2, resolved_egress_ips=["2.2.2.2"]),
+        ]
+    )
     await cache.publish_snapshot(snap)
 
     stream = servicer.StreamClusters(
@@ -141,9 +146,7 @@ async def test_cds_emits_clusters_after_publish() -> None:
     first = await asyncio.wait_for(_anext(stream), timeout=1.0)
     assert isinstance(first, DiscoveryResponse)
     assert first.version_info == snap.version
-    assert first.type_url == (
-        "type.googleapis.com/envoy.config.cluster.v3.Cluster"
-    )
+    assert first.type_url == ("type.googleapis.com/envoy.config.cluster.v3.Cluster")
     assert len(first.resources) == 2
 
     # Unpack the resources back to Cluster and verify names.
@@ -172,10 +175,12 @@ async def test_cds_streams_update_on_new_snapshot() -> None:
 
     # Publish a NEW snapshot; the same stream should emit again with
     # the new version.
-    snap2 = build_snapshot([
-        _Row(id=_C1, resolved_egress_ips=["1.1.1.1"]),
-        _Row(id=_C2, resolved_egress_ips=["2.2.2.2"]),
-    ])
+    snap2 = build_snapshot(
+        [
+            _Row(id=_C1, resolved_egress_ips=["1.1.1.1"]),
+            _Row(id=_C2, resolved_egress_ips=["2.2.2.2"]),
+        ]
+    )
     await cache.publish_snapshot(snap2)
     second = await asyncio.wait_for(_anext(stream), timeout=1.0)
     assert second.version_info == snap2.version
@@ -189,10 +194,11 @@ async def test_rds_emits_single_routeconfiguration() -> None:
     cache = XdsSnapshotCache()
     servicer = RouteDiscoveryServicer(cache)
 
-    snap = build_snapshot([
-        _Row(id=_C1, resolved_egress_ips=["1.1.1.1"],
-             upstream_host="api.openai.com"),
-    ])
+    snap = build_snapshot(
+        [
+            _Row(id=_C1, resolved_egress_ips=["1.1.1.1"], upstream_host="api.openai.com"),
+        ]
+    )
     await cache.publish_snapshot(snap)
 
     stream = servicer.StreamRoutes(

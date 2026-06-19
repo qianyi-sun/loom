@@ -6,17 +6,19 @@
 # `provider_connections_changed` NOTIFY (Postgres trigger from
 # migration 0026 in #192).
 #
-# Listener `:30443` is HTTP CONNECT forward proxy mode. The Loom
-# gateway-router HTTP client points at this listener via
-# `proxies={"https://": "http://egress-proxy:30443"}` and adds
-# `x-loom-connection-id: <id>` as a CONNECT-time header (NOT a request
-# header — see PR-C2 + spike notes for the curl gotcha).
+# Listener `:30443` is an HTTP proxy endpoint. HTTPS providers use
+# CONNECT tunneling; HTTP providers use ordinary forward-proxy
+# requests. The Loom gateway-router HTTP client points at this
+# listener with `httpx.Proxy(headers={"x-loom-connection-id": ...})`
+# so Envoy can match the tenant header alongside the upstream
+# `:authority`.
 #
 # Defense layers:
 #   1. RDS route match on (x-loom-connection-id, :authority) pair —
-#      both must equal the expected tenant + upstream_host.
+#      both must equal the expected tenant + upstream_host:port.
 #   2. CDS cluster endpoints — Envoy can only physically reach IPs in
-#      `resolved_egress_ips` for that connection. Belt-and-braces.
+#      `resolved_egress_ips` for that connection, on the port derived
+#      from provider_connections.base_url. Belt-and-braces.
 #
 # Failure modes:
 #   - Wrong header → 404 from Envoy (no matching route).

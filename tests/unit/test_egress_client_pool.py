@@ -146,3 +146,45 @@ async def test_str_connection_id_supported() -> None:
     assert by_uuid is by_str
     await pool.aclose()
     await pool.upstream_client.aclose()
+
+
+async def test_http_provider_proxy_request_carries_header_and_authority() -> None:
+    """HTTP provider URLs do not use CONNECT; httpx sends them as
+    forward-proxy requests. The egress proxy route needs the
+    connection-id header and `Host`/`:authority` with the provider's
+    explicit port to match the xDS route for private HTTP providers."""
+
+    captured: dict[str, str] = {}
+
+    async def handle(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        data = await reader.readuntil(b"\r\n\r\n")
+        captured["raw"] = data.decode("latin1")
+        writer.write(
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n",
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    pool = _make_pool(proxy_url=f"http://127.0.0.1:{port}")
+    try:
+        client = await pool.get("conn-http")
+        response = await client.get("http://192.168.32.1:28001/v1/models")
+        assert response.status_code == 502
+    finally:
+        server.close()
+        await server.wait_closed()
+        await pool.aclose()
+        await pool.upstream_client.aclose()
+
+    raw = captured["raw"]
+    assert raw.startswith(
+        "GET http://192.168.32.1:28001/v1/models HTTP/1.1\r\n",
+    )
+    assert "Host: 192.168.32.1:28001\r\n" in raw
+    assert "x-loom-connection-id: conn-http\r\n" in raw

@@ -70,6 +70,7 @@ class _PgRow:
     id: UUID
     resolved_egress_ips: list[str]
     upstream_host: str
+    base_url: str
     deleted_at: datetime | None
 
 
@@ -127,7 +128,8 @@ async def _fetch_rows(
             # builder see the same shape as our test fakes.
             resolved_egress_ips=[str(ip) for ip in row[1]],
             upstream_host=row[2],
-            deleted_at=row[3],
+            base_url=row[3],
+            deleted_at=row[4],
         )
         for row in rows
     ]
@@ -142,7 +144,8 @@ async def main() -> None:
 
     db_url = os.environ["LOOM_EGRESS_XDS_DB_URL"]
     listen_addr = os.environ.get(
-        "LOOM_EGRESS_XDS_LISTEN_ADDR", _DEFAULT_LISTEN_ADDR,
+        "LOOM_EGRESS_XDS_LISTEN_ADDR",
+        _DEFAULT_LISTEN_ADDR,
     )
 
     cache = XdsSnapshotCache()
@@ -179,7 +182,8 @@ async def main() -> None:
             exc = watcher_task.exception()
             if exc is not None:
                 logger.exception(
-                    "watcher_exited_unexpectedly", exc_info=exc,
+                    "watcher_exited_unexpectedly",
+                    exc_info=exc,
                 )
     finally:
         logger.info("loom_egress_xds_shutting_down")

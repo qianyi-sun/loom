@@ -7,7 +7,7 @@ Pure function over the format-agnostic `Snapshot` shipped in PR-C1a
   IPs as static endpoints. Cluster name: `egress-<connection_id>`.
 - A single `RouteConfiguration` with one Route per ConnectionAllowlist.
   Each route matches on BOTH the `x-loom-connection-id` header AND
-  the `:authority` CONNECT target (`<upstream_host>:443`) — this
+  the `:authority` upstream target (`<upstream_host>:<port>`) — this
   layered match defeats the CDN-IP-collapse problem the spike (#196)
   surfaced: a Cloudflare IP serves thousands of domains via SNI, so
   IP-only enforcement is insufficient.
@@ -42,11 +42,6 @@ from envoy.type.matcher.v3.string_pb2 import StringMatcher
 from google.protobuf.duration_pb2 import Duration
 
 from loom_egress_xds.config_builder import ConnectionAllowlist, Snapshot
-
-# Default upstream port for TLS providers. CONNECT targets land here
-# (`<host>:443`); we don't currently allow non-443 upstreams (which
-# would simplify nothing — provider APIs are all on HTTPS).
-_UPSTREAM_PORT = 443
 
 # Default cluster connect timeout. 5s matches the spike configs and
 # is enough for one TCP+TLS handshake from a US-East worker to a US-
@@ -114,12 +109,16 @@ def _build_cluster(entry: ConnectionAllowlist) -> Cluster:
     connection_id_str = str(entry.connection_id)
     cluster_name = _cluster_name_for(connection_id_str)
     lb_endpoints = [
-        LbEndpoint(endpoint=Endpoint(address=Address(
-            socket_address=SocketAddress(
-                address=ip,
-                port_value=_UPSTREAM_PORT,
-            ),
-        )))
+        LbEndpoint(
+            endpoint=Endpoint(
+                address=Address(
+                    socket_address=SocketAddress(
+                        address=ip,
+                        port_value=entry.upstream_port,
+                    ),
+                )
+            )
+        )
         for ip in entry.ips
     ]
     return Cluster(
@@ -139,11 +138,11 @@ def _build_route_configuration(snapshot: Snapshot) -> RouteConfiguration:
 
     Each route requires BOTH headers to match:
       - `x-loom-connection-id: <connection_id>` (tenant dispatch)
-      - `:authority: <upstream_host>:443` (CONNECT target hostname)
+      - `:authority: <upstream_host>:<port>` (upstream target)
 
     The pair-match is the spike (#196) finding: header alone isn't
     enough because a malicious tenant could send the right header
-    but a wrong CONNECT target; CONNECT target alone isn't enough
+    but a wrong upstream target; target authority alone isn't enough
     because Cloudflare IPs serve thousands of domains, so the
     cluster's IPs include hostnames the tenant shouldn't reach.
     Both together = the tenant's header AND the expected upstream.
@@ -151,39 +150,59 @@ def _build_route_configuration(snapshot: Snapshot) -> RouteConfiguration:
     routes = [_build_route(e) for e in snapshot.entries]
     return RouteConfiguration(
         name=ROUTE_CONFIGURATION_NAME,
-        virtual_hosts=[VirtualHost(
-            name=_VIRTUAL_HOST_NAME,
-            domains=["*"],
-            routes=routes,
-        )],
+        virtual_hosts=[
+            VirtualHost(
+                name=_VIRTUAL_HOST_NAME,
+                domains=["*"],
+                routes=routes,
+            )
+        ],
     )
 
 
 def _build_route(entry: ConnectionAllowlist) -> Route:
     connection_id_str = str(entry.connection_id)
-    expected_authority = f"{entry.upstream_host}:{_UPSTREAM_PORT}"
+    expected_authority = f"{entry.upstream_host}:{entry.upstream_port}"
+    headers = [
+        HeaderMatcher(
+            name=CONNECTION_ID_HEADER,
+            string_match=StringMatcher(exact=connection_id_str),
+        ),
+        HeaderMatcher(
+            name=":authority",
+            string_match=StringMatcher(exact=expected_authority),
+        ),
+    ]
+    if entry.upstream_scheme == "http":
+        return Route(
+            match=RouteMatch(
+                # HTTP providers use normal HTTP proxy forwarding
+                # rather than CONNECT tunneling. The route still
+                # requires the connection id + authority pair so the
+                # gateway cannot retarget the allowlisted IPs.
+                prefix="/",
+                headers=headers,
+            ),
+            request_headers_to_remove=[CONNECTION_ID_HEADER],
+            route=RouteAction(
+                cluster=_cluster_name_for(connection_id_str),
+            ),
+        )
     return Route(
         match=RouteMatch(
             # `connect_matcher` (set to empty CONNECT match) tells
             # Envoy this route applies to CONNECT requests. The
             # `headers` matchers below further restrict it.
             connect_matcher=RouteMatch.ConnectMatcher(),
-            headers=[
-                HeaderMatcher(
-                    name=CONNECTION_ID_HEADER,
-                    string_match=StringMatcher(exact=connection_id_str),
-                ),
-                HeaderMatcher(
-                    name=":authority",
-                    string_match=StringMatcher(exact=expected_authority),
-                ),
-            ],
+            headers=headers,
         ),
         route=RouteAction(
             cluster=_cluster_name_for(connection_id_str),
-            upgrade_configs=[RouteAction.UpgradeConfig(
-                upgrade_type="CONNECT",
-                connect_config=RouteAction.UpgradeConfig.ConnectConfig(),
-            )],
+            upgrade_configs=[
+                RouteAction.UpgradeConfig(
+                    upgrade_type="CONNECT",
+                    connect_config=RouteAction.UpgradeConfig.ConnectConfig(),
+                )
+            ],
         ),
     )

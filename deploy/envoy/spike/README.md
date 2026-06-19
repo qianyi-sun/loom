@@ -70,11 +70,11 @@ thousands of domains. The IP allowlist is too coarse for CDN-fronted
 providers, which includes all of OpenAI, Anthropic (Cloudflare), and
 most managed LLM APIs.
 
-**Mitigation:** layer a `:authority` CONNECT-target match in the
-route so the route ONLY matches when both the header and the target
-hostname are expected. Loom already has `upstream_host` on
-`provider_connections`; the xDS server publishes a per-connection
-route whose match clause is:
+**Mitigation:** layer a `:authority` target match in the route so the
+route ONLY matches when both the header and the target hostname/port
+are expected. Loom stores the provider `base_url` and derived
+`upstream_host` on `provider_connections`; the xDS server publishes a
+per-connection route whose match clause is:
 
 ```yaml
 - match:
@@ -83,12 +83,16 @@ route whose match clause is:
       - name: x-loom-connection-id
         string_match: { exact: "<connection_id>" }
       - name: ":authority"
-        string_match: { exact: "<upstream_host>:443" }
+        string_match: { exact: "<upstream_host>:<port>" }
   route:
     cluster: egress-<connection_id>
 ```
 
-This forces BOTH header AND CONNECT target to be the expected pair.
+HTTPS providers use the CONNECT route shape above. HTTP providers use
+the same header + authority pair on an ordinary forward-proxy route
+instead of `connect_matcher`, and the route strips
+`x-loom-connection-id` before forwarding upstream. This forces BOTH
+header AND target authority to be the expected pair.
 Then the cluster's IP set is defense-in-depth (Envoy still can't
 physically reach an IP not in the cluster, even if the route match
 were bypassed).
@@ -151,7 +155,9 @@ The xDS server implements **two discovery services**:
 2. **RDS (RouteDiscoveryService)** — one RouteConfiguration containing
    N VirtualHosts (or one VirtualHost with N routes); each route
    matches on `x-loom-connection-id: <id>` AND `:authority:
-   <upstream_host>:443`, action `cluster: egress-<id>`.
+   <upstream_host>:<port>`, action `cluster: egress-<id>`. The port is
+   derived from `provider_connections.base_url`: explicit ports are
+   preserved, HTTPS defaults to 443, and HTTP defaults to 80.
 
 **Bootstrap (static, baked into `deploy/envoy/egress-proxy.yaml`):**
 - Listener on `:30443` with HCM

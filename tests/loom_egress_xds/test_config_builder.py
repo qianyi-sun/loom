@@ -20,6 +20,7 @@ class _Row:
     id: UUID
     resolved_egress_ips: list[str] = field(default_factory=list)
     upstream_host: str = "example.com"
+    base_url: str = "https://example.com/v1"
     deleted_at: datetime | None = None
 
 
@@ -36,23 +37,81 @@ def test_empty_input_returns_empty_snapshot() -> None:
 
 
 def test_single_row_round_trips() -> None:
-    rows = [_Row(id=_C1, resolved_egress_ips=["1.2.3.4", "5.6.7.8"],
-                 upstream_host="api.openai.com")]
+    rows = [
+        _Row(id=_C1, resolved_egress_ips=["1.2.3.4", "5.6.7.8"], upstream_host="api.openai.com")
+    ]
     snap = build_snapshot(rows)
     assert snap.entries == (
         ConnectionAllowlist(
             connection_id=_C1,
             ips=("1.2.3.4", "5.6.7.8"),
             upstream_host="api.openai.com",
+            upstream_scheme="https",
+            upstream_port=443,
         ),
     )
+
+
+def test_base_url_explicit_http_port_round_trips() -> None:
+    rows = [
+        _Row(
+            id=_C1,
+            resolved_egress_ips=["192.168.32.1"],
+            upstream_host="192.168.32.1",
+            base_url="http://192.168.32.1:28001/v1",
+        )
+    ]
+    snap = build_snapshot(rows)
+    assert snap.entries[0] == ConnectionAllowlist(
+        connection_id=_C1,
+        ips=("192.168.32.1",),
+        upstream_host="192.168.32.1",
+        upstream_scheme="http",
+        upstream_port=28001,
+    )
+
+
+def test_base_url_default_ports_follow_scheme() -> None:
+    https_snap = build_snapshot(
+        [
+            _Row(
+                id=_C1,
+                resolved_egress_ips=["1.2.3.4"],
+                base_url="https://api.example.com/v1",
+            )
+        ]
+    )
+    http_snap = build_snapshot(
+        [
+            _Row(
+                id=_C1,
+                resolved_egress_ips=["1.2.3.4"],
+                base_url="http://api.example.com/v1",
+            )
+        ]
+    )
+
+    assert https_snap.entries[0].upstream_port == 443
+    assert http_snap.entries[0].upstream_port == 80
+
+
+def test_invalid_base_url_row_excluded() -> None:
+    rows = [
+        _Row(
+            id=_C1,
+            resolved_egress_ips=["1.2.3.4"],
+            base_url="ftp://example.com/v1",
+        ),
+        _Row(id=_C2, resolved_egress_ips=["5.6.7.8"]),
+    ]
+    snap = build_snapshot(rows)
+    assert [e.connection_id for e in snap.entries] == [_C2]
 
 
 def test_deleted_rows_excluded() -> None:
     rows = [
         _Row(id=_C1, resolved_egress_ips=["1.2.3.4"]),
-        _Row(id=_C2, resolved_egress_ips=["5.6.7.8"],
-             deleted_at=datetime.now(UTC)),
+        _Row(id=_C2, resolved_egress_ips=["5.6.7.8"], deleted_at=datetime.now(UTC)),
     ]
     snap = build_snapshot(rows)
     assert [e.connection_id for e in snap.entries] == [_C1]
@@ -132,8 +191,10 @@ def test_snapshot_is_immutable() -> None:
     # `entries` is a tuple, ConnectionAllowlist is frozen — runtime
     # mutation would raise. This test pins the contract.
     import dataclasses
+
     assert dataclasses.is_dataclass(snap)
     # frozen=True means setattr raises FrozenInstanceError.
     import pytest
+
     with pytest.raises(dataclasses.FrozenInstanceError):
         snap.version = "xyz"  # type: ignore[misc]

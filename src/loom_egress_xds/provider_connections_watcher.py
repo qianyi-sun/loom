@@ -52,7 +52,8 @@ SnapshotCallback = Callable[[Snapshot], Awaitable[None]]
 # testable without a live Postgres. Production wires these to psycopg.
 ConnectionFactory = Callable[[], Awaitable["WatcherConnection"]]
 RowFetcher = Callable[
-    ["WatcherConnection"], Awaitable[list[ProviderConnectionRow]],
+    ["WatcherConnection"],
+    Awaitable[list[ProviderConnectionRow]],
 ]
 
 
@@ -135,15 +136,16 @@ class ProviderConnectionsWatcher:
                         self._listen_loop(conn),
                     )
                     await self._consume_until_disconnect(
-                        conn, listener_task,
+                        conn,
+                        listener_task,
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.warning(
-                        "provider_connections_watcher_reconnect "
-                        "backoff=%.2fs err=%s",
-                        backoff, exc,
+                        "provider_connections_watcher_reconnect backoff=%.2fs err=%s",
+                        backoff,
+                        exc,
                     )
                     await asyncio.sleep(backoff)
                     backoff = min(
@@ -249,8 +251,7 @@ class ProviderConnectionsWatcher:
             await self._on_snapshot(snapshot)
         except Exception:
             logger.exception(
-                "provider_connections_watcher_callback_failed "
-                "version=%s",
+                "provider_connections_watcher_callback_failed version=%s",
                 snapshot.version,
             )
 
@@ -313,7 +314,7 @@ def make_row_fetcher_query() -> str:
     bug this query had pre-fixup (phantom `team_id` left over from
     an earlier draft)."""
     return (
-        "SELECT id, resolved_egress_ips, upstream_host, deleted_at "
+        "SELECT id, resolved_egress_ips, upstream_host, base_url, deleted_at "
         "FROM provider_connections"
     )
 

@@ -80,12 +80,12 @@ The security pivot. Trial sandbox containers are spawned by the worker via `dock
 │  resolves connection, decrypts API key, rate-limits,  │   trust boundary: knows team_id,
 │  calls upstream via egress proxy                       │   records usage.
 └──────────────────┬─────────────────────────────────────┘
-                   │ HTTPS CONNECT (target_ip, 443)
-                   │   X-Loom-Connection-Id, X-Loom-Team-Id
+                   │ HTTP proxy via base_url scheme/port
+                   │   x-loom-connection-id + :authority match
                    ▼
 ┌─ loom-egress-proxy (Envoy, ≥2 replicas) ──────────────┐   second wall: even if gateway
-│  validates target_ip ∈ resolved_egress_ips            │   compromised, only operator-
-│  [connection_id]; per-team local_ratelimit            │   resolved IPs are dialed.
+│  validates target_ip:port ∈ connection allowlist      │   compromised, only operator-
+│  [connection_id]; per-team local_ratelimit            │   resolved endpoints are dialed.
 └──────────────────┬─────────────────────────────────────┘
                    ▼
             OpenAI / Anthropic / Google
@@ -123,7 +123,11 @@ Four layers; any single one closes the path if the others fail:
 3. **Step-JWT auth at gateway** — anonymous calls rejected; per-trial scope.
 4. **Egress proxy IP allowlist** — even with a compromised gateway, only `resolved_egress_ips[connection_id]` is reachable.
 
-`POST /provider-connections` rejects RFC1918 / loopback / link-local / ULA by default; `team.allow_private_endpoints=true` permits RFC1918 + loopback for on-prem providers (defaulted on in `loom service` single-box mode).
+`POST /provider-connections` rejects RFC1918 / CGNAT / loopback /
+link-local / ULA by default; `team.allow_private_endpoints=true`
+permits RFC1918 + CGNAT + ULA for on-prem providers (defaulted on in
+`loom service` single-box mode). Loopback and link-local remain
+rejected even with the private-endpoint flag.
 
 ## Data architecture
 
@@ -148,7 +152,7 @@ MinIO bucket lifecycle: `AbortIncompleteMultipartUpload after 7 days` for non-tr
 | `loom-llm-gateway-sandbox` | Worker-spawned Docker container (one per worker node) | Host Docker; NOT a k8s pod | TLS-terminates sandbox traffic; validates step-JWT; forwards to gateway-router. Worker manages lifecycle via `docker events`. |
 | `loom-gateway-router` | DaemonSet (one pod per worker node, hostPort 30443) | `loom` namespace | TCP proxy: `host:30443` → in-cluster `loom-llm-gateway.loom.svc:9100`. |
 | `loom-llm-gateway` | Deployment (≥2 replicas) | `loom` namespace | Provider-facade routes (`/openai/v1/...`, `/anthropic/v1/...`) plus BYO OpenAI-compatible `/v1/chat/completions`; resolves `provider_connection_id`; decrypts API key; forwards through the egress proxy. |
-| `loom-egress-proxy` | Deployment (≥2 replicas, Envoy) | `loom` namespace | Validates `target_ip ∈ resolved_egress_ips[connection_id]`; per-team rate limit; HTTPS CONNECT to provider. |
+| `loom-egress-proxy` | Deployment (≥2 replicas, Envoy) | `loom` namespace | Validates `target_ip ∈ resolved_egress_ips[connection_id]`; per-team rate limit; HTTPS CONNECT or HTTP forward-proxy routing to the provider endpoint declared by `base_url`. |
 | `loom-egress-xds` | Deployment (1 replica, Python control plane) | `loom` namespace | Reads `provider_connections` from Postgres; serves Envoy CDS/EDS via gRPC. Vendored from `envoyproxy/python-control-plane`. |
 | `loom-service` | Deployment (≥2 replicas) | `loom` namespace | REST API; `POST /trials`, `POST /batches`, `POST /provider-connections`, etc. |
 | `loom-control-plane` | Deployment (≥2 replicas) | `loom` namespace | Schedules trials; mints step JWTs; serves Worker claim path. |
@@ -290,7 +294,7 @@ team_id                     UUID FK → teams.id  ON DELETE RESTRICT
 provider_type               text       -- 'openai-compatible' | 'anthropic' | 'google' | 'custom'
 display_name                text       -- UNIQUE per (team_id, display_name) WHERE deleted_at IS NULL
 base_url                    text
-upstream_host               text       -- derived from base_url; re-derived on PATCH
+upstream_host               text       -- hostname derived from base_url; re-derived on PATCH
 resolved_egress_ips         inet[]     -- populated by background re-resolver
 egress_ips_min_ttl_seconds  int NOT NULL DEFAULT 300
 encrypted_api_key_ref       text       -- ref into `secrets` OR "k8s://ns/name"
@@ -342,6 +346,22 @@ class SecretStore(Protocol):
 ```
 
 Two impls ship: `local-encrypted` (AES-GCM, `LOOM_SECRET_STORE_MASTER_KEY`; ciphertext in `secrets` table) for user-API-key data path, and `k8s-secret` (one k8s Secret per ref) for bootstrap-supplied infra credentials. Both impls live in both deployment modes.
+
+### Provider egress contract
+
+Provider `base_url` values may use `https://` or `http://`. The xDS
+snapshot derives the upstream scheme and port from that URL: explicit
+ports are preserved, while HTTPS defaults to `443` and HTTP defaults
+to `80`. HTTPS providers route through Envoy CONNECT matches on
+`(x-loom-connection-id, :authority=<upstream_host>:<port>)`; HTTP
+providers route as normal forward-proxy requests with the same
+connection-id + authority pair and the internal connection header is
+removed before the request is forwarded upstream.
+
+This means private on-prem OpenAI-compatible endpoints such as
+`http://192.168.32.1:28001/v1` are routable through egress when the
+team/operator has enabled `allow_private_endpoints`, while public
+HTTPS providers keep the existing CONNECT path.
 
 ### Re-resolver
 

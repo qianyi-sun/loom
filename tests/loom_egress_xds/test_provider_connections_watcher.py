@@ -31,6 +31,7 @@ class _Row:
     id: UUID
     resolved_egress_ips: list[str] = field(default_factory=list)
     upstream_host: str = "example.com"
+    base_url: str = "https://example.com/v1"
     deleted_at: datetime | None = None
 
 
@@ -54,7 +55,8 @@ class _FakeConn(WatcherConnection):
 
 
 async def _drive_until(
-    cond: asyncio.Event, timeout: float = 2.0,
+    cond: asyncio.Event,
+    timeout: float = 2.0,
 ) -> None:
     """Wait for `cond` with timeout; pytest.fail on timeout for clear
     error message rather than asyncio.TimeoutError."""
@@ -272,12 +274,10 @@ async def test_reconnects_after_listen_failure() -> None:
         await conn2.notify_queue.put(object())
 
         await _drive_until(pub_event, timeout=3.0)
-        assert factory_calls == 2, (
-            f"expected 2 factory calls (reconnect), got {factory_calls}"
+        assert factory_calls == 2, f"expected 2 factory calls (reconnect), got {factory_calls}"
+        assert any(s.lookup(_C2) is not None for s in published), (
+            "expected at least one snapshot containing the new row"
         )
-        assert any(
-            s.lookup(_C2) is not None for s in published
-        ), "expected at least one snapshot containing the new row"
         assert conn1.closed, "old connection must be closed on reconnect"
     finally:
         await watcher.stop()
@@ -303,10 +303,12 @@ _FakeConn.notifies = _exception_aware_notifies  # type: ignore[method-assign,ass
 def _factory(conn: WatcherConnection):
     async def make() -> WatcherConnection:
         return conn
+
     return make
 
 
 def _fetcher(rows: list[ProviderConnectionRow]):
     async def fetch(_conn: WatcherConnection) -> list[ProviderConnectionRow]:
         return list(rows)
+
     return fetch
