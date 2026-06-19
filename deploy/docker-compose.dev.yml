@@ -198,6 +198,10 @@ services:
       LOOM_WORKER_MINIO_ACCESS_KEY: loomdev
       LOOM_WORKER_MINIO_SECRET_KEY: loomdev123
       LOOM_WORKER_LOG_LEVEL: debug
+      LOOM_WORKER_MAX_CONCURRENT: "${LOOM_WORKER_MAX_CONCURRENT:-5}"
+      # Leave LOOM_WORKER_BLOCKING_IO_MAX_WORKERS unset so the worker derives
+      # it from LOOM_WORKER_MAX_CONCURRENT. Set explicitly only for capacity
+      # sweeps that need to isolate blocking Docker/S3/HF calls.
       # Where the worker resolves `fixture://<task_id>` sources to —
       # paired with the bind-mount below so the canary hello-world
       # task in tests/fixtures/tasks/ runs end-to-end without a bundle
@@ -208,6 +212,10 @@ services:
       - ../tests/fixtures:/app/tests/fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - worker_trajectories:/var/lib/loom/trajectories
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       control-plane:
         condition: service_healthy

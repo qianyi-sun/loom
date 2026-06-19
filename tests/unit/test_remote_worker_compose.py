@@ -4,6 +4,25 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.yml"
+_DEV_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.dev.yml"
+_WORKER_NOFILE_LIMIT = 65_536
+
+
+def _env_map(raw: object) -> dict[str, str | None]:
+    if isinstance(raw, dict):
+        return raw
+    assert isinstance(raw, list)
+    env: dict[str, str | None] = {}
+    for item in raw:
+        assert isinstance(item, str)
+        key, separator, value = item.partition("=")
+        env[key] = value if separator else None
+    return env
+
+
+def _worker_service(compose_file: Path) -> dict[str, object]:
+    data = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    return data["services"]["worker"]
 
 
 def test_remote_worker_compose_runs_only_worker() -> None:
@@ -16,8 +35,7 @@ def test_remote_worker_compose_runs_only_worker() -> None:
 
 
 def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
-    data = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
-    env = data["services"]["worker"]["environment"]
+    env = _env_map(_worker_service(_COMPOSE)["environment"])
     assert env["LOOM_WORKER_CONTROL_PLANE_URL"].startswith(
         "${LOOM_WORKER_CONTROL_PLANE_URL:?",
     )
@@ -28,6 +46,15 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
         "${LOOM_WORKER_MINIO_ENDPOINT:?",
     )
     assert env["LOOM_WORKER_MAX_CONCURRENT"] == "${LOOM_WORKER_MAX_CONCURRENT:-5}"
+
+
+def test_compose_workers_raise_nofile_limit_for_concurrent_sandboxes() -> None:
+    for compose_file in (_COMPOSE, _DEV_COMPOSE):
+        worker = _worker_service(compose_file)
+        assert worker["ulimits"]["nofile"] == {
+            "soft": _WORKER_NOFILE_LIMIT,
+            "hard": _WORKER_NOFILE_LIMIT,
+        }
 
 
 def test_remote_worker_compose_has_no_environment_specific_hosts() -> None:

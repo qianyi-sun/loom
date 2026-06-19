@@ -105,6 +105,8 @@ LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
 LOOM_WORKER_MINIO_SECRET_KEY=...
 LOOM_WORKER_MAX_CONCURRENT=5
+# Optional: leave unset unless a capacity sweep says blocking I/O is the bottleneck.
+# LOOM_WORKER_BLOCKING_IO_MAX_WORKERS=128
 ```
 
 Start only the worker service:
@@ -153,8 +155,37 @@ the task dir empty — the trial then fails at agent start.
 
 ## Capacity Settings
 
-Per-host concurrency is controlled by `LOOM_WORKER_MAX_CONCURRENT`. The
-default is 5, matching `WorkerSettings.max_concurrent`.
+Per-host trial concurrency is controlled by `LOOM_WORKER_MAX_CONCURRENT`.
+The default is 5, matching `WorkerSettings.max_concurrent`.
+
+The Worker also configures Python's default blocking-I/O executor for
+Docker, S3/MinIO, Hugging Face, and filesystem calls. Leave
+`LOOM_WORKER_BLOCKING_IO_MAX_WORKERS` unset for normal operation; the
+Worker derives it from trial concurrency as:
+
+```text
+max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))
+```
+
+This executor setting is not additional trial capacity. It only prevents
+blocking setup and sandbox calls from capping admission around Python's
+small default thread pool. Override it only when a single-worker sweep
+shows blocking I/O threads are still the first bottleneck.
+
+The remote-worker compose file also raises the worker container's open-file
+limit to `nofile=65536`. High sandbox concurrency opens Docker socket,
+HTTP, object-store, and filesystem descriptors at the same time; the common
+default soft limit of 1024 can make Docker cleanup fail with `Too many open
+files`, which in turn leaves sandbox containers behind. Verify a new worker
+host with:
+
+```bash
+docker compose --env-file .env.remote-worker \
+  -f deploy/docker-compose.remote-worker.yml \
+  exec worker sh -c 'ulimit -n'
+```
+
+The output should be at least `65536` before running high-concurrency sweeps.
 
 Use this formula for the initial ceiling:
 
@@ -178,6 +209,33 @@ Postgres state updates, MinIO writes, or sandbox cleanup.
 Until Docker sandbox CPU/RAM limits are enforced per trial, keep shared
 worker hosts conservative. A single workload can otherwise consume more
 than its fair share of the host.
+
+## Single-Worker Capacity Sweep
+
+When validating a new worker image or host class, isolate one worker
+host first and sweep upward before scaling the fleet. The goal is to find
+the stable per-container ceiling and the first real bottleneck, not just
+to prove one target succeeds.
+
+Use a low-cost S3-backed oracle task such as `qa255-sleep-60s`, then run
+increasing targets such as 64, 96, 128, 160, 192, 224, and 256 trials.
+Continue or binary-search if the host is still healthy. Stop when one of
+these happens:
+
+- Success rate drops below the operator threshold.
+- Peak overlap stops increasing materially across at least two higher
+  targets.
+- Tail latency, claim/start latency, Docker/MinIO errors, or cleanup
+  leakage crosses the operator threshold.
+- Host CPU, memory, disk, file descriptors, or Docker daemon pressure
+  reaches the safety limit.
+
+Record target concurrency, submitted trials, succeeded/failed/cancelled
+counts, peak overlap from `started_at`/`finished_at`, claim span, start
+span, p95/p99 runtime, tail latency, host CPU/memory/disk pressure,
+Docker daemon errors, MinIO/S3 errors, and cleanup results. Every stage
+must finish with no leaked sandbox containers, Docker networks, worker
+temp dirs, or trajectory cache files.
 
 ## Validation Gate
 

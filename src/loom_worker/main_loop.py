@@ -22,6 +22,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -63,14 +64,36 @@ from loom_worker.vllm_registry import WorkerVLLMRegistry
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_CAPS = [{
-    "os": "linux",
-    "gpu_vendor": "none",
-    "network_policies": ["public", "no-network", "allowlist"],
-    "dynamic_network_policy": True,
-    "mounted_fs": True,
-    "resource_modes": ["auto", "limit", "guarantee"],
-}]
+_DEFAULT_CAPS = [
+    {
+        "os": "linux",
+        "gpu_vendor": "none",
+        "network_policies": ["public", "no-network", "allowlist"],
+        "dynamic_network_policy": True,
+        "mounted_fs": True,
+        "resource_modes": ["auto", "limit", "guarantee"],
+    }
+]
+
+
+def _resolve_blocking_io_max_workers(settings: WorkerSettings) -> int:
+    configured = settings.blocking_io_max_workers
+    if configured is not None:
+        if configured < 1:
+            raise ValueError("blocking_io_max_workers must be >= 1")
+        return configured
+    concurrency = max(1, settings.max_concurrent)
+    return max(32, min(concurrency * 4, 256))
+
+
+def _configure_blocking_io_executor(settings: WorkerSettings) -> None:
+    max_workers = _resolve_blocking_io_max_workers(settings)
+    executor = ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="loom-worker-io",
+    )
+    asyncio.get_running_loop().set_default_executor(executor)
+    logger.info("worker_blocking_io_executor_configured max_workers=%d", max_workers)
 
 
 async def run_worker(settings: WorkerSettings) -> None:
@@ -78,12 +101,18 @@ async def run_worker(settings: WorkerSettings) -> None:
     install_signal_handlers(state)
 
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
+    _configure_blocking_io_executor(settings)
 
-    async with httpx.AsyncClient(
-        base_url=str(settings.control_plane_url), timeout=30.0,
-    ) as cp_http, httpx.AsyncClient(
-        base_url=str(settings.gateway_url), timeout=120.0,
-    ) as gw_http:
+    async with (
+        httpx.AsyncClient(
+            base_url=str(settings.control_plane_url),
+            timeout=30.0,
+        ) as cp_http,
+        httpx.AsyncClient(
+            base_url=str(settings.gateway_url),
+            timeout=120.0,
+        ) as gw_http,
+    ):
         cp_client = HttpControlPlaneClient(
             base_url=str(settings.control_plane_url),
             token=settings.token.get_secret_value(),
@@ -96,7 +125,9 @@ async def run_worker(settings: WorkerSettings) -> None:
         )
 
         info = await cp_client.register(
-            hostname="worker", version="0.0.1", capabilities=_DEFAULT_CAPS,
+            hostname="worker",
+            version="0.0.1",
+            capabilities=_DEFAULT_CAPS,
         )
         worker_id = UUID(info["worker_id"])
         logger.info("worker_registered worker_id=%s", worker_id)
@@ -104,7 +135,8 @@ async def run_worker(settings: WorkerSettings) -> None:
         _run_orphan_cleanup(settings, worker_id)
 
         sync_http = httpx.Client(
-            base_url=str(settings.control_plane_url), timeout=5.0,
+            base_url=str(settings.control_plane_url),
+            timeout=5.0,
         )
         token_value = settings.token.get_secret_value()
 
@@ -136,12 +168,8 @@ async def run_worker(settings: WorkerSettings) -> None:
             # a None-dereference when a trial requests local-vllm.
             vllm_registry = WorkerVLLMRegistry(
                 enabled=settings.enable_worker_vllm,
-                default_gpu_memory_utilization=(
-                    settings.vllm_gpu_memory_utilization
-                ),
-                default_tensor_parallel_size=(
-                    settings.vllm_tensor_parallel_size
-                ),
+                default_gpu_memory_utilization=(settings.vllm_gpu_memory_utilization),
+                default_tensor_parallel_size=(settings.vllm_tensor_parallel_size),
             )
 
             # #188 / Phase B: per-worker sandbox-isolation resources.
@@ -169,27 +197,24 @@ async def run_worker(settings: WorkerSettings) -> None:
                     sandbox_singleton = None
 
             while not state.shutting_down:
-                if pool.in_flight < settings.max_concurrent:
-                    trial_payload = await cp_client.claim(
-                        worker_id=worker_id, caps=_DEFAULT_CAPS,
-                    )
-                    if trial_payload is not None:
-                        await _spawn_trial(
-                            pool=pool, settings=settings,
-                            cp_client=cp_client,
-                            gateway_client=gateway_client,
-                            object_store=object_store,
-                            worker_id=worker_id,
-                            payload=trial_payload,
-                            vllm_registry=vllm_registry,
-                            sandbox_allocator=sandbox_allocator,
-                            sandbox_singleton=sandbox_singleton,
-                        )
-                await asyncio.sleep(settings.claim_poll_interval_sec)
+                claimed = await _claim_available_trials(
+                    pool=pool,
+                    settings=settings,
+                    cp_client=cp_client,
+                    gateway_client=gateway_client,
+                    object_store=object_store,
+                    worker_id=worker_id,
+                    vllm_registry=vllm_registry,
+                    sandbox_allocator=sandbox_allocator,
+                    sandbox_singleton=sandbox_singleton,
+                )
+                if claimed == 0 or pool.in_flight >= settings.max_concurrent:
+                    await asyncio.sleep(settings.claim_poll_interval_sec)
 
             logger.info(
                 "drain_started timeout=%ss in_flight=%d",
-                settings.drain_timeout_sec, pool.in_flight,
+                settings.drain_timeout_sec,
+                pool.in_flight,
             )
             await pool.wait_all(timeout=float(settings.drain_timeout_sec))
             if pool.in_flight > 0:
@@ -215,7 +240,8 @@ def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
 
     def _lookup(trial_id: UUID) -> tuple[str, UUID | None]:
         with httpx.Client(
-            base_url=str(settings.control_plane_url), timeout=10.0,
+            base_url=str(settings.control_plane_url),
+            timeout=10.0,
         ) as sync_http:
             r = sync_http.get(
                 f"/trials/{trial_id}",
@@ -247,6 +273,42 @@ async def _ensure_runtime_buckets(object_store: ObjectStore) -> None:
         logger.info("runtime_bucket_ensured bucket=%s", bucket)
 
 
+async def _claim_available_trials(
+    *,
+    pool: RunnerPool,
+    settings: WorkerSettings,
+    cp_client: HttpControlPlaneClient,
+    gateway_client: HttpLLMGatewayClient,
+    object_store: ObjectStore,
+    worker_id: UUID,
+    vllm_registry: WorkerVLLMRegistry,
+    sandbox_allocator: SandboxNetworkAllocator | None = None,
+    sandbox_singleton: SandboxSingletonManager | None = None,
+) -> int:
+    claimed = 0
+    while pool.in_flight < settings.max_concurrent:
+        trial_payload = await cp_client.claim(
+            worker_id=worker_id,
+            caps=_DEFAULT_CAPS,
+        )
+        if trial_payload is None:
+            break
+        await _spawn_trial(
+            pool=pool,
+            settings=settings,
+            cp_client=cp_client,
+            gateway_client=gateway_client,
+            object_store=object_store,
+            worker_id=worker_id,
+            payload=trial_payload,
+            vllm_registry=vllm_registry,
+            sandbox_allocator=sandbox_allocator,
+            sandbox_singleton=sandbox_singleton,
+        )
+        claimed += 1
+    return claimed
+
+
 async def _spawn_trial(
     *,
     pool: RunnerPool,
@@ -262,119 +324,131 @@ async def _spawn_trial(
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
-    try:
-        bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
-        task_config = TaskConfig.model_validate(bundle["config"])
-        task_checksum = str(bundle["checksum"])
-        trial_config = TrialConfig.model_validate(payload.get("config") or {})
 
-        # Plan 13 Task 3: materialize the fixture content from
-        # bundle["source"] when it's an s3:// URL (benchmark-imported
-        # tasks). Hand-authored tasks with source=None or git+... still
-        # get an empty tempdir; the operator runbook documents the
-        # volume-mount / git-clone alternatives.
-        task_dir = await _materialize_task_dir(
-            bundle=bundle, object_store=object_store, trial_id=trial_id,
-            fixtures_root=settings.fixtures_root,
-            benchmark_cache=settings.benchmark_cache,
-        )
-    except (httpx.HTTPError, ValidationError, OSError, ValueError) as exc:
-        await _mark_setup_failed(
-            cp_client=cp_client,
+    async def _setup_run_and_cleanup() -> None:
+        task_dir: Path | None = None
+        try:
+            bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+            task_config = TaskConfig.model_validate(bundle["config"])
+            task_checksum = str(bundle["checksum"])
+            trial_config = TrialConfig.model_validate(payload.get("config") or {})
+
+            # Plan 13 Task 3: materialize the fixture content from
+            # bundle["source"] when it's an s3:// URL (benchmark-imported
+            # tasks). Hand-authored tasks with source=None or git+... still
+            # get an empty tempdir; the operator runbook documents the
+            # volume-mount / git-clone alternatives.
+            task_dir = await _materialize_task_dir(
+                bundle=bundle,
+                object_store=object_store,
+                trial_id=trial_id,
+                fixtures_root=settings.fixtures_root,
+                benchmark_cache=settings.benchmark_cache,
+            )
+        except (httpx.HTTPError, ValidationError, OSError, ValueError) as exc:
+            if task_dir is not None:
+                shutil.rmtree(task_dir, ignore_errors=True)
+            await _mark_setup_failed(
+                cp_client=cp_client,
+                trial_id=trial_id,
+                worker_id=worker_id,
+                detail=str(exc),
+            )
+            return
+
+        async def _state_patch(
+            state: str,
+            fr: str | None,
+            fm: str | None = None,
+        ) -> bool:
+            return await cp_client.patch_state(
+                trial_id=trial_id,
+                worker_id=worker_id,
+                state=state,
+                failure_reason=fr,
+                failure_message=fm,
+            )
+
+        async def _output_projection(
+            result_payload: dict[str, object],
+            trajectory_index: dict[str, object],
+        ) -> bool:
+            return await cp_client.patch_output_projection(
+                trial_id=trial_id,
+                worker_id=worker_id,
+                result=result_payload,
+                trajectory_index=trajectory_index,
+            )
+
+        runner = LocalTrialRunner(
             trial_id=trial_id,
-            worker_id=worker_id,
-            detail=str(exc),
+            team_id=team_id,
+            task_config=task_config,
+            task_checksum=task_checksum,
+            task_dir=task_dir,
+            trial_config=trial_config,
+            driver_factory=lambda: DockerDriver(
+                image=task_config.environment.docker_image or "alpine",
+            ),
+            agent_factory=_default_agent_factory(
+                team_id,
+                trial_id,
+                cp_client=cp_client,
+                gateway_url=str(settings.gateway_url),
+                provider_connection_id=payload.get("provider_connection_id"),
+            ),
+            verifier_factory=lambda: PytestVerifier(**task_config.verifier.args),
+            object_store=object_store,
+            gateway_client=gateway_client,
+            local_trajectory_root=settings.trajectory_cache_dir,
+            state_patch_callback=_state_patch,
+            output_projection_callback=_output_projection,
+            # A11.1: query CP for the trial's llm_calls rows at finalize,
+            # project each into an LLMCallEvent. No-op for trials that
+            # don't route through the Gateway (oracle, in-box runtimes).
+            llm_calls_fetcher=cp_client.get_trial_llm_calls,
+            # PR-E: worker-spawned vLLM registry. Shared across trials
+            # claimed by this worker process so the 1-3 min vLLM startup
+            # is amortised across many same-model trials.
+            vllm_registry=vllm_registry,
+            # #188 / Phase B: per-trial sandbox isolation. Both None →
+            # legacy direct-network behavior. Both populated → per-trial
+            # bridge + singleton attach.
+            sandbox_allocator=(sandbox_allocator if sandbox_singleton is not None else None),
+            sandbox_singleton=sandbox_singleton,
+            # Phase D: step-JWT minting + rotation. Only wired when
+            # singleton started (isolation on); the mint_callback closes
+            # over `cp_client` so the rotator hits POST /admin/step-tokens
+            # with a stable step_id (per-step attribution is a future
+            # improvement — for now sandbox isolation prioritizes session
+            # continuity over per-step cost attribution).
+            sandbox_mint_token=(
+                _build_mint_callback(cp_client, team_id) if sandbox_singleton is not None else None
+            ),
+            sandbox_secrets_root=(
+                Path(settings.sandbox_singleton_secrets_dir) / "trials"
+                if sandbox_singleton is not None
+                else None
+            ),
+            sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
         )
-        return
 
-    async def _state_patch(state: str, fr: str | None, fm: str | None = None) -> bool:
-        return await cp_client.patch_state(
-            trial_id=trial_id, worker_id=worker_id,
-            state=state, failure_reason=fr, failure_message=fm,
-        )
-
-    async def _output_projection(
-        result_payload: dict[str, object],
-        trajectory_index: dict[str, object],
-    ) -> bool:
-        return await cp_client.patch_output_projection(
-            trial_id=trial_id,
-            worker_id=worker_id,
-            result=result_payload,
-            trajectory_index=trajectory_index,
-        )
-
-    runner = LocalTrialRunner(
-        trial_id=trial_id, team_id=team_id,
-        task_config=task_config, task_checksum=task_checksum,
-        task_dir=task_dir,
-        trial_config=trial_config,
-        driver_factory=lambda: DockerDriver(
-            image=task_config.environment.docker_image or "alpine",
-        ),
-        agent_factory=_default_agent_factory(
-            team_id, trial_id,
-            cp_client=cp_client,
-            gateway_url=str(settings.gateway_url),
-            provider_connection_id=payload.get("provider_connection_id"),
-        ),
-        verifier_factory=lambda: PytestVerifier(**task_config.verifier.args),
-        object_store=object_store,
-        gateway_client=gateway_client,
-        local_trajectory_root=settings.trajectory_cache_dir,
-        state_patch_callback=_state_patch,
-        output_projection_callback=_output_projection,
-        # A11.1: query CP for the trial's llm_calls rows at finalize,
-        # project each into an LLMCallEvent. No-op for trials that
-        # don't route through the Gateway (oracle, in-box runtimes).
-        llm_calls_fetcher=cp_client.get_trial_llm_calls,
-        # PR-E: worker-spawned vLLM registry. Shared across trials
-        # claimed by this worker process so the 1-3 min vLLM startup
-        # is amortised across many same-model trials.
-        vllm_registry=vllm_registry,
-        # #188 / Phase B: per-trial sandbox isolation. Both None →
-        # legacy direct-network behavior. Both populated → per-trial
-        # bridge + singleton attach.
-        sandbox_allocator=(
-            sandbox_allocator if sandbox_singleton is not None else None
-        ),
-        sandbox_singleton=sandbox_singleton,
-        # Phase D: step-JWT minting + rotation. Only wired when
-        # singleton started (isolation on); the mint_callback closes
-        # over `cp_client` so the rotator hits POST /admin/step-tokens
-        # with a stable step_id (per-step attribution is a future
-        # improvement — for now sandbox isolation prioritizes session
-        # continuity over per-step cost attribution).
-        sandbox_mint_token=(
-            _build_mint_callback(cp_client, team_id)
-            if sandbox_singleton is not None else None
-        ),
-        sandbox_secrets_root=(
-            Path(settings.sandbox_singleton_secrets_dir) / "trials"
-            if sandbox_singleton is not None else None
-        ),
-        sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
-    )
-
-    async def _run_and_cleanup() -> None:
-        # Bug 4 fix: drop the per-trial mkdtemp once the trial body is
-        # done. Without this, every claim leaks a directory under /tmp
-        # until the host or PV runs out of inodes. Cleanup runs in a
-        # try/finally so it fires on cancellation + agent error too.
         try:
             await runner.run()
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
 
-    await pool.spawn(_run_and_cleanup())
+    await pool.spawn(_setup_run_and_cleanup())
 
 
 def _build_mint_callback(
-    cp_client: HttpControlPlaneClient, team_id: UUID,
+    cp_client: HttpControlPlaneClient,
+    team_id: UUID,
 ) -> Callable[[UUID], Awaitable[str]]:
     """Closure the rotator calls on each tick. Stable step_id
     `"sandbox-rotated"` because Phase D's primary goal is sandbox
     isolation; per-step cost-attribution refinements are a follow-up."""
+
     async def _mint(trial_id: UUID) -> str:
         return await cp_client.mint_step_token(
             team_id=team_id,
@@ -382,6 +456,7 @@ def _build_mint_callback(
             step_id="sandbox-rotated",
             ttl_sec=600,
         )
+
     return _mint
 
 
@@ -467,6 +542,7 @@ def _default_agent_factory(
       adapter of that name. Raises ValueError if the name is unknown
       (i.e. no v0.7 runtime and no registered adapter).
     """
+
     def make(
         task_dir: Path,
         gateway: LLMGatewayClient,
@@ -485,8 +561,10 @@ def _default_agent_factory(
             # protocol declares ModelSpec | None; covariant on a mutable
             # attribute trips invariance. Both are structurally compatible.
             agent = LiteLLMAgent(  # type: ignore[assignment]
-                model=model, gateway=gateway,
-                team_id=str(team_id), trial_id=trial_id,
+                model=model,
+                gateway=gateway,
+                team_id=str(team_id),
+                trial_id=trial_id,
                 provider_connection_id=provider_connection_id,
             )
         else:
@@ -496,6 +574,7 @@ def _default_agent_factory(
             from loom_launcher import get_adapter
 
             from loom.agent.subprocess import SubprocessAgent
+
             adapter = get_adapter(agent_name)
             if adapter is None:
                 # Surface as AgentError so Trial.run() classifies it as
@@ -513,9 +592,13 @@ def _default_agent_factory(
             # SubprocessAgent.model is ModelSpec while AgentRuntime.model
             # is ModelSpec | None. Structurally compatible.
             agent = SubprocessAgent(  # type: ignore[assignment]
-                adapter=adapter, model=model,
-                cp_client=cp_client, gateway_url=gateway_url,
-                team_id=team_id, trial_id=trial_id,
+                adapter=adapter,
+                model=model,
+                cp_client=cp_client,
+                gateway_url=gateway_url,
+                team_id=team_id,
+                trial_id=trial_id,
             )
         return agent
+
     return make

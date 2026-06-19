@@ -176,6 +176,11 @@ and the kind smoke runs it before `kubectl apply` — see #77.
 | `loom-egress-proxy`, `loom-egress-xds` | **No** | Egress validators; only reachable from `loom-llm-gateway`. |
 | `loom-gateway-router` | **No** Ingress (binds `hostPort 30443` on each node for sandbox-Docker → gateway routing) | NOT for public Internet — sandbox bridges dial `<node>:30443` from inside the cluster network. Auditor allows this hostPort by exception when shipped from the canonical template. |
 
+Docker-backed worker nodes must also run with an open-file limit high enough
+for concurrent sandbox/container cleanup. Compose-based dev and remote-worker
+deployments set `nofile=65536`; Kubernetes deployments should set an
+equivalent node/container-runtime limit before raising worker concurrency.
+
 The audit checks:
 
 1. **Service type.** Every `Service` must be `ClusterIP`. `LoadBalancer` or `NodePort` would publish a pod to external traffic; the public surface is supposed to flow through the shared Ingress.
@@ -384,15 +389,22 @@ Rewrap during master-key rotation bumps `provider_connections.updated_at` for ev
 
 One `loom-worker` Deployment replica runs one worker process. That
 process handles N concurrent trials via the existing asyncio Semaphore,
-gated by `LOOM_WORKER_MAX_CONCURRENT`. The rendered manifest value comes
-from `cluster-config.toml`'s `worker_max_concurrent` field and defaults
-to 5, matching `WorkerSettings.max_concurrent`.
+gated by `LOOM_WORKER_MAX_CONCURRENT`. The default is 5, matching
+`WorkerSettings.max_concurrent`; override it in the worker Deployment
+env block for now. The old `cluster-config.toml` `worker_max_concurrent`
+field was removed during config consolidation.
+
+Workers also size their Python blocking-I/O executor from concurrency as
+`max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))` unless
+`LOOM_WORKER_BLOCKING_IO_MAX_WORKERS` is explicitly set. This executor
+covers blocking Docker, S3/MinIO, Hugging Face, and filesystem calls and
+must not be counted as extra trial capacity.
 
 Use the CPU/memory formula as an upper-bound planning heuristic, not as
 the default:
 
 ```
-worker_max_concurrent <= min(cpu_cores // 2, memory_gb // 8, 32)
+LOOM_WORKER_MAX_CONCURRENT <= min(cpu_cores // 2, memory_gb // 8, 32)
 ```
 
 One worker process per worker host is preferred because one process owns

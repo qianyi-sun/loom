@@ -233,6 +233,11 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 5
 
+[service_config.blocking_io_max_workers]
+used_by     = ["worker"]
+python_type = "int"
+description = "Maximum threads for the worker event-loop default executor used by blocking Docker, S3, HF, and filesystem calls. Leave unset to derive from max_concurrent."
+
 [service_config.sandbox_isolation]
 used_by     = ["worker"]
 python_type = "bool"

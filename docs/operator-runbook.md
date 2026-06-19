@@ -797,6 +797,14 @@ follow-up to #111.
 - Each Worker process runs `LOOM_WORKER_MAX_CONCURRENT` trials
   (default 5). Memory scales with the trajectory ring buffer + the
   largest artifact in flight; 8 GiB limit covers most workloads.
+- Each Worker process also derives `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS`
+  as `max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))` when unset.
+  This is the thread pool for blocking Docker, S3/MinIO, Hugging Face,
+  and filesystem calls; it is not additional trial capacity.
+- Docker-backed workers need a high open-file limit for high sandbox
+  concurrency. The dev and remote-worker compose files set
+  `nofile=65536`; equivalent production deployments should set the same
+  limit at the container runtime or node service layer before sweeps.
 - For shared-dev or staging hosts outside Kubernetes, use
   [remote-worker-pool.md](remote-worker-pool.md). Start at concurrency
   5 per worker host, then raise only after CPU, RAM, Docker cleanup,

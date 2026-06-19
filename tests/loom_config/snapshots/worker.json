@@ -4,6 +4,11 @@
     "default": "None",
     "required": false
   },
+  "blocking_io_max_workers": {
+    "annotation": "int | None",
+    "default": "None",
+    "required": false
+  },
   "claim_poll_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "1.0",
