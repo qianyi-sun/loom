@@ -12,6 +12,11 @@ What you're looking for, where it lives:
 - **[authoring-a-task.md](authoring-a-task.md)** — `task.toml` schema,
   on-disk layout, agent/verifier choices, network policies,
   healthchecks, validation, gotchas
+- **[user-guide.md#operator-registered-benchmarks-via-configbenchmarkstoml](user-guide.md)**
+  — if you already have a folder of `task.toml` bundles, register
+  the whole folder via `config/benchmarks.toml` instead of writing
+  a Python adapter (`[[local]]`). Or reuse an existing adapter
+  against a fork of its upstream (`[[remap]]`).
 
 ## I want to run / operate a Loom cluster
 
@@ -33,7 +38,9 @@ Start with the overview, drill into the area you care about:
   DaytonaDriver; how to add a cloud backend
 - **[architecture/benchmark-adapter.md](architecture/benchmark-adapter.md)**
   — `BenchmarkAdapter` Protocol; the 14 shipped adapters;
-  entry-point discovery; how to add a new dataset
+  entry-point discovery; how to add a new dataset; operator-facing
+  `config/benchmarks.toml` registry for `[[local]]` folders +
+  `[[remap]]` adapter reuse
 - **[architecture/agent-adapter.md](architecture/agent-adapter.md)**
   — `loom-launcher` framework; the 11 shipped CLI adapters;
   `SubprocessAgent`; how to add an agent

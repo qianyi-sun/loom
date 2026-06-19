@@ -134,6 +134,23 @@ docker compose \
   down
 ```
 
+## Local-folder benchmarks
+
+If operators want this worker to evaluate `[[local]]` benchmarks
+registered via `config/benchmarks.toml`, the worker host needs:
+
+1. `LOOM_WORKER_FIXTURES_ROOT` set to a directory containing
+   `<benchmark-id>/<task>/task.toml` bundles for every registered
+   `[[local]]` benchmark.
+2. The same data populated on disk (host bind-mount in compose; PV
+   or hostPath in k8s).
+
+Sync from the control-plane side runs on `loom service up` (dev) or
+via `loom datasets sync-config` (operator-driven on k8s). Without
+the fixtures-root data, the worker can claim trials for that
+benchmark but `FixtureMaterializer` will log a warning and leave
+the task dir empty — the trial then fails at agent start.
+
 ## Capacity Settings
 
 Per-host concurrency is controlled by `LOOM_WORKER_MAX_CONCURRENT`. The
