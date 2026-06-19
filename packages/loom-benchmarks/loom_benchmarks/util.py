@@ -27,7 +27,10 @@ def _slug(s: str) -> str:
 
 
 def pytest_from_test_strings(
-    test_strings: list[str], *, out_dir: Path, prefix: str = "case",
+    test_strings: list[str],
+    *,
+    out_dir: Path,
+    prefix: str = "case",
 ) -> list[Path]:
     """Write one pytest file per assertion string.
 
@@ -49,7 +52,8 @@ def pytest_from_test_strings(
 
                 def test_{slug}_{i}() -> None:
                     {body}
-            """).strip() + "\n",
+            """).strip()
+            + "\n",
         )
         written.append(target)
     return written
@@ -80,6 +84,23 @@ def structured_verifier_script(script_body: str, *, out_dir: Path) -> Path:
     return run_sh
 
 
+def oracle_noop_solve_script(*, solution_dir: Path) -> Path:
+    """Write the OracleAgent contract script for pre-seeded solutions.
+
+    Code benchmarks such as HumanEval and MBPP ship a canonical
+    `solution/solution.py` plus pytest tests. In that layout the
+    oracle does not need to mutate the workspace before verification;
+    it only needs a successful `solution/solve.sh` so service-mode
+    oracle smoke runs exercise the same Agent contract as hand-authored
+    tasks.
+    """
+    solution_dir.mkdir(parents=True, exist_ok=True)
+    solve_sh = solution_dir / "solve.sh"
+    solve_sh.write_text("#!/bin/sh\nset -eu\nexit 0\n")
+    solve_sh.chmod(0o755)
+    return solve_sh
+
+
 def embed_base64_image(image_bytes: bytes, *, alt_text: str) -> str:
     """Inline a PNG/JPEG into instruction.md as a markdown image. Used
     by adapters whose upstream attaches screenshots inline (MMMU, GAIA
@@ -95,7 +116,10 @@ def embed_base64_image(image_bytes: bytes, *, alt_text: str) -> str:
 
 
 def download_files_from_record(
-    record: dict[str, Any], *, out_dir: Path, fields: tuple[str, ...],
+    record: dict[str, Any],
+    *,
+    out_dir: Path,
+    fields: tuple[str, ...],
 ) -> list[Path]:
     """For each name in `fields`, if `record[name]` is a non-empty URL,
     pull it into `out_dir` preserving the URL basename. Skips missing

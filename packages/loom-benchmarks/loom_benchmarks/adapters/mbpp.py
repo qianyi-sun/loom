@@ -21,6 +21,7 @@ from loom_benchmarks.base import (
     ConvertedTask,
 )
 from loom_benchmarks.util import (
+    oracle_noop_solve_script,
     pytest_from_test_strings,
     sha256_of_dir,
     toml_string,
@@ -31,7 +32,10 @@ class MBPPAdapter(CatalogBackedAdapter):
     name = "mbpp"
 
     def list_instances(
-        self, *, source_dir: Path, split: str,
+        self,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         ds = datasets.load_dataset(
             self.upstream_source.locator,
@@ -41,11 +45,16 @@ class MBPPAdapter(CatalogBackedAdapter):
         for record in ds:
             rec = cast(dict[str, Any], dict(record))
             yield BenchmarkInstance(
-                instance_id=str(rec["task_id"]), split=split, raw=rec,
+                instance_id=str(rec["task_id"]),
+                split=split,
+                raw=rec,
             )
 
     def convert_instance(
-        self, instance: BenchmarkInstance, *, out_dir: Path,
+        self,
+        instance: BenchmarkInstance,
+        *,
+        out_dir: Path,
     ) -> ConvertedTask:
         r = instance.raw
         task_id = f"{self.name}/{instance.instance_id}"
@@ -67,6 +76,7 @@ class MBPPAdapter(CatalogBackedAdapter):
         sol_dir.mkdir(parents=True, exist_ok=True)
         body = str(setup) + "\n" + str(r["code"])
         (sol_dir / "solution.py").write_text(body)
+        oracle_noop_solve_script(solution_dir=sol_dir)
         (sol_dir / "__init__.py").write_text(
             "from solution.solution import *  # noqa: F401,F403\n",
         )
@@ -85,12 +95,15 @@ class MBPPAdapter(CatalogBackedAdapter):
             "sys.path.insert(0, str(Path(__file__).parent.parent))\n",
         )
         pytest_from_test_strings(
-            list(r["test_list"]), out_dir=tests_dir, prefix="mbpp",
+            list(r["test_list"]),
+            out_dir=tests_dir,
+            prefix="mbpp",
         )
 
         toml_id = toml_string(task_id)
         toml_name = toml_string(f"{self.display_name} — {instance.instance_id}")
-        (out_dir / "task.toml").write_text(textwrap.dedent(f"""
+        (out_dir / "task.toml").write_text(
+            textwrap.dedent(f"""
             schema_version = "1"
 
             [task]
@@ -110,7 +123,9 @@ class MBPPAdapter(CatalogBackedAdapter):
             [[steps]]
             name = "main"
             artifacts = ["solution/solution.py"]
-        """).strip() + "\n")
+        """).strip()
+            + "\n"
+        )
 
         return ConvertedTask(
             task_id=task_id,

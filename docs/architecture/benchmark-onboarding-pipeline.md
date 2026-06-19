@@ -261,6 +261,13 @@ loom datasets register my-benchmark --source s3://...
 loom datasets smoke my-benchmark --sample first:3 --agent oracle
 ```
 
+The `smoke --agent oracle` path intentionally uses the same task
+contract as production trial execution: tasks configured with
+`agent.name = "oracle"` must ship an executable `solution/solve.sh`.
+For code benchmarks whose reference answer already lives in
+`solution/solution.py`, that script can be a no-op and the verifier
+tests provide the actual pass/fail signal.
+
 The first implementation can keep this CLI/operator owned. A later admin API can
 wrap the same validation and publication primitives. Browser upload should call
 the same backend path eventually, but it is not the default onboarding workflow.

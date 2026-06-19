@@ -25,7 +25,9 @@ def test_registry_lists_humaneval() -> None:
 def test_convert_instance_writes_complete_fixture(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(
-        instance_id=rec["task_id"], split="test", raw=rec,
+        instance_id=rec["task_id"],
+        split="test",
+        raw=rec,
     )
     adapter = HumanEvalAdapter()
     out = tmp_path / "HumanEval__0"
@@ -39,11 +41,15 @@ def test_convert_instance_writes_complete_fixture(tmp_path: Path) -> None:
     assert (out / "task.toml").exists()
     assert (out / "instruction.md").exists()
     assert (out / "solution" / "solution.py").exists()
+    solve_sh = out / "solution" / "solve.sh"
+    assert solve_sh.exists()
+    assert solve_sh.stat().st_mode & 0o111
     assert (out / "solution" / "__init__.py").exists()
     assert (out / "tests" / "test_humaneval.py").exists()
 
     # The emitted task.toml validates against TaskConfig.
     from loom.models.task import TaskConfig
+
     cfg = TaskConfig.model_validate(
         tomllib.loads((out / "task.toml").read_text()),
     )
@@ -57,7 +63,9 @@ def test_convert_instance_solution_runs(tmp_path: Path) -> None:
     """The canonical solution + upstream tests must pass under pytest."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(
-        instance_id=rec["task_id"], split="test", raw=rec,
+        instance_id=rec["task_id"],
+        split="test",
+        raw=rec,
     )
     adapter = HumanEvalAdapter()
     out = tmp_path / "HumanEval__0"
@@ -73,15 +81,15 @@ def test_convert_instance_solution_runs(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, (
-        f"stdout={result.stdout}\nstderr={result.stderr}"
-    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
 
 
 def test_checksum_deterministic(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(
-        instance_id=rec["task_id"], split="test", raw=rec,
+        instance_id=rec["task_id"],
+        split="test",
+        raw=rec,
     )
     adapter = HumanEvalAdapter()
     out1 = tmp_path / "a"

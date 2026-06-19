@@ -158,6 +158,14 @@ tree to a supported object store or dataset repo, register the manifest,
 then smoke a small sample. Browser upload and admin APIs should wrap
 these primitives instead of inventing separate ingestion behavior.
 
+If a generated task config uses `agent.name = "oracle"`, the bundle
+must include an executable `solution/solve.sh`. Code-completion
+benchmarks that already ship a canonical `solution/solution.py` may
+emit a no-op `solve.sh`; the verifier tests remain the correctness
+source of truth. This keeps service-mode smoke tests on the same agent
+contract as hand-authored tasks without adding one-off benchmark
+wrappers.
+
 ## Discovery
 
 Each adapter package declares:
@@ -408,6 +416,6 @@ Pre-flight (at sync) fails if:
   trajectory looks like for a converted task
 - `packages/loom-benchmark-terminal-bench-2/` — slim reference impl
 - `packages/loom-benchmarks/loom_benchmarks/adapters/humaneval.py` —
-  typical HuggingFace-backed adapter
+  typical HuggingFace-backed code adapter
 - `packages/loom-benchmarks/loom_benchmarks/adapters/swe_bench_verified.py`
   — typical git-backed adapter

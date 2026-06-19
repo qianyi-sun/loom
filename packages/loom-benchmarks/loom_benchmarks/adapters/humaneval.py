@@ -7,8 +7,10 @@ function), and `entry_point` (the symbol the agent must define).
 Conversion:
 - `instruction.md` ← the prompt rendered in a code fence; the agent
   reads it as the user-facing problem.
-- `solution/solution.py` ← `prompt + canonical_solution`. The Oracle
-  agent imports this verbatim; LLM agents only see `instruction.md`.
+- `solution/solution.py` ← `prompt + canonical_solution`. The pytest
+  verifier imports this reference solution for oracle smoke runs.
+- `solution/solve.sh` ← no-op OracleAgent contract script; the verifier
+  performs the correctness check against `solution/solution.py`.
 - `solution/__init__.py` re-exports `entry_point` so tests can do
   `from solution import {entry_point}`.
 - `tests/test_humaneval.py` ← the upstream `check(...)` function plus a
@@ -31,7 +33,11 @@ from loom_benchmarks.base import (
     CatalogBackedAdapter,
     ConvertedTask,
 )
-from loom_benchmarks.util import sha256_of_dir, toml_string
+from loom_benchmarks.util import (
+    oracle_noop_solve_script,
+    sha256_of_dir,
+    toml_string,
+)
 
 
 class HumanEvalAdapter(CatalogBackedAdapter):
@@ -40,19 +46,28 @@ class HumanEvalAdapter(CatalogBackedAdapter):
     name = "humaneval"
 
     def list_instances(
-        self, *, source_dir: Path, split: str,
+        self,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         ds = datasets.load_dataset(
-            self.upstream_source.locator, cache_dir=str(source_dir),
+            self.upstream_source.locator,
+            cache_dir=str(source_dir),
         )[split]
         for record in ds:
             rec = cast(dict[str, Any], dict(record))
             yield BenchmarkInstance(
-                instance_id=str(rec["task_id"]), split=split, raw=rec,
+                instance_id=str(rec["task_id"]),
+                split=split,
+                raw=rec,
             )
 
     def convert_instance(
-        self, instance: BenchmarkInstance, *, out_dir: Path,
+        self,
+        instance: BenchmarkInstance,
+        *,
+        out_dir: Path,
     ) -> ConvertedTask:
         r = instance.raw
         prompt = str(r["prompt"])
@@ -75,6 +90,7 @@ class HumanEvalAdapter(CatalogBackedAdapter):
         sol_dir = out_dir / "solution"
         sol_dir.mkdir(parents=True, exist_ok=True)
         (sol_dir / "solution.py").write_text(prompt + canonical)
+        oracle_noop_solve_script(solution_dir=sol_dir)
         (sol_dir / "__init__.py").write_text(
             f"from solution.solution import {entry_point}\n",
         )
@@ -101,7 +117,8 @@ class HumanEvalAdapter(CatalogBackedAdapter):
         # upstream instance_id can't break the TOML literal.
         toml_id = toml_string(task_id)
         toml_name = toml_string(f"HumanEval — {instance.instance_id}")
-        (out_dir / "task.toml").write_text(textwrap.dedent(f"""
+        (out_dir / "task.toml").write_text(
+            textwrap.dedent(f"""
             schema_version = "1"
 
             [task]
@@ -121,7 +138,9 @@ class HumanEvalAdapter(CatalogBackedAdapter):
             [[steps]]
             name = "main"
             artifacts = ["solution/solution.py"]
-        """).strip() + "\n")
+        """).strip()
+            + "\n"
+        )
 
         return ConvertedTask(
             task_id=task_id,

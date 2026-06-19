@@ -8,4 +8,4 @@ instances into the Loom Postgres + MinIO state.
 
 See `docs/architecture/benchmark-adapter.md` for the framework
 reference (Protocol, canonical task layout, fetchers, how to add a
-new adapter). 14 adapters ship today.
+new adapter). 16 adapters ship today.

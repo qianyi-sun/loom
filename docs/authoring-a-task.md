@@ -11,7 +11,7 @@ my-task/
 ├── task.toml                # required: task config (see src/loom/models/task.py:TaskConfig)
 ├── instruction.md           # required: top-level agent instruction
 ├── solution/
-│   └── solve.sh             # optional: Oracle baseline (chmod +x)
+│   └── solve.sh             # required when [agent].name = "oracle" (chmod +x)
 ├── environment/
 │   └── Dockerfile           # optional: custom image (otherwise docker_image used)
 ├── steps/                   # optional: per-step overrides
@@ -56,7 +56,7 @@ artifacts = ["result.txt"]
 
 | name | When | Notes |
 |---|---|---|
-| `oracle` | Baseline + dev fixtures | Runs `solution/solve.sh` inside the sandbox. |
+| `oracle` | Baseline + dev fixtures | Runs `solution/solve.sh` inside the sandbox. Tasks that set `[agent].name = "oracle"` must include it. |
 | `litellm` | Out-of-box LLM agent | Tool-loop over Gateway calls; requires `[agent.model]`. |
 | `claude-code` | In-box CLI agent | Runs `claude` inside the container; requires the image to ship the CLI. |
 
@@ -211,7 +211,10 @@ worker to pull via `bundle["source"]`.
 
 - **Solve script paths.** `solve.sh` runs with `/workspace` as cwd in
   the sandbox; `tests/` runs the same way. Write tests relative to
-  `/workspace/`, not the host fixture dir.
+  `/workspace/`, not the host fixture dir. For code-completion
+  benchmarks that already ship a canonical `solution/solution.py`, a
+  no-op `solve.sh` is enough for oracle smoke; the pytest verifier does
+  the correctness check.
 - **Shared verifier env.** v1 runs the pytest verifier in the same
   container as the agent. The agent's image must therefore ship
   `pytest` (and any test deps) — see `hello-world/environment/Dockerfile`
