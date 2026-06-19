@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -44,6 +45,15 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 _IN_FLIGHT: frozenset[str] = frozenset({"queued", "claimed", "running"})
+_NON_RETRYABLE_SUBMIT_STATUSES: frozenset[int] = frozenset({400, 403, 404, 409, 422})
+_MAX_SUBMIT_ERROR_DETAIL_LEN = 500
+
+
+@dataclass(frozen=True)
+class _SubmitResult:
+    ok: bool
+    retryable: bool
+    error: dict[str, Any] | None = None
 
 
 def next_batch_state(
@@ -95,6 +105,33 @@ def _idempotency_key(
     return f"{batch_id}::{task_id}::{combination_idx}::{sample_idx}"
 
 
+def _single_line_excerpt(text: str) -> str:
+    cleaned = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").strip()
+    return cleaned[:_MAX_SUBMIT_ERROR_DETAIL_LEN]
+
+
+def _response_detail(resp: httpx.Response) -> str:
+    try:
+        body = resp.json()
+    except ValueError:
+        return _single_line_excerpt(resp.text)
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str):
+            return _single_line_excerpt(detail)
+        if detail is not None:
+            return _single_line_excerpt(str(detail))
+    return _single_line_excerpt(resp.text)
+
+
+def _fanout_errors(batch: Batch) -> list[dict[str, Any]]:
+    return [item for item in (batch.fanout_errors or []) if isinstance(item, dict)]
+
+
+def _fanout_error_keys(errors: list[dict[str, Any]]) -> set[str]:
+    return {str(item["idempotency_key"]) for item in errors if item.get("idempotency_key")}
+
+
 def _materialize_trial_config(
     shared: dict[str, Any], combination: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -126,16 +163,16 @@ async def _submit_one(
     provider_connection_id: UUID | None = None,
     provider_model_id: str | None = None,
     combination_idx: int | None = None,
-) -> None:
+) -> _SubmitResult:
+    idempotency_key = _idempotency_key(
+        batch_id, task_id, sample_idx, combination_idx=combination_idx,
+    )
     payload: dict[str, Any] = {
         "task_id": task_id,
         "config": trial_config,
         "batch_id": str(batch_id),
         "sample_idx": sample_idx,
-        "idempotency_key": _idempotency_key(
-            batch_id, task_id, sample_idx,
-            combination_idx=combination_idx,
-        ),
+        "idempotency_key": idempotency_key,
     }
     if combination_idx is not None:
         payload["combination_idx"] = combination_idx
@@ -155,12 +192,28 @@ async def _submit_one(
             "batch %s task %s submit error: %s",
             batch_id, task_id, exc,
         )
-        return
+        return _SubmitResult(ok=False, retryable=True)
     if resp.status_code >= 400:
+        detail = _response_detail(resp)
         logger.warning(
             "batch %s task %s submit failed: %s %s",
             batch_id, task_id, resp.status_code, resp.text,
         )
+        retryable = resp.status_code not in _NON_RETRYABLE_SUBMIT_STATUSES
+        return _SubmitResult(
+            ok=False,
+            retryable=retryable,
+            error=None if retryable else {
+                "task_id": task_id,
+                "sample_idx": sample_idx,
+                "combination_idx": combination_idx,
+                "idempotency_key": idempotency_key,
+                "status_code": resp.status_code,
+                "detail": detail,
+                "seen_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    return _SubmitResult(ok=True, retryable=False)
 
 
 def _compute_result_status(
@@ -273,15 +326,20 @@ async def run_once(
             .with_for_update(skip_locked=True),
         )).scalars().all()
         for b in batches_to_process:
+            existing_fanout_errors = _fanout_errors(b)
+            failed_fanout_keys = _fanout_error_keys(existing_fanout_errors)
             task_ids = await resolve_task_filter(s, b.task_filter)
             task_ids, invalid_tasks = await split_valid_task_configs(
                 s, task_ids,
             )
             if invalid_tasks:
-                adjusted_expected = expected_trial_count(
-                    task_count=len(task_ids),
-                    n_per_task=b.n_per_task,
-                    combinations=b.combinations,
+                adjusted_expected = max(
+                    0,
+                    expected_trial_count(
+                        task_count=len(task_ids),
+                        n_per_task=b.n_per_task,
+                        combinations=b.combinations,
+                    ) - len(failed_fanout_keys),
                 )
                 values: dict[str, Any] = {
                     "expected_trial_count": adjusted_expected,
@@ -338,6 +396,11 @@ async def run_once(
                     n = int(combo.get("n_per_task", 1))
                     for t in task_ids:
                         for s_idx in range(n):
+                            key = _idempotency_key(
+                                b.id, t, s_idx, combination_idx=c_idx,
+                            )
+                            if key in failed_fanout_keys:
+                                continue
                             if (t, c_idx, s_idx) in existing_multi:
                                 continue
                             pending_units.append(
@@ -363,6 +426,9 @@ async def run_once(
                 cfg = dict(b.trial_config)
                 for t in task_ids:
                     for s_idx in range(b.n_per_task):
+                        key = _idempotency_key(b.id, t, s_idx)
+                        if key in failed_fanout_keys:
+                            continue
                         if (t, s_idx) in existing_single:
                             continue
                         pending_units.append((t, None, cfg, s_idx))
@@ -373,11 +439,12 @@ async def run_once(
         await s.commit()
 
     # Phase 2: HTTP fanout. No DB locks.
+    fanout_errors_by_batch: dict[UUID, list[dict[str, Any]]] = {}
     for batch_id, provider_connection_id, provider_model_id, pending_units in work:
         for chunk_start in range(0, len(pending_units), batch_size):
             chunk = pending_units[chunk_start:chunk_start + batch_size]
             for tid, combo_idx, cfg, s_idx in chunk:
-                await _submit_one(
+                submit_result = await _submit_one(
                     http_client,
                     authorization=cp_authorization,
                     batch_id=batch_id,
@@ -388,7 +455,60 @@ async def run_once(
                     provider_model_id=provider_model_id,
                     combination_idx=combo_idx,
                 )
+                if (
+                    not submit_result.ok
+                    and not submit_result.retryable
+                    and submit_result.error is not None
+                ):
+                    fanout_errors_by_batch.setdefault(batch_id, []).append(
+                        submit_result.error,
+                    )
                 await asyncio.sleep(delay)
+
+    if fanout_errors_by_batch:
+        async with session_factory() as s:
+            for batch_id, new_errors in fanout_errors_by_batch.items():
+                row = (await s.execute(
+                    select(Batch)
+                    .where(Batch.id == batch_id)
+                    .with_for_update(),
+                )).scalar_one_or_none()
+                if row is None or row.state == "cancelled":
+                    continue
+                existing_errors = _fanout_errors(row)
+                seen_keys = _fanout_error_keys(existing_errors)
+                added: list[dict[str, Any]] = []
+                for error in new_errors:
+                    error_key_raw = error.get("idempotency_key")
+                    if not error_key_raw:
+                        continue
+                    error_key = str(error_key_raw)
+                    if error_key in seen_keys:
+                        continue
+                    seen_keys.add(error_key)
+                    added.append(error)
+                if not added:
+                    continue
+                adjusted_expected = max(
+                    0,
+                    int(row.expected_trial_count) - len(added),
+                )
+                update_values: dict[str, Any] = {
+                    "fanout_errors": existing_errors + added,
+                    "expected_trial_count": adjusted_expected,
+                }
+                if adjusted_expected == 0:
+                    update_values.update({
+                        "state": "finished",
+                        "result_status": "all_failed",
+                        "finished_at": datetime.now(UTC),
+                    })
+                elif row.result_status is None:
+                    update_values["result_status"] = "partial_failed"
+                await s.execute(
+                    update(Batch).where(Batch.id == batch_id).values(**update_values),
+                )
+            await s.commit()
 
     # Phase 3: advance state for the batches we processed.
     async with session_factory() as s:

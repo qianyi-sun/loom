@@ -726,5 +726,88 @@ async def test_runner_finishes_batch_when_all_task_configs_are_invalid(
     assert batch_row.finished_at is not None
 
 
+async def test_runner_finishes_batch_when_trial_submit_policy_rejects_task(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, _http_client, team_id, task_ids, _captured = runner_setup
+
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="policy-blocked",
+            task_filter={
+                "benchmark_ids": ["runner-benchmark"],
+                "subset_kind": "first_n",
+                "n": 1,
+            },
+            trial_config={},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=1,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    rejected: list[dict] = []
+
+    def rejecting_cp_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path != "/trials" or req.method != "POST":
+            return httpx.Response(404)
+        body = _json.loads(req.content.decode())
+        rejected.append(body)
+        return httpx.Response(
+            403,
+            json={
+                "detail": "task license proprietary-MAA not in team allowlist",
+            },
+        )
+
+    rejecting_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(rejecting_cp_handler),
+        base_url="http://cp",
+    )
+    try:
+        await run_once(
+            session_factory=session_factory,
+            http_client=rejecting_client,
+            batch_size=10,
+            submit_rate_per_sec=100,
+        )
+        await run_once(
+            session_factory=session_factory,
+            http_client=rejecting_client,
+            batch_size=10,
+            submit_rate_per_sec=100,
+        )
+    finally:
+        await rejecting_client.aclose()
+
+    assert [body["task_id"] for body in rejected] == [task_ids[0]]
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial).where(Trial.batch_id == cid),
+        ).scalars().all()
+        batch_row = s.execute(
+            select(Batch).where(Batch.id == cid),
+        ).scalar_one()
+    sync_engine.dispose()
+
+    assert trials == []
+    assert batch_row.expected_trial_count == 0
+    assert batch_row.state == "finished"
+    assert batch_row.result_status == "all_failed"
+    assert batch_row.failure_reason == "fanout_submit_failed"
+    assert "proprietary-MAA" in (batch_row.failure_message or "")
+    assert batch_row.finished_at is not None
+
+
 # Sanity import to keep `next_batch_state` referenced.
 _ = next_batch_state

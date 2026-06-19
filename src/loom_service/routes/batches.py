@@ -90,6 +90,9 @@ def _serialize(
         "trial_config": b.trial_config,
         "state": b.state,
         "result_status": b.result_status,
+        "failure_reason": b.failure_reason,
+        "failure_message": b.failure_message,
+        "fanout_errors": b.fanout_errors,
         "created_at": b.created_at.isoformat(),
         "finished_at": (
             b.finished_at.isoformat() if b.finished_at else None

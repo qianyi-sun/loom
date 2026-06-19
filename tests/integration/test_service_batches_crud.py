@@ -610,6 +610,55 @@ async def test_get_batch_detail_with_rollup(
     assert body["total_cost_usd"] == pytest.approx(0.08)
 
 
+async def test_get_batch_detail_exposes_fanout_failure(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    fanout_errors = [{
+        "task_id": "local/mit-0",
+        "sample_idx": 0,
+        "combination_idx": None,
+        "idempotency_key": f"{batch_id}::local/mit-0::0",
+        "status_code": 403,
+        "detail": "task license proprietary-MAA not in team allowlist",
+        "seen_at": datetime.now(UTC).isoformat(),
+    }]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Batch).values(
+            id=batch_id,
+            team_id=team_id,
+            name="policy-blocked",
+            task_filter={"license": "MIT"},
+            trial_config={},
+            state="finished",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=0,
+            result_status="all_failed",
+            fanout_errors=fanout_errors,
+            finished_at=datetime.now(UTC),
+        ))
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["failure_reason"] == "fanout_submit_failed"
+    assert "proprietary-MAA" in body["failure_message"]
+    assert body["fanout_errors"] == fanout_errors
+
+
 async def test_get_batch_not_found(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:

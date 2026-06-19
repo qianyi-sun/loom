@@ -383,6 +383,12 @@ been re-verified.
   of existing batches, lowers `expected_trial_count` to the valid slate,
   marks mixed slates `partial_failed`, and finishes all-invalid slates as
   `all_failed` instead of retrying forever.
+- **Batch fan-out failures** — child `POST /trials` failures that are
+  deterministic policy/config rejections (`400`, `403`, `404`, `409`,
+  `422`) are recorded on `batches.fanout_errors`. The runner lowers
+  `expected_trial_count`, marks the batch `partial_failed` or
+  `all_failed`, and skips the same idempotency key on later ticks. Network
+  errors, `429`, and `5xx` remain retryable.
 - **Runnable task counts** — benchmark `task_count` and
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete

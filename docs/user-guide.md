@@ -351,6 +351,11 @@ legacy published manifest with task rows but empty `config` appears as
 `blocked` with `manifest_legacy_missing_task_config`; republish or
 backfill the benchmark before launching user batches.
 
+If a benchmark is structurally runnable but a team policy rejects a
+selected task during batch fan-out, the batch becomes terminal instead of
+staying `submitted`. Open Batch Detail or run `loom eval batch show <id>`
+to inspect `failure_reason`, `failure_message`, and `fanout_errors`.
+
 ## `loom config` reference
 
 Config persists to `$XDG_CONFIG_HOME/loom/config.toml` (defaults to

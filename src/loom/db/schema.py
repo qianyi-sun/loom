@@ -256,6 +256,11 @@ class Batch(Base):
     result_status: Mapped[str | None] = mapped_column(
         Text, nullable=True,
     )
+    # Fan-out failures happen before Control Plane accepts a child Trial.
+    # Store them on the batch for retry suppression and user diagnostics.
+    fanout_errors: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
     # cluster-deploy.md §Schema additions: per-batch provider override.
     # When set, the gateway uses this connection (decrypts its API key,
     # forwards to base_url) for every trial in this batch instead of
@@ -270,6 +275,25 @@ class Batch(Base):
     provider_model_id: Mapped[str | None] = mapped_column(
         Text, nullable=True,
     )
+
+    @property
+    def failure_reason(self) -> str | None:
+        return "fanout_submit_failed" if self.fanout_errors else None
+
+    @property
+    def failure_message(self) -> str | None:
+        if not self.fanout_errors:
+            return None
+        first = self.fanout_errors[0]
+        task_id = first.get("task_id", "unknown task")
+        status_code = first.get("status_code", "unknown status")
+        detail = first.get("detail") or first.get("message") or "no detail"
+        if len(self.fanout_errors) == 1:
+            return f"task {task_id} submit failed: HTTP {status_code}: {detail}"
+        return (
+            f"{len(self.fanout_errors)} trial submissions failed; "
+            f"first: task {task_id} HTTP {status_code}: {detail}"
+        )
 
 
 class Trial(Base):

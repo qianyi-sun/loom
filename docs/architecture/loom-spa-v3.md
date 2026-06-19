@@ -328,7 +328,8 @@ trial row inside it.
 Three sections, vertically stacked:
 
 1. **Header**: batch name, state, agent + model + backend badges,
-   timestamps, link back to /batches.
+   result status, fan-out failure summary when present, timestamps,
+   link back to /batches.
 2. **Config snapshot**: every TrialConfig field as a read-only
    table so users can audit what was actually submitted (catches
    "did I really turn skip_verifier off?" right after submit).
@@ -591,6 +592,23 @@ Four additions in one migration:
   `{batch}::{task}::{combination_idx}::{sample_idx}` when
   `combinations` is non-empty; preserves the 3-segment form
   otherwise.
+
+### Migration 0027 — Batch fan-out errors
+
+```sql
+ALTER TABLE batches
+  ADD COLUMN fanout_errors JSONB NOT NULL DEFAULT '[]'::jsonb;
+```
+
+`fanout_errors` stores deterministic child-submit failures that happen before
+Control Plane creates a Trial row. Each entry records the task id, sample index,
+combination index, idempotency key, HTTP status, detail, and timestamp. The
+Batch API derives `failure_reason = fanout_submit_failed` and a short
+`failure_message` from this list for SPA/CLI display.
+
+The runner uses the same list to skip known failed idempotency keys on later
+ticks. It lowers `expected_trial_count` for non-retryable submit failures and
+keeps transient submit failures retryable.
 
 ### No-DDL extensions
 

@@ -230,6 +230,12 @@ New Batch behavior:
 This makes the user-facing UX consistent with the backend: the UI should never
 offer a benchmark as launchable when the API will reject it.
 
+Some blockers are team-policy dependent rather than catalog dependent. For
+example, a task can be structurally runnable but still rejected by the team's
+license allowlist when the runner submits child trials. Those deterministic
+fan-out failures are recorded on the Batch as `fanout_errors` and surfaced in
+Batch Detail/CLI; they must not leave the Batch indefinitely `submitted`.
+
 ## User-Owned Benchmark Path
 
 The user-owned path should be folder-first, not code-first.
@@ -322,6 +328,8 @@ Minimum tests for the implementation plan:
 - SPA renders readiness states from API data and disables non-runnable choices.
 - End-to-end smoke registers at least one first-wave benchmark and runs a small
   sample through API or SPA.
+- Policy-blocked fan-out is diagnosable at the Batch layer and does not retry
+  forever.
 
 ## Implementation Order
 

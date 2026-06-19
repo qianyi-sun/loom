@@ -184,6 +184,13 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
     print(f"expected_trial_count:  {item.get('expected_trial_count', '?')}")
     print(f"n_per_task:            {item.get('n_per_task', 1)}")
     print(f"backend:               {item.get('backend', 'docker')}")
+    if item.get("failure_reason"):
+        print(f"failure_reason:        {item['failure_reason']}")
+    if item.get("failure_message"):
+        print(f"failure_message:       {item['failure_message']}")
+    fanout_errors = item.get("fanout_errors") or []
+    if fanout_errors:
+        print(f"fanout_errors:         {len(fanout_errors)}")
     if item.get("trial_summary"):
         ts = item["trial_summary"]
         print(

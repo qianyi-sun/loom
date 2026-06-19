@@ -638,6 +638,35 @@ def test_batch_show_renders_rollup(
     assert "1.234" in out
 
 
+def test_batch_show_renders_fanout_failure(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(
+        200, json={
+            "id": _BATCH_ID, "team_id": "x", "name": "b1",
+            "description": None, "task_filter": {}, "trial_config": {},
+            "state": "finished", "result_status": "all_failed",
+            "failure_reason": "fanout_submit_failed",
+            "failure_message": "task t1 submit failed: HTTP 403: blocked",
+            "fanout_errors": [{"task_id": "t1", "status_code": 403}],
+            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
+            "created_by_token_prefix": "abc",
+            "expected_trial_count": 0, "n_per_task": 1,
+            "backend": "docker", "combinations": [],
+            "trial_summary": {"queued": 0, "claimed": 0, "running": 0,
+                              "succeeded": 0, "failed": 0, "cancelled": 0},
+            "aggregate_reward": None,
+            "total_cost_usd": 0.0,
+        },
+    )
+    rc = main(["eval", "batch", "show", _BATCH_ID])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fanout_submit_failed" in out
+    assert "HTTP 403: blocked" in out
+    assert "fanout_errors:         1" in out
+
+
 def test_batch_cancel(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:

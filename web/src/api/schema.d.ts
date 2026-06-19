@@ -380,6 +380,9 @@ export interface components {
       combinations: components["schemas"]["Combination"][];
       state: string;
       result_status: string | null;
+      failure_reason: string | null;
+      failure_message: string | null;
+      fanout_errors: Record<string, unknown>[];
       created_at: string;
       finished_at: string | null;
       created_by_token_prefix: string;
