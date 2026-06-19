@@ -9,6 +9,7 @@ Subcommands:
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
 - register <slug> [--hf-org --hf-token --db-url --revision]
 - verify <slug> [--limit --minio-* --bucket --seed]
+- audit [--all | <slug>] [--db-url] [--json]
 
 The {import, publish, register, verify} subcommands were previously
 shipped as `python -m loom_benchmark_tool <cmd>`. Folded into
@@ -30,6 +31,11 @@ from loom_cli import builtin as builtin_mod
 from loom_cli import catalog as catalog_mod
 from loom_cli import install as install_mod
 from loom_cli import remote as remote_mod
+from loom_cli.benchmark_readiness import (
+    render_readiness_json,
+    render_readiness_table,
+    run_readiness_audit,
+)
 from loom_cli.discovery import DatasetEntry, union_entries
 from loom_cli.output import render_datasets_json, render_datasets_table
 
@@ -116,6 +122,17 @@ def _add_verify_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--seed", type=int, default=0)
 
 
+def _add_audit_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("benchmark", nargs="?")
+    p.add_argument("--all", dest="all_benchmarks", action="store_true")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.add_argument(
+        "--db-url",
+        default=os.environ.get("LOOM_DB_URL"),
+        help="Postgres URL (defaults to env LOOM_DB_URL).",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom datasets")
     sub = p.add_subparsers(dest="subcmd", required=True)
@@ -158,6 +175,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_verify_args(sub.add_parser(
         "verify",
         help="Sample tasks from a benchmark + run the oracle agent end-to-end.",
+    ))
+    _add_audit_args(sub.add_parser(
+        "audit",
+        help="Inspect benchmark readiness from registered catalog/task rows.",
     ))
 
     p_sync = sub.add_parser(
@@ -417,6 +438,37 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit(args: argparse.Namespace) -> int:
+    if not args.db_url:
+        print(
+            "error: audit requires --db-url / env LOOM_DB_URL",
+            file=sys.stderr,
+        )
+        return 2
+    if args.all_benchmarks and args.benchmark:
+        print(
+            "error: pass either --all or a benchmark, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.all_benchmarks and not args.benchmark:
+        print(
+            "error: audit requires --all or a benchmark id",
+            file=sys.stderr,
+        )
+        return 2
+
+    items = asyncio.run(run_readiness_audit(
+        db_url=args.db_url,
+        benchmark=None if args.all_benchmarks else args.benchmark,
+    ))
+    if args.as_json:
+        print(render_readiness_json(items))
+    else:
+        print(render_readiness_table(items))
+    return 0
+
+
 def _cmd_sync_config(args: argparse.Namespace) -> int:
     from loom_benchmarks.registry import REGISTRY
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -519,6 +571,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "publish": _cmd_publish,
     "register": _cmd_register,
     "verify": _cmd_verify,
+    "audit": _cmd_audit,
     "sync-config": _cmd_sync_config,
 }
 

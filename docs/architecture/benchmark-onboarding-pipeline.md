@@ -185,16 +185,16 @@ manifest -> smoke.
 
 ## Operator CLI
 
-Add an audit/readiness command that can be used before and after registration.
-The exact command name can be refined during implementation, but the user model
-should be:
+The first audit/readiness command is operator-facing and direct-DB. It can be
+used before and after registration:
 
 ```bash
-loom datasets audit --all
-loom datasets audit humaneval
-loom datasets publish humaneval --target hf
-loom datasets register humaneval
-loom datasets smoke humaneval --sample first:3 --agent oracle
+loom datasets audit --all --db-url "$LOOM_DB_URL"
+loom datasets audit humaneval --db-url "$LOOM_DB_URL"
+loom datasets audit --all --db-url "$LOOM_DB_URL" --json
+loom datasets publish humaneval --hf-org "$LOOM_HF_ORG"
+loom datasets register humaneval --hf-org "$LOOM_HF_ORG" --db-url "$LOOM_DB_URL"
+loom datasets verify humaneval --limit 3
 ```
 
 Required audit columns:

@@ -334,6 +334,23 @@ The file lives at `<repo>/config/benchmarks.toml` in dev or
 under "Operator-facing TOML registry" for the schema and worked
 examples.
 
+### Benchmark readiness audit
+
+Operators can inspect why a benchmark is or is not runnable without
+opening the SPA:
+
+```bash
+loom datasets audit --all --db-url "$LOOM_DB_URL"
+loom datasets audit swe-bench-verified --db-url "$LOOM_DB_URL"
+loom datasets audit --all --db-url "$LOOM_DB_URL" --json
+```
+
+The audit reports raw task rows, valid `TaskConfig` rows, source
+schemes, materializer status, readiness state, and blocker reason. A
+legacy published manifest with task rows but empty `config` appears as
+`blocked` with `manifest_legacy_missing_task_config`; republish or
+backfill the benchmark before launching user batches.
+
 ## `loom config` reference
 
 Config persists to `$XDG_CONFIG_HOME/loom/config.toml` (defaults to
