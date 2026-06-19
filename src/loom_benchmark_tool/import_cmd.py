@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.trajectory.storage import ObjectStore
+from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
 
 # Permissive but bounded: forward-slashes are fine (HumanEval IDs are
@@ -56,13 +57,6 @@ def _validate_instance_id(instance_id: str) -> None:
         raise ValueError(
             f"instance_id {instance_id!r} contains empty / .. / . segments; reject",
         )
-
-
-def _normalize_db_url(url: str) -> str:
-    """Ensure the URL is the async psycopg variant SQLAlchemy expects."""
-    if url.startswith("postgresql+"):
-        return url
-    return url.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
 def _resolve_adapter(
@@ -155,7 +149,7 @@ async def run_import(
         adapter.upstream_source, cache_root=cache_dir, refresh=refresh,
     )
 
-    engine = create_async_engine(_normalize_db_url(db_url))
+    engine = create_async_engine(normalize_db_url(db_url))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # Upsert benchmarks row first (A13.2: human-readable PK supports

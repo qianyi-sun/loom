@@ -127,6 +127,37 @@ The full pydantic models live in `src/loom/models/task.py`. `extra =
 "forbid"` is enforced — `convert_instance` output that adds fields
 not in the schema will fail to load.
 
+## Publish/Register Boundary
+
+Adapters convert upstream data into local bundles. Publication turns
+those bundles into a durable dataset repo, and registration turns the
+published manifest into catalog rows:
+
+```bash
+loom datasets publish humaneval --hf-org PRHW
+loom datasets register humaneval --hf-org PRHW --db-url "$LOOM_DB_URL"
+```
+
+The publish command validates every generated `task.toml` against
+`TaskConfig` before upload. Schema v3 manifests include the validated
+raw `task_config` for each task, alongside the bundle checksum,
+`hf_path`, split, tags, and license metadata. The register command
+validates that payload again, verifies `task_config.task.id` matches
+the manifest `task_id`, and writes it to `tasks.config`.
+
+That stored config is the runnable boundary used by the service,
+batch runner, and SPA. Legacy manifests that lack `task_config` are
+still registered for metadata and provenance, but their rows keep
+`config = {}` and are counted as `legacy_placeholders` in CLI output.
+They are not runnable until the benchmark is republished with a v3
+manifest or explicitly backfilled.
+
+This same boundary is the intended scaling path for user-owned
+benchmarks: validate a folder of Loom task bundles, publish the bundle
+tree to a supported object store or dataset repo, register the manifest,
+then smoke a small sample. Browser upload and admin APIs should wrap
+these primitives instead of inventing separate ingestion behavior.
+
 ## Discovery
 
 Each adapter package declares:

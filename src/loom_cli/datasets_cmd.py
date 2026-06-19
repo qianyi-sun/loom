@@ -363,6 +363,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
     print(
         f"register {args.benchmark}: "
         f"registered={result['registered']} "
+        f"legacy_placeholders={result['legacy_placeholders']} "
         f"skipped={result['skipped']} "
         f"repo={result['repo_id']} "
         f"rev={result['revision']}",

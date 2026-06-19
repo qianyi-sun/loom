@@ -14,7 +14,8 @@ release (or on adapter changes). It:
    in one upload commit.
 
 Per-deploy seeding then calls `register` (separate subcommand) which
-just reads the manifest off HF and inserts task rows pointing at
+reads the manifest off HF, validates each per-task config, and inserts
+task rows pointing at
 `hf://{org}/loom-benchmark-{benchmark}@<revision>/{instance_id}/`. No
 upstream conversion needed per-deploy.
 
@@ -27,7 +28,6 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,12 +37,17 @@ from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
 
 from loom_benchmark_tool.import_cmd import _validate_instance_id
+from loom_benchmark_tool.manifest import (
+    MANIFEST_FILENAME,
+    load_task_config_from_bundle,
+    repo_id_for,
+)
 
 # Manifest schema version. Bump when the per-task field set changes in
 # a way the register/worker code needs to fork on. The shape:
 #
 # {
-#   "schema_version": int,       # 1 = legacy, 2 = adds series + tags
+#   "schema_version": int,       # 1 = legacy, 2 = series/tags, 3 = task_config
 #   "benchmark_id": str,
 #   "display_name": str,
 #   "series": str | null,        # v2+: grouping label ("aime", …)
@@ -64,15 +69,16 @@ from loom_benchmark_tool.import_cmd import _validate_instance_id
 #       "license_spdx": str,
 #       "split": str,
 #       "tags": dict[str, str],    # v2+: open-ended task metadata
+#       "task_config": dict,       # v3+: validated raw task.toml payload
 #     }
 #   ]
 # }
 #
 # Legacy v1 manifests have no `series` or `tags`; the register path
 # treats those as `series=None` and `tags={}` so the migration is
-# rolling.
-MANIFEST_SCHEMA_VERSION = 2
-MANIFEST_FILENAME = "manifest.json"
+# rolling. v1/v2 manifests also have no `task_config`; the register path keeps
+# them as explicit non-runnable placeholders until republished or backfilled.
+MANIFEST_SCHEMA_VERSION = 3
 
 
 def _safe_dirname(instance_id: str) -> str:
@@ -98,12 +104,6 @@ def _bundle_checksum(bundle_dir: Path) -> str:
         h.update(p.read_bytes())
         h.update(b"\0")
     return f"sha256:{h.hexdigest()}"
-
-
-def repo_id_for(org: str, benchmark: str) -> str:
-    """`PRHW/loom-benchmark-humaneval`. Keep this in one place so the
-    register command + worker derive the same id from the manifest."""
-    return f"{org}/loom-benchmark-{benchmark}"
 
 
 def run_publish(
@@ -134,7 +134,9 @@ def run_publish(
     adapter = REGISTRY[benchmark]
     cache_dir.mkdir(parents=True, exist_ok=True)
     source_dir = fetch_upstream(
-        adapter.upstream_source, cache_root=cache_dir, refresh=refresh,
+        adapter.upstream_source,
+        cache_root=cache_dir,
+        refresh=refresh,
     )
 
     api = HfApi(token=hf_token)
@@ -142,7 +144,10 @@ def run_publish(
     # `exist_ok=True` — first publish creates, subsequent re-publish
     # under the same id just adds a commit.
     api.create_repo(
-        repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True,
+        repo_id=repo_id,
+        repo_type="dataset",
+        private=private,
+        exist_ok=True,
     )
 
     stats = {"published": 0, "warnings": 0}
@@ -154,7 +159,8 @@ def run_publish(
         for split in adapter.splits:
             count = 0
             for inst in adapter.list_instances(
-                source_dir=source_dir, split=split,
+                source_dir=source_dir,
+                split=split,
             ):
                 if limit is not None and count >= limit:
                     break
@@ -172,26 +178,22 @@ def run_publish(
                 # claim time on a remote box.
                 if converted.checksum != checksum:
                     stats["warnings"] += 1
-                task_entries.append({
-                    "task_id": converted.task_id,
-                    "instance_id": inst.instance_id,
-                    "hf_path": f"{safe_name}/",
-                    "checksum": checksum,
-                    "license_spdx": converted.license_spdx,
-                    "split": split,
-                    # PR-1 (series/tags): per-task metadata. Empty for
-                    # adapters that haven't been reworked yet — register
-                    # treats absent + {} identically.
-                    "tags": dict(inst.tags),
-                })
-                # Sniff out task.toml so the manifest can echo a
-                # canonical step_count — convenient for the SPA.
-                toml_path = bundle_dir / "task.toml"
-                if toml_path.exists():
-                    try:
-                        tomllib.loads(toml_path.read_text())
-                    except tomllib.TOMLDecodeError:
-                        stats["warnings"] += 1
+                task_config = load_task_config_from_bundle(bundle_dir)
+                task_entries.append(
+                    {
+                        "task_id": converted.task_id,
+                        "instance_id": inst.instance_id,
+                        "hf_path": f"{safe_name}/",
+                        "checksum": checksum,
+                        "license_spdx": converted.license_spdx,
+                        "split": split,
+                        # PR-1 (series/tags): per-task metadata. Empty for
+                        # adapters that haven't been reworked yet — register
+                        # treats absent + {} identically.
+                        "tags": dict(inst.tags),
+                        "task_config": task_config,
+                    }
+                )
                 stats["published"] += 1
 
         manifest = {
@@ -232,23 +234,3 @@ def run_publish(
         "repo_id": repo_id,
         "revision": getattr(commit_info, "oid", "main"),
     }
-
-
-def read_manifest_from_hf(
-    *, hf_org: str, benchmark: str, hf_token: str | None = None,
-    revision: str = "main",
-) -> dict[str, Any]:
-    """Download + parse manifest.json from the dataset repo. Used by
-    the register command and by tests that want to introspect a
-    published benchmark without re-running upstream conversion."""
-    from huggingface_hub import hf_hub_download
-
-    path = hf_hub_download(
-        repo_id=repo_id_for(hf_org, benchmark),
-        filename=MANIFEST_FILENAME,
-        repo_type="dataset",
-        revision=revision,
-        token=hf_token,
-    )
-    data: dict[str, Any] = json.loads(Path(path).read_text())
-    return data

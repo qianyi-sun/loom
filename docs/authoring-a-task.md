@@ -138,11 +138,23 @@ print('ok')
 sg docker -c "pytest tests/integration/test_trial_e2e_docker.py -v"
 ```
 
-## Submitting
+## Registering
 
-**v0.7 does not ship a task-ingestion endpoint.** Operators register
-new tasks by seeding the `tasks` table directly. Use
-`scripts/seed_test_data.py` as a template:
+There are three supported task-registration shapes today:
+
+- Single dev/test fixtures can still be seeded with
+  `scripts/seed_test_data.py`.
+- Operator-owned folders of `task.toml` bundles can be registered as a
+  benchmark through `config/benchmarks.toml` and
+  `loom datasets sync-config`.
+- Adapter-backed benchmarks should go through
+  `loom datasets publish` followed by `loom datasets register`.
+  Publish validates each generated `task.toml`, writes a schema v3
+  manifest with per-task `task_config`, and register persists that
+  config into `tasks.config`.
+
+For a one-off local fixture, use `scripts/seed_test_data.py` as a
+template:
 
 ```bash
 python scripts/seed_test_data.py \
@@ -168,6 +180,20 @@ Catalog counts are runnable counts. A task row inserted as an import
 placeholder with empty or incomplete `config` is not counted by benchmark
 `task_count` or `POST /api/v1/tasks/count`, so the New Batch screen shows
 the benchmark as needing publish instead of offering an evaluation run.
+
+For benchmark-level onboarding, prefer the manifest path:
+
+```bash
+loom datasets publish my-benchmark --hf-org "$LOOM_HF_ORG"
+loom datasets register my-benchmark --hf-org "$LOOM_HF_ORG" \
+    --db-url "$LOOM_DB_URL"
+```
+
+Legacy manifests without `task_config` remain metadata placeholders.
+They must be republished or backfilled before users can launch them
+from the batch UI. Folder-first user-owned publishing is tracked by
+the benchmark onboarding design; it should reuse the same validate,
+publish, register, and smoke primitives.
 
 Once registered, submit a trial:
 

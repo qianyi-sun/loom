@@ -8,7 +8,13 @@ safe-dirname, repo-id derivation."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
 
 from loom_benchmark_tool.publish_cmd import (
     MANIFEST_SCHEMA_VERSION,
@@ -16,6 +22,27 @@ from loom_benchmark_tool.publish_cmd import (
     _safe_dirname,
     repo_id_for,
 )
+
+_TASK_TOML = """\
+schema_version = "1"
+
+[task]
+id = "fake-bench/task-001"
+name = "Fake task"
+
+[environment]
+os = "linux"
+docker_image = "python:3.12-slim"
+
+[agent]
+name = "oracle"
+
+[verifier]
+name = "pytest"
+
+[[steps]]
+name = "main"
+"""
 
 
 def test_repo_id_for_uses_loom_benchmark_prefix() -> None:
@@ -58,4 +85,87 @@ def test_manifest_schema_version_is_int() -> None:
     """Operators (and the worker) fork on this; an accidental change
     to a string would silently break the manifest reader."""
     assert isinstance(MANIFEST_SCHEMA_VERSION, int)
-    assert MANIFEST_SCHEMA_VERSION >= 1
+    assert MANIFEST_SCHEMA_VERSION >= 3
+
+
+def test_run_publish_includes_valid_task_config_in_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from loom_benchmark_tool import publish_cmd
+
+    class FakeAdapter:
+        name = "fake-bench"
+        display_name = "Fake Bench"
+        upstream_source = UpstreamSource(kind="huggingface", locator="fake/source")
+        license_spdx = "MIT"
+        license_url = ""
+        splits = ("test",)
+        series = "fake"
+
+        def list_instances(
+            self,
+            *,
+            source_dir: Path,
+            split: str,
+        ) -> list[BenchmarkInstance]:
+            return [
+                BenchmarkInstance(
+                    instance_id="task-001",
+                    split=split,
+                    raw={},
+                    tags={"difficulty": "smoke"},
+                ),
+            ]
+
+        def convert_instance(
+            self,
+            instance: BenchmarkInstance,
+            *,
+            out_dir: Path,
+        ) -> ConvertedTask:
+            (out_dir / "task.toml").write_text(_TASK_TOML)
+            (out_dir / "instruction.md").write_text("solve it\n")
+            return ConvertedTask(
+                task_id="fake-bench/task-001",
+                checksum=_bundle_checksum(out_dir),
+                license_spdx="MIT",
+                warnings=(),
+            )
+
+    captured_manifest: dict[str, Any] = {}
+
+    class FakeHfApi:
+        def __init__(self, *, token: str) -> None:
+            self.token = token
+
+        def create_repo(self, **_kwargs: object) -> None:
+            return None
+
+        def upload_folder(self, **kwargs: object) -> object:
+            folder = Path(str(kwargs["folder_path"]))
+            captured_manifest.update(
+                json.loads((folder / "manifest.json").read_text()),
+            )
+            return SimpleNamespace(oid="fake-revision")
+
+    monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
+    monkeypatch.setattr(
+        publish_cmd,
+        "fetch_upstream",
+        lambda *_args, **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(publish_cmd, "HfApi", FakeHfApi)
+
+    stats = publish_cmd.run_publish(
+        benchmark="fake-bench",
+        hf_org="fake-org",
+        hf_token="fake-token",
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert stats["published"] == 1
+    assert captured_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
+    task = cast(dict[str, Any], captured_manifest["tasks"][0])
+    assert task["task_config"]["task"]["id"] == "fake-bench/task-001"
+    assert task["task_config"]["environment"]["docker_image"] == "python:3.12-slim"

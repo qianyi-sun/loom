@@ -104,7 +104,7 @@ shown as available work.
 
 Manifest vNext should include:
 
-- `manifest_version`
+- `schema_version`
 - `benchmark_id`
 - display metadata: name, series, license, upstream locator, revision, splits
 - per-task metadata:
@@ -126,6 +126,10 @@ Registration behavior:
   mark the benchmark as blocked by legacy manifest data.
 - Re-registering should be idempotent and should update checksums, tags, source,
   and configs when the manifest revision changes.
+
+The first #272 implementation uses inline `task_config` in schema v3 manifests.
+The remote-path variant remains the scalable extension point for very large or
+non-HF user-owned benchmark manifests.
 
 ## Existing Manifest Compatibility And Backfill
 
