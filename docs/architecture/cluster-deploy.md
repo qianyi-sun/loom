@@ -260,7 +260,6 @@ loom providers update NAME [--base-url URL] [--api-key SOURCE] ...
 loom providers delete NAME                                         # soft-delete
 
 loom eval run --provider N --model M --agent A --task ID
-    [--backend B] [--name N]
 loom eval batch create --provider N --model M --agent A --name N
     [--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]
 loom eval batch {list,show,cancel}

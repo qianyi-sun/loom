@@ -331,6 +331,36 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["provider_model_id"] == "gpt-4o"
 
 
+def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 5,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main([
+        "eval", "batch", "create",
+        "--provider", "openai-prod",
+        "--model", "gpt-4o",
+        "--agent", "claude-code",
+        "--benchmark", "humaneval",
+        "--name", "smoke-run",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "name:                  smoke-run" in out
+    assert "name:                  (unset)" not in out
+
+
 def test_batch_create_task_filter_json(
     mock_server: MockServer,
 ) -> None:

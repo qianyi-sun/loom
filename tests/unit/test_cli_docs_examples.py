@@ -35,3 +35,14 @@ def test_cluster_deploy_docs_do_not_advertise_missing_trial_download_commands() 
     assert "loom eval trial {list,show} | trajectory ID | atif ID" not in cluster_deploy
     assert "loom eval trial {list,show}" in cluster_deploy
     assert "loom eval trial show TRIAL_ID" in cluster_deploy
+
+
+def test_cluster_deploy_eval_run_example_matches_supported_options() -> None:
+    cluster_deploy = _read("docs/architecture/cluster-deploy.md")
+
+    assert (
+        "loom eval run --provider N --model M --agent A --task ID\n"
+        "    [--backend B] [--name N]"
+    ) not in cluster_deploy
+    assert "loom eval batch create" in cluster_deploy
+    assert "[--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]" in cluster_deploy

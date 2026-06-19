@@ -252,6 +252,8 @@ def _batch_create(args: argparse.Namespace) -> int:
                 payload["description"] = args.description
             resp = c.post("/api/v1/batches", json=payload)
         body = assert_2xx(resp, action=f"create batch {args.name!r}")
+        if body.get("name") is None:
+            body = {**body, "name": args.name}
         print(f"Created batch {args.name!r}:")
         _print_batch_summary(body)
         return 0
