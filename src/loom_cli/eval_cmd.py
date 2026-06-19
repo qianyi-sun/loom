@@ -526,7 +526,7 @@ def dispatch(argv: list[str]) -> int:
     p_tl.set_defaults(handler=_trial_list)
 
     p_ts = trial_sub.add_parser(
-        "show", help="Show trial details + presigned ATIF/trajectory URLs.",
+        "show", help="Show trial details + ATIF/trajectory download URLs.",
     )
     p_ts.add_argument("trial_id", help="Trial UUID.")
     p_ts.add_argument("--format", choices=["text", "json"], default="text")

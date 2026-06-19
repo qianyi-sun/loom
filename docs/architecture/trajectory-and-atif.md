@@ -171,12 +171,11 @@ path:
   uploaded artifact's `step_name`, bucket, object key, and size.
 
 `GET /api/v1/trials/{id}` reads this projection to return ready flags
-and presigned ATIF, trajectory, and artifact download URLs. In
-deployments with a user-facing object-store endpoint, `loom_service`
-signs these URLs with the public MinIO/S3 endpoint rather than signing
-with the cluster-internal endpoint and rewriting the host afterward;
-SigV4 includes `Host` in the signed headers. A succeeded trial should
-not require clients to scan object storage or guess artifact keys.
+and authenticated service download URLs for ATIF, trajectory, and artifacts.
+`loom_service` streams those object bodies from the internal MinIO/S3 endpoint
+to the caller, so browser and laptop clients do not need direct object-store
+network access. A succeeded trial should not require clients to scan object
+storage, guess artifact keys, or open a separate MinIO tunnel.
 
 ## Trajectory ↔ ATIF in code
 

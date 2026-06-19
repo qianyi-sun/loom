@@ -1,9 +1,8 @@
 """FastAPI factory for loom_service (spec §2).
 
 Stateless service. The lifespan opens a per-process async SQLAlchemy
-engine, boto3 S3 clients for internal object-store operations and
-user-facing presigned URLs, and an httpx AsyncClient pointed at the
-Control Plane (for Plan 18+ forwarders).
+engine, a boto3 S3 client for internal object-store operations, and an
+httpx AsyncClient pointed at the Control Plane (for Plan 18+ forwarders).
 Routes pull these off `request.app.state`.
 """
 
@@ -53,7 +52,6 @@ from loom_service.routes import (
 )
 from loom_service.storage import (
     create_minio_client,
-    create_minio_presign_client,
 )
 
 
@@ -78,7 +76,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         minio_client = create_minio_client(
             settings, endpoint_url=settings.minio_endpoint,
         )
-        minio_presign_client = create_minio_presign_client(settings)
 
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url), timeout=10.0,
@@ -107,7 +104,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
-        app.state.minio_presign_client = minio_presign_client
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
 

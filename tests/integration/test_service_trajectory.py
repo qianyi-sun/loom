@@ -1,4 +1,4 @@
-"""Trajectory paginated read + download redirect (Plan 18 Task 4).
+"""Trajectory paginated read + download route (Plan 18 Task 4).
 
 `traj_setup` lives in `tests/integration/conftest.py` so both
 trajectory + ATIF tests share it (and the underlying MinIO container).
@@ -7,13 +7,11 @@ trajectory + ATIF tests share it (and the underlying MinIO container).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import httpx
 from fastapi import FastAPI
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Task, Trial
@@ -95,7 +93,7 @@ async def test_trajectory_object_missing_returns_empty_page(
     assert r.json() == {"events": [], "next_cursor": None}
 
 
-async def test_trajectory_download_302(
+async def test_trajectory_download_proxies_object_through_service(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
 ) -> None:
     app, raw, _team_id, trial_id = traj_setup
@@ -108,31 +106,52 @@ async def test_trajectory_download_302(
             f"/api/v1/trials/{trial_id}/trajectory/download",
             headers={"Authorization": f"Bearer {raw}"},
         )
-    assert r.status_code == 302
-    assert "X-Amz-Signature" in r.headers["location"]
-    assert "events.jsonl" in r.headers["location"]
+
+    assert r.status_code == 200
+    assert "location" not in r.headers
+    assert b'"kind": "trial_start"' in r.content
 
 
-async def test_trajectory_download_uses_public_presign_client(
+async def test_artifact_download_proxies_object_through_service(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
 ) -> None:
-    app, raw, _team_id, trial_id = traj_setup
-    public_presign_client = MagicMock()
+    app, raw, team_id, trial_id = traj_setup
+    settings = app.state.settings
+    artifact_key = f"{team_id}/{trial_id}/main/result.txt"
+    existing = {
+        bucket["Name"]
+        for bucket in app.state.minio_client.list_buckets()["Buckets"]
+    }
+    if settings.artifacts_bucket not in existing:
+        app.state.minio_client.create_bucket(Bucket=settings.artifacts_bucket)
+    app.state.minio_client.put_object(
+        Bucket=settings.artifacts_bucket,
+        Key=artifact_key,
+        Body=b"hello artifact",
+    )
 
-    def _public_url(
-        _op: str, *, Params: dict[str, Any], ExpiresIn: int,  # noqa: N803
-    ) -> str:
-        assert ExpiresIn == 3600
-        return (
-            "http://localhost:9000/{}/{}"
-            "?X-Amz-SignedHeaders=host&X-Amz-Signature=publicsig"
-        ).format(
-            Params["Bucket"],
-            Params["Key"],
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(
+                trajectory_index={
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": settings.artifacts_bucket,
+                            "key": artifact_key,
+                            "size": 14,
+                        }
+                    ],
+                },
+            ),
         )
-
-    public_presign_client.generate_presigned_url.side_effect = _public_url
-    app.state.minio_presign_client = public_presign_client
+        s.commit()
+    sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -140,13 +159,11 @@ async def test_trajectory_download_uses_public_presign_client(
         follow_redirects=False,
     ) as ac:
         r = await ac.get(
-            f"/api/v1/trials/{trial_id}/trajectory/download",
+            f"/api/v1/trials/{trial_id}/artifacts/download",
+            params={"key": artifact_key},
             headers={"Authorization": f"Bearer {raw}"},
         )
-    assert r.status_code == 302
-    loc = r.headers["location"]
-    assert loc.startswith("http://localhost:9000/")
-    assert "events.jsonl" in loc
-    assert "X-Amz-Signature=publicsig" in loc
-    assert "minio:9000" not in loc
-    public_presign_client.generate_presigned_url.assert_called_once()
+
+    assert r.status_code == 200
+    assert "location" not in r.headers
+    assert r.content == b"hello artifact"

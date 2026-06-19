@@ -19,8 +19,8 @@ def test_web_dev_container_uses_lockfile_stable_bootstrap() -> None:
     assert "npm install" not in command_line
 
 
-def test_loom_service_dev_container_rewrites_minio_urls_to_localhost() -> None:
-    """The dev API must return browser-resolvable artifact URLs by default."""
+def test_loom_service_dev_container_uses_internal_minio_endpoint() -> None:
+    """Downloads are service-proxied, so dev does not need public MinIO URLs."""
     compose = REPO_ROOT / "deploy" / "docker-compose.dev.yml"
     text = compose.read_text()
     service_block = text.split("\n  loom-service:\n", 1)[1].split(
@@ -28,8 +28,4 @@ def test_loom_service_dev_container_rewrites_minio_urls_to_localhost() -> None:
     )[0]
 
     assert "LOOM_SVC_MINIO_ENDPOINT: http://minio:9000" in service_block
-    expected_public_endpoint = (
-        "LOOM_SVC_MINIO_PUBLIC_ENDPOINT: "
-        "\"${LOOM_SVC_MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}\""
-    )
-    assert expected_public_endpoint in service_block
+    assert "LOOM_SVC_MINIO_PUBLIC_ENDPOINT" not in service_block

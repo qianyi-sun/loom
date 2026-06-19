@@ -26,12 +26,13 @@ def create_minio_client(
 
 
 def create_minio_presign_client(settings: LoomServiceSettings) -> Any:
-    """Create the client used for user-facing presigned GET URLs.
+    """Create the legacy client for MinIO presigned GET URLs.
 
     SigV4 presigned URLs bind the request ``Host`` header through
     ``X-Amz-SignedHeaders=host``. If Loom serves API callers outside the
     cluster, the URL must therefore be signed with the public endpoint the
-    caller will use, not signed internally and rewritten afterward.
+    caller will use, not signed internally and rewritten afterward. Trial
+    detail downloads are service-proxied and do not use this client.
     """
     return create_minio_client(
         settings,
@@ -40,17 +41,15 @@ def create_minio_presign_client(settings: LoomServiceSettings) -> Any:
 
 
 def get_minio_presign_client(app_state: Any) -> Any:
-    """Return the public presign client, falling back for older test fixtures."""
+    """Return the legacy presign client, falling back for older fixtures."""
     return getattr(app_state, "minio_presign_client", app_state.minio_client)
 
 
 def rewrite_to_public(url: str, settings: LoomServiceSettings) -> str:
     """Rewrite a URL's host:port to the public MinIO endpoint.
 
-    This helper is retained for non-SigV4 and legacy callers. Do not use it for
-    SigV4 presigned URLs returned to users; those must be generated with
-    :func:`create_minio_presign_client` so the signed ``Host`` header matches
-    the public endpoint.
+    This helper is retained for non-SigV4 and legacy callers. Trial detail
+    downloads are service-proxied and should not use this helper.
 
     If ``settings.minio_public_endpoint`` is *not* set the URL is returned
     unchanged, preserving byte-identical behaviour for existing deployments.

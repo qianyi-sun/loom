@@ -2,7 +2,8 @@
 
 Read surface:
 - GET /api/v1/trials             — list with cursor pagination + filters
-- GET /api/v1/trials/{id}        — detail + presigned ATIF + trajectory URLs
+- GET /api/v1/trials/{id}        — detail + service download URLs
+- GET /api/v1/trials/{id}/artifacts/download — authenticated artifact proxy
 
 Write forwarders (Task 8):
 - POST /api/v1/trials            — proxies to Control Plane /trials
@@ -23,7 +24,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
@@ -42,7 +43,7 @@ from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
-from loom_service.storage import get_minio_presign_client
+from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter()
 
@@ -204,26 +205,23 @@ async def list_trials(
     }
 
 
-def _presign_get(
-    client: Any,
-    bucket: str,
-    key: str,
-    expires_sec: int,
-) -> str:
-    url: str = client.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=expires_sec,
-    )
-    return url
+def _artifact_bucket(item: dict[str, Any], default_bucket: str) -> str:
+    bucket = item.get("bucket")
+    if not isinstance(bucket, str) or not bucket:
+        return default_bucket
+    return bucket
+
+
+def _artifact_filename(key: str) -> str:
+    name = key.rstrip("/").rsplit("/", 1)[-1]
+    return name or "artifact"
 
 
 def _projected_artifacts(
-    client: Any,
+    request: Request,
     *,
-    artifacts_bucket: str,
     trajectory_index: dict[str, Any] | None,
-    expires_sec: int,
+    trial_id: UUID,
 ) -> list[dict[str, Any]]:
     if not trajectory_index:
         return []
@@ -238,9 +236,6 @@ def _projected_artifacts(
         key = item.get("key")
         if not isinstance(key, str) or not key:
             continue
-        bucket = item.get("bucket")
-        if not isinstance(bucket, str) or not bucket:
-            bucket = artifacts_bucket
         size = item.get("size")
         if isinstance(size, int):
             size_int = size
@@ -254,7 +249,12 @@ def _projected_artifacts(
         entry: dict[str, Any] = {
             "key": key,
             "size": max(size_int, 0),
-            "download_url": _presign_get(client, bucket, key, expires_sec),
+            "download_url": str(
+                request.url_for(
+                    "download_artifact",
+                    trial_id=str(trial_id),
+                ).include_query_params(key=key),
+            ),
         }
         step_name = item.get("step_name")
         if isinstance(step_name, str):
@@ -263,13 +263,27 @@ def _projected_artifacts(
     return out
 
 
+def _find_projected_artifact(
+    trajectory_index: dict[str, Any] | None,
+    key: str,
+) -> dict[str, Any] | None:
+    if not trajectory_index:
+        return None
+    artifacts = trajectory_index.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    for item in artifacts:
+        if isinstance(item, dict) and item.get("key") == key:
+            return item
+    return None
+
+
 @router.get("/trials/{trial_id}")
 async def get_trial(
     request: Request,
     sc: SessionAndCtx,
     trial_id: UUID,
 ) -> dict[str, Any]:
-    settings = request.app.state.settings
     s, ctx = sc
     require_scope(ctx, "read:own")
     trial = (
@@ -283,22 +297,16 @@ async def get_trial(
 
     base = _trial_row(trial)
     trajectory_index = trial.trajectory_index or {}
-    presign_client = get_minio_presign_client(request.app.state)
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;
     # finalize.py writes ATIF to the same bucket at `atif.json`.
-    # Both URLs are presigned-GET on the trajectories bucket.
-    base["atif_url"] = _presign_get(
-        presign_client,
-        settings.trajectories_bucket,
-        f"{trial.team_id}/{trial.id}/atif.json",
-        settings.signed_url_expiry_sec,
+    # Both user-facing URLs stay on loom_service so remote browser
+    # clients do not need direct MinIO reachability.
+    base["atif_url"] = str(
+        request.url_for("download_atif", trial_id=str(trial.id)),
     )
-    base["trajectory_url"] = _presign_get(
-        presign_client,
-        settings.trajectories_bucket,
-        f"{trial.team_id}/{trial.id}/events.jsonl",
-        settings.signed_url_expiry_sec,
+    base["trajectory_url"] = str(
+        request.url_for("download_trajectory", trial_id=str(trial.id)),
     )
     # `*_ready` flags so the SPA can avoid rendering a download link
     # that's going to 404. The trajectory exists as soon as the worker
@@ -311,12 +319,42 @@ async def get_trial(
         trial.started_at is not None
     )
     base["artifacts"] = _projected_artifacts(
-        presign_client,
-        artifacts_bucket=settings.artifacts_bucket,
+        request,
         trajectory_index=trajectory_index,
-        expires_sec=settings.signed_url_expiry_sec,
+        trial_id=trial.id,
     )
     return base
+
+
+@router.get("/trials/{trial_id}/artifacts/download")
+async def download_artifact(
+    request: Request,
+    sc: SessionAndCtx,
+    trial_id: UUID,
+    key: Annotated[str, Query(min_length=1)],
+) -> StreamingResponse:
+    settings = request.app.state.settings
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = (
+        await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )
+    ).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
+
+    artifact = _find_projected_artifact(trial.trajectory_index, key)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    return stream_object_response(
+        client=request.app.state.minio_client,
+        bucket=_artifact_bucket(artifact, settings.artifacts_bucket),
+        key=key,
+        filename=_artifact_filename(key),
+    )
 
 
 class _SubmitReq(BaseModel):

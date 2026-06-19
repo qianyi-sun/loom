@@ -6,9 +6,8 @@ Covers:
    string preserved.
 3. Public endpoint includes port → host AND port both rewritten.
 
-SigV4 presigned URLs returned to users are covered by integration tests that
-assert routes use the public presign client instead of this legacy rewrite
-helper.
+Trial detail downloads are now service-proxied. These tests keep coverage for
+the legacy helper while it remains part of the storage module.
 """
 
 from __future__ import annotations

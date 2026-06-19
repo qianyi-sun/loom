@@ -1,6 +1,6 @@
 /**
  * Per-trial detail: header card with summary stats, trajectory
- * viewer with action-type-pill rows + JSON expansion, download links
+ * viewer with action-type-pill rows + JSON expansion, download buttons
  * for ATIF and the raw trajectory. Live-polls while the trial is
  * non-terminal; pauses cleanly once done.
  */
@@ -33,6 +33,11 @@ const ACTIVE_TRIAL_STATES = new Set([
 
 function artifactLabel(artifact: TrialArtifact): string {
   return artifact.key || artifact.step_name || "artifact";
+}
+
+function artifactDownloadName(artifact: TrialArtifact): string {
+  const label = artifactLabel(artifact).replace(/\/+$/, "");
+  return label.split("/").pop() || "artifact";
 }
 
 function formatBytes(size: number): string {
@@ -117,20 +122,13 @@ function TrialHeader({
 
         <div className="flex flex-wrap gap-2">
           {trial.atif_ready ? (
-            <a
-              href={trial.atif_url}
-              target="_blank"
-              rel="noreferrer"
+            <Button
+              variant="secondary"
               title="Download the finalized ATIF artifact for this trial."
-              className="contents"
+              onClick={() => void api.downloadATIF(trial.id)}
             >
-              <Button
-                variant="secondary"
-                title="Download the finalized ATIF artifact for this trial."
-              >
-                Download ATIF
-              </Button>
-            </a>
+              Download ATIF
+            </Button>
           ) : (
             <Button
               variant="secondary"
@@ -141,20 +139,13 @@ function TrialHeader({
             </Button>
           )}
           {trial.trajectory_ready ? (
-            <a
-              href={trial.trajectory_url}
-              target="_blank"
-              rel="noreferrer"
+            <Button
+              variant="secondary"
               title="Download the raw trajectory events for this trial."
-              className="contents"
+              onClick={() => void api.downloadTrajectory(trial.id)}
             >
-              <Button
-                variant="secondary"
-                title="Download the raw trajectory events for this trial."
-              >
-                Download trajectory
-              </Button>
-            </a>
+              Download trajectory
+            </Button>
           ) : (
             <Button
               variant="secondary"
@@ -175,12 +166,17 @@ function TrialHeader({
               {trial.artifacts.map((artifact, index) => {
                 const label = artifactLabel(artifact);
                 return (
-                  <a
+                  <button
                     key={`${artifact.key}-${index}`}
-                    href={artifact.download_url}
-                    target="_blank"
-                    rel="noreferrer"
                     title={`Download artifact ${label}.`}
+                    type="button"
+                    onClick={() =>
+                      void api.downloadArtifact(
+                        trial.id,
+                        artifact.key,
+                        artifactDownloadName(artifact),
+                      )
+                    }
                     className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm transition-colors hover:border-slate-300 hover:bg-slate-50"
                   >
                     <span className="min-w-0 truncate font-medium text-slate-700">
@@ -189,7 +185,7 @@ function TrialHeader({
                     <span className="shrink-0 font-mono text-xs text-slate-400">
                       {formatBytes(artifact.size)}
                     </span>
-                  </a>
+                  </button>
                 );
               })}
             </div>

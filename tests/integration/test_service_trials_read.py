@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from io import BytesIO
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
@@ -335,7 +335,7 @@ async def test_no_read_own_scope_forbidden(
     assert r.status_code == 403
 
 
-async def test_trial_detail_returns_presigned_urls(
+async def test_trial_detail_returns_service_download_urls(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:
     app, raw, _team_id, trial_ids = trials_setup
@@ -351,12 +351,16 @@ async def test_trial_detail_returns_presigned_urls(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["id"] == str(trial_ids[0])
-    # boto3 presigned URLs include X-Amz-Signature in the query string.
-    assert "X-Amz-Signature" in body["atif_url"]
-    assert "X-Amz-Signature" in body["trajectory_url"]
-    # URL anchors on the actual key shape (`{team_id}/{trial_id}/...`).
-    assert f"/{trial_ids[0]}/atif.json" in body["atif_url"]
-    assert f"/{trial_ids[0]}/events.jsonl" in body["trajectory_url"]
+    assert body["atif_url"] == (
+        f"http://svc/api/v1/trials/{trial_ids[0]}/atif"
+    )
+    assert body["trajectory_url"] == (
+        f"http://svc/api/v1/trials/{trial_ids[0]}/trajectory/download"
+    )
+    assert "localhost:9000" not in body["atif_url"]
+    assert "localhost:9000" not in body["trajectory_url"]
+    assert "X-Amz-Signature" not in body["atif_url"]
+    assert "X-Amz-Signature" not in body["trajectory_url"]
     assert body["artifacts"] == []
     # failure_message field present in response (issue #164).
     assert "failure_message" in body
@@ -411,10 +415,15 @@ async def test_trial_detail_exposes_projected_artifacts(
             "download_url": body["artifacts"][0]["download_url"],
         }
     ]
-    assert "X-Amz-Signature" in body["artifacts"][0]["download_url"]
+    assert body["artifacts"][0]["download_url"] == (
+        f"http://svc/api/v1/trials/{trial_ids[0]}/artifacts/download"
+        f"?key={team_id}%2F{trial_ids[0]}%2Fmain%2Fresult.txt"
+    )
+    assert "localhost:9000" not in body["artifacts"][0]["download_url"]
+    assert "X-Amz-Signature" not in body["artifacts"][0]["download_url"]
 
 
-async def test_trial_detail_uses_public_presign_client_for_download_urls(
+async def test_trial_detail_download_urls_do_not_call_presign_client(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
     postgres_url: str,
 ) -> None:
@@ -422,20 +431,6 @@ async def test_trial_detail_uses_public_presign_client_for_download_urls(
     artifact_key = f"{team_id}/{trial_ids[0]}/main/result.txt"
 
     public_presign_client = MagicMock()
-
-    def _public_url(
-        _op: str,
-        *,
-        Params: dict[str, Any],  # noqa: N803
-        ExpiresIn: int,  # noqa: N803
-    ) -> str:
-        assert ExpiresIn == 3600
-        return (
-            f"http://localhost:9000/{Params['Bucket']}/{Params['Key']}"
-            "?X-Amz-SignedHeaders=host&X-Amz-Signature=publicsig"
-        )
-
-    public_presign_client.generate_presigned_url.side_effect = _public_url
     app.state.minio_presign_client = public_presign_client
 
     sync_engine = create_engine(postgres_url)
@@ -478,10 +473,109 @@ async def test_trial_detail_uses_public_presign_client_for_download_urls(
         body["trajectory_url"],
         body["artifacts"][0]["download_url"],
     ]
-    assert all(url.startswith("http://localhost:9000/") for url in urls)
-    assert all("X-Amz-Signature=publicsig" in url for url in urls)
-    assert all("minio:9000" not in url for url in urls)
-    assert public_presign_client.generate_presigned_url.call_count == 3
+    assert all(url.startswith("http://svc/api/v1/trials/") for url in urls)
+    assert all("localhost:9000" not in url for url in urls)
+    public_presign_client.generate_presigned_url.assert_not_called()
+
+
+async def test_trajectory_download_proxies_via_service_without_presigned_redirect(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    app.state.minio_client = MagicMock()
+    app.state.minio_client.get_object.return_value = {
+        "Body": BytesIO(b'{"kind": "trial_start"}\n'),
+    }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}/trajectory/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    assert "location" not in r.headers
+    assert r.content == b'{"kind": "trial_start"}\n'
+
+
+async def test_atif_download_proxies_via_service_without_presigned_redirect(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    app.state.minio_client = MagicMock()
+    app.state.minio_client.get_object.return_value = {
+        "Body": BytesIO(b'{"version": "1.7"}'),
+    }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}/atif",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    assert "location" not in r.headers
+    assert r.json() == {"version": "1.7"}
+
+
+async def test_artifact_download_proxies_via_service_without_presigned_redirect(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    artifact_key = f"{team_id}/{trial_ids[0]}/main/result.txt"
+    app.state.minio_client = MagicMock()
+    app.state.minio_client.get_object.return_value = {
+        "Body": BytesIO(b"hello artifact"),
+    }
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[0])
+            .values(
+                trajectory_index={
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": "artifacts",
+                            "key": artifact_key,
+                            "size": 14,
+                        }
+                    ],
+                }
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}/artifacts/download",
+            params={"key": artifact_key},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    assert "location" not in r.headers
+    assert r.content == b"hello artifact"
 
 
 async def test_trial_detail_not_found(

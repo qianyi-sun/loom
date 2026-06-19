@@ -1,4 +1,4 @@
-"""Trajectory paginated read + download redirect (spec §5.2).
+"""Trajectory paginated read + authenticated download (spec §5.2).
 
 The events.jsonl object lives in the same `trajectories` bucket the
 worker's TrajectoryWriter writes to, at the key
@@ -17,7 +17,7 @@ from uuid import UUID
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from loom.db.schema import Trial
@@ -26,7 +26,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
-from loom_service.storage import get_minio_presign_client
+from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter()
 
@@ -112,20 +112,16 @@ async def download_trajectory(
     request: Request,
     sc: SessionAndCtx,
     trial_id: UUID,
-) -> RedirectResponse:
+) -> StreamingResponse:
     settings = request.app.state.settings
     s, ctx = sc
     require_scope(ctx, "read:own")
     trial = await _load_trial(s, trial_id, ctx)
 
-    url = get_minio_presign_client(
-        request.app.state,
-    ).generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": settings.trajectories_bucket,
-            "Key": _key(trial.team_id, trial.id),
-        },
-        ExpiresIn=settings.signed_url_expiry_sec,
+    return stream_object_response(
+        client=request.app.state.minio_client,
+        bucket=settings.trajectories_bucket,
+        key=_key(trial.team_id, trial.id),
+        filename=f"{trial.id}-events.jsonl",
+        media_type="application/x-ndjson",
     )
-    return RedirectResponse(url=url, status_code=302)

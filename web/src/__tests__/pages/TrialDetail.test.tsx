@@ -11,6 +11,7 @@
  * (which mis-implies more pages exist).
  */
 import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -78,8 +79,20 @@ function fetchSpy(
           }),
         );
       }
+      if (url.includes(`/trials/${TRIAL_ID}/artifacts/download`)) {
+        return Promise.resolve(new Response("artifact", { status: 200 }));
+      }
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
+}
+
+function stubBlobUrls(url = "blob:download") {
+  return {
+    createObjectURL: vi.spyOn(URL, "createObjectURL").mockReturnValue(url),
+    revokeObjectURL: vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => undefined),
+  };
 }
 
 describe("TrialDetail trajectory section", () => {
@@ -111,8 +124,8 @@ describe("TrialDetail trajectory section", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders artifact download links from trial detail metadata", async () => {
-    fetchSpy(
+  it("downloads artifacts through the authenticated service endpoint", async () => {
+    const fetchMock = fetchSpy(
       { ok: true, body: { events: [], next_cursor: null } },
       {
         ...TRIAL_BODY,
@@ -123,10 +136,16 @@ describe("TrialDetail trajectory section", () => {
             step_name: "main",
             key: "main/result.txt",
             size: 701,
-            download_url: "http://localhost:9000/artifacts/result.txt",
+            download_url: (
+              `http://svc/api/v1/trials/${TRIAL_ID}/artifacts/download`
+              + "?key=main%2Fresult.txt"
+            ),
           },
         ],
       },
+    );
+    const { createObjectURL, revokeObjectURL } = stubBlobUrls(
+      "blob:artifact",
     );
     renderWithProviders(
       <Routes>
@@ -135,14 +154,99 @@ describe("TrialDetail trajectory section", () => {
       { route: `/trials/${TRIAL_ID}` },
     );
 
-    const artifactLink = await screen.findByRole("link", {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", {
       name: /Download artifact main\/result\.txt/i,
-    });
-    expect(artifactLink).toHaveAttribute(
-      "href",
-      "http://localhost:9000/artifacts/result.txt",
+    }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/v1/trials/${TRIAL_ID}/artifacts/download?key=main%2Fresult.txt`,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-token",
+          }),
+        }),
+      ),
     );
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:artifact");
     expect(screen.getByText("701 B")).toBeInTheDocument();
+  });
+
+  it("downloads trajectory through the authenticated service endpoint", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : String(input);
+        if (url.endsWith(`/trials/${TRIAL_ID}`)) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                ...TRIAL_BODY,
+                state: "succeeded",
+                started_at: "2026-06-11T00:01:00Z",
+                finished_at: "2026-06-11T00:05:00Z",
+                trajectory_ready: true,
+                trajectory_url: "http://localhost:9000/trajectories/events.jsonl",
+              }),
+              {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              },
+            ),
+          );
+        }
+        if (url.endsWith(`/trials/${TRIAL_ID}/trajectory/download`)) {
+          expect(init?.headers).toMatchObject({
+            Authorization: "Bearer test-token",
+          });
+          return Promise.resolve(
+            new Response("{}", {
+              status: 200,
+              headers: { "Content-Type": "application/jsonl" },
+            }),
+          );
+        }
+        if (url.includes(`/trials/${TRIAL_ID}/trajectory`)) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ events: [], next_cursor: null }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    const { createObjectURL, revokeObjectURL } = stubBlobUrls(
+      "blob:trajectory",
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", {
+      name: /Download trajectory/i,
+    }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/v1/trials/${TRIAL_ID}/trajectory/download`,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-token",
+          }),
+        }),
+      ),
+    );
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:trajectory");
   });
 
   it("shows Retry instead of Load more on trajectory error", async () => {

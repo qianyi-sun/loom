@@ -269,7 +269,7 @@ loom eval batch create --provider N --model M --agent A --name N
     [--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]
 loom eval batch {list,show,cancel}
 loom eval trial {list,show}
-loom eval trial show TRIAL_ID     # includes presigned atif_url + trajectory_url when ready
+loom eval trial show TRIAL_ID     # includes service atif_url + trajectory_url when ready
 ```
 
 Argv hygiene: every secret-bearing flag accepts only `env:VAR`, `file:PATH`, or `-` (stdin). Literals are rejected at argparse-time.

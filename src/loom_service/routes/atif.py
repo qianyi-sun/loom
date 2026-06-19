@@ -1,8 +1,9 @@
-"""ATIF presigned redirect (spec §5.2).
+"""ATIF authenticated download (spec §5.2).
 
 `finalize.py` writes the trial's ATIF document to the trajectories
-bucket at `<team_id>/<trial_id>/atif.json`. This route 302-redirects
-the caller to a presigned GET URL for that object.
+bucket at `<team_id>/<trial_id>/atif.json`. This route proxies the
+object through loom_service so browser clients only need API access,
+not direct MinIO access.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from loom.db.schema import Trial
@@ -19,17 +20,17 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
-from loom_service.storage import get_minio_presign_client
+from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter()
 
 
 @router.get("/trials/{trial_id}/atif")
-async def atif_redirect(
+async def download_atif(
     request: Request,
     sc: SessionAndCtx,
     trial_id: UUID,
-) -> RedirectResponse:
+) -> StreamingResponse:
     settings = request.app.state.settings
     s, ctx = sc
     require_scope(ctx, "read:own")
@@ -40,14 +41,10 @@ async def atif_redirect(
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
 
-    url = get_minio_presign_client(
-        request.app.state,
-    ).generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": settings.trajectories_bucket,
-            "Key": f"{trial.team_id}/{trial.id}/atif.json",
-        },
-        ExpiresIn=settings.signed_url_expiry_sec,
+    return stream_object_response(
+        client=request.app.state.minio_client,
+        bucket=settings.trajectories_bucket,
+        key=f"{trial.team_id}/{trial.id}/atif.json",
+        filename=f"{trial.id}-atif.json",
+        media_type="application/json",
     )
-    return RedirectResponse(url=url, status_code=302)

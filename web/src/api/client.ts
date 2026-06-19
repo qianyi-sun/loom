@@ -24,23 +24,25 @@ function getToken(): string | null {
   }
 }
 
-export async function apiFetch<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
-  const token = getToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(init.headers as Record<string, string> | undefined),
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-
+function apiBase(): string {
   const env = (
     import.meta as unknown as { env: { VITE_API_BASE?: string } }
   ).env;
-  const base = env.VITE_API_BASE ?? "";
-  const resp = await fetch(`${base}${path}`, { ...init, headers });
+  return env.VITE_API_BASE ?? "";
+}
 
+function authHeaders(
+  initHeaders?: RequestInit["headers"],
+): Record<string, string> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    ...(initHeaders as Record<string, string> | undefined),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function throwIfApiError(resp: Response): Promise<void> {
   if (resp.status === 401) {
     _onUnauthorized();
     throw { status: 401, detail: "unauthorized" } satisfies ApiError;
@@ -63,8 +65,47 @@ export async function apiFetch<T>(
     }
     throw { status: resp.status, detail } satisfies ApiError;
   }
+}
+
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...authHeaders(init.headers),
+  };
+
+  const resp = await fetch(`${apiBase()}${path}`, { ...init, headers });
+
+  await throwIfApiError(resp);
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
+}
+
+export async function apiDownload(
+  path: string,
+  filename: string,
+): Promise<void> {
+  const resp = await fetch(`${apiBase()}${path}`, {
+    headers: authHeaders(),
+  });
+
+  await throwIfApiError(resp);
+
+  const blob = await resp.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.rel = "noreferrer";
+  document.body.appendChild(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 type TrialList = paths["/api/v1/trials"]["get"]["responses"][200]["content"]["application/json"];
@@ -273,6 +314,18 @@ export const api = {
   getTrajectoryPage: (id: string, cursor?: number, limit = 200) =>
     apiFetch<TrajectoryPage>(
       `/api/v1/trials/${id}/trajectory${qs({ cursor, limit })}`,
+    ),
+  downloadATIF: (id: string) =>
+    apiDownload(`/api/v1/trials/${id}/atif`, `${id}-atif.json`),
+  downloadTrajectory: (id: string) =>
+    apiDownload(
+      `/api/v1/trials/${id}/trajectory/download`,
+      `${id}-events.jsonl`,
+    ),
+  downloadArtifact: (id: string, key: string, filename: string) =>
+    apiDownload(
+      `/api/v1/trials/${id}/artifacts/download${qs({ key })}`,
+      filename,
     ),
   listTasks: (q: Record<string, string | undefined> = {}) =>
     apiFetch<TaskList>(`/api/v1/tasks${qs(q)}`),

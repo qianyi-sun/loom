@@ -153,34 +153,20 @@ knob you need.
    kubectl rollout restart deploy/loom-service
    ```
 
-7. **Configure a user-facing MinIO endpoint for presigned URLs.** Local dev
-   compose sets `LOOM_SVC_MINIO_PUBLIC_ENDPOINT=http://localhost:9000` by
-   default, so links returned to the SPA and host CLI are resolvable from the
-   developer machine. Production clusters must set the value explicitly. Without
-   it, `loom_service` generates presigned URLs using the cluster-internal MinIO
-   address (`http://loom-minio:9000`), which is not resolvable from outside the
-   cluster.
-
-   If MinIO is reachable from the internet — either via its own Ingress or as a
-   path under the main Loom Ingress — set `LOOM_SVC_MINIO_PUBLIC_ENDPOINT` to
-   the public base URL. `loom_service` uses `LOOM_SVC_MINIO_ENDPOINT` for
-   internal bucket operations and a separate presign client pointed at
-   `LOOM_SVC_MINIO_PUBLIC_ENDPOINT` for URLs returned to API callers. This is
-   required because SigV4 presigned URLs bind the request `Host` header; signing
-   against the internal hostname and rewriting the URL afterward will fail with
-   `SignatureDoesNotMatch` from browsers and laptop CLIs.
+7. **Verify service-proxied downloads.** `loom_service` should use the
+   cluster-internal MinIO endpoint for object reads, then stream ATIF,
+   trajectory, and artifact downloads through authenticated API routes. Browser
+   and laptop CLI users should not need direct access to the MinIO S3 port.
 
    ```bash
-   kubectl patch secret loom-secrets \
-     -p '{"stringData":{"minio-public-endpoint":"https://minio.loom.example.com"}}'
-   # (or add LOOM_SVC_MINIO_PUBLIC_ENDPOINT to loom-service's env block)
-   kubectl rollout restart deploy/loom-service
+   curl -H "Authorization: Bearer $TEAM_TOKEN" \
+     "$LOOM_API/api/v1/trials/$TRIAL_ID" \
+     | jq -r '.trajectory_url,.atif_url,.artifacts[].download_url'
    ```
 
-   If the env var is unset, all presigned URLs point at the internal hostname.
-   Keep that only for deployments where every API caller is inside the cluster.
-   Browser, laptop CLI, and shared-dev deployments need a user-facing endpoint
-   or a proxy path that forwards to MinIO.
+   Every returned URL should stay on the Loom API host, and a normal authorized
+   `curl -L` against those URLs should return the object body without opening a
+   separate MinIO tunnel.
 
 8. **Approve team registration requests.** Public registration is
    default-closed. A researcher can submit a request without a bearer token:
@@ -759,8 +745,9 @@ concrete command or UI action.
    applicable), plus `atif_url`, `trajectory_url`, `atif_ready`,
    `trajectory_ready`, and `artifacts` for download.
 10. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
-    streams events; `GET /api/v1/trials/{id}/atif` returns the ATIF
-    JSON. Both bodies parse cleanly.
+    streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
+    returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
+    artifact `download_url` entries from trial detail return object bodies.
 11. **Provider error surfaces.** Temporarily rotate the provider key
     to an invalid value, re-run a trial, and confirm the SPA + API
     surface a clear `provider_error` reason rather than a generic 500.
