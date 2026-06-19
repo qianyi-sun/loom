@@ -43,6 +43,10 @@ class LiteLLMAgent:
     name: str = "litellm-agent"
     version: str = "1.0"
     supports_os: frozenset[OS] = field(default_factory=lambda: frozenset({"linux"}))
+    # Trial finalization must not project gateway llm_calls rows back into the
+    # trajectory for this agent: the agent already writes rich LLMCallEvent
+    # records from each GatewayCallResponse.
+    emits_gateway_llm_call_events: bool = True
     # #178: BYO provider connection. When set, forwarded to the gateway
     # client on every chat request so the call routes via the team's
     # stored credential + base_url rather than the platform default.
@@ -83,40 +87,44 @@ class LiteLLMAgent:
             )
             response: GatewayCallResponse = await self.gateway.call(request)
 
-            await trajectory.append(LLMCallEvent(
-                emitted_at=datetime.now(UTC),
-                trial_id=self.trial_id,
-                step_id=step_id,
-                seq=seq,
-                model=self.model,
-                rate_card_hash=response.rate_card_hash,
-                system_prompt=self.system_prompt,
-                messages=list(messages),
-                tools=None,
-                tool_choice=None,
-                response=response.response,
-                finish_reason=response.finish_reason,
-                input_tokens=response.input_tokens,
-                cached_input_tokens=response.cached_input_tokens,
-                cache_write_tokens=response.cache_write_tokens,
-                output_tokens=response.output_tokens,
-                thinking_tokens=response.thinking_tokens,
-                provider_extras=response.provider_extras,
-                cost_usd_snapshot=response.cost_usd,
-                duration_sec=response.duration_sec,
-                streamed=response.streamed,
-                time_to_first_token_sec=response.time_to_first_token_sec,
-                gateway_request_id=response.gateway_request_id,
-                cache_keys=list(request.cache_keys),
-            ))
+            await trajectory.append(
+                LLMCallEvent(
+                    emitted_at=datetime.now(UTC),
+                    trial_id=self.trial_id,
+                    step_id=step_id,
+                    seq=seq,
+                    model=self.model,
+                    rate_card_hash=response.rate_card_hash,
+                    system_prompt=self.system_prompt,
+                    messages=list(messages),
+                    tools=None,
+                    tool_choice=None,
+                    response=response.response,
+                    finish_reason=response.finish_reason,
+                    input_tokens=response.input_tokens,
+                    cached_input_tokens=response.cached_input_tokens,
+                    cache_write_tokens=response.cache_write_tokens,
+                    output_tokens=response.output_tokens,
+                    thinking_tokens=response.thinking_tokens,
+                    provider_extras=response.provider_extras,
+                    cost_usd_snapshot=response.cost_usd,
+                    duration_sec=response.duration_sec,
+                    streamed=response.streamed,
+                    time_to_first_token_sec=response.time_to_first_token_sec,
+                    gateway_request_id=response.gateway_request_id,
+                    cache_keys=list(request.cache_keys),
+                )
+            )
             seq += 1
 
             messages.append(response.response)
             if response.finish_reason == "stop":
                 raw_content = response.response.content
                 content_str = (
-                    raw_content if isinstance(raw_content, str)
-                    else "" if raw_content is None
+                    raw_content
+                    if isinstance(raw_content, str)
+                    else ""
+                    if raw_content is None
                     else "".join(
                         str(p.get("text", "")) if isinstance(p, dict) else str(p)
                         for p in raw_content
@@ -141,9 +149,13 @@ class LiteLLMAgent:
         body = _extract_first_code_block(content)
         import tempfile
         from pathlib import Path
+
         for rel_path in self.artifact_paths:
             with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".out", delete=False, encoding="utf-8",
+                mode="w",
+                suffix=".out",
+                delete=False,
+                encoding="utf-8",
             ) as tf:
                 tf.write(body)
                 tmp = Path(tf.name)
@@ -163,6 +175,7 @@ def _extract_first_code_block(text: str) -> str:
     full text.
     """
     import re
+
     m = re.search(r"```[a-zA-Z0-9_-]*\n(.*?)```", text, re.DOTALL)
     if m is None:
         return text.strip()

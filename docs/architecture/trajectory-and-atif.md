@@ -149,10 +149,11 @@ ATIF shape (rough; canonical definition is in the projection code):
 ```
 
 Service mode enriches the ATIF with `llm_calls` fetched from the
-Gateway (via `llm_calls_fetcher` callback) before projection — the
-trajectory's `llm_call` events are summaries; the full request/response
-bodies live in the Gateway's database. CLI mode skips this step
-(no Gateway).
+Gateway (via `llm_calls_fetcher` callback) before projection when the
+agent did not already write gateway-backed `llm_call` trajectory
+events. Synthetic `llm_call` events are billing summaries; full
+request/response bodies live in the Gateway database. CLI mode skips
+this step (no Gateway).
 
 ATIF is a pure projection — re-running it on the same events.jsonl
 produces a byte-identical result modulo `emitted_at` timestamps.

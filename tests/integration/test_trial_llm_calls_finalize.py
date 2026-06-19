@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from loom.agent.gateway_client import FakeLLMGatewayClient, GatewayCallResponse
+from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
 from loom.driver.fake import FakeDriver, command_table_handler
 from loom.models.exec import ExecResult
@@ -20,6 +22,8 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
+from loom.models.trajectory import ChatMessage
+from loom.models.types import ModelSpec
 from loom.models.verifier import VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
@@ -52,12 +56,17 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
     trial_id = uuid4()
 
     captured_calls: list[UUID] = []
@@ -140,8 +149,10 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
     store = FakeObjectStore()
     local_path = tmp_path / "trajectory.jsonl"
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=sol.parent,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -161,10 +172,7 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
 
     # The local JSONL has both llm_call events appended.
     lines = local_path.read_text().splitlines()
-    llm_call_lines = [
-        line for line in lines
-        if json.loads(line).get("kind") == "llm_call"
-    ]
+    llm_call_lines = [line for line in lines if json.loads(line).get("kind") == "llm_call"]
     assert len(llm_call_lines) == 5
     parsed = [json.loads(line) for line in llm_call_lines]
     assert parsed[0]["input_tokens"] == 100
@@ -191,6 +199,105 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
     assert parsed[0]["cost_usd_snapshot"] == 0.001
 
 
+async def test_trial_does_not_duplicate_litellm_agent_llm_calls(
+    tmp_path: Path,
+) -> None:
+    """#257: LiteLLMAgent writes rich LLMCallEvents itself.
+
+    The gateway also persists the same call in `llm_calls` for usage
+    accounting. Finalize must not project that row back into the same
+    trajectory, or Trial Detail shows two LLM calls for one model request.
+    """
+
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "task.toml").write_text('schema_version = "1"\n')
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello-world", name="hello-world"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="litellm"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    trial_id = uuid4()
+    model = ModelSpec(provider="openai", name="qwen2.5-coder-7b-instruct")
+    agent = LiteLLMAgent(
+        model=model,
+        gateway=FakeLLMGatewayClient(
+            scripted=[
+                GatewayCallResponse(
+                    response=ChatMessage(role="assistant", content="done"),
+                    input_tokens=41,
+                    cached_input_tokens=0,
+                    cache_write_tokens=0,
+                    output_tokens=142,
+                    thinking_tokens=0,
+                    provider_extras={},
+                    cost_usd=0.0001,
+                    finish_reason="stop",
+                    duration_sec=0.05,
+                    streamed=False,
+                    time_to_first_token_sec=None,
+                    rate_card_hash="card",
+                    gateway_request_id="gateway-row-1",
+                ),
+            ]
+        ),
+        team_id=str(uuid4()),
+        trial_id=trial_id,
+        max_turns=1,
+    )
+    captured_calls: list[UUID] = []
+
+    async def fetcher(tid: UUID) -> list[dict]:
+        captured_calls.append(tid)
+        return [
+            {
+                "id": "gateway-row-1",
+                "captured_at": "2026-06-19T02:15:44Z",
+                "trial_id": str(tid),
+                "step_id": "main",
+                "model": "qwen2.5-coder-7b-instruct",
+                "dialect": "openai_chat",
+                "input_tokens": 41,
+                "output_tokens": 142,
+                "provider_extras": {},
+                "cost_usd": 0.0001,
+                "rate_card_hash": "card",
+            },
+        ]
+
+    local_path = tmp_path / "trajectory.jsonl"
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=task_dir,
+        trial_config=stub_trial_config(agent_name="litellm", agent_model=model),
+        driver=FakeDriver(),
+        agent=agent,
+        verifier=_AlwaysPassVerifier(),  # type: ignore[arg-type]
+        object_store=FakeObjectStore(),
+        local_trajectory_path=local_path,
+        llm_calls_fetcher=fetcher,
+    )
+
+    result = await Trial(ctx=ctx).run()
+    assert result.state.value == "succeeded"
+    assert captured_calls == []
+
+    llm_call_events = [
+        json.loads(line)
+        for line in local_path.read_text().splitlines()
+        if json.loads(line).get("kind") == "llm_call"
+    ]
+    assert len(llm_call_events) == 1
+    assert llm_call_events[0]["finish_reason"] == "stop"
+    assert llm_call_events[0]["response"]["content"] == "done"
+
+
 async def test_trial_skips_fetcher_when_none(tmp_path: Path) -> None:
     """Backwards-compat: a context without llm_calls_fetcher (v0.7 path)
     finalizes normally with no extra events injected."""
@@ -208,18 +315,25 @@ async def test_trial_skips_fetcher_when_none(tmp_path: Path) -> None:
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main")],
     )
-    handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
-            return_code=0, stdout=b"hello\n", stderr=b"",
-            truncated=False, duration_sec=0.05,
-        ),
-    })
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.05,
+            ),
+        }
+    )
 
     trial_id = uuid4()
     local_path = tmp_path / "trajectory.jsonl"
     ctx = TrialContext(
-        trial_id=trial_id, team_id=uuid4(),
-        task_config=task, task_checksum="0" * 64,
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
         task_dir=sol.parent,
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
@@ -236,6 +350,4 @@ async def test_trial_skips_fetcher_when_none(tmp_path: Path) -> None:
 
     # JSONL has no llm_call events.
     lines = local_path.read_text().splitlines()
-    assert all(
-        json.loads(line).get("kind") != "llm_call" for line in lines
-    )
+    assert all(json.loads(line).get("kind") != "llm_call" for line in lines)

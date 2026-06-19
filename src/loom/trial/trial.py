@@ -168,11 +168,13 @@ class Trial:
                     # inside the broad-Exception catch so ENV_START_FAILURE
                     # (DriverError) becomes a classified TrialResult instead
                     # of propagating raw out of Trial.run.
-                    await self.ctx.driver.start(options=StartOptions(
-                        force_build=self.ctx.trial_config.force_build,
-                        network=self.ctx.sandbox_network,
-                        volumes=self.ctx.sandbox_volumes,
-                    ))
+                    await self.ctx.driver.start(
+                        options=StartOptions(
+                            force_build=self.ctx.trial_config.force_build,
+                            network=self.ctx.sandbox_network,
+                            volumes=self.ctx.sandbox_volumes,
+                        )
+                    )
                     driver_started = True
                     # #188 / Phase B: attach the per-node singleton
                     # to this trial's bridge AFTER container creation.
@@ -181,14 +183,17 @@ class Trial:
                     # run the agent would just hang.
                     if self.ctx.on_driver_started is not None:
                         await self.ctx.on_driver_started()
-                    await writer.append(TrialStartEvent(
-                        emitted_at=datetime.now(UTC),
-                        trial_id=self.ctx.trial_id, step_id="__trial__",
-                        seq=seq.next(),
-                        task_id=self.ctx.task_id,
-                        agent_name=self.ctx.agent.name,
-                        agent_mode=self.ctx.agent.mode,
-                    ))
+                    await writer.append(
+                        TrialStartEvent(
+                            emitted_at=datetime.now(UTC),
+                            trial_id=self.ctx.trial_id,
+                            step_id="__trial__",
+                            seq=seq.next(),
+                            task_id=self.ctx.task_id,
+                            agent_name=self.ctx.agent.name,
+                            agent_mode=self.ctx.agent.mode,
+                        )
+                    )
                     # #186: upload the materialized task bundle into the
                     # sandbox so the agent sees instructions / scaffolding
                     # AND the verifier sees grading tests at /workspace/
@@ -204,8 +209,10 @@ class Trial:
 
                     for step in self.ctx.task_config.steps:
                         sr = await run_step(
-                            ctx=self.ctx, step=step,
-                            trajectory=writer, baseline_policy=baseline,
+                            ctx=self.ctx,
+                            step=step,
+                            trajectory=writer,
+                            baseline_policy=baseline,
                         )
                         result.steps.append(sr)
                     result.reward = _aggregate(self.ctx, result)
@@ -219,13 +226,16 @@ class Trial:
                     cancelled = True
                     result.state = TrialState.CANCELLED
                     try:
-                        await writer.append(TrialCancelledEvent(
-                            emitted_at=datetime.now(UTC),
-                            trial_id=self.ctx.trial_id, step_id="__trial__",
-                            seq=seq.next(),
-                            cancellation_requested_at=datetime.now(UTC),
-                            observed_at=datetime.now(UTC),
-                        ))
+                        await writer.append(
+                            TrialCancelledEvent(
+                                emitted_at=datetime.now(UTC),
+                                trial_id=self.ctx.trial_id,
+                                step_id="__trial__",
+                                seq=seq.next(),
+                                cancellation_requested_at=datetime.now(UTC),
+                                observed_at=datetime.now(UTC),
+                            )
+                        )
                     except Exception:
                         logger.exception("failed to append TrialCancelledEvent")
                 except Exception as exc:
@@ -234,14 +244,17 @@ class Trial:
                     result.failure_reason = reason
                     result.failure_message = message
                     try:
-                        await writer.append(TrialErrorEvent(
-                            emitted_at=datetime.now(UTC),
-                            trial_id=self.ctx.trial_id, step_id="__trial__",
-                            seq=seq.next(),
-                            error_type=type(exc).__name__,
-                            message=str(exc),
-                            traceback=_format_tb(exc),
-                        ))
+                        await writer.append(
+                            TrialErrorEvent(
+                                emitted_at=datetime.now(UTC),
+                                trial_id=self.ctx.trial_id,
+                                step_id="__trial__",
+                                seq=seq.next(),
+                                error_type=type(exc).__name__,
+                                message=str(exc),
+                                traceback=_format_tb(exc),
+                            )
+                        )
                     except Exception:
                         # Early-start failure leaves the writer with no
                         # TrialStartEvent; appending an error event can
@@ -253,16 +266,19 @@ class Trial:
                             self.ctx.driver.stop(delete=self.ctx.trial_config.delete_env),
                         )
                 try:
-                    await writer.append(TrialEndEvent(
-                        emitted_at=datetime.now(UTC),
-                        trial_id=self.ctx.trial_id, step_id="__trial__",
-                        seq=seq.next(),
-                        final_state=result.state.value,
-                        reward=result.reward,
-                        failure_reason=(
-                            result.failure_reason.value if result.failure_reason else None
-                        ),
-                    ))
+                    await writer.append(
+                        TrialEndEvent(
+                            emitted_at=datetime.now(UTC),
+                            trial_id=self.ctx.trial_id,
+                            step_id="__trial__",
+                            seq=seq.next(),
+                            final_state=result.state.value,
+                            reward=result.reward,
+                            failure_reason=(
+                                result.failure_reason.value if result.failure_reason else None
+                            ),
+                        )
+                    )
                 except Exception:
                     logger.exception("failed to append TrialEndEvent")
 
@@ -272,7 +288,10 @@ class Trial:
                 # projection sees them. The writer is still open here
                 # (inside `async with writer:`); skip silently if the
                 # context didn't supply a fetcher (v0.7 behavior).
-                if self.ctx.llm_calls_fetcher is not None:
+                if (
+                    self.ctx.llm_calls_fetcher is not None
+                    and not _agent_emits_gateway_llm_call_events(self.ctx.agent)
+                ):
                     try:
                         await self._append_llm_call_events(writer)
                     except Exception:
@@ -283,16 +302,18 @@ class Trial:
         finally:
             try:
                 atif_uri = await asyncio.wait_for(
-                    asyncio.shield(finalize_trajectory(
-                        local_path=self.ctx.local_trajectory_path,
-                        store=self.ctx.object_store,
-                        team_id=str(self.ctx.team_id),
-                        trial_id=str(self.ctx.trial_id),
-                        task_id=self.ctx.task_id,
-                        agent_name=self.ctx.agent.name,
-                        agent_version=self.ctx.agent.version,
-                        bucket=self.ctx.trajectory_bucket,
-                    )),
+                    asyncio.shield(
+                        finalize_trajectory(
+                            local_path=self.ctx.local_trajectory_path,
+                            store=self.ctx.object_store,
+                            team_id=str(self.ctx.team_id),
+                            trial_id=str(self.ctx.trial_id),
+                            task_id=self.ctx.task_id,
+                            agent_name=self.ctx.agent.name,
+                            agent_version=self.ctx.agent.version,
+                            bucket=self.ctx.trajectory_bucket,
+                        )
+                    ),
                     timeout=_FINALIZE_TIMEOUT_SEC,
                 )
                 result.atif_uri = atif_uri
@@ -312,11 +333,13 @@ class Trial:
                 # connection drops, etc. to propagate out of Trial.run.
                 try:
                     await asyncio.wait_for(
-                        asyncio.shield(self.state_patch(
-                            result.state.value,
-                            result.failure_reason.value if result.failure_reason else None,
-                            result.failure_message,
-                        )),
+                        asyncio.shield(
+                            self.state_patch(
+                                result.state.value,
+                                result.failure_reason.value if result.failure_reason else None,
+                                result.failure_message,
+                            )
+                        ),
                         timeout=_STATE_PATCH_TIMEOUT_SEC,
                     )
                 except TimeoutError:
@@ -367,18 +390,23 @@ class Trial:
         }
         for row in rows:
             captured_at_raw = row.get("captured_at")
-            emitted_at = datetime.fromisoformat(
-                str(captured_at_raw).replace("Z", "+00:00"),
-            ) if captured_at_raw else datetime.now(UTC)
+            emitted_at = (
+                datetime.fromisoformat(
+                    str(captured_at_raw).replace("Z", "+00:00"),
+                )
+                if captured_at_raw
+                else datetime.now(UTC)
+            )
             extras = row.get("provider_extras") or {}
             event = LLMCallEvent(
                 emitted_at=emitted_at,
                 trial_id=self.ctx.trial_id,
                 step_id=str(row.get("step_id") or "__trial__"),
-                seq=0,        # appended out-of-band; ATIF sorts by emitted_at
+                seq=0,  # appended out-of-band; ATIF sorts by emitted_at
                 model=ModelSpec(
                     provider=_provider_by_dialect.get(
-                        str(row.get("dialect") or ""), "unknown",
+                        str(row.get("dialect") or ""),
+                        "unknown",
                     ),
                     name=str(row.get("model") or "unknown"),
                 ),
@@ -397,8 +425,7 @@ class Trial:
                 ),
                 output_tokens=int(row.get("output_tokens") or 0),
                 thinking_tokens=int(
-                    extras.get("reasoning_tokens", 0)
-                    + extras.get("thoughtsTokenCount", 0),
+                    extras.get("reasoning_tokens", 0) + extras.get("thoughtsTokenCount", 0),
                 ),
                 provider_extras={
                     k: int(v) for k, v in extras.items() if isinstance(v, int | float)
@@ -412,16 +439,13 @@ class Trial:
             await writer.append(event)
 
 
+def _agent_emits_gateway_llm_call_events(agent: AgentRuntime) -> bool:
+    return bool(getattr(agent, "emits_gateway_llm_call_events", False))
+
+
 def _aggregate(ctx: TrialContext, result: TrialResult) -> dict[str, float] | None:
-    strategy = (
-        ctx.task_config.multi_step.reward_strategy
-        if ctx.task_config.multi_step else "mean"
-    )
-    rewards = [
-        s.verifier_result.rewards
-        for s in result.steps
-        if s.verifier_result is not None
-    ]
+    strategy = ctx.task_config.multi_step.reward_strategy if ctx.task_config.multi_step else "mean"
+    rewards = [s.verifier_result.rewards for s in result.steps if s.verifier_result is not None]
     if not rewards:
         return None
     keys: set[str] = set()

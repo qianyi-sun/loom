@@ -135,8 +135,10 @@ all scale horizontally. Postgres is the durability boundary.
         |                      |                      |   (fenced)   |                          |
         |                      |                      |              | finalize (always runs):  |
         |                      |                      |              |  1. last trajectory part |
-        |                      |                      |              |  2. fetch llm_calls      |
-        |                      |                      |              |     (CP HTTP)            |
+        |                      |                      |              |  2. maybe fetch llm_calls|
+        |                      |                      |              |     (CP HTTP; skipped if |
+        |                      |                      |              |      agent already wrote |
+        |                      |                      |              |      gateway llm events) |
         |                      |                      |              |  3. project_to_atif      |
         |                      |                      |              |  4. upload atif.json     |
         |                      |                      |              | PATCH /trajectory_index  |
@@ -243,8 +245,9 @@ configurations.
 - Provider-connection facade cost lookup via
   `provider_connections.rate_card_provider` for BYO endpoints
 - Cost compute at request time; row inserted into `llm_calls` BEFORE
-  the response returns (so finalize can fetch a guaranteed-complete
-  set)
+  the response returns, so finalize can fetch a guaranteed-complete
+  set for adapters that did not already write gateway-backed
+  `llm_call` trajectory events.
 - Per-call attribution via `(team_id, trial_id, step_id)` fields on
   the `llm_calls` row
 
