@@ -30,6 +30,7 @@ def load_builtin_entries() -> list[DatasetEntry]:
                 ep.name, exc,
             )
             continue
+        upstream = getattr(adapter, "upstream_source", None)
         out.append(DatasetEntry(
             slug=ep.name,
             source="builtin",
@@ -40,6 +41,7 @@ def load_builtin_entries() -> list[DatasetEntry]:
             status="installed",
             available_pip_spec=None,
             entry_point=f"{ep.module}:{ep.attr}" if ep.attr else ep.value,
+            upstream_kind=getattr(upstream, "kind", None),
         ))
     out.sort(key=lambda e: e.slug)
     return out

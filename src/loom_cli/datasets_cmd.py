@@ -241,6 +241,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"slug:           {match.slug}")
     print(f"display_name:   {match.display_name}")
     print(f"source:         {match.source}")
+    print(f"upstream_kind:  {match.upstream_kind or '-'}")
     print(f"status:         {match.status}")
     print(f"license:        {match.license_spdx}")
     print(f"license_url:    {match.license_url}")

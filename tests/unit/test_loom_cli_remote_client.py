@@ -25,6 +25,7 @@ def test_returns_entries_from_service(monkeypatch: pytest.MonkeyPatch) -> None:
                 "license_spdx": "MIT",
                 "license_url": "https://x.example",
                 "splits": ["test"],
+                "upstream_kind": "huggingface",
             },
             {
                 "id": "custom-rl-bench",
@@ -32,6 +33,10 @@ def test_returns_entries_from_service(monkeypatch: pytest.MonkeyPatch) -> None:
                 "license_spdx": "proprietary",
                 "license_url": "",
                 "splits": ["train"],
+                # #234: API rows for [[local]] benchmarks surface
+                # upstream_kind="local-folder" — operators can spot
+                # them in `loom datasets list`.
+                "upstream_kind": "local-folder",
             },
         ],
         "next_cursor": None,
@@ -58,6 +63,9 @@ def test_returns_entries_from_service(monkeypatch: pytest.MonkeyPatch) -> None:
     for e in entries:
         assert e.source == "remote"
         assert e.status == "remote-only"
+    by_slug = {e.slug: e for e in entries}
+    assert by_slug["humaneval"].upstream_kind == "huggingface"
+    assert by_slug["custom-rl-bench"].upstream_kind == "local-folder"
 
 
 def test_service_error_returns_empty_not_raise(

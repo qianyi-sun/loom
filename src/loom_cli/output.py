@@ -73,18 +73,26 @@ def render_datasets_table(entries: list[DatasetEntry]) -> str:
     # multimodal`=20 chars; future adapters may go wider).
     slug_w = max(24, max((len(e.slug) for e in entries), default=0))
     license_w = max(14, max((len(e.license_spdx) for e in entries), default=0))
+    # UPSTREAM (issue #234): which mechanism produces this benchmark's
+    # tasks. "huggingface" / "git" / "https-tarball" for entry-point
+    # adapters; "local-folder" for [[local]] benchmarks; "-" for
+    # catalog-only entries.
+    upstream_w = max(
+        12, max((len(e.upstream_kind or "-") for e in entries), default=0),
+    )
     header = (
-        f"{'SLUG':<{slug_w}} {'SOURCE':<10} {'LICENSE':<{license_w}} "
-        f"{'TASKS':<6} STATUS"
+        f"{'SLUG':<{slug_w}} {'SOURCE':<10} {'UPSTREAM':<{upstream_w}} "
+        f"{'LICENSE':<{license_w}} {'TASKS':<6} STATUS"
     )
     if not entries:
         return header
     rows = [header]
     for e in entries:
         tasks = "-" if e.task_count is None else str(e.task_count)
+        upstream = e.upstream_kind or "-"
         rows.append(
-            f"{e.slug:<{slug_w}} {e.source:<10} {e.license_spdx:<{license_w}} "
-            f"{tasks:<6} {e.status}",
+            f"{e.slug:<{slug_w}} {e.source:<10} {upstream:<{upstream_w}} "
+            f"{e.license_spdx:<{license_w}} {tasks:<6} {e.status}",
         )
     return "\n".join(rows)
 

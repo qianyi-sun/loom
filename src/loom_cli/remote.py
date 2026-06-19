@@ -50,6 +50,7 @@ def load_remote_entries(
 
     out: list[DatasetEntry] = []
     for item in payload.get("items", []):
+        upstream_kind = item.get("upstream_kind")
         out.append(DatasetEntry(
             slug=str(item["id"]),
             source="remote",
@@ -60,6 +61,7 @@ def load_remote_entries(
             status="remote-only",
             available_pip_spec=None,
             entry_point=None,
+            upstream_kind=str(upstream_kind) if upstream_kind else None,
         ))
     out.sort(key=lambda e: e.slug)
     return out

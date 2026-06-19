@@ -21,6 +21,13 @@ class DatasetEntry:
     status: Status
     available_pip_spec: str | None
     entry_point: str | None
+    # Where the benchmark's TASKS come from. Distinct from `source`
+    # (which is where THIS DISCOVERY ROW came from). Values:
+    #   "huggingface" / "git" / "https-tarball" — entry-point adapter
+    #     fetching from a real upstream
+    #   "local-folder" — [[local]] in benchmarks.toml (issue #234 PR-1)
+    #   None — catalog entries, or remote rows with no upstream info
+    upstream_kind: str | None = None
 
 
 def union_entries(

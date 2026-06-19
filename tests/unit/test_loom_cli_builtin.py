@@ -33,6 +33,48 @@ def test_each_entry_has_display_name_and_license() -> None:
     assert he.source == "builtin"
 
 
+def test_entry_carries_upstream_kind_from_adapter() -> None:
+    """#234: the listing layer must surface adapter.upstream_source.kind
+    so `loom datasets list` can show an UPSTREAM column."""
+    entries = load_builtin_entries()
+    he = next(e for e in entries if e.slug == "humaneval")
+    assert he.upstream_kind == "huggingface"
+    # bfcl uses a git upstream — sanity-check we propagate that too.
+    bfcl = next(e for e in entries if e.slug == "bfcl")
+    assert bfcl.upstream_kind == "git"
+
+
+def test_third_party_adapter_without_upstream_source_falls_back_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive: an adapter that doesn't expose `upstream_source`
+    (legacy third-party shape) returns None for `upstream_kind` rather
+    than crashing the loader."""
+    from loom_cli import builtin
+
+    class _NoUpstreamAdapter:
+        display_name = "Bare"
+        license_spdx = "MIT"
+        license_url = ""
+
+    class _Stub:
+        name = "no-upstream"
+        module = "x"
+        attr = "Y"
+        value = "x:Y"
+
+        def load(self) -> object:
+            return _NoUpstreamAdapter
+
+    def _fake_eps(group: str) -> list[_Stub]:
+        return [_Stub()]
+
+    monkeypatch.setattr(builtin, "_entry_points", _fake_eps)
+    out = builtin.load_builtin_entries()
+    assert len(out) == 1
+    assert out[0].upstream_kind is None
+
+
 def test_broken_entry_point_does_not_crash_loader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
