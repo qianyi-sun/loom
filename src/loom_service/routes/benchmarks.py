@@ -13,10 +13,11 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text
 
 from loom.db.schema import Benchmark, Task
 from loom_service.dependencies import SessionAndCtx
+from loom_service.task_config_validation import has_required_task_config_sections
 
 router = APIRouter()
 
@@ -60,9 +61,13 @@ async def list_benchmarks(
     s, _ctx = sc
     # LEFT JOIN tasks for the count so empty benchmarks still show
     # up when include_empty=True. GROUP BY on the PK is safe.
+    runnable_task_join = and_(
+        Task.benchmark_id == Benchmark.id,
+        has_required_task_config_sections(),
+    )
     stmt = (
         select(Benchmark, func.count(Task.id).label("task_count"))
-        .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
+        .join(Task, runnable_task_join, isouter=True)
         .group_by(Benchmark.id)
         .order_by(Benchmark.display_name)
     )
@@ -85,18 +90,26 @@ async def list_benchmarks(
 
 @router.get("/benchmarks/{benchmark_id}")
 async def get_benchmark(
-    benchmark_id: str, sc: SessionAndCtx,
+    benchmark_id: str,
+    sc: SessionAndCtx,
 ) -> dict[str, Any]:
     s, _ctx = sc
-    row = (await s.execute(
-        select(Benchmark, func.count(Task.id).label("task_count"))
-        .join(Task, Task.benchmark_id == Benchmark.id, isouter=True)
-        .where(Benchmark.id == benchmark_id)
-        .group_by(Benchmark.id),
-    )).one_or_none()
+    runnable_task_join = and_(
+        Task.benchmark_id == Benchmark.id,
+        has_required_task_config_sections(),
+    )
+    row = (
+        await s.execute(
+            select(Benchmark, func.count(Task.id).label("task_count"))
+            .join(Task, runnable_task_join, isouter=True)
+            .where(Benchmark.id == benchmark_id)
+            .group_by(Benchmark.id),
+        )
+    ).one_or_none()
     if row is None:
         raise HTTPException(
-            status_code=404, detail="benchmark not found",
+            status_code=404,
+            detail="benchmark not found",
         )
     b, count = row
     return _bench_row(b, int(count))
@@ -104,7 +117,8 @@ async def get_benchmark(
 
 @router.get("/benchmarks/{benchmark_id}/tags")
 async def list_benchmark_tags(
-    benchmark_id: str, sc: SessionAndCtx,
+    benchmark_id: str,
+    sc: SessionAndCtx,
 ) -> dict[str, Any]:
     """Distinct tag keys → distinct values for a benchmark's tasks.
 
@@ -120,26 +134,28 @@ async def list_benchmark_tags(
     # 404 if the benchmark itself doesn't exist so the SPA can
     # distinguish "no tags here" (empty list, 200) from "wrong id"
     # (404).
-    exists = (await s.execute(
-        select(Benchmark.id).where(Benchmark.id == benchmark_id),
-    )).scalar_one_or_none()
+    exists = (
+        await s.execute(
+            select(Benchmark.id).where(Benchmark.id == benchmark_id),
+        )
+    ).scalar_one_or_none()
     if exists is None:
         raise HTTPException(
-            status_code=404, detail="benchmark not found",
+            status_code=404,
+            detail="benchmark not found",
         )
-    rows = (await s.execute(
-        text(
-            "SELECT kv.key, ARRAY_AGG(DISTINCT kv.value ORDER BY kv.value) "
-            "FROM tasks t, jsonb_each_text(t.tags) AS kv(key, value) "
-            "WHERE t.benchmark_id = :bid "
-            "GROUP BY kv.key "
-            "ORDER BY kv.key",
-        ),
-        {"bid": benchmark_id},
-    )).all()
+    rows = (
+        await s.execute(
+            text(
+                "SELECT kv.key, ARRAY_AGG(DISTINCT kv.value ORDER BY kv.value) "
+                "FROM tasks t, jsonb_each_text(t.tags) AS kv(key, value) "
+                "WHERE t.benchmark_id = :bid "
+                "GROUP BY kv.key "
+                "ORDER BY kv.key",
+            ),
+            {"bid": benchmark_id},
+        )
+    ).all()
     return {
-        "items": [
-            {"key": key, "values": list(values)}
-            for key, values in rows
-        ],
+        "items": [{"key": key, "values": list(values)} for key, values in rows],
     }

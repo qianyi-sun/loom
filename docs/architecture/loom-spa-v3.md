@@ -292,6 +292,12 @@ close to what PR J shipped, with three deliberate changes:
      formats users tend to paste from (see "Smart task-id parser"
      below).
 
+   Benchmark `task_count` values shown here are runnable counts, not
+   raw task-table row counts. Placeholder benchmark rows whose stored
+   `config` is empty or missing required `TaskConfig` sections surface
+   as `0 tasks — needs publish`. The real `/api/v1/tasks/count` check
+   applies full stored-`TaskConfig` validation before enabling submit.
+
    The selection is a radio between the five modes plus a benchmark
    dropdown above them (the benchmark scopes the pool that random/
    first/last operate on; for "Explicit", the benchmark is implied

@@ -21,9 +21,21 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
 
+def _valid_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
 @pytest.fixture
 async def benchmarks_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -39,7 +51,8 @@ async def benchmarks_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -58,22 +71,32 @@ async def benchmarks_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         for bid, dn, lic in (
             ("aime", "AIME", "proprietary-MAA"),
             ("humaneval", "HumanEval", "MIT"),
             ("mbpp", "MBPP", "CC-BY-4.0"),
         ):
-            s.execute(insert(Benchmark).values(
-                id=bid, display_name=dn, upstream_kind="huggingface",
-                upstream_locator=f"upstream/{bid}", upstream_revision="",
-                license_spdx=lic, license_url=f"https://example/{bid}",
-                splits=["test"],
-            ))
+            s.execute(
+                insert(Benchmark).values(
+                    id=bid,
+                    display_name=dn,
+                    upstream_kind="huggingface",
+                    upstream_locator=f"upstream/{bid}",
+                    upstream_revision="",
+                    license_spdx=lic,
+                    license_url=f"https://example/{bid}",
+                    splits=["test"],
+                )
+            )
         s.commit()
     try:
         yield app, raw
@@ -82,6 +105,7 @@ async def benchmarks_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Token))
+            s.execute(delete(Task))
             s.execute(delete(Benchmark))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -98,7 +122,8 @@ async def test_list_benchmarks(
     app, raw = benchmarks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r_default = await ac.get(
             "/api/v1/benchmarks",
@@ -115,7 +140,9 @@ async def test_list_benchmarks(
     assert len(items) == 3
     # Sorted by display_name: AIME < HumanEval < MBPP
     assert [it["display_name"] for it in items] == [
-        "AIME", "HumanEval", "MBPP",
+        "AIME",
+        "HumanEval",
+        "MBPP",
     ]
     # Every row reports task_count=0 (no tasks linked to these
     # benchmark ids in the fixture).
@@ -123,7 +150,8 @@ async def test_list_benchmarks(
 
 
 async def test_list_benchmarks_shows_imported(
-    benchmarks_setup: tuple[FastAPI, str], postgres_url: str,
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
 ) -> None:
     """Once a task is registered for a benchmark, the default listing
     surfaces that benchmark with task_count > 0."""
@@ -131,20 +159,23 @@ async def test_list_benchmarks_shows_imported(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(insert(Task).values(
-            id="humaneval/HumanEval/0",
-            benchmark_id="humaneval",
-            config={"task": {"name": "stub"}},
-            checksum="0" * 64,
-            source="s3://bucket/prefix/",
-            license="MIT",
-            registered_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Task).values(
+                id="humaneval/HumanEval/0",
+                benchmark_id="humaneval",
+                config=_valid_task_config("humaneval/HumanEval/0"),
+                checksum="0" * 64,
+                source="s3://bucket/prefix/",
+                license="MIT",
+                registered_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     sync_engine.dispose()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/benchmarks",
@@ -165,13 +196,72 @@ async def test_list_benchmarks_shows_imported(
     sync_engine.dispose()
 
 
+async def test_list_benchmarks_counts_only_runnable_task_configs(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """Placeholder task rows with empty config are not runnable and
+    must not make New Batch advertise a benchmark as launchable."""
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="humaneval/HumanEval/0",
+                benchmark_id="humaneval",
+                config=_valid_task_config("humaneval/HumanEval/0"),
+                checksum="0" * 64,
+                source="s3://bucket/prefix/",
+                license="MIT",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="mbpp/unpublished-placeholder",
+                benchmark_id="mbpp",
+                config={},
+                checksum="1" * 64,
+                source=None,
+                license="CC-BY-4.0",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r_default = await ac.get(
+            "/api/v1/benchmarks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_all = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r_default.status_code == 200
+    assert [item["id"] for item in r_default.json()["items"]] == [
+        "humaneval",
+    ]
+    all_items = {item["id"]: item for item in r_all.json()["items"]}
+    assert all_items["humaneval"]["task_count"] == 1
+    assert all_items["mbpp"]["task_count"] == 0
+
+
 async def test_pagination(
     benchmarks_setup: tuple[FastAPI, str],
 ) -> None:
     app, raw = benchmarks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r1 = await ac.get(
             "/api/v1/benchmarks?limit=2&include_empty=true",
@@ -196,7 +286,8 @@ async def test_get_benchmark_detail(
     app, raw = benchmarks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/benchmarks/humaneval",
@@ -217,7 +308,8 @@ async def test_get_benchmark_not_found(
     app, raw = benchmarks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/benchmarks/no-such-bench",
@@ -232,7 +324,8 @@ async def test_unauthenticated_401(
     app, _raw = benchmarks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get("/api/v1/benchmarks")
     assert r.status_code == 401

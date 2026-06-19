@@ -671,10 +671,11 @@ export default function NewBatch(): JSX.Element {
     return allKnown ? total : undefined;
   }, [benchmarks.data, selectedBenchmarks]);
 
-  // Build the same `task_filter` the submit handler would send so the
-  // count endpoint returns identical numbers to what POST /batches
-  // would materialize. Keyed by the filter shape so React Query dedupes
-  // and refetches only when the filter actually changes.
+  // Build the same `task_filter` the submit handler would send. The
+  // count endpoint returns the runnable count after stored TaskConfig
+  // validation, so placeholder/unpublished rows do not make the form
+  // advertise launchable trials. Keyed by the filter shape so React
+  // Query dedupes and refetches only when the filter actually changes.
   const benchmarkIdsSorted = useMemo(
     () => Array.from(selectedBenchmarks).sort(),
     [selectedBenchmarks],

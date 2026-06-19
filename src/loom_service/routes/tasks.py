@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 
 from loom.db.schema import Task
 from loom_service.dependencies import SessionAndCtx
+from loom_service.task_config_validation import split_valid_task_configs
 from loom_service.task_filter import resolve_task_filter
 
 router = APIRouter()
@@ -87,9 +88,11 @@ async def list_tasks(
         # query that happens to contain them just matches more
         # broadly — no injection risk through the SQL boundary.
         conds.append(Task.id.ilike(f"%{q}%"))
-    total = (await s.execute(
-        select(func.count()).select_from(Task).where(*conds),
-    )).scalar_one()
+    total = (
+        await s.execute(
+            select(func.count()).select_from(Task).where(*conds),
+        )
+    ).scalar_one()
     stmt = select(Task).where(*conds).order_by(Task.id)
     if cursor:
         stmt = stmt.where(Task.id > cursor)
@@ -131,15 +134,18 @@ async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, int]:
     """
     s, _ctx = sc
     task_ids = await resolve_task_filter(s, payload.task_filter)
-    return {"count": len(task_ids)}
+    valid_task_ids, _invalid_tasks = await split_valid_task_configs(s, task_ids)
+    return {"count": len(valid_task_ids)}
 
 
 @router.get("/tasks/{task_id:path}")
 async def get_task(task_id: str, sc: SessionAndCtx) -> dict[str, Any]:
     s, _ctx = sc
-    t = (await s.execute(
-        select(Task).where(Task.id == task_id),
-    )).scalar_one_or_none()
+    t = (
+        await s.execute(
+            select(Task).where(Task.id == task_id),
+        )
+    ).scalar_one_or_none()
     if t is None:
         raise HTTPException(status_code=404, detail="task not found")
     d = _task_row(t)

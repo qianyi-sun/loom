@@ -383,6 +383,12 @@ been re-verified.
   of existing batches, lowers `expected_trial_count` to the valid slate,
   marks mixed slates `partial_failed`, and finishes all-invalid slates as
   `all_failed` instead of retrying forever.
+- **Runnable task counts** — benchmark `task_count` and
+  `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
+  task-table row counts. Placeholder rows with empty or incomplete
+  `TaskConfig` data do not make a benchmark look launchable in New Batch;
+  the batch creation path still performs the final strict validation and
+  rejects invalid explicit selections with HTTP 400.
 - **Task bundle lookup** — workers fetch the full task body from
   `GET /tasks/{task_id}/bundle`; task ids may include slashes such as
   `humaneval/HumanEval/26`.

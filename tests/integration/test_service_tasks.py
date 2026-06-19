@@ -23,7 +23,8 @@ from loom_service.config import LoomServiceSettings
 
 @pytest.fixture
 async def tasks_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[FastAPI, str]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
@@ -39,7 +40,8 @@ async def tasks_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -58,40 +60,75 @@ async def tasks_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Benchmark).values(
-            id="humaneval", display_name="HumanEval",
-            upstream_kind="huggingface",
-            upstream_locator="openai_humaneval",
-            upstream_revision="", license_spdx="MIT",
-            license_url="https://example/license",
-            splits=["test"],
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Benchmark).values(
+                id="humaneval",
+                display_name="HumanEval",
+                upstream_kind="huggingface",
+                upstream_locator="openai_humaneval",
+                upstream_revision="",
+                license_spdx="MIT",
+                license_url="https://example/license",
+                splits=["test"],
+            )
+        )
+
         # Realistic config so the list route can surface name +
         # description + agent + verifier + step_count from the JSON.
         def _config(name: str, desc: str) -> dict:
             return {
+                "schema_version": "1",
                 "task": {"id": name, "name": name, "description": desc},
+                "environment": {"os": "linux", "docker_image": "alpine"},
                 "agent": {"name": "oracle"},
                 "verifier": {"name": "pytest"},
                 "steps": [{"name": "main"}, {"name": "checkpoint"}],
             }
-        for i, (tid, lic, bench, name, desc) in enumerate((
-            ("humaneval/HumanEval/0", "MIT", "humaneval",
-                "Two-sum", "Return indices of two numbers that sum to a target."),
-            ("humaneval/HumanEval/1", "MIT", "humaneval",
-                "Balanced parens", "Validate a balanced-parens expression."),
-            ("local/hand-written", "Apache-2.0", None,
-                "Hello world", "Smallest possible Loom task."),
-        )):
-            s.execute(insert(Task).values(
-                id=tid, checksum="x" * 64, config=_config(name, desc),
-                source="local", license=lic, benchmark_id=bench,
-            ))
+
+        for i, (tid, lic, bench, name, desc) in enumerate(
+            (
+                (
+                    "humaneval/HumanEval/0",
+                    "MIT",
+                    "humaneval",
+                    "Two-sum",
+                    "Return indices of two numbers that sum to a target.",
+                ),
+                (
+                    "humaneval/HumanEval/1",
+                    "MIT",
+                    "humaneval",
+                    "Balanced parens",
+                    "Validate a balanced-parens expression.",
+                ),
+                (
+                    "local/hand-written",
+                    "Apache-2.0",
+                    None,
+                    "Hello world",
+                    "Smallest possible Loom task.",
+                ),
+            )
+        ):
+            s.execute(
+                insert(Task).values(
+                    id=tid,
+                    checksum="x" * 64,
+                    config=_config(name, desc),
+                    source="local",
+                    license=lic,
+                    benchmark_id=bench,
+                )
+            )
             del i
         s.commit()
     try:
@@ -113,7 +150,8 @@ async def test_list_tasks(tasks_setup: tuple[FastAPI, str]) -> None:
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks",
@@ -135,7 +173,8 @@ async def test_list_surfaces_name_description_agent_verifier_step_count(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks?benchmark_id=humaneval",
@@ -158,7 +197,8 @@ async def test_q_substring_matches_task_id(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks?q=hand",
@@ -175,7 +215,8 @@ async def test_q_is_case_insensitive(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks?q=HUMANEVAL",
@@ -194,7 +235,8 @@ async def test_license_query_param_no_longer_filters(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks?license=MIT",
@@ -209,7 +251,8 @@ async def test_filter_by_benchmark_id(tasks_setup: tuple[FastAPI, str]) -> None:
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks?benchmark_id=humaneval",
@@ -224,7 +267,8 @@ async def test_pagination(tasks_setup: tuple[FastAPI, str]) -> None:
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r1 = await ac.get(
             "/api/v1/tasks?limit=2",
@@ -247,7 +291,8 @@ async def test_get_task_detail(tasks_setup: tuple[FastAPI, str]) -> None:
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks/humaneval/HumanEval/0",
@@ -265,7 +310,8 @@ async def test_get_task_not_found(tasks_setup: tuple[FastAPI, str]) -> None:
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/tasks/no/such/task",
@@ -278,7 +324,8 @@ async def test_unauthenticated_401(tasks_setup: tuple[FastAPI, str]) -> None:
     app, _raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get("/api/v1/tasks")
     assert r.status_code == 401
@@ -296,7 +343,8 @@ async def test_count_empty_filter_returns_all(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
@@ -313,7 +361,8 @@ async def test_count_benchmark_id_filter(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
@@ -322,6 +371,51 @@ async def test_count_benchmark_id_filter(
         )
     assert r.status_code == 200
     assert r.json() == {"count": 2}
+
+
+async def test_count_ignores_invalid_stored_task_configs(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """New Batch uses this count to decide whether a benchmark is
+    launchable, so placeholder rows with empty config must not count."""
+    app, raw = tasks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="humaneval/unpublished-placeholder",
+                checksum="y" * 64,
+                config={},
+                source=None,
+                license="MIT",
+                benchmark_id="humaneval",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        benchmark_count = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"benchmark_id": "humaneval"}},
+        )
+        all_count = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {}},
+        )
+
+    assert benchmark_count.status_code == 200
+    assert benchmark_count.json() == {"count": 2}
+    assert all_count.status_code == 200
+    assert all_count.json() == {"count": 3}
 
 
 async def test_count_no_match_returns_zero_not_error(
@@ -333,7 +427,8 @@ async def test_count_no_match_returns_zero_not_error(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
@@ -345,7 +440,8 @@ async def test_count_no_match_returns_zero_not_error(
 
 
 async def test_count_tag_filter_narrows_to_zero(
-    tasks_setup: tuple[FastAPI, str], postgres_url: str,
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
 ) -> None:
     """The user-facing #28 scenario: benchmark_id has matches, but
     tag_filters narrow to zero. count returns 0 — the SPA gates submit
@@ -357,6 +453,7 @@ async def test_count_tag_filter_narrows_to_zero(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         from sqlalchemy import update as sa_update
+
         s.execute(
             sa_update(Task)
             .where(Task.id == "humaneval/HumanEval/0")
@@ -367,22 +464,26 @@ async def test_count_tag_filter_narrows_to_zero(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_filter": {
-                "benchmark_id": "humaneval",
-                "tag_filters": {"verified": ["unverified-value"]},
-            }},
+            json={
+                "task_filter": {
+                    "benchmark_id": "humaneval",
+                    "tag_filters": {"verified": ["unverified-value"]},
+                }
+            },
         )
     assert r.status_code == 200
     assert r.json() == {"count": 0}
 
 
 async def test_count_tag_filter_narrows_to_some(
-    tasks_setup: tuple[FastAPI, str], postgres_url: str,
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
 ) -> None:
     """Same setup as above but the tag value matches — proves the
     filter pipeline materializes the right count, not just zero."""
@@ -391,6 +492,7 @@ async def test_count_tag_filter_narrows_to_some(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         from sqlalchemy import update as sa_update
+
         s.execute(
             sa_update(Task)
             .where(Task.id == "humaneval/HumanEval/0")
@@ -401,15 +503,18 @@ async def test_count_tag_filter_narrows_to_some(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_filter": {
-                "benchmark_id": "humaneval",
-                "tag_filters": {"verified": ["true"]},
-            }},
+            json={
+                "task_filter": {
+                    "benchmark_id": "humaneval",
+                    "tag_filters": {"verified": ["true"]},
+                }
+            },
         )
     assert r.status_code == 200
     assert r.json() == {"count": 1}
@@ -423,7 +528,8 @@ async def test_count_rejects_unknown_filter_key(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
@@ -442,7 +548,8 @@ async def test_count_subset_kind_first_n_truncates(
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/tasks/count",
@@ -457,7 +564,8 @@ async def test_count_unauthenticated(tasks_setup: tuple[FastAPI, str]) -> None:
     app, _raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.post("/api/v1/tasks/count", json={"task_filter": {}})
     assert r.status_code == 401

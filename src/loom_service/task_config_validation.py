@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import Task
 from loom.models.task import TaskConfig
@@ -18,6 +19,24 @@ from loom.models.task import TaskConfig
 class InvalidTaskConfig:
     task_id: str
     detail: str
+
+
+_REQUIRED_TASK_CONFIG_SECTIONS = (
+    "task",
+    "environment",
+    "agent",
+    "verifier",
+)
+
+
+def has_required_task_config_sections() -> ColumnElement[bool]:
+    """DB-level prefilter for task rows that are at least published.
+
+    Full `TaskConfig` validation stays in Python because Pydantic owns
+    the schema. Catalog counts use this cheap predicate to avoid
+    advertising placeholder rows like `config={}` as runnable.
+    """
+    return and_(*(Task.config.op("?")(section) for section in _REQUIRED_TASK_CONFIG_SECTIONS))
 
 
 async def split_valid_task_configs(
@@ -33,9 +52,11 @@ async def split_valid_task_configs(
     if not task_ids:
         return [], []
 
-    rows = (await session.execute(
-        select(Task.id, Task.config).where(Task.id.in_(task_ids)),
-    )).all()
+    rows = (
+        await session.execute(
+            select(Task.id, Task.config).where(Task.id.in_(task_ids)),
+        )
+    ).all()
     configs = {str(task_id): config for task_id, config in rows}
 
     valid: list[str] = []
@@ -44,10 +65,12 @@ async def split_valid_task_configs(
         try:
             TaskConfig.model_validate(configs[task_id])
         except ValidationError as exc:
-            invalid.append(InvalidTaskConfig(
-                task_id=task_id,
-                detail=str(exc),
-            ))
+            invalid.append(
+                InvalidTaskConfig(
+                    task_id=task_id,
+                    detail=str(exc),
+                )
+            )
         else:
             valid.append(task_id)
     return valid, invalid
@@ -66,8 +89,5 @@ def expected_trial_count(
     combinations: Sequence[Mapping[str, Any]] | None,
 ) -> int:
     if combinations:
-        return sum(
-            task_count * int(combo.get("n_per_task", 1))
-            for combo in combinations
-        )
+        return sum(task_count * int(combo.get("n_per_task", 1)) for combo in combinations)
     return task_count * n_per_task

@@ -164,6 +164,11 @@ older batches so they do not retry forever. Task ids may contain `/`
 segments, for example `humaneval/HumanEval/26`; workers fetch those
 through the normal bundle endpoint.
 
+Catalog counts are runnable counts. A task row inserted as an import
+placeholder with empty or incomplete `config` is not counted by benchmark
+`task_count` or `POST /api/v1/tasks/count`, so the New Batch screen shows
+the benchmark as needing publish instead of offering an evaluation run.
+
 Once registered, submit a trial:
 
 ```bash
