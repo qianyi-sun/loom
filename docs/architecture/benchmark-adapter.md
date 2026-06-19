@@ -337,9 +337,38 @@ trials may still reference them. Operators clean up manually.
 
 ### Adapter remaps (`[[remap]]`)
 
-Reserved for PR-2 (issue #234). The loader accepts `[[remap]]`
-entries today, but the sync engine reports them as SKIP with reason
-`remap support pending PR-2`.
+Reuse an existing adapter's parsing logic against a different
+upstream — e.g., a fork of HumanEval:
+
+```toml
+[[remap]]
+id = "humaneval-internal-fork"
+inherit = "humaneval"                  # must be in REGISTRY
+display_name = "HumanEval (internal fork)"
+upstream_kind = "huggingface"          # huggingface | git | https-tarball
+upstream_locator = "myorg/humaneval-fork"
+license_spdx = "Apache-2.0"
+license_url = "https://github.com/myorg/humaneval-fork/blob/main/LICENSE"
+series = "code"                        # optional; defaults to base adapter's
+splits = ["test"]                      # optional; defaults to base adapter's
+```
+
+Sync (UPSERT into `benchmarks`) runs the same way as `[[local]]`.
+The row is keyed on `remap.id`, with `upstream_kind` /
+`upstream_locator` / license fields from the remap and any unset
+optionals inherited from the base adapter via `REGISTRY[inherit]`.
+
+Importing tasks is a separate step: `loom datasets import
+<remap.id>`. The importer resolves `inherit` against `REGISTRY`,
+overrides `name` + `upstream_source` on a shallow-copied adapter
+instance, and writes `tasks.benchmark_id = remap.id`. So the
+fork's tasks live under the remap's id — not the inherit's —
+across the S3 prefix, the per-task `task.toml`'s `task.id`, and the
+DB.
+
+Pre-flight (at sync) fails if:
+- `remap.id` collides with a name in `REGISTRY`.
+- `remap.inherit` does NOT resolve in `REGISTRY`.
 
 ## See also
 

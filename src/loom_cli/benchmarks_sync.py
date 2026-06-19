@@ -16,9 +16,10 @@ from __future__ import annotations
 import logging
 import os
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -123,9 +124,16 @@ async def sync(
     fixtures_root: Path,
     session: AsyncSession,
     registry_names: set[str],
+    base_adapter_lookup: Callable[[str], _RemapBase | None] | None = None,
     dry_run: bool = False,
 ) -> SyncPlan:
-    """Apply the TOML to the DB. Returns the plan."""
+    """Apply the TOML to the DB. Returns the plan.
+
+    `base_adapter_lookup` resolves a `[[remap]] inherit` name to its
+    base adapter so we can inherit defaults for `series` / `splits`.
+    Defaults to looking up `loom_benchmarks.REGISTRY` lazily. Tests
+    inject a stub to avoid importing the real registry.
+    """
     preflight(cfg, registry_names=registry_names)
     plan = SyncPlan()
 
@@ -144,6 +152,7 @@ async def sync(
             session=session,
             plan=plan,
             dry_run=dry_run,
+            base_adapter_lookup=base_adapter_lookup or _default_base_lookup,
         )
 
     return plan
@@ -315,23 +324,78 @@ def _walk_task_tomls(source_dir: Path) -> list[Path]:
     return found
 
 
+class _RemapBase(Protocol):
+    """Subset of `BenchmarkAdapter` we read for series / splits inheritance."""
+
+    splits: tuple[str, ...]
+
+
+if TYPE_CHECKING:  # pragma: no cover
+    pass
+
+
+def _default_base_lookup(inherit: str) -> _RemapBase | None:
+    """Lazy import so unit tests that mock the lookup don't pay the
+    REGISTRY entry-point scan cost. Cast: REGISTRY is typed as
+    `BenchmarkAdapter` but only `series` + `splits` are read.
+    """
+    from loom_benchmarks.registry import REGISTRY
+    base: Any = REGISTRY.get(inherit)
+    return base  # type: ignore[no-any-return]
+
+
 async def _sync_remap(
     entry: RemapBenchmarkEntry,
     *,
     session: AsyncSession,
     plan: SyncPlan,
     dry_run: bool,
+    base_adapter_lookup: Callable[[str], _RemapBase | None],
 ) -> None:
-    """PR-2 will populate this with adapter resolution + task import.
-
-    PR-1 ships only the loader + preflight, so a remap entry that
-    reaches sync is reported as SKIP (not-yet-implemented) without
-    touching the DB.
+    """Write a `benchmarks` row for the remap. Tasks are imported
+    separately via `loom benchmark-tool import <remap.id>` (issue #234,
+    PR-2 plumbing in `loom_benchmark_tool/import_cmd.py`).
     """
-    plan.add(
-        kind="remap", id=entry.id, action="SKIP",
-        reason="remap support pending PR-2",
+    base = base_adapter_lookup(entry.inherit)
+    # Pre-flight guarantees `inherit in registry_names`, so base is
+    # not-None at runtime — but the lookup signature still admits it.
+    if base is None:  # pragma: no cover - defensive
+        raise SyncError(
+            f"remap {entry.id!r} inherit={entry.inherit!r} not in REGISTRY",
+        )
+    desired = dict(
+        id=entry.id,
+        display_name=entry.display_name,
+        series=entry.series or getattr(base, "series", None),
+        license_spdx=entry.license_spdx,
+        license_url=entry.license_url,
+        upstream_kind=entry.upstream_kind,
+        upstream_locator=entry.upstream_locator,
+        upstream_revision="",  # filled in by benchmark-tool import
+        splits=entry.splits if entry.splits is not None else list(base.splits),
+        imported_by=SYNC_IMPORTED_BY,
     )
+    existing = await _get_benchmark(session, entry.id)
+    if existing is None:
+        action: PlanAction = "INSERT"
+        reason = "new"
+    elif _benchmark_differs(existing, desired):
+        action = "UPDATE"
+        reason = "metadata changed"
+    else:
+        action = "SKIP"
+        reason = "unchanged"
+
+    plan.add(kind="remap", id=entry.id, action=action, reason=reason)
+
+    if not dry_run and action != "SKIP":
+        await session.execute(
+            pg_insert(Benchmark).values(**desired).on_conflict_do_update(
+                index_elements=["id"],
+                set_={k: v for k, v in desired.items() if k != "id"},
+            ),
+        )
+        await session.commit()
 
 
 async def _get_benchmark(

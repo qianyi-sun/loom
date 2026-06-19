@@ -19,12 +19,15 @@ Steps per invocation:
 
 from __future__ import annotations
 
+import copy
+import os
 import re
 import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
 
+from loom_benchmarks.base import BenchmarkAdapter, UpstreamSource
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -62,6 +65,66 @@ def _normalize_db_url(url: str) -> str:
     return url.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
+def _resolve_adapter(
+    benchmark: str,
+    *,
+    benchmarks_config_path: Path | None = None,
+) -> BenchmarkAdapter:
+    """Resolve a benchmark name to its effective adapter.
+
+    Plain case: `benchmark` is in REGISTRY → return that adapter.
+
+    Remap case: `benchmark` is a `[[remap]]` id in
+    `config/benchmarks.toml` → return a shallow copy of the
+    `inherit` adapter with `.name` + `.upstream_source` overridden
+    so all downstream paths (S3 prefix, task_id, on-disk task.toml's
+    task.id) carry the remap's id instead of the base adapter's.
+    """
+    if benchmark in REGISTRY:
+        return REGISTRY[benchmark]
+
+    from loom_cli.benchmarks_config import load_benchmarks_config
+    from loom_cli.datasets_cmd import _resolve_config_path
+
+    cfg_path = benchmarks_config_path or _resolve_config_path(None)
+    cfg = load_benchmarks_config(cfg_path) if cfg_path else None
+    if cfg is None:
+        raise KeyError(
+            f"no benchmark adapter registered for {benchmark!r} "
+            f"(available: {sorted(REGISTRY)}); not found in "
+            f"config/benchmarks.toml [[remap]] either",
+        )
+    remap = next((r for r in cfg.remap if r.id == benchmark), None)
+    if remap is None:
+        raise KeyError(
+            f"no benchmark adapter registered for {benchmark!r} "
+            f"(available: {sorted(REGISTRY)}; remaps: "
+            f"{sorted(r.id for r in cfg.remap)})",
+        )
+    if remap.inherit not in REGISTRY:
+        raise KeyError(
+            f"remap {benchmark!r} inherits from {remap.inherit!r} "
+            f"which is not in REGISTRY (available: {sorted(REGISTRY)})",
+        )
+    base = REGISTRY[remap.inherit]
+    # deepcopy guards against adapters that ever cache state on the
+    # instance — `copy.copy` would have aliased mutable instance attrs
+    # back to the base. Current adapters are class-attr-only so the cost
+    # is negligible.
+    remapped = copy.deepcopy(base)
+    # Instance-level overrides shadow class attrs from CatalogBackedAdapter.
+    remapped.name = remap.id
+    remapped.display_name = remap.display_name
+    remapped.upstream_source = UpstreamSource(
+        kind=remap.upstream_kind, locator=remap.upstream_locator,
+    )
+    remapped.license_spdx = remap.license_spdx
+    remapped.license_url = remap.license_url
+    if remap.splits is not None:
+        remapped.splits = tuple(remap.splits)
+    return remapped
+
+
 async def run_import(
     *,
     benchmark: str,
@@ -72,8 +135,22 @@ async def run_import(
     limit: int | None = None,
     imported_by: str | None = None,
     refresh: bool = False,
+    benchmarks_config_path: Path | None = None,
 ) -> dict[str, int]:
-    adapter = REGISTRY[benchmark]
+    """Import upstream tasks for a benchmark.
+
+    `benchmark` resolves via REGISTRY first, then via
+    `config/benchmarks.toml` `[[remap]]` entries (issue #234 PR-2).
+    Remapped benchmarks reuse the inherited adapter's parsing logic
+    but write rows keyed on the remap's id.
+    """
+    # Honor the explicit override, then the env var, then the default.
+    cfg_path = benchmarks_config_path
+    if cfg_path is None and (env_path := os.environ.get(
+        "LOOM_BENCHMARKS_CONFIG_PATH",
+    )):
+        cfg_path = Path(env_path)
+    adapter = _resolve_adapter(benchmark, benchmarks_config_path=cfg_path)
     cache_dir.mkdir(parents=True, exist_ok=True)
     source_dir = fetch_upstream(
         adapter.upstream_source, cache_root=cache_dir, refresh=refresh,
