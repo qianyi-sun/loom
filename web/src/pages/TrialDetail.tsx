@@ -18,6 +18,7 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
 import { trialStateVariant } from "../lib/statusVariant";
 
@@ -53,11 +54,51 @@ function formatBytes(size: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unit]}`;
 }
 
+function trialOutcome(
+  trial: components["schemas"]["TrialDetail"],
+): { label: string; description: string } {
+  if (ACTIVE_TRIAL_STATES.has(trial.state)) {
+    return {
+      label: "Trial is active",
+      description: "A worker has not produced a final platform outcome yet.",
+    };
+  }
+  if (trial.state === "succeeded") {
+    return {
+      label: "Trial succeeded",
+      description:
+        "The platform run finished and persisted its final artifacts. The evaluator score below is separate.",
+    };
+  }
+  if (trial.state === "failed" || trial.state === "failed_terminal") {
+    return {
+      label: "Trial failed",
+      description:
+        "The platform could not complete this trial successfully. Use the failure reason and trajectory log for diagnosis.",
+    };
+  }
+  if (trial.state === "cancelled") {
+    return {
+      label: "Trial cancelled",
+      description: "The trial was stopped before normal completion.",
+    };
+  }
+  return {
+    label: "Trial outcome unknown",
+    description: "The service returned a state this UI does not yet describe.",
+  };
+}
+
 function TrialHeader({
   trial,
 }: {
   trial: components["schemas"]["TrialDetail"];
 }): JSX.Element {
+  const outcome = trialOutcome(trial);
+  const failure = trial.failure_reason
+    ? humanizeFailureReason(trial.failure_reason)
+    : null;
+
   return (
     <Card>
       <Card.Body className="space-y-5">
@@ -81,11 +122,21 @@ function TrialHeader({
           </StatusPill>
         </div>
 
+        <div className="rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Platform outcome
+          </p>
+          <p className="mt-1 text-sm font-semibold text-slate-900">
+            {outcome.label}
+          </p>
+          <p className="mt-1 text-xs text-slate-600">{outcome.description}</p>
+        </div>
+
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
           <StatCard label="Agent" value={trial.agent_name ?? "—"} />
           <StatCard label="Model" value={modelLabel(trial.model)} />
           <StatCard
-            label="Reward"
+            label="Evaluator score"
             value={
               trial.aggregate_reward != null
                 ? trial.aggregate_reward.toFixed(3)
@@ -108,14 +159,25 @@ function TrialHeader({
           />
           <StatCard label="Attempts" value={trial.attempt_count} />
         </div>
+        <p className="text-xs text-slate-500">
+          Evaluator score measures task performance when a verifier reports one;
+          it is separate from whether the platform run succeeded or failed.
+        </p>
 
-        {trial.failure_reason ? (
+        {failure ? (
           <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-red-800">
               Failure reason
             </p>
-            <p className="mt-1 font-mono text-xs text-red-700">
-              {trial.failure_reason}
+            <p className="mt-1 text-sm font-semibold text-red-950">
+              {failure.label}
+            </p>
+            <p className="mt-1 text-xs text-red-800">
+              {failure.description}
+            </p>
+            <p className="mt-2 text-xs text-red-700">
+              Raw code:{" "}
+              <code className="font-mono">{failure.code}</code>
             </p>
           </div>
         ) : null}
@@ -127,7 +189,7 @@ function TrialHeader({
               title="Download the finalized ATIF artifact for this trial."
               onClick={() => void api.downloadATIF(trial.id)}
             >
-              Download ATIF
+              Download ATIF report
             </Button>
           ) : (
             <Button
@@ -144,7 +206,7 @@ function TrialHeader({
               title="Download the raw trajectory events for this trial."
               onClick={() => void api.downloadTrajectory(trial.id)}
             >
-              Download trajectory
+              Download trajectory log
             </Button>
           ) : (
             <Button

@@ -8,7 +8,8 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { Card } from "../components/Card";
 import LoadingState from "../components/LoadingState";
-import { StatusPill, type StatusVariant } from "../components/StatusPill";
+import { StatusPill } from "../components/StatusPill";
+import { providerStatusSummary } from "../lib/providerDisplay";
 
 type Conn = {
   id: string;
@@ -16,12 +17,6 @@ type Conn = {
   type: string;
   status?: string;
 };
-
-function pillVariant(s?: string): StatusVariant {
-  if (s === "valid") return "success";
-  if (s === "invalid") return "failed";
-  return "neutral";
-}
 
 export default function ProvidersList(): JSX.Element {
   const { data, isLoading, error } = useQuery({
@@ -83,21 +78,27 @@ export default function ProvidersList(): JSX.Element {
             </tr>
           </thead>
           <tbody>
-            {items.map((c) => (
-              <tr key={c.id} className="border-b border-slate-100">
-                <td className="px-4 py-3">
-                  <Link to={`/providers/${c.id}`} className="text-accent hover:underline">
-                    {c.name}
-                  </Link>
-                </td>
-                <td className="px-4 py-3 text-sm text-slate-600">{c.type}</td>
-                <td className="px-4 py-3">
-                  <StatusPill variant={pillVariant(c.status)}>
-                    {c.status ?? "untested"}
-                  </StatusPill>
-                </td>
-              </tr>
-            ))}
+            {items.map((c) => {
+              const status = providerStatusSummary(c.status);
+              return (
+                <tr key={c.id} className="border-b border-slate-100">
+                  <td className="px-4 py-3">
+                    <Link to={`/providers/${c.id}`} className="text-accent hover:underline">
+                      {c.name}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-slate-600">{c.type}</td>
+                  <td className="px-4 py-3">
+                    <StatusPill variant={status.variant} title={status.description}>
+                      {status.label}
+                    </StatusPill>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {status.description}
+                    </p>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </Card>

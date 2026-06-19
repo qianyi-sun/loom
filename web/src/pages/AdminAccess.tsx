@@ -91,10 +91,16 @@ export default function AdminAccess(): JSX.Element {
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Team access</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Approve pending team registrations and audit access decisions.
+        </p>
       </header>
 
       <Card>
-        <Card.Header title="Admin actor" />
+        <Card.Header
+          title="Admin actor"
+          description="Recorded in audit events for approve and reject actions."
+        />
         <Card.Body>
           <label className="block text-sm font-medium text-slate-700" htmlFor="admin-actor">
             Admin actor
@@ -111,7 +117,10 @@ export default function AdminAccess(): JSX.Element {
 
       {revealed ? (
         <Card className="border-emerald-200">
-          <Card.Header title="Approved team token" />
+          <Card.Header
+            title="Approved team token"
+            description="Shown once; copy or download before leaving this page."
+          />
           <Card.Body className="space-y-3">
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm text-emerald-900">
               {revealed.team_token}
@@ -135,7 +144,10 @@ export default function AdminAccess(): JSX.Element {
       ) : null}
 
       <Card>
-        <Card.Header title="Pending registrations" />
+        <Card.Header
+          title="Pending registrations"
+          description="Approve creates a team token. Reject stores the reason in the audit trail."
+        />
         <Card.Body>
           {registrations.isPending ? <LoadingState /> : null}
           {registrations.isError ? <ErrorState error={registrations.error} /> : null}
@@ -204,7 +216,10 @@ export default function AdminAccess(): JSX.Element {
       </Card>
 
       <Card>
-        <Card.Header title="Audit log" />
+        <Card.Header
+          title="Audit log"
+          description="Recent admin access decisions with actor, action, and target."
+        />
         <Card.Body>
           {audit.isPending ? <LoadingState /> : null}
           {audit.isError ? <ErrorState error={audit.error} /> : null}

@@ -23,15 +23,13 @@ import {
   useRotateConnectionKey,
   useTestConnection,
 } from "../hooks/providers";
+import {
+  allowedModelsSummary,
+  providerStatusSummary,
+} from "../lib/providerDisplay";
 
 type TabName = "overview" | "models" | "settings";
 type TestResult = { status: "valid" | "invalid"; last_validation_error?: string | null };
-
-function pillVariant(s?: string): "success" | "failed" | "neutral" {
-  if (s === "valid") return "success";
-  if (s === "invalid") return "failed";
-  return "neutral";
-}
 
 export default function ProviderDetail(): JSX.Element {
   const { id = "" } = useParams<{ id: string }>();
@@ -137,6 +135,11 @@ function OverviewTab({
   const test = useTestConnection(id);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const providerStatus = providerStatusSummary(conn.status);
+  const allowedModels = allowedModelsSummary(conn.allowed_models);
+  const testStatus = testResult
+    ? providerStatusSummary(testResult.status)
+    : null;
 
   const handleTest = async () => {
     try {
@@ -157,12 +160,23 @@ function OverviewTab({
           <dt className="font-medium text-slate-600">Type</dt>
           <dd>{conn.type}</dd>
           <dt className="font-medium text-slate-600">Allowed models</dt>
-          <dd>{conn.allowed_models?.length ?? 0}</dd>
+          <dd>
+            <p className="font-medium text-slate-800">{allowedModels.label}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {allowedModels.description}
+            </p>
+          </dd>
           <dt className="font-medium text-slate-600">Status</dt>
           <dd>
-            <StatusPill variant={pillVariant(conn.status)}>
-              {conn.status ?? "untested"}
+            <StatusPill
+              variant={providerStatus.variant}
+              title={providerStatus.description}
+            >
+              {providerStatus.label}
             </StatusPill>
+            <p className="mt-1 text-xs text-slate-500">
+              {providerStatus.description}
+            </p>
           </dd>
           {conn.last_validated_at && (
             <>
@@ -178,9 +192,19 @@ function OverviewTab({
         </div>
         {testResult && (
           <div className="space-y-2">
-            <StatusPill variant={pillVariant(testResult.status)}>
-              {testResult.status}
-            </StatusPill>
+            {testStatus ? (
+              <>
+                <StatusPill
+                  variant={testStatus.variant}
+                  title={testStatus.description}
+                >
+                  {testStatus.label}
+                </StatusPill>
+                <p className="text-xs text-slate-500">
+                  {testStatus.description}
+                </p>
+              </>
+            ) : null}
             {testResult.status === "invalid" && (
               <div>
                 <button

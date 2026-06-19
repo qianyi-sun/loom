@@ -44,6 +44,21 @@ const TRIAL_STATE_OPTIONS = [
 const TERMINAL_BATCH_STATES = new Set(["finished", "cancelled"]);
 const TERMINAL_TRIAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
+const STATE_OPTION_LABELS: Record<string, string> = {
+  cancelled: "Cancelled - stopped",
+  claimed: "Claimed - worker reserved it",
+  failed: "Failed - needs diagnosis",
+  finished: "Finished - all trials terminal",
+  queued: "Queued - waiting for worker",
+  running: "Running - in progress",
+  submitted: "Submitted - waiting for scheduling",
+  succeeded: "Succeeded - platform run completed",
+};
+
+function stateOptionLabel(state: string): string {
+  return STATE_OPTION_LABELS[state] ?? state.replaceAll("_", " ");
+}
+
 function SegmentedToggle({
   value,
   onChange,
@@ -176,16 +191,20 @@ function BatchesView({
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead>
               <tr className="bg-slate-50/50">
-                {["Name", "State", "Expected", "Created", "Created by"].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
-                    >
-                      {h}
-                    </th>
-                  ),
-                )}
+                {[
+                  "Name",
+                  "State",
+                  "Planned trials",
+                  "Created",
+                  "Created by",
+                ].map((h) => (
+                  <th
+                    key={h}
+                    className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
+                  >
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -318,16 +337,27 @@ function TrialsView({
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead>
               <tr className="bg-slate-50/50">
-                {["ID", "Task", "State", "Agent", "Reward", "Cost", "Submitted"].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
-                    >
-                      {h}
-                    </th>
-                  ),
-                )}
+                {[
+                  "ID",
+                  "Task",
+                  "State",
+                  "Agent",
+                  "Evaluator score",
+                  "Cost",
+                  "Submitted",
+                ].map((h) => (
+                  <th
+                    key={h}
+                    title={
+                      h === "Evaluator score"
+                        ? "Reward reported by the evaluator; platform success or failure is shown in State."
+                        : undefined
+                    }
+                    className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
+                  >
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -443,13 +473,17 @@ export default function Monitor(): JSX.Element {
         <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder={view === "batches" ? "Search by name or id…" : "Search by task id or trial id…"}
+          placeholder={
+            view === "batches"
+              ? "Search batches by name or ID..."
+              : "Search trials by task ID or trial ID..."
+          }
           className="max-w-sm"
           aria-label="search"
           title={
             view === "batches"
-              ? "Filter batches by name or id."
-              : "Filter trials by task id or trial id."
+              ? "Filter batches by human name or batch ID."
+              : "Filter trials by task ID or trial ID."
           }
         />
         <label className="flex items-center gap-2 text-sm text-slate-600">
@@ -461,10 +495,10 @@ export default function Monitor(): JSX.Element {
             aria-label="filter by state"
             title="Limit the table to one lifecycle state, or choose all."
           >
-            <option value="">all</option>
+            <option value="">All states</option>
             {stateOptions.map((s) => (
               <option key={s} value={s}>
-                {s}
+                {stateOptionLabel(s)}
               </option>
             ))}
           </select>

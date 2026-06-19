@@ -154,6 +154,10 @@ export default function ProviderForm({
           onChange={(e) => setAllowedModelsText(e.target.value)}
           placeholder={`gpt-4o\nclaude-3-opus`}
         />
+        <p className="mt-1 text-xs text-slate-500">
+          Blank means all discovered models are allowed. Add one model ID per
+          line to restrict the picker.
+        </p>
       </div>
       <div>
         <button
@@ -178,6 +182,10 @@ export default function ProviderForm({
                 <option value="">(default for provider type)</option>
                 {PRICING_SOURCES.map((p) => (<option key={p} value={p}>{p}</option>))}
               </select>
+              <p className="mt-1 text-xs text-slate-500">
+                Rate-card uses published pricing. Tokens-only records usage
+                without dollars. Operator-supplied uses the JSON below.
+              </p>
             </div>
             <div>
               <label htmlFor="pf-pricing-data" className="block text-sm font-medium text-slate-700">
@@ -190,6 +198,9 @@ export default function ProviderForm({
                 onChange={(e) => setPricingDataText(e.target.value)}
                 placeholder='{"input_per_million": 1.50, "output_per_million": 6.00}'
               />
+              <p className="mt-1 text-xs text-slate-500">
+                Used only when Pricing source is operator-supplied.
+              </p>
             </div>
             <div>
               <label htmlFor="pf-rate-card-provider" className="block text-sm font-medium text-slate-700">
@@ -201,6 +212,10 @@ export default function ProviderForm({
                 onChange={(e) => setRateCardProvider(e.target.value)}
                 placeholder="(default for provider type)"
               />
+              <p className="mt-1 text-xs text-slate-500">
+                Override the provider namespace used to match this connection
+                to published rate-card rows.
+              </p>
             </div>
           </div>
         )}

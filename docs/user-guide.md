@@ -90,6 +90,29 @@ Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
 `docker compose version` before `loom service up`.
 
+## Default views and diagnostics
+
+The SPA defaults to readable summaries instead of raw API payloads.
+New Batch explains task selection, agent/model combinations, backend,
+and advanced trial settings in product terms. Batch Detail shows a
+Run plan, Monitor shows planned trials and evaluator score, and Trial
+Detail separates platform outcome from evaluator reward.
+
+Raw data is still available when you need to debug or reproduce an API
+request. Look for `Diagnostics`, `Raw event data`, or explicit
+advanced disclosures. Those panels contain internal field names such
+as `task_filter`, `trial_config`, trajectory event payloads,
+fan-out errors, and rate-card payloads. They are intentionally closed
+by default so the normal workflow stays focused on what was launched,
+what is running, and what needs attention.
+
+Provider pages use the same model. A connection marked `Ready` means
+the last provider test passed. `Needs attention` means the last test
+failed and batches using that connection may fail. `Untested` means
+the connection has been saved but should be tested before real runs.
+Allowed-model summaries distinguish unrestricted discovered models
+from explicit allow-lists.
+
 ## Cloud sandboxes (Daytona)
 
 ```bash

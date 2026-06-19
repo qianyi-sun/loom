@@ -41,6 +41,11 @@ describe("ProvidersList", () => {
       expect(screen.getByText("openai-prod")).toBeInTheDocument();
       expect(screen.getByText("anthropic-dev")).toBeInTheDocument();
     });
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Untested")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Run a connection test before trusting this provider/i),
+    ).toBeInTheDocument();
   });
 
   it("each row links to its detail page", async () => {

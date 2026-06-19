@@ -17,10 +17,10 @@ import { api } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { DiagnosticPanel } from "../components/DiagnosticPanel";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Textarea } from "../components/Input";
-import JsonViewer from "../components/JsonViewer";
 import LoadingState from "../components/LoadingState";
 
 const DEFAULT_BODY = `{
@@ -48,6 +48,98 @@ const DEFAULT_BODY = `{
     ]
   }
 }`;
+
+type RateCardEntry = {
+  cache_read_per_mtok?: number | null;
+  cache_write_per_mtok?: number | null;
+  input_per_mtok?: number | null;
+  model?: string | null;
+  output_per_mtok?: number | null;
+  provider?: string | null;
+};
+
+type RateCard = {
+  captured_at?: string | null;
+  id?: string | null;
+  table?: {
+    entries?: RateCardEntry[] | null;
+  } | null;
+};
+
+function moneyPerMtok(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "not set";
+  return `$${value.toFixed(2)} / 1M tokens`;
+}
+
+function RateCardSummary({ items }: { items: RateCard[] }): JSX.Element {
+  return (
+    <div className="space-y-4">
+      {items.map((card, index) => {
+        const entries = card.table?.entries ?? [];
+        return (
+          <section
+            key={card.id ?? index}
+            className="rounded-lg border border-slate-200 bg-slate-50 p-4"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-900">
+                {card.id ?? `Rate card ${index + 1}`}
+              </h3>
+              <p className="text-xs text-slate-500">
+                {entries.length} price {entries.length === 1 ? "entry" : "entries"}
+                {card.captured_at ? ` - captured ${card.captured_at}` : ""}
+              </p>
+            </div>
+            {entries.length === 0 ? (
+              <p className="mt-3 text-sm text-slate-500">
+                No model pricing entries are published in this card.
+              </p>
+            ) : (
+              <div className="mt-3 overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wider text-slate-500">
+                      <th className="py-2 pr-4 font-medium">Provider</th>
+                      <th className="py-2 pr-4 font-medium">Model</th>
+                      <th className="py-2 pr-4 font-medium">Input</th>
+                      <th className="py-2 pr-4 font-medium">Output</th>
+                      <th className="py-2 pr-4 font-medium">Cache read</th>
+                      <th className="py-2 pr-4 font-medium">Cache write</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {entries.map((entry, entryIndex) => (
+                      <tr key={`${entry.provider}-${entry.model}-${entryIndex}`}>
+                        <td className="py-2 pr-4 text-slate-700">
+                          {entry.provider ?? "unknown"}
+                        </td>
+                        <td className="py-2 pr-4 font-mono text-xs text-slate-700">
+                          {entry.model ?? "unknown"}
+                        </td>
+                        <td className="py-2 pr-4 text-slate-700">
+                          {moneyPerMtok(entry.input_per_mtok)}
+                        </td>
+                        <td className="py-2 pr-4 text-slate-700">
+                          {moneyPerMtok(entry.output_per_mtok)}
+                        </td>
+                        <td className="py-2 pr-4 text-slate-700">
+                          {moneyPerMtok(entry.cache_read_per_mtok)}
+                        </td>
+                        <td className="py-2 pr-4 text-slate-700">
+                          {moneyPerMtok(entry.cache_write_per_mtok)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function RateCardsAdmin(): JSX.Element {
   const { isAdmin } = useAuth();
@@ -106,7 +198,20 @@ export default function RateCardsAdmin(): JSX.Element {
             list.data.items.length === 0 ? (
               <EmptyState label="No rate cards published yet." />
             ) : (
-              <JsonViewer data={list.data.items} expanded />
+              <div className="space-y-4">
+                <RateCardSummary items={list.data.items as RateCard[]} />
+                <DiagnosticPanel
+                  title="Rate-card diagnostics"
+                  description="Raw published payloads for troubleshooting pricing imports or API compatibility."
+                  blocks={[
+                    {
+                      title: "raw_rate_cards",
+                      data: list.data.items,
+                      expanded: true,
+                    },
+                  ]}
+                />
+              </div>
             )
           ) : null}
         </Card.Body>

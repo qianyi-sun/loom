@@ -208,6 +208,45 @@ monitoring and submission flows. A read of the reference
   Card primitive can stay; just adopt the same `shadow-sm
   rounded-2xl border border-slate-200/80 bg-white` look.
 
+## Default Views And Diagnostics
+
+Every SPA page follows a two-layer rule:
+
+- **Default layer**: readable summaries, clear actions, and concise
+  definitions for controls, options, statuses, metrics, empty states,
+  and failure states. This layer uses product nouns such as Task
+  selection, Run plan, Planned trials, Platform outcome, Evaluator
+  score, Provider connection, and Rate-card pricing.
+- **Diagnostics layer**: raw payloads, internal field names, complete
+  IDs, event objects, and backend codes. This layer is available
+  through explicit `Diagnostics`, `Advanced`, or row-level raw-data
+  disclosures, and is closed by default.
+
+Default page content must not render raw JSON or internal request
+objects as the primary explanation of a workflow. Use shared
+humanizers for request-shaped data and put the raw object behind
+`DiagnosticPanel` unless the page is explicitly a JSON editor. Current
+examples:
+
+- Batch Detail shows a Run plan first, then exposes raw
+  `task_filter`, `trial_config`, combinations, and fan-out errors in
+  diagnostics.
+- Trial Detail shows platform outcome and evaluator score first.
+  Timeline rows summarize events and expose each raw event only under
+  `Raw event data`.
+- Provider pages translate `valid`, `invalid`, and `untested` into
+  readiness language, and summarize allowed models as all discovered,
+  N allowed, or none.
+- Rate Cards show provider/model pricing rows before raw published
+  payloads.
+- Settings, Admin Access, and Usage define token scope, approve/reject
+  consequences, and cost/token metrics inline.
+
+The diagnostics layer is not a permission boundary. It is an
+information hierarchy: normal users should understand the workflow
+without reading backend fields, while operators can still inspect the
+exact payloads needed for support and reproducibility.
+
 ## Surfaces
 
 ### Top-level navigation
@@ -330,9 +369,10 @@ Three sections, vertically stacked:
 1. **Header**: batch name, state, agent + model + backend badges,
    result status, fan-out failure summary when present, timestamps,
    link back to /batches.
-2. **Config snapshot**: every TrialConfig field as a read-only
-   table so users can audit what was actually submitted (catches
-   "did I really turn skip_verifier off?" right after submit).
+2. **Run plan**: readable task-selection, combination, backend, and
+   shared-setting summaries. Raw `task_filter`, `trial_config`,
+   combinations, and fan-out errors stay in diagnostics so bug
+   reports still have all inputs.
 3. **Trials in this batch**: one row per (task_id, sample_idx).
    Columns: task id, sample, state, reward, cost, click → Trial
    detail. Filter chips by state.

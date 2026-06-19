@@ -1041,8 +1041,8 @@ export default function NewBatch(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">New batch</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Pick a backend + task slate + one-or-more (agent, model)
-          combinations. Each combination fans out across the slate.
+          Choose the tasks, choose one or more agent/model combinations,
+          then review how many trials Loom will launch.
         </p>
       </header>
 
@@ -1109,8 +1109,8 @@ export default function NewBatch(): JSX.Element {
 
           <Card>
             <Card.Header
-              title="Which tasks"
-              description="Pick one or more benchmarks (grouped by series) + a subset rule, or paste explicit ids."
+              title="Task selection"
+              description="Choose the benchmark tasks to run. You can select whole benchmarks, narrow by tags, take a subset, or paste exact task IDs."
             />
             <Card.Body className="space-y-4">
               <fieldset
@@ -1292,9 +1292,12 @@ export default function NewBatch(): JSX.Element {
             <details className="group">
               <summary className="flex cursor-pointer items-start gap-2 px-6 py-4 text-sm font-semibold text-slate-900">
                 <span className="flex-1">
-                  Advanced options
+                  Advanced trial settings
                   <span className="ml-2 text-xs font-normal text-slate-500">
                     (defaults are sensible)
+                  </span>
+                  <span className="mt-1 block text-xs font-normal text-slate-500">
+                    Shared settings applied to every trial unless a combination overrides them.
                   </span>
                 </span>
                 <span className="text-slate-400 transition-transform group-open:rotate-90">
@@ -1572,10 +1575,11 @@ export default function NewBatch(): JSX.Element {
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2 className="text-sm font-semibold text-slate-800">
-                  Combinations
+                  Agent/model combinations
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  Each combination fans out across the task slate.
+                  Each row runs the selected tasks with its own agent, model,
+                  and samples-per-task count.
                 </p>
               </div>
               <Button

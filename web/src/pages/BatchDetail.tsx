@@ -9,12 +9,15 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { DiagnosticPanel } from "../components/DiagnosticPanel";
 import ErrorState from "../components/ErrorState";
-import JsonViewer from "../components/JsonViewer";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
+import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
+import { modelLabel } from "../lib/modelLabel";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 
 function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
@@ -33,6 +36,19 @@ function resultStatusVariant(s: string): "success" | "warning" | "failed" | "can
 }
 
 const ACTIVE_STATES = new Set(["submitted", "running"]);
+
+function comboSummary(
+  combo: {
+    label?: string | null;
+    agent_name: string;
+    agent_model: unknown;
+    n_per_task: number;
+  },
+  index: number,
+): string {
+  const label = combo.label || `combo${index + 1}`;
+  return `${label} / ${combo.agent_name} / ${modelLabel(combo.agent_model)} / n=${combo.n_per_task}`;
+}
 
 export default function BatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
@@ -70,6 +86,20 @@ export default function BatchDetail(): JSX.Element {
   if (query.isError) return <ErrorState error={query.error} />;
   if (!query.data) return <ErrorState error={new Error("no data")} />;
   const c = query.data;
+  const taskSummary = humanizeTaskFilter(c.task_filter, {
+    matchedTaskCount: c.expected_trial_count,
+  });
+  const trialConfigSummary = humanizeTrialConfig(c.trial_config);
+  const diagnostics = [
+    { title: "task_filter", data: c.task_filter, expanded: true },
+    { title: "trial_config", data: c.trial_config, expanded: true },
+    ...(c.combinations && c.combinations.length > 0
+      ? [{ title: "combinations", data: c.combinations }]
+      : []),
+    ...(c.fanout_errors.length > 0
+      ? [{ title: "fanout_errors", data: c.fanout_errors }]
+      : []),
+  ];
 
   return (
     <div className="space-y-6">
@@ -241,20 +271,86 @@ export default function BatchDetail(): JSX.Element {
       </Card>
 
       <Card>
-        <Card.Header title="Filter + config" />
-        <Card.Body className="space-y-4 lg:grid lg:grid-cols-2 lg:gap-4 lg:space-y-0">
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
-              task_filter
-            </p>
-            <JsonViewer data={c.task_filter} expanded />
+        <Card.Header
+          title="Run plan"
+          description="What this batch will run, how often each task runs, and which shared settings apply to every trial."
+        />
+        <Card.Body className="space-y-5">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                Task selection
+              </p>
+              <p className="mt-1 text-sm font-semibold text-slate-900">
+                {taskSummary.primary}
+              </p>
+              {taskSummary.details.length > 0 ? (
+                <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                  {taskSummary.details.map((detail) => (
+                    <li key={detail}>{detail}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                Agent/model combinations
+              </p>
+              {c.combinations && c.combinations.length > 0 ? (
+                <ul className="mt-1 space-y-1 text-sm font-semibold text-slate-900">
+                  {c.combinations.map((combo, i) => (
+                    <li key={`${combo.label ?? "combo"}-${i}`}>
+                      {comboSummary(combo, i)}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-sm font-semibold text-slate-900">
+                  Single default combination
+                </p>
+              )}
+            </div>
+
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                Shared trial settings
+              </p>
+              <p className="mt-1 text-sm font-semibold text-slate-900">
+                {trialConfigSummary.primary}
+              </p>
+              {trialConfigSummary.items.length > 0 ? (
+                <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                  {trialConfigSummary.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                Execution backend
+              </p>
+              <p className="mt-1 text-sm font-semibold text-slate-900">
+                {c.backend || "Default backend"}
+              </p>
+              <p className="mt-2 text-xs text-slate-600">
+                The backend decides which worker pool and runtime adapter runs
+                the trials.
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
-              trial_config
-            </p>
-            <JsonViewer data={c.trial_config} expanded />
-          </div>
+
+          {taskSummary.diagnostics.length > 0 ||
+          trialConfigSummary.diagnostics.length > 0 ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              {[...taskSummary.diagnostics, ...trialConfigSummary.diagnostics]
+                .join("; ")}
+            </div>
+          ) : null}
+
+          <DiagnosticPanel blocks={diagnostics} />
         </Card.Body>
       </Card>
     </div>

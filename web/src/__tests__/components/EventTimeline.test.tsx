@@ -116,11 +116,39 @@ describe("EventTimeline", () => {
         ]}
       />,
     );
-    // Click the summary row to expand.
-    await user.click(screen.getByText(/LLM call — gpt-4/));
+    await user.click(screen.getByText("Raw event data"));
     // The raw JSON contains the model name.
     const all = screen.getAllByText(/gpt-4/);
     // One in summary, one in JSON viewer when expanded.
     expect(all.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps raw event payloads behind a row-level diagnostics disclosure", async () => {
+    const user = userEvent.setup();
+    render(
+      <EventTimeline
+        events={[
+          {
+            kind: "env_exec",
+            seq: 1,
+            step_id: "main",
+            command: "pytest",
+            internal_note: "worker-only diagnostic detail",
+            emitted_at: "2026-06-08T12:00:00Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText(/Env exec — pytest/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/worker-only diagnostic detail/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Raw event data"));
+
+    expect(
+      screen.getByText(/worker-only diagnostic detail/i),
+    ).toBeInTheDocument();
   });
 });

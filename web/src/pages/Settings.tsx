@@ -108,7 +108,7 @@ export default function Settings(): JSX.Element {
       <Card>
         <Card.Header
           title="Bearer token"
-          description="Currently signed in."
+          description="Team tokens can submit and monitor runs. Admin tokens also unlock admin-only pages and rate-card publishing."
           actions={
             <Button
               variant="secondary"
@@ -132,7 +132,10 @@ export default function Settings(): JSX.Element {
       </Card>
 
       <Card>
-        <Card.Header title="Active tokens" />
+        <Card.Header
+          title="Active tokens"
+          description="Token prefixes identify credentials without exposing secrets. Revoked tokens can no longer call the API."
+        />
         <Card.Body className="p-0">
           {tokens.isPending ? <LoadingState /> : null}
           {tokens.isError ? (
@@ -152,7 +155,7 @@ export default function Settings(): JSX.Element {
                         Prefix
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Type
+                        Token type
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                         Scopes

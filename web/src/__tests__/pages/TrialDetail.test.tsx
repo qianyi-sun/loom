@@ -249,6 +249,33 @@ describe("TrialDetail trajectory section", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:trajectory");
   });
 
+  it("shows platform outcome and humanized failure reason for failed trials", async () => {
+    fetchSpy(
+      { ok: true, body: { events: [], next_cursor: null } },
+      {
+        ...TRIAL_BODY,
+        state: "failed",
+        finished_at: "2026-06-11T00:05:00Z",
+        failure_reason: "trajectory_flush_failed",
+      },
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    expect(await screen.findByText("Platform outcome")).toBeInTheDocument();
+    expect(screen.getByText(/Trial failed/i)).toBeInTheDocument();
+    expect(screen.getByText("Trajectory flush failed")).toBeInTheDocument();
+    expect(screen.getByText("trajectory_flush_failed")).toBeInTheDocument();
+    expect(
+      screen.getByText(/could not persist the trial trajectory log/i),
+    ).toBeInTheDocument();
+  });
+
   it("shows Retry instead of Load more on trajectory error", async () => {
     fetchSpy({ ok: false, status: 500, body: { detail: "boom" } });
     renderWithProviders(

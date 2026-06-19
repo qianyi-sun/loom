@@ -1,7 +1,7 @@
 /**
- * Trajectory event timeline. Each event renders as an expandable
- * row with a coloured tag for its kind. Clicking a row reveals the
- * full JSON payload via the shared JsonViewer.
+ * Trajectory event timeline. Each event renders as a summary row
+ * with a coloured tag for its kind. The raw event payload stays
+ * behind a row-level diagnostics disclosure.
  *
  * The kind-colour mapping borrows the reference design's pattern of
  * action-type pills (shell_cmd / file_edit / etc.). Loom's event
@@ -95,12 +95,7 @@ function Row({ event }: { event: Event }): JSX.Element {
   const badge = KIND_BADGE[event.kind] ?? KIND_DEFAULT;
   return (
     <div className="border-b border-slate-100 last:border-b-0">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-slate-50"
-        aria-expanded={open}
-      >
+      <div className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left">
         <div className="flex min-w-0 items-center gap-2">
           <span
             className={cn(
@@ -122,12 +117,20 @@ function Row({ event }: { event: Event }): JSX.Element {
         <span className="shrink-0 font-mono text-xs text-slate-400">
           {event.emitted_at?.slice(11, 23) ?? ""}
         </span>
-      </button>
-      {open ? (
-        <div className="border-t border-slate-100 bg-slate-50/30 px-3 py-3">
-          <JsonViewer data={event} expanded />
-        </div>
-      ) : null}
+      </div>
+      <details
+        className="border-t border-slate-100 bg-slate-50/30"
+        onToggle={(toggleEvent) => setOpen(toggleEvent.currentTarget.open)}
+      >
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900">
+          Raw event data
+        </summary>
+        {open ? (
+          <div className="px-3 pb-3">
+            <JsonViewer data={event} expanded />
+          </div>
+        ) : null}
+      </details>
     </div>
   );
 }

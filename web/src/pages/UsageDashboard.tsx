@@ -50,7 +50,8 @@ export default function UsageDashboard(): JSX.Element {
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Usage</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Trials, tokens, and cost per bucket over the selected range.
+          Trials, tokens, and estimated LLM cost per bucket over the selected
+          range. Cost is derived from recorded LLM calls and active rate cards.
         </p>
       </header>
 
@@ -154,7 +155,10 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard label="Trials" value={totals.trial_count.toLocaleString()} />
-        <StatCard label="Cost" value={`$${totals.total_cost_usd.toFixed(4)}`} />
+        <StatCard
+          label="Estimated LLM cost"
+          value={`$${totals.total_cost_usd.toFixed(4)}`}
+        />
         <StatCard
           label="Input tokens"
           value={totals.llm_input_tokens.toLocaleString()}
@@ -164,9 +168,16 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
           value={totals.llm_output_tokens.toLocaleString()}
         />
       </div>
+      <p className="text-xs text-slate-500">
+        Trial counts reflect currently stored trial states. Token totals come
+        from LLM gateway call records, not evaluator rewards.
+      </p>
 
       <Card>
-        <Card.Header title="Cost per bucket" />
+        <Card.Header
+          title="Estimated LLM cost per bucket"
+          description="Each bar is the sum of recorded model-call costs for that time bucket."
+        />
         <Card.Body>
           <Chart
             buckets={buckets}
@@ -188,9 +199,9 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
                     "Trials",
                     "Succeeded",
                     "Failed",
-                    "Input",
-                    "Output",
-                    "Cost",
+                    "Input tokens",
+                    "Output tokens",
+                    "LLM cost",
                   ].map((h) => (
                     <th
                       key={h}

@@ -384,7 +384,7 @@ export function AgentModelPicker({
         </label>
         <label
           className="flex items-center gap-2 pb-2 text-sm text-slate-700"
-          title="Include raw discovered models that may be hidden from the default picker."
+          title="Include models discovered from the provider that are hidden from the default picker because they are not recommended, not agent-capable, or operator-hidden."
         >
           <input
             type="checkbox"
@@ -393,7 +393,7 @@ export function AgentModelPicker({
             disabled={disabled}
             className="h-4 w-4 rounded border-slate-300"
           />
-          <span>Show raw</span>
+          <span>Include hidden/discovered models</span>
         </label>
       </div>
 
@@ -403,7 +403,7 @@ export function AgentModelPicker({
         </span>
         <select
           aria-label="Model"
-          title="Choose a discovered model, or switch to Manual model for an ad-hoc id."
+          title="Choose a discovered model, or use an ad-hoc model ID for the selected provider connection."
           className={SELECT_CLS}
           value={selectedModelKey}
           disabled={
@@ -446,7 +446,7 @@ export function AgentModelPicker({
                 {showRaw && m.hidden_reason ? ` (${m.hidden_reason})` : ""}
               </option>
             ))}
-          <option value={CUSTOM_MODEL_KEY}>Manual model…</option>
+          <option value={CUSTOM_MODEL_KEY}>Ad-hoc model ID...</option>
         </select>
       </label>
       {customMode ? (
@@ -454,7 +454,7 @@ export function AgentModelPicker({
           {selectedConnection ? (
             <label className="block">
               <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                Manual model id
+                Ad-hoc model ID
               </span>
               <Input
                 value={value.modelName}
@@ -470,6 +470,10 @@ export function AgentModelPicker({
                 placeholder="manual-vllm-checkpoint"
                 disabled={disabled}
               />
+              <p className="mt-1 text-xs text-slate-500">
+                Use this for a model ID that exists on the selected provider
+                connection but has not been discovered or added to the catalog yet.
+              </p>
             </label>
           ) : (
             <div className="grid grid-cols-2 gap-2">

@@ -53,6 +53,20 @@ describe("ProviderDetail", () => {
     expect(screen.getByRole("tab", { name: /overview/i })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("explains readiness and allowed-model policy in plain language", async () => {
+    renderPage(CONN);
+    await waitFor(() => {
+      expect(screen.getByText("1 allowed model")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(
+      screen.getByText(/model picker only offers the configured allow-list/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/last provider test passed/i),
+    ).toBeInTheDocument();
+  });
+
   it("clicking Models tab switches content", async () => {
     const user = userEvent.setup();
     // Use per-call mock so each fetch gets a fresh Response (reusing a single
@@ -107,7 +121,7 @@ describe("ProviderDetail", () => {
     });
   });
 
-  it("Test connection button triggers POST and shows valid pill on success", async () => {
+  it("Test connection button triggers POST and shows ready pill on success", async () => {
     // Use mockImplementation to reliably sequence: GET conn, POST test, GET conn (re-fetch)
     let callCount = 0;
     const fetchMock = vi.fn().mockImplementation(async () => {
@@ -133,7 +147,7 @@ describe("ProviderDetail", () => {
     });
     await user.click(screen.getByRole("button", { name: /test connection/i }));
     await waitFor(() => {
-      expect(screen.getAllByText(/valid/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/Ready/i).length).toBeGreaterThan(0);
     });
   });
 
