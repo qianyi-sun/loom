@@ -104,6 +104,7 @@ def test_run_publish_includes_valid_task_config_in_manifest(
         upstream_source = UpstreamSource(kind="huggingface", locator="fake/source")
         license_spdx = "MIT"
         license_url = ""
+        license_execution_policy = "notice"
         splits = ("test",)
         series = "fake"
 
@@ -173,6 +174,10 @@ def test_run_publish_includes_valid_task_config_in_manifest(
     task = cast(dict[str, Any], captured_manifest["tasks"][0])
     assert task["task_config"]["task"]["id"] == "fake-bench/task-001"
     assert task["task_config"]["environment"]["docker_image"] == "python:3.12-slim"
+    assert task["tags"] == {
+        "difficulty": "smoke",
+        "license_execution_policy": "notice",
+    }
 
 
 def test_run_publish_filters_specific_instance_ids(

@@ -224,8 +224,14 @@ translates pytest exit codes into the ScriptVerifier JSON contract.
 
 `team_quotas.license_allowlist` defaults to `[MIT, Apache-2.0,
 BSD-3-Clause, CC-BY-4.0]`. `POST /trials` returns 403 if the task's
-adapter declares a license outside the allowlist. Operators extend
-their team's allowlist via the rate-cards admin API.
+adapter declares a license outside the allowlist and its execution policy is
+the default `allowlist`. Public benchmark mirrors can keep their source
+license metadata while declaring `license.execution_policy = "notice"` in
+`benchmarks.json`; import/publish writes this as a task tag and submission
+allows it without mutating the team's hard-license allowlist. AIME 2022-2025
+uses this notice policy. Truly restricted, private, NDA, or non-commercial
+datasets should stay on the default hard allowlist path until an operator
+extends the team's allowlist via the rate-cards admin API.
 
 ## Upstream fetching
 
@@ -287,8 +293,9 @@ get cleaned up via `rmtree` on the next call.
    <slug> = "loom_benchmark_<name>.adapter:<YourAdapterClass>"
    ```
 4. License must be in the default allowlist (MIT, Apache-2.0,
-   BSD-3-Clause, CC-BY-4.0) or operators extend their team's
-   allowlist before trials run.
+   BSD-3-Clause, CC-BY-4.0), use an explicit `notice` execution policy for
+   public benchmark mirrors, or operators extend their team's allowlist before
+   trials run.
 5. `convert_instance` must produce a deterministic checksum —
    `loom_benchmarks.util.sha256_of_dir` hashes `out_dir`'s relpaths +
    bytes in sorted order. Avoid timestamp-based content.
@@ -304,8 +311,10 @@ get cleaned up via `rmtree` on the next call.
 - `pytest_from_unittest(unittest_class_source, out_dir)` — wrap a
   unittest TestCase as a pytest file
 - `structured_verifier_script(script_body, out_dir)` — write a
-  script-verifier shim that emits the JSON `LOOM_VERIFIER_OUTPUT`
-  shape ScriptVerifier consumes
+  script-verifier shim. The body must emit a `VerifierResult` JSON object to
+  `LOOM_VERIFIER_OUTPUT`; derive task/artifact paths from the script location
+  or explicit paths such as `/workspace`, because `ScriptVerifier` only
+  guarantees the output env var.
 - `embed_base64_image(image_bytes, alt_text)` — for multimodal
   benchmarks (SWE-Bench Multimodal)
 - `download_files_from_record(...)` — fetch per-instance assets

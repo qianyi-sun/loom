@@ -15,9 +15,9 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
-import datasets  # type: ignore[import-untyped]
+import datasets
 
-from loom_benchmarks.adapters.aime import _AIME_CHECK_PY
+from loom_benchmarks.adapters.aime import _AIME_CHECK_PY, _AIME_RUN_SH
 from loom_benchmarks.base import (
     BenchmarkInstance,
     CatalogBackedAdapter,
@@ -52,7 +52,10 @@ class AIME25Adapter(CatalogBackedAdapter):
     )
 
     def list_instances(
-        self, *, source_dir: Path, split: str,
+        self,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         for locator, exam in self._SOURCES:
             ds = datasets.load_dataset(locator, cache_dir=str(source_dir))[split]
@@ -76,7 +79,10 @@ class AIME25Adapter(CatalogBackedAdapter):
                 )
 
     def convert_instance(
-        self, instance: BenchmarkInstance, *, out_dir: Path,
+        self,
+        instance: BenchmarkInstance,
+        *,
+        out_dir: Path,
     ) -> ConvertedTask:
         r = instance.raw
         task_id = f"{self.name}/{instance.instance_id}"
@@ -95,11 +101,10 @@ class AIME25Adapter(CatalogBackedAdapter):
         (verifier_dir / "check.py").write_text(_AIME_CHECK_PY)
         (out_dir / "task.toml").write_text(_aime_2025_toml(task_id))
 
-        # Same wrapper script as the per-year AIMEAdapter:
-        # `python "$LOOM_TASK_DIR/verifier/check.py"`. The helper
-        # writes verifier/run.sh + chmods +x; no further wiring.
+        # Same self-contained wrapper script as the per-year AIMEAdapter.
+        # The helper writes verifier/run.sh + chmods +x; no further wiring.
         structured_verifier_script(
-            'python "$LOOM_TASK_DIR/verifier/check.py"',
+            _AIME_RUN_SH,
             out_dir=out_dir,
         )
 
@@ -118,9 +123,11 @@ def _aime_2025_toml(task_id: str) -> str:
     is a *string-escape* helper (not a serializer) — hand-render the
     document with the same shape the per-year AIME adapters use."""
     import textwrap as _tw
+
     toml_id = toml_string(task_id)
     toml_name = toml_string(f"AIME 2025 — {task_id}")
-    return _tw.dedent(f"""
+    return (
+        _tw.dedent(f"""
         schema_version = "1"
 
         [task]
@@ -137,7 +144,12 @@ def _aime_2025_toml(task_id: str) -> str:
         [verifier]
         name = "script"
 
+        [verifier.args]
+        script_path = "/workspace/verifier/run.sh"
+
         [[steps]]
         name = "main"
         artifacts = ["final_answer.txt"]
-    """).strip() + "\n"
+    """).strip()
+        + "\n"
+    )

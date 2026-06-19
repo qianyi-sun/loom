@@ -10,9 +10,11 @@ import tomllib
 from pathlib import Path
 
 from loom_benchmarks.adapters.aime import AIME22Adapter
+from loom_benchmarks.adapters.aime_2025 import AIME25Adapter
 from loom_benchmarks.base import BenchmarkInstance
 
 from loom.models.task import TaskConfig
+from loom.models.verifier import VerifierResult
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aime" / "sample.json"
 
@@ -22,6 +24,7 @@ def test_aime_url_parser_extracts_year_exam_problem() -> None:
     opaque AI-MO row id. Tags carry year/exam/problem so the SPA's
     tag filter can slice the benchmark."""
     from loom_benchmarks.adapters.aime import _parse_aime_url
+
     assert _parse_aime_url(
         "https://artofproblemsolving.com/wiki/index.php/2024_AIME_II_Problems/Problem_7",
     ) == ("2024", "II", "7")
@@ -45,17 +48,35 @@ def test_aime_emits_structured_integer_verifier(tmp_path: Path) -> None:
     # the resulting `task.id` reflects the renamed adapter slug
     # `aime-22` (year-22 adapter).
     inst = BenchmarkInstance(
-        instance_id="2022-I/1", split="train", raw=rec,
+        instance_id="2022-I/1",
+        split="train",
+        raw=rec,
     )
     AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
     cfg = TaskConfig.model_validate(
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.verifier.name == "script"
+    assert cfg.verifier.args["script_path"] == "/workspace/verifier/run.sh"
     assert cfg.task.id == "aime-22/2022-I/1"
     assert (tmp_path / "expected_answer.txt").read_text() == "45"
     assert "ordered pairs" in (tmp_path / "instruction.md").read_text()
     assert "verifier/check.py" in (tmp_path / "verifier" / "run.sh").read_text()
+
+
+def test_aime_2025_emits_script_path(tmp_path: Path) -> None:
+    inst = BenchmarkInstance(
+        instance_id="2025-I/1",
+        split="train",
+        raw={"problem": "What is 40 + 2?", "answer": "42"},
+    )
+    AIME25Adapter().convert_instance(inst, out_dir=tmp_path)
+
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((tmp_path / "task.toml").read_text()),
+    )
+    assert cfg.verifier.name == "script"
+    assert cfg.verifier.args["script_path"] == "/workspace/verifier/run.sh"
 
 
 def test_aime_checker_extracts_last_integer(tmp_path: Path) -> None:
@@ -78,26 +99,63 @@ def test_aime_checker_extracts_last_integer(tmp_path: Path) -> None:
 
     result = subprocess.run(
         [sys.executable, str(tmp_path / "verifier" / "check.py")],
-        env=env, capture_output=True, text=True,
+        env=env,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0, result.stderr
 
-    payload = json.loads(verifier_out.read_text())
-    assert payload["pass"] is True
-    assert payload["got"] == "45"
-    assert payload["expected"] == "45"
+    parsed = VerifierResult.model_validate_json(verifier_out.read_text())
+    assert parsed.rewards == {"score": 1.0}
+    assert parsed.checks[0].name == "answer"
+    assert parsed.checks[0].passed is True
+    assert parsed.structured == {"got": "45", "expected": "45"}
+
+
+def test_aime_run_sh_is_self_contained_and_writes_verifier_result(
+    tmp_path: Path,
+) -> None:
+    """ScriptVerifier only injects LOOM_VERIFIER_OUTPUT. The generated
+    AIME run.sh must derive its task paths from its own location so the
+    task bundle is self-contained after publication/registration."""
+    rec = json.loads(FIXTURE.read_text())[0]
+    inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
+    AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
+
+    (tmp_path / "final_answer.txt").write_text("Reasoning...\n45\n")
+    verifier_out = tmp_path / "verifier_output.json"
+
+    env = dict(os.environ)
+    env.pop("LOOM_AGENT_OUTPUT", None)
+    env.pop("LOOM_TASK_DIR", None)
+    env["PYTHON"] = sys.executable
+    env["LOOM_VERIFIER_OUTPUT"] = str(verifier_out)
+
+    result = subprocess.run(
+        ["sh", str(tmp_path / "verifier" / "run.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    parsed = VerifierResult.model_validate_json(verifier_out.read_text())
+    assert parsed.rewards == {"score": 1.0}
+    assert len(parsed.checks) == 1
+    assert parsed.checks[0].name == "answer"
+    assert parsed.checks[0].passed is True
+    assert parsed.structured == {"got": "45", "expected": "45"}
 
 
 def test_aime_license_spdx_is_proprietary_maa(tmp_path: Path) -> None:
-    """Spec §7: AIME tasks must carry `proprietary-MAA` so the Plan 13
-    license-allowlist enforcement keeps them out of the default
-    `[MIT, Apache-2.0, BSD-3-Clause, CC-BY-4.0]` allowlist (audit
-    license-bypass finding)."""
+    """AIME tasks keep source/license metadata even though their catalog
+    execution policy is notice-only for internal research launches."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
     converted = AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
     assert converted.license_spdx == "proprietary-MAA"
     assert AIME22Adapter.license_spdx == "proprietary-MAA"
+    assert AIME22Adapter.license_execution_policy == "notice"
 
 
 def test_aime_checker_picks_last_integer(tmp_path: Path) -> None:
@@ -121,11 +179,15 @@ def test_aime_checker_picks_last_integer(tmp_path: Path) -> None:
 
     subprocess.run(
         [sys.executable, str(tmp_path / "verifier" / "check.py")],
-        env=env, capture_output=True, text=True, check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    payload = json.loads(verifier_out.read_text())
-    assert payload["pass"] is True
-    assert payload["got"] == "100"
+    parsed = VerifierResult.model_validate_json(verifier_out.read_text())
+    assert parsed.rewards == {"score": 1.0}
+    assert parsed.checks[0].passed is True
+    assert parsed.structured == {"got": "100", "expected": "100"}
 
 
 def test_aime_checker_rejects_wrong_answer(tmp_path: Path) -> None:
@@ -144,8 +206,12 @@ def test_aime_checker_rejects_wrong_answer(tmp_path: Path) -> None:
 
     subprocess.run(
         [sys.executable, str(tmp_path / "verifier" / "check.py")],
-        env=env, capture_output=True, text=True, check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    payload = json.loads(verifier_out.read_text())
-    assert payload["pass"] is False
-    assert payload["got"] == "42"
+    parsed = VerifierResult.model_validate_json(verifier_out.read_text())
+    assert parsed.rewards == {"score": 0.0}
+    assert parsed.checks[0].passed is False
+    assert parsed.structured == {"got": "42", "expected": "45"}

@@ -6,7 +6,7 @@
       "display_name": "AIME 2022",
       "series": "aime",
       "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
       "splits": ["train"],
       "params": {"year": "2022"}
     },
@@ -15,7 +15,7 @@
       "display_name": "AIME 2023",
       "series": "aime",
       "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
       "splits": ["train"],
       "params": {"year": "2023"}
     },
@@ -24,7 +24,7 @@
       "display_name": "AIME 2024",
       "series": "aime",
       "upstream": {"kind": "huggingface", "locator": "AI-MO/aimo-validation-aime"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
       "splits": ["train"],
       "params": {"year": "2024"}
     },
@@ -33,7 +33,7 @@
       "display_name": "AIME 2025",
       "series": "aime",
       "upstream": {"kind": "huggingface", "locator": "MathArena/aime_2025_I"},
-      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability"},
+      "license": {"spdx": "proprietary-MAA", "url": "https://maa.org/maa-disclaimer-of-warranties-and-limitation-of-liability", "execution_policy": "notice"},
       "splits": ["train"]
     },
     {

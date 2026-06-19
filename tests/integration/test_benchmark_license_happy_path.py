@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Benchmark, Team, TeamQuota, Token
@@ -34,6 +34,9 @@ from loom_control_plane.config import ControlPlaneSettings
 _FIXTURE = (
     Path(__file__).resolve().parents[2]
     / "packages/loom-benchmarks/tests/fixtures/humaneval/sample.json"
+)
+_AIME_FIXTURE = (
+    Path(__file__).resolve().parents[2] / "packages/loom-benchmarks/tests/fixtures/aime/sample.json"
 )
 
 
@@ -49,17 +52,23 @@ def seed(postgres_url: str) -> Iterator[dict[str, object]]:
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["submit"], team_id=team_id,
-            issued_at=now, expires_at=None,
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["submit"],
+                team_id=team_id,
+                issued_at=now,
+                expires_at=None,
+            )
+        )
         s.commit()
     try:
         yield {"team_id": team_id, "token": raw}
     finally:
         with session_local() as s:
             from loom.db.schema import Trial
+
             s.execute(delete(Trial))
             s.execute(delete(Token))
             s.execute(delete(TaskRow))
@@ -103,11 +112,16 @@ async def test_humaneval_mit_clears_default_allowlist(
     fixture_records = json.loads(_FIXTURE.read_text())
 
     def _fake_list(
-        self: hv.HumanEvalAdapter, *, source_dir: Path, split: str,
+        self: hv.HumanEvalAdapter,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         for r in fixture_records:
             yield BenchmarkInstance(
-                instance_id=r["task_id"], split=split, raw=r,
+                instance_id=r["task_id"],
+                split=split,
+                raw=r,
             )
 
     monkeypatch.setattr(hv.HumanEvalAdapter, "list_instances", _fake_list)
@@ -131,7 +145,10 @@ async def test_humaneval_mit_clears_default_allowlist(
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "humaneval/HumanEval/0", "config": {"agent_name": "oracle", "agent_model": None}},
+            json={
+                "task_id": "humaneval/HumanEval/0",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
         )
     assert r.status_code == 201, r.text
     assert r.json()["state"] == "queued"
@@ -165,14 +182,21 @@ async def test_lcb_cc_by_nc_rejected_under_default_allowlist(
     }
 
     def _fake_list(
-        self: lcb.LiveCodeBenchAdapter, *, source_dir: Path, split: str,
+        self: lcb.LiveCodeBenchAdapter,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         yield BenchmarkInstance(
-            instance_id=sample["question_id"], split=split, raw=sample,
+            instance_id=sample["question_id"],
+            split=split,
+            raw=sample,
         )
 
     monkeypatch.setattr(
-        lcb.LiveCodeBenchAdapter, "list_instances", _fake_list,
+        lcb.LiveCodeBenchAdapter,
+        "list_instances",
+        _fake_list,
     )
     monkeypatch.setattr(
         "loom_benchmark_tool.import_cmd.fetch_upstream",
@@ -194,7 +218,79 @@ async def test_lcb_cc_by_nc_rejected_under_default_allowlist(
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
-            json={"task_id": "livecodebench/lcb-9001", "config": {"agent_name": "oracle", "agent_model": None}},
+            json={
+                "task_id": "livecodebench/lcb-9001",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
         )
     assert r.status_code == 403, r.text
     assert "CC-BY-NC-4.0" in r.json()["detail"]
+
+
+async def test_aime_notice_policy_clears_default_submit_allowlist(
+    app,  # type: ignore[no-untyped-def]
+    seed: dict[str, object],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AIME keeps `proprietary-MAA` as metadata, but #274 owner decision
+    treats public AIME mirrors as notice-only for internal research launches.
+    The submit path must allow the default team without adding
+    `proprietary-MAA` to the team's hard-license allowlist."""
+    from loom_benchmarks.adapters import aime
+    from loom_benchmarks.base import BenchmarkInstance
+
+    rec = json.loads(_AIME_FIXTURE.read_text())[0]
+
+    def _fake_list(
+        self: aime.AIME22Adapter,
+        *,
+        source_dir: Path,
+        split: str,
+    ) -> Iterator[BenchmarkInstance]:
+        yield BenchmarkInstance(
+            instance_id="2022-I/1",
+            split=split,
+            raw=rec,
+            tags={"year": "2022", "exam": "I", "problem": "1"},
+        )
+
+    monkeypatch.setattr(aime.AIME22Adapter, "list_instances", _fake_list)
+    monkeypatch.setattr(
+        "loom_benchmark_tool.import_cmd.fetch_upstream",
+        lambda *a, **kw: tmp_path / "stub-source",
+    )
+
+    store = FakeObjectStore()
+    await run_import(
+        benchmark="aime-22",
+        db_url=postgres_url,
+        object_store=store,
+        bucket="loom-benchmarks",
+        cache_dir=tmp_path / "cache",
+        imported_by="ci",
+    )
+
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        task_row = conn.execute(
+            text(
+                "SELECT license, tags FROM tasks WHERE id='aime-22/2022-I/1'",
+            )
+        ).one()
+    engine.dispose()
+    assert task_row.license == "proprietary-MAA"
+    assert task_row.tags["license_execution_policy"] == "notice"
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {seed['token']}"},
+            json={
+                "task_id": "aime-22/2022-I/1",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+    assert r.status_code == 201, r.text
+    assert r.json()["state"] == "queued"

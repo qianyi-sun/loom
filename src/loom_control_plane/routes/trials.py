@@ -14,6 +14,7 @@ from loom.auth import verify_bearer_token
 from loom.db.schema import Batch, LlmCall, TeamQuota
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
+from loom.license_policy import is_license_allowed_for_submit
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
@@ -45,9 +46,11 @@ async def submit_trial(
     batch_team_id: UUID | None = None
     if batch_id is not None:
         async with request.app.state.session_factory() as session:
-            batch_team_id = (await session.execute(
-                select(Batch.team_id).where(Batch.id == batch_id),
-            )).scalar_one_or_none()
+            batch_team_id = (
+                await session.execute(
+                    select(Batch.team_id).where(Batch.id == batch_id),
+                )
+            ).scalar_one_or_none()
         if batch_team_id is None:
             raise HTTPException(
                 status_code=400,
@@ -81,12 +84,14 @@ async def submit_trial(
     # common "runner re-submits an already-emitted trial" path.
     if idempotency_key is not None:
         async with request.app.state.session_factory() as session:
-            existing = (await session.execute(
-                select(TrialRow).where(
-                    TrialRow.idempotency_key == idempotency_key,
-                    TrialRow.team_id == submit_team_id,
-                ),
-            )).scalar_one_or_none()
+            existing = (
+                await session.execute(
+                    select(TrialRow).where(
+                        TrialRow.idempotency_key == idempotency_key,
+                        TrialRow.team_id == submit_team_id,
+                    ),
+                )
+            ).scalar_one_or_none()
         if existing is not None:
             return {
                 "trial_id": str(existing.id),
@@ -95,9 +100,11 @@ async def submit_trial(
             }
 
     async with request.app.state.session_factory() as session:
-        task_row = (await session.execute(
-            select(TaskRow).where(TaskRow.id == task_id),
-        )).scalar_one_or_none()
+        task_row = (
+            await session.execute(
+                select(TaskRow).where(TaskRow.id == task_id),
+            )
+        ).scalar_one_or_none()
     if task_row is None:
         raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
 
@@ -142,10 +149,16 @@ async def submit_trial(
         # buggy benchmark importer could produce) must NOT bypass; it
         # should fall through to the allowlist check and 403.
         if task_row.license is not None:
-            quota = (await session.execute(
-                select(TeamQuota).where(TeamQuota.team_id == submit_team_id),
-            )).scalar_one()
-            if task_row.license not in quota.license_allowlist:
+            quota = (
+                await session.execute(
+                    select(TeamQuota).where(TeamQuota.team_id == submit_team_id),
+                )
+            ).scalar_one()
+            if not is_license_allowed_for_submit(
+                task_license=task_row.license,
+                allowlist=quota.license_allowlist,
+                tags=task_row.tags,
+            ):
                 raise HTTPException(
                     status_code=403,
                     detail=(
@@ -174,7 +187,9 @@ async def submit_trial(
         provider_connection_id = payload.get("provider_connection_id")
         provider_model_id = payload.get("provider_model_id")
         insert_values: dict[str, Any] = {
-            "id": trial_id, "team_id": submit_team_id, "task_id": task_id,
+            "id": trial_id,
+            "team_id": submit_team_id,
+            "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
             "requires_caps": requires_caps.model_dump(mode="json"),
             "state": "queued",
@@ -211,19 +226,18 @@ async def submit_trial(
                 # global, but we never expose another team's trial:
                 # if the canonical row belongs to a different team
                 # we 409 the caller).
-                existing = (await session.execute(
-                    select(TrialRow).where(
-                        TrialRow.idempotency_key == idempotency_key,
-                    ),
-                )).scalar_one()
+                existing = (
+                    await session.execute(
+                        select(TrialRow).where(
+                            TrialRow.idempotency_key == idempotency_key,
+                        ),
+                    )
+                ).scalar_one()
                 await session.commit()
                 if existing.team_id != submit_team_id:
                     raise HTTPException(
                         status_code=409,
-                        detail=(
-                            "idempotency_key collision with another "
-                            "team's trial"
-                        ),
+                        detail=("idempotency_key collision with another team's trial"),
                     )
                 return {
                     "trial_id": str(existing.id),
@@ -234,8 +248,7 @@ async def submit_trial(
             submitted_at = row.submitted_at
         else:
             result = await session.execute(
-                insert(TrialRow).values(**insert_values)
-                .returning(TrialRow.submitted_at),
+                insert(TrialRow).values(**insert_values).returning(TrialRow.submitted_at),
             )
             submitted_at = result.scalar_one()
         await session.commit()
@@ -270,9 +283,19 @@ async def cancel_trial(
         raise HTTPException(status_code=401, detail="not authorized")
 
     async with request.app.state.session_factory() as session:
-        row = (await session.execute(_CANCEL_SQL, {
-            "trial_id": trial_id, "team_id": ctx.team_id,
-        })).mappings().one_or_none()
+        row = (
+            (
+                await session.execute(
+                    _CANCEL_SQL,
+                    {
+                        "trial_id": trial_id,
+                        "team_id": ctx.team_id,
+                    },
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
         await session.commit()
 
     if row is None:
@@ -295,17 +318,22 @@ async def get_trial(
         raise HTTPException(status_code=401, detail="not authorized")
 
     async with request.app.state.session_factory() as session:
-        row = (await session.execute(
-            select(TrialRow).where(TrialRow.id == trial_id),
-        )).scalar_one_or_none()
+        row = (
+            await session.execute(
+                select(TrialRow).where(TrialRow.id == trial_id),
+            )
+        ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="trial not found")
     if ctx.team_id is not None and row.team_id != ctx.team_id:
         raise HTTPException(status_code=403, detail="trial belongs to another team")
 
     return {
-        "id": str(row.id), "team_id": str(row.team_id), "task_id": row.task_id,
-        "state": row.state, "failure_reason": row.failure_reason,
+        "id": str(row.id),
+        "team_id": str(row.team_id),
+        "task_id": row.task_id,
+        "state": row.state,
+        "failure_reason": row.failure_reason,
         "submitted_at": row.submitted_at.isoformat(),
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
         "started_at": row.started_at.isoformat() if row.started_at else None,
@@ -332,22 +360,31 @@ async def get_trial_llm_calls(
 
     # Worker scope OR same-team team-token can read.
     async with request.app.state.session_factory() as session:
-        trial_row = (await session.execute(
-            select(TrialRow.team_id).where(TrialRow.id == trial_id),
-        )).scalar_one_or_none()
+        trial_row = (
+            await session.execute(
+                select(TrialRow.team_id).where(TrialRow.id == trial_id),
+            )
+        ).scalar_one_or_none()
     if trial_row is None:
         raise HTTPException(status_code=404, detail="trial not found")
     if ctx.team_id is not None and trial_row != ctx.team_id:
         raise HTTPException(
-            status_code=403, detail="trial belongs to another team",
+            status_code=403,
+            detail="trial belongs to another team",
         )
 
     async with request.app.state.session_factory() as session:
-        rows = (await session.execute(
-            select(LlmCall)
-            .where(LlmCall.trial_id == trial_id)
-            .order_by(LlmCall.captured_at),
-        )).scalars().all()
+        rows = (
+            (
+                await session.execute(
+                    select(LlmCall)
+                    .where(LlmCall.trial_id == trial_id)
+                    .order_by(LlmCall.captured_at),
+                )
+            )
+            .scalars()
+            .all()
+        )
     return {
         "items": [
             {

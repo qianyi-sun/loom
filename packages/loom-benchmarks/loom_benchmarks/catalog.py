@@ -62,6 +62,7 @@ class _CatalogLicense(BaseModel):
 
     spdx: str
     url: str = ""
+    execution_policy: Literal["allowlist", "notice"] = "allowlist"
 
 
 class CatalogEntry(BaseModel):

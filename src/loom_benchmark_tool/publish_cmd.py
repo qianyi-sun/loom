@@ -37,6 +37,7 @@ from huggingface_hub import HfApi
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
 
+from loom.license_policy import tags_with_license_execution_policy
 from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
 from loom_benchmark_tool.manifest import (
     MANIFEST_FILENAME,
@@ -190,7 +191,10 @@ def run_publish(
                     # PR-1 (series/tags): per-task metadata. Empty for
                     # adapters that haven't been reworked yet - register
                     # treats absent + {} identically.
-                    "tags": dict(inst.tags),
+                    "tags": tags_with_license_execution_policy(
+                        inst.tags,
+                        getattr(adapter, "license_execution_policy", None),
+                    ),
                     "task_config": task_config,
                 }
             )

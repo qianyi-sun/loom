@@ -101,7 +101,7 @@ Notes:
 | Name           | Class                           | When to use                                            |
 |----------------|---------------------------------|--------------------------------------------------------|
 | `pytest`       | `PytestVerifier`                | code tasks with a test suite; parses junit XML         |
-| `script`       | `ScriptVerifier`                | task ships a `verify.sh`; exit code → pass/fail        |
+| `script`       | `ScriptVerifier`                | task ships a script that writes `VerifierResult` JSON   |
 | `structured`   | `StructuredOutputVerifier`      | agent produced JSON; verify against a schema           |
 | `llm_judge`    | `LLMJudgeVerifier`              | grade open-ended output via an LLM with a rubric       |
 | `composite`    | `CompositeVerifier`             | run N verifiers, aggregate via min / mean / weighted   |
@@ -109,6 +109,43 @@ Notes:
 `CompositeVerifier` is the only one that takes other verifiers as
 args. The aggregator (`Aggregator.MIN`, `Aggregator.MEAN`,
 `Aggregator.WEIGHTED`) reduces `rewards` dicts across children.
+
+## Script verifier bundle contract
+
+`ScriptVerifier` is the preferred adapter boundary for benchmark-specific
+checks that can run inside the task sandbox. A task must set the script path
+explicitly:
+
+```toml
+[verifier]
+name = "script"
+
+[verifier.args]
+script_path = "/workspace/verifier/run.sh"
+```
+
+At runtime Loom creates `/loom/verifier/`, sets only
+`LOOM_VERIFIER_OUTPUT=/loom/verifier/output.json`, and runs the configured
+script in the agent sandbox. The script should derive task paths from its own
+location or from explicit paths such as `/workspace`; it must not require
+implicit variables such as `LOOM_TASK_DIR` or `LOOM_AGENT_OUTPUT` unless the
+script sets safe defaults itself.
+
+The script must write a `VerifierResult` JSON object to
+`$LOOM_VERIFIER_OUTPUT`:
+
+```json
+{
+  "rewards": {"score": 1.0},
+  "checks": [{"name": "answer", "passed": true, "score": 1.0}],
+  "structured": {"expected": "45", "got": "45"},
+  "confidence": 1.0
+}
+```
+
+A wrong model answer should normally be `rewards.score = 0.0` with
+`checks[0].passed = false`, not a platform failure. Missing output or invalid
+JSON is a verifier infrastructure failure and makes the trial failed.
 
 ## Why each lives where it does
 

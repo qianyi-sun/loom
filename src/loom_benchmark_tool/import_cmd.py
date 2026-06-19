@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
+from loom.license_policy import tags_with_license_execution_policy
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
@@ -165,7 +166,8 @@ def _resolve_adapter(
     remapped.name = remap.id
     remapped.display_name = remap.display_name
     remapped.upstream_source = UpstreamSource(
-        kind=remap.upstream_kind, locator=remap.upstream_locator,
+        kind=remap.upstream_kind,
+        locator=remap.upstream_locator,
     )
     remapped.license_spdx = remap.license_spdx
     remapped.license_url = remap.license_url
@@ -196,14 +198,18 @@ async def run_import(
     """
     # Honor the explicit override, then the env var, then the default.
     cfg_path = benchmarks_config_path
-    if cfg_path is None and (env_path := os.environ.get(
-        "LOOM_BENCHMARKS_CONFIG_PATH",
-    )):
+    if cfg_path is None and (
+        env_path := os.environ.get(
+            "LOOM_BENCHMARKS_CONFIG_PATH",
+        )
+    ):
         cfg_path = Path(env_path)
     adapter = _resolve_adapter(benchmark, benchmarks_config_path=cfg_path)
     cache_dir.mkdir(parents=True, exist_ok=True)
     source_dir = fetch_upstream(
-        adapter.upstream_source, cache_root=cache_dir, refresh=refresh,
+        adapter.upstream_source,
+        cache_root=cache_dir,
+        refresh=refresh,
     )
     selected_instances = _select_instances(
         adapter,
@@ -219,7 +225,8 @@ async def run_import(
     # ON CONFLICT (id) DO UPDATE).
     async with session_factory() as session:
         await session.execute(
-            pg_insert(Benchmark).values(
+            pg_insert(Benchmark)
+            .values(
                 id=adapter.name,
                 display_name=adapter.display_name,
                 upstream_kind=adapter.upstream_source.kind,
@@ -229,7 +236,8 @@ async def run_import(
                 license_url=adapter.license_url,
                 splits=list(adapter.splits),
                 imported_by=imported_by,
-            ).on_conflict_do_update(
+            )
+            .on_conflict_do_update(
                 index_elements=["id"],
                 set_={
                     "upstream_revision": adapter.upstream_source.revision or "",
@@ -249,24 +257,33 @@ async def run_import(
             converted = adapter.convert_instance(inst, out_dir=out_dir)
             prefix = f"{adapter.name}/{inst.instance_id}/"
             await upload_task_dir(
-                store=object_store, bucket=bucket,
-                prefix=prefix, task_dir=out_dir,
+                store=object_store,
+                bucket=bucket,
+                prefix=prefix,
+                task_dir=out_dir,
             )
 
             cfg: dict[str, Any] = tomllib.loads(
                 (out_dir / "task.toml").read_text(),
             )
             source_uri = f"s3://{bucket}/{prefix}"
+            tags = tags_with_license_execution_policy(
+                inst.tags,
+                getattr(adapter, "license_execution_policy", None),
+            )
             async with session_factory() as session:
                 await session.execute(
-                    pg_insert(TaskRow).values(
+                    pg_insert(TaskRow)
+                    .values(
                         id=converted.task_id,
                         checksum=converted.checksum,
                         config=cfg,
                         source=source_uri,
                         license=converted.license_spdx,
                         benchmark_id=adapter.name,
-                    ).on_conflict_do_update(
+                        tags=tags,
+                    )
+                    .on_conflict_do_update(
                         index_elements=["id"],
                         set_={
                             "checksum": converted.checksum,
@@ -274,6 +291,7 @@ async def run_import(
                             "source": source_uri,
                             "license": converted.license_spdx,
                             "benchmark_id": adapter.name,
+                            "tags": tags,
                         },
                     ),
                 )

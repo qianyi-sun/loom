@@ -65,10 +65,38 @@ artifacts = ["result.txt"]
 | name | What it does | Input |
 |---|---|---|
 | `pytest` | Runs `tests/test_*.py` in-sandbox, parses JUnit XML | `tests/` dir |
-| `script` | Runs an arbitrary script; reads JSON from `LOOM_VERIFIER_OUTPUT` | `verifier/run.sh` |
+| `script` | Runs an arbitrary script; reads `VerifierResult` JSON from `LOOM_VERIFIER_OUTPUT` | `verifier/run.sh` |
 | `structured` | JSON Schema validation of an artifact | schema in config |
 | `llm-judge` | Submits trajectory excerpt + rubric to the gateway | rubric in config |
 | `composite` | Aggregates sub-verifiers (MEAN/MIN/MAX/WEIGHTED) | nested verifier list |
+
+For `script`, set the script path explicitly and write a full
+`VerifierResult` JSON object to `LOOM_VERIFIER_OUTPUT`:
+
+```toml
+[verifier]
+name = "script"
+
+[verifier.args]
+script_path = "/workspace/verifier/run.sh"
+```
+
+```sh
+#!/bin/sh
+set -eu
+script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+task_dir="${LOOM_TASK_DIR:-$(dirname "$script_dir")}"
+answer_file="${LOOM_AGENT_OUTPUT:-$task_dir/final_answer.txt}"
+python3 "$task_dir/verifier/check.py" \
+  --answer "$answer_file" \
+  --output "$LOOM_VERIFIER_OUTPUT"
+```
+
+`ScriptVerifier` guarantees `LOOM_VERIFIER_OUTPUT`; task bundles should derive
+their own task/artifact paths from the script location, `/workspace`, or safe
+defaults. A model's wrong answer should produce a scored verifier result such
+as `{"rewards":{"score":0.0},"checks":[...]}` so the trial succeeds as a
+platform run while recording model correctness separately.
 
 ## Multi-step tasks
 

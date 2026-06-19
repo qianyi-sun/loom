@@ -63,14 +63,20 @@ class BenchmarkAdapter(Protocol):
     splits: tuple[str, ...]
 
     def list_instances(
-        self, *, source_dir: Path, split: str,
+        self,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         """Yield BenchmarkInstance records. Pure: same source_dir +
         split → same order."""
         ...
 
     def convert_instance(
-        self, instance: BenchmarkInstance, *, out_dir: Path,
+        self,
+        instance: BenchmarkInstance,
+        *,
+        out_dir: Path,
     ) -> ConvertedTask:
         """Write task.toml + instruction.md (+ solution/, tests/,
         environment/) into out_dir."""
@@ -100,7 +106,14 @@ class CatalogBackedAdapter:
     (i.e. not inherited unset)."""
 
     name: ClassVar[str] = ""
+    display_name: ClassVar[str] = ""
+    series: ClassVar[str | None] = None
+    upstream_source: ClassVar[UpstreamSource]
+    license_spdx: ClassVar[str] = ""
+    license_url: ClassVar[str] = ""
+    splits: ClassVar[tuple[str, ...]] = ()
     _params: ClassVar[dict[str, str]] = {}
+    license_execution_policy: ClassVar[str] = "allowlist"
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -120,5 +133,6 @@ class CatalogBackedAdapter:
         cls.upstream_source = entry.upstream.to_dataclass()
         cls.license_spdx = entry.license.spdx
         cls.license_url = entry.license.url
+        cls.license_execution_policy = entry.license.execution_policy
         cls.splits = tuple(entry.splits)
         cls._params = dict(entry.params)

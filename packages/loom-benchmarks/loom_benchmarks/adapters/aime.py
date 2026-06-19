@@ -22,7 +22,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
-import datasets  # type: ignore[import-untyped]
+import datasets
 
 from loom_benchmarks.base import (
     BenchmarkInstance,
@@ -35,16 +35,19 @@ from loom_benchmarks.util import (
     toml_string,
 )
 
-_AIME_CHECK_PY = textwrap.dedent("""
+_AIME_CHECK_PY = (
+    textwrap.dedent("""
     import json
     import os
     import pathlib
     import re
 
-    ans = pathlib.Path(os.environ["LOOM_AGENT_OUTPUT"]).read_text().strip()
-    exp = pathlib.Path(
-        os.environ["LOOM_TASK_DIR"] + "/expected_answer.txt"
-    ).read_text().strip()
+    task_dir = pathlib.Path(os.environ.get("LOOM_TASK_DIR", "/workspace"))
+    agent_output = pathlib.Path(
+        os.environ.get("LOOM_AGENT_OUTPUT", str(task_dir / "final_answer.txt"))
+    )
+    ans = agent_output.read_text().strip() if agent_output.is_file() else ""
+    exp = (task_dir / "expected_answer.txt").read_text().strip()
     last_line = ans.splitlines()[-1] if ans else ""
     # Use the LAST integer on the line, not the first. Phrasings like
     # "answer: 45 (out of 1000)" should extract 45 only if it's the
@@ -52,11 +55,36 @@ _AIME_CHECK_PY = textwrap.dedent("""
     # integer on last line" convention.
     matches = re.findall(r"-?\\d+", last_line)
     got = matches[-1] if matches else ""
-    result = {"pass": got == exp, "got": got, "expected": exp}
+    passed = got == exp
+    score = 1.0 if passed else 0.0
+    got_display = got if got else "<none>"
+    result = {
+        "rewards": {"score": score},
+        "checks": [
+            {
+                "name": "answer",
+                "passed": passed,
+                "score": score,
+                "message": f"expected {exp}, got {got_display}",
+            }
+        ],
+        "structured": {"got": got, "expected": exp},
+        "confidence": 1.0,
+    }
     pathlib.Path(os.environ["LOOM_VERIFIER_OUTPUT"]).write_text(
         json.dumps(result),
     )
-""").strip() + "\n"
+""").strip()
+    + "\n"
+)
+
+_AIME_RUN_SH = textwrap.dedent("""
+    script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+    task_dir="${LOOM_TASK_DIR:-$(dirname "$script_dir")}"
+    export LOOM_TASK_DIR="$task_dir"
+    export LOOM_AGENT_OUTPUT="${LOOM_AGENT_OUTPUT:-$task_dir/final_answer.txt}"
+    "${PYTHON:-python3}" "$task_dir/verifier/check.py"
+""").strip()
 
 
 _URL_RE = re.compile(r"(?P<year>\d{4})_AIME_(?P<exam>I+)_Problems/Problem_(?P<num>\d+)")
@@ -84,10 +112,14 @@ class _AIMEYearBase(CatalogBackedAdapter):
     name: ClassVar[str]
 
     def list_instances(
-        self, *, source_dir: Path, split: str,
+        self,
+        *,
+        source_dir: Path,
+        split: str,
     ) -> Iterator[BenchmarkInstance]:
         ds = datasets.load_dataset(
-            self.upstream_source.locator, cache_dir=str(source_dir),
+            self.upstream_source.locator,
+            cache_dir=str(source_dir),
         )[split]
         year_filter = self._params.get("year", "")
         for record in ds:
@@ -100,7 +132,8 @@ class _AIMEYearBase(CatalogBackedAdapter):
                 continue
             yield BenchmarkInstance(
                 instance_id=f"{year}-{exam}/{num}",
-                split=split, raw=rec,
+                split=split,
+                raw=rec,
                 tags={
                     "year": year,
                     "exam": exam,
@@ -109,7 +142,10 @@ class _AIMEYearBase(CatalogBackedAdapter):
             )
 
     def convert_instance(
-        self, instance: BenchmarkInstance, *, out_dir: Path,
+        self,
+        instance: BenchmarkInstance,
+        *,
+        out_dir: Path,
     ) -> ConvertedTask:
         r = instance.raw
         task_id = f"{self.name}/{instance.instance_id}"
@@ -127,13 +163,14 @@ class _AIMEYearBase(CatalogBackedAdapter):
         verifier_dir.mkdir(parents=True, exist_ok=True)
         (verifier_dir / "check.py").write_text(_AIME_CHECK_PY)
         structured_verifier_script(
-            'python "$LOOM_TASK_DIR/verifier/check.py"',
+            _AIME_RUN_SH,
             out_dir=out_dir,
         )
 
         toml_id = toml_string(task_id)
         toml_name = toml_string(f"{self.display_name} — {instance.instance_id}")
-        (out_dir / "task.toml").write_text(textwrap.dedent(f"""
+        (out_dir / "task.toml").write_text(
+            textwrap.dedent(f"""
             schema_version = "1"
 
             [task]
@@ -150,10 +187,15 @@ class _AIMEYearBase(CatalogBackedAdapter):
             [verifier]
             name = "script"
 
+            [verifier.args]
+            script_path = "/workspace/verifier/run.sh"
+
             [[steps]]
             name = "main"
             artifacts = ["final_answer.txt"]
-        """).strip() + "\n")
+        """).strip()
+            + "\n"
+        )
 
         return ConvertedTask(
             task_id=task_id,

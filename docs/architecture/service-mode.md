@@ -387,7 +387,10 @@ been re-verified.
 - **License enforcement** — per-team `license_allowlist` (default
   `[MIT, Apache-2.0, BSD-3-Clause, CC-BY-4.0]`). `POST /trials`
   returns 403 if the task's adapter declares a license outside the
-  allowlist.
+  allowlist and the task is on the default hard `allowlist` execution
+  policy. Public benchmark mirrors can declare a task-level
+  `license_execution_policy=notice`; their source license remains visible,
+  but the default internal research team can launch them.
 - **Idempotency** — batches + trials accept an `idempotency_key`;
   partial unique index `WHERE NOT NULL` on `trials.idempotency_key`.
   Cross-team collisions return 409.
