@@ -1,0 +1,66 @@
+# Operator-facing benchmark registry.
+#
+# Ships empty (everything commented) — uncomment one of the templates
+# below to register a benchmark. Sync runs automatically on
+# `loom service up` (dev) or on demand via:
+#
+#     loom datasets sync-config [--dry-run]
+#
+# In production, copy to /etc/loom/benchmarks.toml or override the
+# path with $LOOM_BENCHMARKS_CONFIG_PATH.
+#
+# See docs/architecture/benchmark-adapter.md under "Operator-facing
+# TOML registry" for the full schema + failure-mode table.
+
+schema_version = 1
+
+# ─── Local task folders ──────────────────────────────────────────
+#
+# Register a directory of `task.toml` bundles as a benchmark. The
+# source path is *derived*: <worker.fixtures_root>/<id>/. So this
+# entry expects bundles at <fixtures_root>/team-evals/<task>/task.toml.
+# Operators provision that directory out-of-band (host bind-mount in
+# dev compose; PV / hostPath in k8s) and set
+# $LOOM_WORKER_FIXTURES_ROOT.
+#
+# Sync UPSERTs:
+#   benchmarks: upstream_kind="local-folder", upstream_locator=<source dir>
+#   tasks:      one per task.toml; source="fixture://<id>/<relpath>"
+#
+# Empty / missing source dir → WARN + SKIP (no zombie row).
+# Invalid task.toml inside the source → sync exits 1.
+
+# [[local]]
+# id = "team-evals"                          # kebab-case, unique
+# display_name = "Internal team evaluations"
+# series = "internal"
+# license_spdx = "proprietary"
+
+# ─── Adapter remaps ──────────────────────────────────────────────
+#
+# Reuse an existing entry-point adapter's parsing against a different
+# upstream — e.g., a fork of HumanEval. `inherit` MUST be a name in
+# `loom_benchmarks.REGISTRY` (sync pre-flight rejects unknown
+# inherits). The fork's `name`, `upstream_source`, `license_spdx`,
+# `license_url`, and optional `splits` shadow the base adapter on
+# a shallow-copied instance, so all downstream paths (S3 prefix,
+# task.toml's `[task] id`, DB tasks.benchmark_id) carry the remap's
+# id — not the inherit's.
+#
+# Sync writes the benchmarks row only. Tasks come from:
+#
+#     loom datasets import <remap.id>
+#
+# which resolves the inherit, fetches from the remap's upstream,
+# and writes tasks keyed on the remap.id.
+
+# [[remap]]
+# id = "humaneval-internal-fork"
+# inherit = "humaneval"                      # must be in REGISTRY
+# display_name = "HumanEval (internal fork)"
+# upstream_kind = "huggingface"              # huggingface | git | https-tarball
+# upstream_locator = "myorg/humaneval-fork"
+# license_spdx = "Apache-2.0"
+# license_url = "https://github.com/myorg/humaneval-fork/blob/main/LICENSE"
+# series = "code"                            # optional; defaults to base's
+# splits = ["test"]                          # optional; defaults to base's
