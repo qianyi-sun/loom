@@ -185,16 +185,16 @@ class BrowseCompAdapter(CatalogBackedAdapter):
         )
 
 
-def derive_key(password: str, length: int) -> bytes:
+def derive_repeating_xor_key(canary: str, length: int) -> bytes:
     hasher = hashlib.sha256()
-    hasher.update(password.encode())
+    hasher.update(canary.encode())
     key = hasher.digest()
     return key * (length // len(key)) + key[: length % len(key)]
 
 
-def decrypt(ciphertext_b64: str, password: str) -> str:
+def decrypt(ciphertext_b64: str, canary: str) -> str:
     encrypted = base64.b64decode(ciphertext_b64)
-    key = derive_key(password, len(encrypted))
+    key = derive_repeating_xor_key(canary, len(encrypted))
     decrypted = bytes(a ^ b for a, b in zip(encrypted, key, strict=True))
     return decrypted.decode()
 
