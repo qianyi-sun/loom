@@ -215,9 +215,9 @@ async def test_agents_includes_builtins_and_adapters(
     # #289 runtime readiness metadata: displayed agents must say whether
     # service-mode can run them before users submit a doomed batch.
     opencode = by_name["opencode"]
-    assert opencode["service_mode_ready"] is False
-    assert opencode["readiness_status"] == "unavailable"
-    assert "opencode" in opencode["readiness_message"]
+    assert opencode["service_mode_ready"] is True
+    assert opencode["readiness_status"] == "ready"
+    assert opencode["readiness_message"] is None
     assert opencode["runtime_contract"]["required_executables"] == ["opencode"]
     assert opencode["runtime_contract"]["required_packages"] == ["opencode-ai"]
     assert opencode["runtime_contract"]["capture"] == "stdout_jsonl"

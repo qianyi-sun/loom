@@ -39,12 +39,14 @@ def test_agent_sandbox_image_files_exist_and_are_used_by_dockerfile() -> None:
     assert "deploy/agent-sandbox/npm-packages.txt" in dockerfile
     assert "deploy/agent-sandbox/python-requirements.txt" in dockerfile
     assert "deploy/agent-sandbox/python-cli-requirements.txt" in dockerfile
+    assert "packages/loom-launcher" in dockerfile
     assert "/opt/agent-runtimes/python-cli" in dockerfile
     assert "npm install -g" in dockerfile
     assert "pip install" in dockerfile
     assert "node --version" in dockerfile
     assert "python --version" in dockerfile
     assert 'importlib.import_module("openhands.sdk")' in dockerfile
+    assert 'importlib.import_module("loom_launcher.openhands_sdk_runner")' in dockerfile
     assert "openhands_sdk.run" not in dockerfile
 
 

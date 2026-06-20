@@ -118,11 +118,11 @@ jobs:
           key: venv-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml', 'packages/*/pyproject.toml', 'uv.lock') }}
 
       - name: Install project + dev deps + sibling packages
-        if: >-
-          steps.docs_only.outputs.docs_only != 'true' &&
-          steps.cache-venv.outputs.cache-hit != 'true'
+        if: steps.docs_only.outputs.docs_only != 'true'
         run: |
-          uv venv --python 3.11
+          if [[ ! -d .venv ]]; then
+            uv venv --python 3.11
+          fi
           uv pip install -e ".[dev]"
           uv pip install -e packages/loom-launcher
           uv pip install -e packages/loom-benchmarks

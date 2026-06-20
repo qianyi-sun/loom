@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -33,11 +35,34 @@ class OpencodeAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
+        env["HOME"] = "/tmp/loom-opencode-home"
+        model_name = self.model_name_template.format(model_id=model.name)
+        provider_id, _, model_id = model_name.partition("/")
+        config = {
+            "provider": {
+                provider_id: {
+                    "options": {
+                        "baseURL": env[self.base_url_env],
+                        "apiKey": env[self.api_key_env],
+                    },
+                    "models": {model_id: {"name": model_id}},
+                }
+            }
+        }
+        config_json = json.dumps(config, separators=(",", ":"))
+        script = (
+            'mkdir -p "$HOME/.config/opencode" && '
+            f"printf '%s\\n' {shlex.quote(config_json)} > "
+            '"$HOME/.config/opencode/opencode.json" && '
+            f"exec opencode run --model {shlex.quote(model_name)} "
+            "--format json --print-logs --log-level ERROR "
+            f'--dir {shlex.quote(str(workdir))} "$1"'
+        )
         return [
-            "opencode", "run",
-            "--model", self.model_name_template.format(model_id=model.name),
-            "--output", "json",
-            "--cwd", str(workdir),
+            "sh",
+            "-c",
+            script,
+            "loom-opencode",
             instruction,
         ]
 

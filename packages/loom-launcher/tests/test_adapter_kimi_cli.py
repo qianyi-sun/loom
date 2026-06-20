@@ -12,27 +12,42 @@ from loom_launcher.adapter import ModelSpec
 def test_build_invocation_argv() -> None:
     adapter = get_adapter("kimi-cli")
     assert adapter is not None
-    env: dict[str, str] = {}
+    env = {"OPENAI_API_KEY": "step-token", "OPENAI_BASE_URL": "http://gateway.local"}
     argv = adapter.build_invocation(
         instruction="hello kimi",
         workdir=PurePosixPath("/workspace"),
         model=ModelSpec(provider="openai", name="kimi-k2"),
         env=env,
     )
-    assert argv == ["kimi", "hello kimi"]
+    assert argv == [
+        "kimi",
+        "--prompt",
+        "hello kimi",
+        "--output-format",
+        "stream-json",
+    ]
+    assert env["KIMI_MODEL_NAME"] == "openai/kimi-k2"
+    assert env["KIMI_MODEL_API_KEY"] == "step-token"
+    assert env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
+    assert env["KIMI_MODEL_BASE_URL"] == "http://gateway.local"
+    assert env["KIMI_MODEL_MAX_CONTEXT_SIZE"] == "262144"
 
 
 async def test_capture_via_pty(make_handle) -> None:
     adapter = get_adapter("kimi-cli")
     assert adapter is not None
-    handle = make_handle(stdout_chunks=[
-        b"kimi: hello!\n",
-        b"\x1b[33mkimi: more\x1b[0m\n",
-    ])
+    handle = make_handle(
+        stdout_chunks=[
+            b"kimi: hello!\n",
+            b"\x1b[33mkimi: more\x1b[0m\n",
+        ]
+    )
     events = [
         e.model_dump()
         async for e in adapter.capture_events(
-            exec_handle=handle, step_id="main", trial_id=uuid4(),
+            exec_handle=handle,
+            step_id="main",
+            trial_id=uuid4(),
         )
     ]
     assert events == [

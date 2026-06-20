@@ -33,12 +33,27 @@ class MiniSweAgentAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
+        # mini-swe-agent v2 launches a first-run configuration wizard when
+        # MSWEA_CONFIGURED is absent. Service-mode runs are non-interactive, so
+        # provide the same values through the step environment instead.
+        env["MSWEA_CONFIGURED"] = "true"
+        env["MSWEA_SILENT_STARTUP"] = "true"
+        env["MSWEA_COST_TRACKING"] = "ignore_errors"
+        env["OPENAI_API_BASE"] = env[self.base_url_env]
         return [
             "mini-swe-agent",
-            "--model", self.model_name_template.format(model_id=model.name),
-            "--workdir", str(workdir),
-            "--output", "jsonl",
-            "--task", instruction,
+            "--model",
+            self.model_name_template.format(model_id=model.name),
+            "--agent-class",
+            "default",
+            "--yolo",
+            "--cost-limit",
+            "0",
+            "--exit-immediately",
+            "--output",
+            str(workdir / "mini-swe-agent-trajectory.jsonl"),
+            "--task",
+            instruction,
         ]
 
     async def capture_events(

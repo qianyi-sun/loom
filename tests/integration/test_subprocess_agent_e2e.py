@@ -9,6 +9,7 @@ ObjectStore has the trajectory.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,10 +34,13 @@ def mocked_cp_client() -> tuple[HttpControlPlaneClient, httpx.AsyncClient]:
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/admin/step-tokens":
-            return httpx.Response(201, json={
-                "token": "loom_step_test-mocked-token",
-                "expires_at": "2026-06-07T00:00:00Z",
-            })
+            return httpx.Response(
+                201,
+                json={
+                    "token": "loom_step_test-mocked-token",
+                    "expires_at": "2026-06-07T00:00:00Z",
+                },
+            )
         return httpx.Response(404)
 
     http = httpx.AsyncClient(
@@ -44,13 +48,16 @@ def mocked_cp_client() -> tuple[HttpControlPlaneClient, httpx.AsyncClient]:
         base_url="http://cp",
     )
     cp = HttpControlPlaneClient(
-        base_url="http://cp", token="fake-worker-token", _client=http,
+        base_url="http://cp",
+        token="fake-worker-token",
+        _client=http,
     )
     return cp, http
 
 
 async def test_subprocess_agent_runs_hello_adapter_end_to_end(
-    tmp_path: Path, mocked_cp_client,
+    tmp_path: Path,
+    mocked_cp_client,
 ) -> None:
     cp, http = mocked_cp_client
     try:
@@ -58,7 +65,7 @@ async def test_subprocess_agent_runs_hello_adapter_end_to_end(
         # HelloAdapter's expected JSONL line.
         streaming = scripted_streaming_handler(
             stdout_chunks=[b'{"line": "hello from solve fizzbuzz"}\n'],
-            stderr_chunks=[],
+            stderr_chunks=[b"bad flag\n"],
             return_code=0,
         )
         driver = FakeDriver(streaming_handler=streaming)
@@ -86,7 +93,7 @@ async def test_subprocess_agent_runs_hello_adapter_end_to_end(
             store=store,
             bucket="trajectories",
             key=f"{team_id}/{trial_id}/events.jsonl",
-            min_part_bytes=0,   # let small test events flush
+            min_part_bytes=0,  # let small test events flush
         ) as trajectory:
             await agent.run(
                 instruction="solve fizzbuzz",
@@ -101,6 +108,9 @@ async def test_subprocess_agent_runs_hello_adapter_end_to_end(
         local_lines = (tmp_path / "trajectory.jsonl").read_text().splitlines()
         assert len(local_lines) == 1
         assert "hello from solve fizzbuzz" in local_lines[0]
+        event = json.loads(local_lines[0])
+        assert event["kind"] == "agent_thought"
+        assert event["content"] == "hello from solve fizzbuzz"
 
         # 5. The ObjectStore received the upload.
         assert ("trajectories", f"{team_id}/{trial_id}/events.jsonl") in store.objects
@@ -111,13 +121,14 @@ async def test_subprocess_agent_runs_hello_adapter_end_to_end(
 
 
 async def test_subprocess_agent_raises_on_agent_exit_nonzero(
-    tmp_path: Path, mocked_cp_client,
+    tmp_path: Path,
+    mocked_cp_client,
 ) -> None:
     cp, http = mocked_cp_client
     try:
         streaming = scripted_streaming_handler(
             stdout_chunks=[b'{"line": "partial"}\n'],
-            stderr_chunks=[],
+            stderr_chunks=[b"bad flag\n"],
             return_code=2,
         )
         driver = FakeDriver(streaming_handler=streaming)
@@ -134,6 +145,7 @@ async def test_subprocess_agent_raises_on_agent_exit_nonzero(
         )
         store = FakeObjectStore()
         from loom.errors import AgentError
+
         async with TrajectoryWriter(
             local_path=tmp_path / "trajectory.jsonl",
             store=store,
@@ -141,7 +153,7 @@ async def test_subprocess_agent_raises_on_agent_exit_nonzero(
             key="t/t/events.jsonl",
             min_part_bytes=0,
         ) as trajectory:
-            with pytest.raises(AgentError, match=r"exited rc=2"):
+            with pytest.raises(AgentError, match=r"exited rc=2.*bad flag"):
                 await agent.run(
                     instruction="x",
                     env=driver,

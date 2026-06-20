@@ -194,13 +194,6 @@ _BUILTIN: tuple[AgentEntry, ...] = (
                 "sandbox image before enabling this agent."
             ),
         ),
-        service_mode_ready=False,
-        readiness_status="unavailable",
-        readiness_message=(
-            "agent claude-code-inbox requires executable claude in "
-            "the trial sandbox, and the default service-mode runtime does "
-            "not provision it"
-        ),
     ),
 )
 
@@ -235,13 +228,13 @@ _DEFAULT_ADAPTER_SUPPORT: tuple[tuple[str, ...], tuple[str, ...]] = (
 _ADAPTER_CAPTURE: dict[str, str] = {
     "aider": "log_file",
     "claude-code": "stdout_jsonl",
-    "codex": "pty",
+    "codex": "stdout_jsonl",
     "gemini-cli": "stdout_jsonl",
     "hello": "stdout_jsonl",
     "kimi-cli": "pty",
     "mini-swe-agent": "stdout_jsonl",
     "opencode": "stdout_jsonl",
-    "openhands": "http_poll",
+    "openhands": "stdout_jsonl",
     "openhands-sdk": "stdout_jsonl",
     "qwen-cli": "pty",
     "swe-agent": "log_file",
@@ -262,8 +255,8 @@ _ADAPTER_REQUIRED_EXECUTABLES: dict[str, tuple[str, ...]] = {
 
 
 _ADAPTER_REQUIRED_PYTHON_MODULES: dict[str, tuple[str, ...]] = {
-    "openhands": ("openhands.server",),
-    "openhands-sdk": ("openhands_sdk.run",),
+    "openhands": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
+    "openhands-sdk": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
     "swe-agent": ("sweagent.run.run_single",),
 }
 
@@ -276,18 +269,26 @@ _ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
     "kimi-cli": ("@moonshot-ai/kimi-code",),
     "mini-swe-agent": ("mini-swe-agent",),
     "opencode": ("opencode-ai",),
-    "openhands": ("openhands-ai",),
-    "openhands-sdk": ("openhands-ai",),
+    "openhands": ("openhands-sdk",),
+    "openhands-sdk": ("openhands-sdk",),
     "qwen-cli": ("@qwen-code/qwen-code",),
     "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
 }
 
 
 _ADAPTER_RUNTIME_READY: dict[str, bool] = {
-    # The reference adapter only shells out to echo, which is available in
-    # every POSIX sandbox image Loom supports. Real external adapters remain
-    # gated until the sandbox image/provisioning path installs their runtime.
+    "aider": True,
+    "claude-code": True,
+    "codex": True,
+    "gemini-cli": True,
     "hello": True,
+    "kimi-cli": True,
+    "mini-swe-agent": True,
+    "opencode": True,
+    "openhands": True,
+    "openhands-sdk": True,
+    "qwen-cli": True,
+    "swe-agent": True,
 }
 
 

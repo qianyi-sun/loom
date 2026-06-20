@@ -57,7 +57,11 @@ build, the worker rejects contexts above `LOOM_TASK_IMAGE_BUILD_MAX_FILES`
 sandbox boundary, not the `loom-worker` container. A clean runtime audit is
 necessary before flipping an external adapter to
 `service_mode_ready=true`; it still must be followed by a live end-to-end
-smoke that proves the adapter can finish a platform trial.
+smoke that proves the adapter can finish a platform trial. Use
+`loom agents smoke-runtime --image <trial-sandbox-image>` for that second
+gate. It runs each displayed agent through `LocalTrialRunner`, a real
+Docker sandbox, and a deterministic provider stub, then reports whether the
+platform trial reached `succeeded`.
 
 The repo ships a candidate agent-capable sandbox image for operator smoke
 work:
@@ -65,18 +69,23 @@ work:
 ```bash
 docker build -f deploy/Dockerfile.agent-sandbox -t loom-agent-sandbox:dev .
 loom agents audit-runtime --image loom-agent-sandbox:dev --json
+loom agents smoke-runtime --image loom-agent-sandbox:dev --json
 ```
 
 `deploy/Dockerfile.agent-sandbox` uses Python 3.12 plus Node 22 because
 the displayed catalog spans both Python-module agents and modern Node
 CLIs. Python CLI-only agents such as `aider` and `mini-swe-agent` are
 installed in isolated virtual environments and linked onto `PATH` so
-their pinned dependencies do not conflict with OpenHands. A successful
-image build or dependency audit does not by itself make an agent ready:
-the catalog should stay gated until a platform-dev trial smoke passes.
-As of this slice, `openhands-sdk` remains blocked because the adapter
-expects `openhands_sdk.run`, while current OpenHands SDK packages expose
-the `openhands.sdk` library but no such one-shot runner.
+their pinned dependencies do not conflict with OpenHands. `openhands`
+and `openhands-sdk` both use Loom's
+`loom_launcher.openhands_sdk_runner` module because upstream OpenHands SDK
+exposes a Python library rather than a stable one-shot CLI, and the old
+`openhands.server` entry point is not a usable non-interactive runner. A
+successful image build or dependency audit does not by itself make an
+agent ready: the catalog should only be flipped after a platform-dev trial
+smoke passes. As of the #289 all-agent smoke, the displayed catalog is
+ready when the selected trial sandbox image satisfies the declared runtime
+dependencies; an audit of a thinner image can still report `blocked`.
 
 ## Process model
 

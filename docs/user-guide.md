@@ -533,24 +533,25 @@ service-mode smoke testing:
 ```bash
 docker build -f deploy/Dockerfile.agent-sandbox -t loom-agent-sandbox:dev .
 loom agents audit-runtime --image loom-agent-sandbox:dev --json
+loom agents smoke-runtime --image loom-agent-sandbox:dev --json
 ```
 
-That image installs the external CLI dependencies declared by the agent
-catalog, but agents still remain `setup needed` in the UI until the
-operator flips catalog readiness after a live platform trial smoke. If
-the audit reports `blocked`, the image is still missing a declared
-runtime dependency or the adapter contract no longer matches the
-upstream package. For example, current OpenHands SDK packages expose
-`openhands.sdk`; the existing `openhands-sdk` adapter still expects
-`openhands_sdk.run`, so it must stay blocked until the adapter is
-updated.
+That image installs the external CLI and Python dependencies declared by
+the agent catalog. `audit-runtime` checks dependency presence inside the
+named image; `smoke-runtime` then runs the selected agents through a
+minimal platform trial with a deterministic provider stub. If the audit
+reports `blocked`, the image is still missing a declared runtime
+dependency or the adapter contract no longer matches the upstream package.
+The `openhands` and `openhands-sdk` adapters intentionally use Loom's
+`loom_launcher.openhands_sdk_runner` module because upstream OpenHands SDK
+ships a Python library, not a stable one-shot CLI.
 
-The command exits `0` only when every audited agent is ready. It exits
-`1` when any agent is still `blocked` by missing dependencies or `gated`
-by the catalog readiness flag, and `2` for usage errors such as an
-unknown agent name. A passing audit proves dependency presence; close the
-loop with a normal trial or batch smoke before treating the agent as
-fully supported.
+The audit command exits `0` only when every audited agent is ready for the
+named image. It exits `1` when any agent is still `blocked` by missing
+dependencies or `gated` by the catalog readiness flag, and `2` for usage
+errors such as an unknown agent name. A passing audit proves dependency
+presence; close the loop with `smoke-runtime` or a normal trial/batch
+smoke before treating the agent as fully supported.
 
 ## Rate cards
 

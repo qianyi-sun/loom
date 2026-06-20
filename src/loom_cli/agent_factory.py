@@ -21,17 +21,27 @@ from loom_worker.trial_runner import AgentFactory
 
 
 class _NoopCPClient:
-    """SubprocessAgent expects a Control Plane client to record llm_calls
-    per Gateway hop. In CLI mode there's no CP, so we provide a no-op
-    object that satisfies the small surface SubprocessAgent touches at
-    construction time."""
+    """SubprocessAgent needs a step token provider.
 
-    async def record_llm_call(self, *args: object, **kwargs: object) -> None:
-        return None
+    In CLI-local mode there is no Control Plane, so use a deterministic
+    placeholder token for the adapter environment.
+    """
+
+    async def mint_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+    ) -> str:
+        return "loom_step_cli-token"
 
 
 def build_agent_factory(
-    *, team_id: UUID, trial_id: UUID,
+    *,
+    team_id: UUID,
+    trial_id: UUID,
 ) -> AgentFactory:
     """Return a factory matching `loom_worker.trial_runner.AgentFactory`.
 
@@ -57,14 +67,18 @@ def build_agent_factory(
                     "litellm agent requires task.agent.model to be set",
                 )
             agent = LiteLLMAgent(  # type: ignore[assignment]
-                model=model, gateway=gateway,
-                team_id=str(team_id), trial_id=trial_id,
+                model=model,
+                gateway=gateway,
+                team_id=str(team_id),
+                trial_id=trial_id,
             )
         else:
             from loom_launcher import get_adapter
 
             from loom.agent.subprocess import SubprocessAgent
-            adapter = get_adapter(agent_name)
+
+            adapter_name = "claude-code" if agent_name == "claude-code-inbox" else agent_name
+            adapter = get_adapter(adapter_name)
             if adapter is None:
                 raise AgentError(
                     f"unknown agent {agent_name!r} — not 'oracle'/'litellm' "
@@ -75,10 +89,12 @@ def build_agent_factory(
                     f"{agent_name} requires task.agent.model to be set",
                 )
             agent = SubprocessAgent(  # type: ignore[assignment]
-                adapter=adapter, model=model,
-                cp_client=_NoopCPClient(),  # type: ignore[arg-type]
+                adapter=adapter,
+                model=model,
+                cp_client=_NoopCPClient(),
                 gateway_url="",
-                team_id=team_id, trial_id=trial_id,
+                team_id=team_id,
+                trial_id=trial_id,
             )
         return agent
 

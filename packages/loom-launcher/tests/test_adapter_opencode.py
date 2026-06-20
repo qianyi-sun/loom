@@ -12,33 +12,37 @@ from loom_launcher.adapter import ModelSpec
 def test_build_invocation_argv() -> None:
     adapter = get_adapter("opencode")
     assert adapter is not None
-    env: dict[str, str] = {}
+    env = {"OPENAI_API_KEY": "step-token", "OPENAI_BASE_URL": "http://gateway.local"}
     argv = adapter.build_invocation(
         instruction="ping",
         workdir=PurePosixPath("/workspace"),
         model=ModelSpec(provider="openai", name="gpt-5"),
         env=env,
     )
-    assert argv == [
-        "opencode", "run",
-        "--model", "openai/gpt-5",
-        "--output", "json",
-        "--cwd", "/workspace",
-        "ping",
-    ]
+    assert argv[:4] == ["sh", "-c", argv[2], "loom-opencode"]
+    assert argv[4] == "ping"
+    assert "opencode run --model openai/gpt-5" in argv[2]
+    assert '"baseURL":"http://gateway.local"' in argv[2]
+    assert '"apiKey":"step-token"' in argv[2]
+    assert '"models":{"gpt-5"' in argv[2]
+    assert env["HOME"] == "/tmp/loom-opencode-home"
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:
     adapter = get_adapter("opencode")
     assert adapter is not None
-    handle = make_handle(stdout_chunks=[
-        b'{"kind": "thought", "text": "exploring"}\n',
-        b'{"kind": "tool_use", "name": "Read"}\n',
-    ])
+    handle = make_handle(
+        stdout_chunks=[
+            b'{"kind": "thought", "text": "exploring"}\n',
+            b'{"kind": "tool_use", "name": "Read"}\n',
+        ]
+    )
     events = [
         e.model_dump()
         async for e in adapter.capture_events(
-            exec_handle=handle, step_id="main", trial_id=uuid4(),
+            exec_handle=handle,
+            step_id="main",
+            trial_id=uuid4(),
         )
     ]
     assert events == [

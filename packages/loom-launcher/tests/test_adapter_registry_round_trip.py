@@ -11,17 +11,24 @@ from loom_launcher import get_adapter
 
 # (name, dialect, api_key_env, base_url_env, model_template, multi_turn)
 _TABLE: list[tuple[str, str, str, str, str, bool]] = [
-    ("codex",          "openai_responses", "OPENAI_API_KEY",    "OPENAI_BASE_URL",        "{model_id}",        False),
-    ("opencode",       "openai_chat",      "OPENAI_API_KEY",    "OPENAI_BASE_URL",        "openai/{model_id}", False),
-    ("aider",          "openai_chat",      "OPENAI_API_KEY",    "OPENAI_API_BASE",        "openai/{model_id}", True),
-    ("openhands",      "openai_chat",      "LLM_API_KEY",       "LLM_BASE_URL",           "openai/{model_id}", True),
-    ("openhands-sdk",  "openai_chat",      "LLM_API_KEY",       "LLM_BASE_URL",           "openai/{model_id}", False),
-    ("swe-agent",      "openai_chat",      "OPENAI_API_KEY",    "OPENAI_API_BASE",        "openai/{model_id}", False),
-    ("mini-swe-agent", "openai_chat",      "OPENAI_API_KEY",    "OPENAI_BASE_URL",        "openai/{model_id}", False),
-    ("claude-code",    "anthropic",        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",     "{model_id}",        True),
-    ("gemini-cli",     "gemini",           "GOOGLE_API_KEY",    "GOOGLE_GEMINI_BASE_URL", "google/{model_id}", True),
-    ("qwen-cli",       "openai_chat",      "OPENAI_API_KEY",    "OPENAI_BASE_URL",        "{model_id}",        False),
-    ("kimi-cli",       "openai_chat",      "OPENAI_API_KEY",    "OPENAI_BASE_URL",        "openai/{model_id}", False),
+    ("codex", "openai_responses", "OPENAI_API_KEY", "OPENAI_BASE_URL", "{model_id}", False),
+    ("opencode", "openai_chat", "OPENAI_API_KEY", "OPENAI_BASE_URL", "openai/{model_id}", False),
+    ("aider", "openai_chat", "OPENAI_API_KEY", "OPENAI_API_BASE", "openai/{model_id}", True),
+    ("openhands", "openai_chat", "LLM_API_KEY", "LLM_BASE_URL", "openai/{model_id}", False),
+    ("openhands-sdk", "openai_chat", "LLM_API_KEY", "LLM_BASE_URL", "openai/{model_id}", False),
+    ("swe-agent", "openai_chat", "OPENAI_API_KEY", "OPENAI_API_BASE", "openai/{model_id}", False),
+    (
+        "mini-swe-agent",
+        "openai_chat",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "openai/{model_id}",
+        False,
+    ),
+    ("claude-code", "anthropic", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "{model_id}", True),
+    ("gemini-cli", "gemini", "GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL", "{model_id}", True),
+    ("qwen-cli", "openai_chat", "OPENAI_API_KEY", "OPENAI_BASE_URL", "{model_id}", False),
+    ("kimi-cli", "openai_chat", "OPENAI_API_KEY", "OPENAI_BASE_URL", "openai/{model_id}", False),
 ]
 
 

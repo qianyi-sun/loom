@@ -195,17 +195,28 @@ def test_catalog_package_hints_use_verified_install_sources() -> None:
     assert by_name["swe-agent"]["runtime_contract"]["required_packages"] == [
         "git+https://github.com/SWE-agent/SWE-agent",
     ]
+    assert by_name["openhands-sdk"]["runtime_contract"]["required_python_modules"] == [
+        "loom_launcher.openhands_sdk_runner",
+        "openhands.sdk",
+    ]
+    assert by_name["openhands-sdk"]["runtime_contract"]["required_packages"] == [
+        "openhands-sdk",
+    ]
+    assert by_name["openhands"]["runtime_contract"]["required_python_modules"] == [
+        "loom_launcher.openhands_sdk_runner",
+        "openhands.sdk",
+    ]
+    assert by_name["openhands"]["runtime_contract"]["required_packages"] == [
+        "openhands-sdk",
+    ]
 
 
-def test_opencode_runtime_not_ready_rejects_before_worker() -> None:
+def test_opencode_runtime_ready_allows_compatible_model() -> None:
     err = validate_agent_model_compat(
         "opencode",
         ModelSpec(provider="openai", name="gpt-4o"),
     )
-    assert err is not None
-    assert "opencode" in err
-    assert "runtime" in err.lower()
-    assert "GET /api/v1/agents" in err
+    assert err is None
 
 
 def test_existing_modelspec_default_source_is_api() -> None:

@@ -33,7 +33,21 @@ class KimiCliAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
-        return ["kimi", instruction]
+        # kimi-code can synthesize an in-memory provider/model from env vars.
+        # Use that path so Loom can route the CLI through the per-step Gateway
+        # without writing persistent config.toml inside the sandbox.
+        env["KIMI_MODEL_NAME"] = self.model_name_template.format(model_id=model.name)
+        env["KIMI_MODEL_API_KEY"] = env[self.api_key_env]
+        env["KIMI_MODEL_PROVIDER_TYPE"] = "openai"
+        env["KIMI_MODEL_BASE_URL"] = env[self.base_url_env]
+        env.setdefault("KIMI_MODEL_MAX_CONTEXT_SIZE", "262144")
+        return [
+            "kimi",
+            "--prompt",
+            instruction,
+            "--output-format",
+            "stream-json",
+        ]
 
     async def capture_events(
         self,

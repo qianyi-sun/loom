@@ -69,10 +69,10 @@ adapters compose one of them:
 
 | Helper | When agents emit | Used by |
 |---|---|---|
-| `stream_stdout_jsonl` | Each event as a JSON line on stdout | claude-code, gemini-cli, mini-swe-agent, opencode, openhands-sdk, hello |
+| `stream_stdout_jsonl` | Each event as a JSON line on stdout | claude-code, codex, gemini-cli, mini-swe-agent, opencode, openhands, openhands-sdk, hello |
 | `tail_log_file` | Events to a file path, tailed | aider, swe-agent |
-| `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | openhands |
-| `tail_pty` | ANSI terminal output (parsed) | codex, qwen-cli, kimi-cli |
+| `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | reserved for server-mode adapters |
+| `tail_pty` | ANSI terminal output (parsed) | qwen-cli, kimi-cli |
 
 ## Shipped adapters
 
@@ -83,12 +83,12 @@ adapters compose one of them:
 |---|---|---|
 | aider | tail_log_file | |
 | claude-code | stdout_jsonl | Anthropic's CLI |
-| codex | tail_pty | OpenAI Codex CLI |
+| codex | stdout_jsonl | OpenAI Codex CLI |
 | gemini-cli | stdout_jsonl | Google Gemini CLI |
 | kimi-cli | tail_pty | Moonshot Kimi CLI |
 | mini-swe-agent | stdout_jsonl | |
 | opencode | stdout_jsonl | |
-| openhands | poll_local_http | port 9999 |
+| openhands | stdout_jsonl | legacy name backed by the SDK runner |
 | openhands-sdk | stdout_jsonl | SDK variant |
 | qwen-cli | tail_pty | Alibaba Qwen CLI |
 | swe-agent | tail_log_file | |
@@ -144,13 +144,12 @@ Every displayed service-mode agent entry includes runtime metadata:
   and `model_name_template`: provider-facing contract used to validate
   compatible model/provider choices.
 
-The current default service-mode runtime marks `oracle`, `litellm`,
-and the reference `hello` adapter ready. Real external CLI adapters
-remain gated until the worker/sandbox image or provisioning path
-installs their runtime dependency and a platform-dev end-to-end smoke
-proves the path. This prevents another catalog option such as
-`opencode` from creating an all-failed batch because the executable is
-missing.
+The service-mode catalog marks displayed agents ready after their runtime
+contract has both dependency-audit and platform-dev smoke evidence. The
+readiness flag is not a substitute for per-image validation: if a task uses
+a thinner sandbox image, `loom agents audit-runtime` still reports
+`blocked` for missing executables or Python modules before users submit a
+doomed batch.
 
 Operators can audit a concrete trial sandbox image before enabling an
 agent:
@@ -166,31 +165,36 @@ from this repo and audit that exact image:
 ```bash
 docker build -f deploy/Dockerfile.agent-sandbox -t loom-agent-sandbox:dev .
 loom agents audit-runtime --image loom-agent-sandbox:dev --json
+loom agents smoke-runtime --image loom-agent-sandbox:dev --json
 ```
 
 The image provisions Node 22 CLI adapters (`claude`, `codex`, `gemini`,
 `kimi`, `opencode`, `qwen`) and Python runtimes for `aider`,
-`mini-swe-agent`, `openhands`, and `swe-agent`. `aider` and
-`mini-swe-agent` live in isolated virtual environments with PATH shims;
-OpenHands and SWE-agent stay importable from the main Python 3.12
-runtime because their adapters invoke `python -m ...`. SWE-agent is
-installed editable from its tagged source tree so its upstream `config/`
-layout is present at runtime.
+`mini-swe-agent`, `openhands`, `openhands-sdk`, and `swe-agent`. `aider`
+and `mini-swe-agent` live in isolated virtual environments with PATH
+shims; OpenHands, the Loom-owned OpenHands SDK runner, and SWE-agent stay
+importable from the main Python 3.12 runtime because their adapters
+invoke `python -m ...`. SWE-agent is installed editable from its tagged
+source tree so its upstream `config/` layout is present at runtime.
+The legacy `openhands` adapter name is SDK-backed as well; the historical
+`python -m openhands.server` contract is not used for non-interactive
+service-mode trials.
 
 The audit runs dependency probes inside the named Docker image and
 reports one row per displayed agent. `blocked` means an executable or
-Python module declared by `runtime_contract` is missing. `gated` means
-the image satisfies the declared dependency checks, but the catalog still
-marks the agent unavailable pending the product readiness flip and an
-end-to-end platform-dev smoke. The command does not pull images
-implicitly; build or pull the target sandbox image first so the audit
-checks exactly what workers will run.
+Python module declared by `runtime_contract` is missing. `ready` means the
+image satisfies the dependency checks and the catalog permits service-mode
+submission for that agent. `smoke-runtime` goes further by executing a
+minimal platform trial for each selected agent against a deterministic
+provider stub. Neither command pulls images implicitly; build or pull the
+target sandbox image first so the checks cover exactly what workers will
+run.
 
-Dependency audit findings can also expose adapter drift. Current
-OpenHands SDK wheels provide `openhands.sdk`, not the historical
-`openhands_sdk.run` module assumed by the `openhands-sdk` adapter. Keep
-that agent blocked until the adapter has a real one-shot SDK runner and
-an end-to-end smoke.
+Dependency audit findings can also expose adapter drift. The upstream
+OpenHands SDK wheels provide `openhands.sdk`, not a stable one-shot CLI;
+`openhands` and `openhands-sdk` therefore run Loom's
+`loom_launcher.openhands_sdk_runner` module and the agent sandbox probes
+both that module and `openhands.sdk`.
 
 ## Adding a new agent adapter
 

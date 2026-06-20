@@ -43,10 +43,11 @@ class ClaudeCodeAdapter:
         env["DISABLE_TELEMETRY"] = "1"
         env["CLAUDE_CODE_AUTO_UPDATE"] = "false"
         return [
-            "sh", "-c",
+            "sh",
+            "-c",
             (
                 f"cd {shlex.quote(str(workdir))} && "
-                f"claude --output-format stream-json "
+                f"claude --verbose --output-format stream-json "
                 f"--model {shlex.quote(model.name)} "
                 f"--print {shlex.quote(instruction)}"
             ),

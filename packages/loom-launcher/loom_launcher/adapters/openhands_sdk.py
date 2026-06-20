@@ -34,11 +34,17 @@ class OpenHandsSdkAdapter:
         env: dict[str, str],
     ) -> list[str]:
         return [
-            "python", "-m", "openhands_sdk.run",
-            "--model", self.model_name_template.format(model_id=model.name),
-            "--workdir", str(workdir),
-            "--output", "jsonl",
-            "--task", instruction,
+            "python",
+            "-m",
+            "loom_launcher.openhands_sdk_runner",
+            "--model",
+            self.model_name_template.format(model_id=model.name),
+            "--workdir",
+            str(workdir),
+            "--output",
+            "jsonl",
+            "--task",
+            instruction,
         ]
 
     async def capture_events(

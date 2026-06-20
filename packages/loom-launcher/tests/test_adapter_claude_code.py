@@ -23,20 +23,16 @@ def test_build_invocation_argv_uses_sh_c_cd_and_print() -> None:
         model=ModelSpec(provider="anthropic", name="claude-sonnet-4"),
         env=env,
     )
-    assert argv == [
-        "sh", "-c",
-        (
-            "cd /workspace && "
-            "claude --output-format stream-json "
-            "--model claude-sonnet-4 "
-            "--print 'solve fizzbuzz'"
-        ),
-    ]
+    assert argv[:2] == ["sh", "-c"]
+    cmd = argv[2]
+    assert cmd.startswith("cd /workspace && ")
+    assert "claude --verbose --output-format stream-json" in cmd
+    assert "--model claude-sonnet-4" in cmd
+    assert "--print 'solve fizzbuzz'" in cmd
     # Telemetry / auto-update disabled via env, NOT flags.
     assert env["DISABLE_TELEMETRY"] == "1"
     assert env["CLAUDE_CODE_AUTO_UPDATE"] == "false"
     # Verify no --workdir / --instruction CLI flags slipped in.
-    cmd = argv[2]
     assert "--workdir" not in cmd
     assert "--instruction" not in cmd
 
@@ -63,15 +59,19 @@ async def test_capture_via_stream_json(make_handle) -> None:
     assert adapter is not None
     # Real claude-code stream-json shape: one JSON object per line, each with
     # a discriminating `type` field.
-    handle = make_handle(stdout_chunks=[
-        b'{"type": "assistant", "text": "Let me look at the code."}\n',
-        b'{"type": "tool_use", "name": "Read", "input": {"path": "main.py"}}\n',
-        b'{"type": "assistant", "text": "Done."}\n',
-    ])
+    handle = make_handle(
+        stdout_chunks=[
+            b'{"type": "assistant", "text": "Let me look at the code."}\n',
+            b'{"type": "tool_use", "name": "Read", "input": {"path": "main.py"}}\n',
+            b'{"type": "assistant", "text": "Done."}\n',
+        ]
+    )
     events = [
         e.model_dump()
         async for e in adapter.capture_events(
-            exec_handle=handle, step_id="main", trial_id=uuid4(),
+            exec_handle=handle,
+            step_id="main",
+            trial_id=uuid4(),
         )
     ]
     assert events == [

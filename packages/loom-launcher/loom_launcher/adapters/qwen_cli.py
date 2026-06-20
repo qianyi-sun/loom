@@ -33,7 +33,21 @@ class QwenCliAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
-        return ["qwen", instruction]
+        return [
+            "qwen",
+            "--model",
+            self.model_name_template.format(model_id=model.name),
+            "--prompt",
+            instruction,
+            "--output-format",
+            "stream-json",
+            "--auth-type",
+            "openai",
+            "--openai-base-url",
+            env[self.base_url_env],
+            "--openai-api-key",
+            env[self.api_key_env],
+        ]
 
     async def capture_events(
         self,

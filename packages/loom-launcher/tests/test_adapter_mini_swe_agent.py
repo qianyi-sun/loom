@@ -12,7 +12,7 @@ from loom_launcher.adapter import ModelSpec
 def test_build_invocation_argv() -> None:
     adapter = get_adapter("mini-swe-agent")
     assert adapter is not None
-    env: dict[str, str] = {}
+    env: dict[str, str] = {"OPENAI_BASE_URL": "http://gateway"}
     argv = adapter.build_invocation(
         instruction="solve fizzbuzz",
         workdir=PurePosixPath("/workspace"),
@@ -21,24 +21,40 @@ def test_build_invocation_argv() -> None:
     )
     assert argv == [
         "mini-swe-agent",
-        "--model", "openai/gpt-5",
-        "--workdir", "/workspace",
-        "--output", "jsonl",
-        "--task", "solve fizzbuzz",
+        "--model",
+        "openai/gpt-5",
+        "--agent-class",
+        "default",
+        "--yolo",
+        "--cost-limit",
+        "0",
+        "--exit-immediately",
+        "--output",
+        "/workspace/mini-swe-agent-trajectory.jsonl",
+        "--task",
+        "solve fizzbuzz",
     ]
+    assert env["MSWEA_CONFIGURED"] == "true"
+    assert env["MSWEA_SILENT_STARTUP"] == "true"
+    assert env["MSWEA_COST_TRACKING"] == "ignore_errors"
+    assert env["OPENAI_API_BASE"] == "http://gateway"
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:
     adapter = get_adapter("mini-swe-agent")
     assert adapter is not None
-    handle = make_handle(stdout_chunks=[
-        b'{"step": 1, "kind": "plan", "text": "investigate"}\n',
-        b'{"step": 2, "kind": "act", "tool": "Bash"}\n',
-    ])
+    handle = make_handle(
+        stdout_chunks=[
+            b'{"step": 1, "kind": "plan", "text": "investigate"}\n',
+            b'{"step": 2, "kind": "act", "tool": "Bash"}\n',
+        ]
+    )
     events = [
         e.model_dump()
         async for e in adapter.capture_events(
-            exec_handle=handle, step_id="main", trial_id=uuid4(),
+            exec_handle=handle,
+            step_id="main",
+            trial_id=uuid4(),
         )
     ]
     assert events == [

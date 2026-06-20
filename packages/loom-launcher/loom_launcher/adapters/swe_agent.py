@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -33,11 +34,40 @@ class SweAgentAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
+        env["OPENAI_API_BASE"] = env[self.base_url_env]
+        model_name = self.model_name_template.format(model_id=model.name)
+        script = (
+            "set -eu; "
+            "repo=$1; shift; "
+            'repo_name=$(basename "$repo"); '
+            'if [ ! -d "$repo/.git" ]; then '
+            'git -C "$repo" init -b main >/dev/null; '
+            'git -C "$repo" config user.email loom@example.invalid; '
+            'git -C "$repo" config user.name Loom; '
+            "fi; "
+            'git -C "$repo" add -A; '
+            'git -C "$repo" diff --cached --quiet || '
+            'git -C "$repo" commit -m loom-baseline >/dev/null; '
+            'if git -C "$repo" remote get-url origin >/dev/null 2>&1; then '
+            'git -C "$repo" remote set-url origin "$repo"; '
+            'else git -C "$repo" remote add origin "$repo"; fi; '
+            "exec python -m sweagent.run.run_single "
+            f"--agent.model.name {shlex.quote(model_name)} "
+            "--agent.model.per_instance_cost_limit 0 "
+            "--agent.model.total_cost_limit 0 "
+            "--agent.model.per_instance_call_limit 2 "
+            "--env.deployment.type local "
+            "--env.repo.type preexisting "
+            '--env.repo.repo_name "$repo_name" '
+            '--problem_statement.text "$1"'
+        )
         return [
-            "python", "-m", "sweagent.run.run_single",
-            "--agent.model.name", self.model_name_template.format(model_id=model.name),
-            "--env.repo.path", str(workdir),
-            "--problem_statement.text", instruction,
+            "sh",
+            "-c",
+            script,
+            "loom-swe-agent",
+            str(workdir),
+            instruction,
         ]
 
     async def capture_events(

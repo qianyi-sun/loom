@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -19,9 +21,9 @@ class GeminiCliAdapter:
     name: str = "gemini-cli"
     supports_os: frozenset[str] = frozenset({"linux"})
     endpoint_dialect: str = "gemini"
-    api_key_env: str = "GOOGLE_API_KEY"
+    api_key_env: str = "GEMINI_API_KEY"
     base_url_env: str = "GOOGLE_GEMINI_BASE_URL"
-    model_name_template: str = "google/{model_id}"
+    model_name_template: str = "{model_id}"
     supports_multi_turn: bool = True
     additional_egress: frozenset[str] = frozenset()
 
@@ -33,11 +35,27 @@ class GeminiCliAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
+        # The Gemini CLI infers custom base URL usage as auth type "gateway",
+        # but its non-interactive auth validator currently rejects that type.
+        # Pin API-key auth in an isolated HOME while still passing
+        # GOOGLE_GEMINI_BASE_URL for the underlying GenAI client.
+        env["HOME"] = "/tmp/loom-gemini-home"
+        settings = {"security": {"auth": {"selectedType": "gemini-api-key"}}}
+        settings_json = json.dumps(settings, separators=(",", ":"))
+        model_id = self.model_name_template.format(model_id=model.name)
+        script = (
+            'mkdir -p "$HOME/.gemini" && '
+            f"printf '%s\\n' {shlex.quote(settings_json)} > \"$HOME/.gemini/settings.json\" && "
+            'exec gemini --model "$1" --output-format stream-json '
+            '--skip-trust --prompt "$2"'
+        )
         return [
-            "gemini",
-            "--model", self.model_name_template.format(model_id=model.name),
-            "--output", "json",
-            "--prompt", instruction,
+            "sh",
+            "-c",
+            script,
+            "loom-gemini",
+            model_id,
+            instruction,
         ]
 
     async def capture_events(

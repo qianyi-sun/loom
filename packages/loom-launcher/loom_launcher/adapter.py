@@ -40,11 +40,14 @@ class SandboxAccess(Protocol):
         `tail_log_file` to poll a log file the agent writes to."""
 
     async def exec_oneshot(
-        self, argv: list[str], *, timeout_sec: float = 10.0,
+        self,
+        argv: list[str],
+        *,
+        timeout_sec: float = 10.0,
     ) -> tuple[int, bytes]:
         """Run `argv` inside the sandbox and return (rc, stdout).
         Used by `poll_local_http` to curl localhost endpoints exposed
-        by agents (openhands server mode, etc.)."""
+        by server-mode adapters."""
 
 
 @dataclass
@@ -82,7 +85,10 @@ class TrajectoryEventLike(Protocol):
 
 
 EndpointDialect = Literal[
-    "openai_chat", "openai_responses", "anthropic", "gemini",
+    "openai_chat",
+    "openai_responses",
+    "anthropic",
+    "gemini",
 ]
 
 
@@ -97,13 +103,13 @@ class AgentAdapter(Protocol):
     """
 
     name: str
-    supports_os: frozenset[str]                  # {"linux", ...}
+    supports_os: frozenset[str]  # {"linux", ...}
     endpoint_dialect: EndpointDialect
-    api_key_env: str                             # e.g. "ANTHROPIC_API_KEY"
+    api_key_env: str  # e.g. "ANTHROPIC_API_KEY"
     base_url_env: str
-    model_name_template: str                     # "{model_id}" / "openai/{model_id}"
-    supports_multi_turn: bool                    # metadata only in v1
-    additional_egress: frozenset[str]            # hostnames beyond Gateway
+    model_name_template: str  # "{model_id}" / "openai/{model_id}"
+    supports_multi_turn: bool  # metadata only in v1
+    additional_egress: frozenset[str]  # hostnames beyond Gateway
 
     def build_invocation(
         self,

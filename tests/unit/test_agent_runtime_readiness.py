@@ -33,7 +33,7 @@ def test_runtime_audit_covers_every_displayed_agent_and_reports_missing_deps() -
     assert RuntimeCheck("python_module", "sweagent.run.run_single") in checks
 
 
-def test_runtime_audit_marks_present_but_catalog_gated_agents() -> None:
+def test_runtime_audit_marks_present_catalog_ready_agents_ready() -> None:
     items = build_runtime_audit_items(
         image="loom-sandbox:test",
         check_runner=lambda _check: True,
@@ -41,9 +41,9 @@ def test_runtime_audit_marks_present_but_catalog_gated_agents() -> None:
 
     by_name = {item.name: item for item in items}
     assert by_name["opencode"].dependency_state == "satisfied"
-    assert by_name["opencode"].catalog_ready is False
-    assert by_name["opencode"].readiness_state == "gated"
-    assert by_name["opencode"].blocker_reason == "catalog_not_enabled"
+    assert by_name["opencode"].catalog_ready is True
+    assert by_name["opencode"].readiness_state == "ready"
+    assert by_name["opencode"].blocker_reason is None
 
 
 def test_runtime_audit_renderers_are_stable() -> None:

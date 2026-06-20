@@ -12,10 +12,13 @@ invocation; multi-turn sessions across steps are v1.5.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import shlex
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Literal
 from uuid import UUID
@@ -28,11 +31,14 @@ from loom.driver.base import Driver
 from loom.driver.base import ExecHandle as DriverExecHandle
 from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
+from loom.models.trajectory import AgentThoughtEvent, EventKind
 from loom.models.types import OS, ModelSpec
 from loom.trajectory.writer import TrajectoryWriter
-from loom_worker.control_plane_client import HttpControlPlaneClient
+from loom_worker.control_plane_client import StepTokenClient
 
 logger = logging.getLogger(__name__)
+_LOOM_EVENT_REQUIRED_KEYS = frozenset({"kind", "emitted_at", "trial_id", "step_id", "seq"})
+_LOOM_EVENT_KINDS = frozenset(kind.value for kind in EventKind)
 
 
 def _bridge_driver(driver: Driver, *, cwd: PurePosixPath) -> SandboxAccess:
@@ -58,20 +64,23 @@ def _bridge_driver(driver: Driver, *, cwd: PurePosixPath) -> SandboxAccess:
             path_q = shlex.quote(str(path))
             result = await driver.exec(
                 f"if [ -e {path_q} ]; then cat {path_q}; else exit 66; fi",
-                cwd=cwd, timeout_sec=10.0,
+                cwd=cwd,
+                timeout_sec=10.0,
             )
             if result.return_code == 66:
                 raise FileNotFoundError(str(path))
             if result.return_code != 0:
                 stderr = result.stderr.decode("utf-8", errors="replace")[:200]
                 raise OSError(
-                    f"sandbox read_text({path}) failed rc={result.return_code}"
-                    f": {stderr}",
+                    f"sandbox read_text({path}) failed rc={result.return_code}: {stderr}",
                 )
             return result.stdout.decode("utf-8", errors="replace")
 
         async def exec_oneshot(
-            self, argv: list[str], *, timeout_sec: float = 10.0,
+            self,
+            argv: list[str],
+            *,
+            timeout_sec: float = 10.0,
         ) -> tuple[int, bytes]:
             cmd = " ".join(shlex.quote(a) for a in argv)
             result = await driver.exec(cmd, cwd=cwd, timeout_sec=timeout_sec)
@@ -81,7 +90,8 @@ def _bridge_driver(driver: Driver, *, cwd: PurePosixPath) -> SandboxAccess:
 
 
 def _bridge_exec_handle(
-    driver_handle: DriverExecHandle, sandbox: SandboxAccess,
+    driver_handle: DriverExecHandle,
+    sandbox: SandboxAccess,
 ) -> LauncherExecHandle:
     """Wrap a loom.driver.base.ExecHandle as a loom_launcher.ExecHandle
     with the SandboxAccess side-channel populated (A11.2)."""
@@ -118,7 +128,7 @@ class SubprocessAgent:
 
     adapter: AgentAdapter
     model: ModelSpec
-    cp_client: HttpControlPlaneClient
+    cp_client: StepTokenClient
     gateway_url: str
     team_id: UUID
     trial_id: UUID
@@ -181,14 +191,18 @@ class SubprocessAgent:
 
         # 3. Streaming exec inside the sandbox.
         driver_handle = await env.exec_streaming(
-            argv, env_vars=env_vars, cwd=cwd,
+            argv,
+            env_vars=env_vars,
+            cwd=cwd,
         )
+        stderr_task = asyncio.create_task(_collect_stream_tail(driver_handle.stderr))
 
         # 4. Build the launcher-side ExecHandle with SandboxAccess wired in.
         sandbox = _bridge_driver(env, cwd=cwd)
         launcher_handle = _bridge_exec_handle(driver_handle, sandbox)
 
         # 5. Forward adapter events into the trajectory.
+        event_seq = 0
         async for event in self.adapter.capture_events(
             exec_handle=launcher_handle,
             step_id=step_id,
@@ -199,10 +213,65 @@ class SubprocessAgent:
             # by Plan 11 task 4) or pre-validates against the event union.
             # For v1 we use write_raw_dict to stay decoupled.
             payload = event.model_dump()
-            await trajectory.write_raw_dict(payload)
+            if _is_complete_loom_event_payload(payload):
+                await trajectory.write_raw_dict(payload)
+            else:
+                await trajectory.append(
+                    AgentThoughtEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=event_seq,
+                        content=_adapter_payload_to_content(payload),
+                    )
+                )
+                event_seq += 1
 
         rc = await driver_handle.wait()
+        stderr_tail = await _finish_tail_task(stderr_task)
         if rc != 0:
+            detail = f"{self.adapter.name} exited rc={rc} on step {step_id}"
+            if stderr_tail:
+                detail = f"{detail}; stderr: {stderr_tail}"
             raise AgentError(
-                f"{self.adapter.name} exited rc={rc} on step {step_id}",
+                detail,
             )
+
+
+def _is_complete_loom_event_payload(payload: dict[str, object]) -> bool:
+    kind = payload.get("kind")
+    return (
+        isinstance(kind, str)
+        and kind in _LOOM_EVENT_KINDS
+        and _LOOM_EVENT_REQUIRED_KEYS.issubset(payload.keys())
+    )
+
+
+def _adapter_payload_to_content(payload: dict[str, object]) -> str:
+    line = payload.get("line")
+    if isinstance(line, str):
+        return line
+    return json.dumps(payload, sort_keys=True)
+
+
+async def _collect_stream_tail(
+    stream: AsyncIterator[bytes],
+    *,
+    max_bytes: int = 4096,
+) -> str:
+    buf = bytearray()
+    async for chunk in stream:
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            del buf[: len(buf) - max_bytes]
+    return bytes(buf).decode("utf-8", errors="replace").strip()
+
+
+async def _finish_tail_task(task: asyncio.Task[str]) -> str:
+    try:
+        return await asyncio.wait_for(task, timeout=1.0)
+    except TimeoutError:
+        task.cancel()
+        return ""
+    except Exception:
+        return ""

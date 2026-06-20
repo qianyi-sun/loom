@@ -46,7 +46,7 @@ from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
 from loom_worker.config import WorkerSettings
-from loom_worker.control_plane_client import HttpControlPlaneClient
+from loom_worker.control_plane_client import HttpControlPlaneClient, StepTokenClient
 from loom_worker.heartbeat import HeartbeatThread
 from loom_worker.materializers import (
     build_default_materializers,
@@ -483,7 +483,7 @@ def _verifier_factory(task_config: TaskConfig) -> Callable[[], Verifier]:
 
 
 def _build_mint_callback(
-    cp_client: HttpControlPlaneClient,
+    cp_client: StepTokenClient,
     team_id: UUID,
 ) -> Callable[[UUID], Awaitable[str]]:
     """Closure the rotator calls on each tick. Stable step_id
@@ -568,7 +568,7 @@ def _default_agent_factory(
     team_id: UUID,
     trial_id: UUID,
     *,
-    cp_client: HttpControlPlaneClient,
+    cp_client: StepTokenClient,
     gateway_url: str,
     provider_connection_id: str | None = None,
 ) -> AgentFactory:
@@ -617,7 +617,8 @@ def _default_agent_factory(
 
             from loom.agent.subprocess import SubprocessAgent
 
-            adapter = get_adapter(agent_name)
+            adapter_name = "claude-code" if agent_name == "claude-code-inbox" else agent_name
+            adapter = get_adapter(adapter_name)
             if adapter is None:
                 # Surface as AgentError so Trial.run() classifies it as
                 # AGENT_ERROR and the trial fails cleanly instead of

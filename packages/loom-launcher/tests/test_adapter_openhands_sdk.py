@@ -20,25 +20,35 @@ def test_build_invocation_argv() -> None:
         env=env,
     )
     assert argv == [
-        "python", "-m", "openhands_sdk.run",
-        "--model", "openai/gpt-5",
-        "--workdir", "/workspace",
-        "--output", "jsonl",
-        "--task", "do the thing",
+        "python",
+        "-m",
+        "loom_launcher.openhands_sdk_runner",
+        "--model",
+        "openai/gpt-5",
+        "--workdir",
+        "/workspace",
+        "--output",
+        "jsonl",
+        "--task",
+        "do the thing",
     ]
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:
     adapter = get_adapter("openhands-sdk")
     assert adapter is not None
-    handle = make_handle(stdout_chunks=[
-        b'{"kind": "thought", "text": "starting"}\n',
-        b'{"kind": "result", "ok": true}\n',
-    ])
+    handle = make_handle(
+        stdout_chunks=[
+            b'{"kind": "thought", "text": "starting"}\n',
+            b'{"kind": "result", "ok": true}\n',
+        ]
+    )
     events = [
         e.model_dump()
         async for e in adapter.capture_events(
-            exec_handle=handle, step_id="main", trial_id=uuid4(),
+            exec_handle=handle,
+            step_id="main",
+            trial_id=uuid4(),
         )
     ]
     assert events == [

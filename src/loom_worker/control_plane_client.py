@@ -11,11 +11,22 @@ surface that as `False` from the corresponding methods so callers can log
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 from uuid import UUID
 
 import httpx
+
+
+class StepTokenClient(Protocol):
+    async def mint_step_token(
+        self,
+        *,
+        team_id: UUID,
+        trial_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+    ) -> str: ...
 
 
 @dataclass
