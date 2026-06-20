@@ -210,6 +210,13 @@ Use `loom datasets list` to enumerate at runtime.
 | `research-agent` | gaia |
 | `skill` | skillflow, skilllearnbench |
 
+BFCL v4 tasks carry their evaluation contract inside the converted bundle:
+`ground_truth.json` stores either `possible_answer/` data or the official
+relevance/irrelevance call-presence mode, `instruction.md` requires the agent
+to write `agent_output.json`, and `verifier/check.py` emits a Loom
+`VerifierResult`. Do not rely on an image-local `/opt/bfcl/evaluator.py` when
+adding BFCL categories; the script verifier bundle must stay self-contained.
+
 ### `packages/loom-benchmark-terminal-bench-2/` — 1 adapter
 
 | Slug | License | Upstream |

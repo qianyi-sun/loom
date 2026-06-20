@@ -123,8 +123,15 @@ from explicit allow-lists.
 
 ```bash
 export DAYTONA_API_KEY=...
-loom run --backend daytona --dataset bfcl --agent oracle --output-dir ./runs
+loom run --backend daytona --dataset bfcl \
+  --agent claude-code --model anthropic/claude-opus-4-7 \
+  --output-dir ./runs
 ```
+
+BFCL is a tool-use benchmark. Its task instructions require the agent to
+write `agent_output.json` with a `calls` list, or a `turns` list for
+multi-turn tasks; it does not use the `oracle` baseline because there is no
+preseeded `solution/solve.sh`.
 
 Daytona usage rows land in the `cloud_compute_records` table when the
 run is connected to a Loom service (`--server-url`). Standalone
