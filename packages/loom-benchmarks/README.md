@@ -10,6 +10,22 @@ See `docs/architecture/benchmark-adapter.md` for the framework
 reference (Protocol, canonical task layout, fetchers, how to add a
 new adapter). 16 adapters ship today.
 
+## LiveCodeBench coverage
+
+The LiveCodeBench adapter targets the official Hugging Face dataset
+`livecodebench/code_generation_lite` pinned at revision
+`0fe84c3912ea0c4d4a78037083943e8f0c4dd505`. That pinned split currently
+contains 1055 tasks. The adapter decodes both public and private test cases:
+2762 public cases plus 25492 compressed private cases, for 28254 total cases.
+
+Generated bundles support both upstream test modes. `stdin` cases run the
+agent's `solution/solution.py` in a subprocess and compare stdout exactly.
+`functional` cases import `Solution`, call `metadata.func_name`, parse
+single-argument JSON inputs or multi-line positional JSON arguments, and
+compare the returned Python value to the expected JSON value. The benchmark is
+licensed `CC-BY-NC-4.0`, so teams must explicitly allow non-commercial
+execution before submitting runs.
+
 ## BFCL output contract
 
 The BFCL adapter targets the upstream v4 task layout under

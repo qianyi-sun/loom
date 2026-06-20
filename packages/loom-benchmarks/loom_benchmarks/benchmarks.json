@@ -64,7 +64,7 @@
       "name": "livecodebench",
       "display_name": "LiveCodeBench",
       "series": "code",
-      "upstream": {"kind": "huggingface", "locator": "livecodebench/code_generation_lite", "trust_remote_code": true},
+      "upstream": {"kind": "huggingface", "locator": "livecodebench/code_generation_lite", "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505", "trust_remote_code": true},
       "license": {"spdx": "CC-BY-NC-4.0", "url": "https://github.com/LiveCodeBench/LiveCodeBench/blob/main/LICENSE"},
       "splits": ["test"]
     },

@@ -210,6 +210,13 @@ Use `loom datasets list` to enumerate at runtime.
 | `research-agent` | gaia |
 | `skill` | skillflow, skilllearnbench |
 
+LiveCodeBench is pinned to `livecodebench/code_generation_lite` revision
+`0fe84c3912ea0c4d4a78037083943e8f0c4dd505`. The selected official split has
+1055 tasks and 28254 public/private cases. Its converter must preserve both
+`stdin` and LeetCode-style `functional` cases; private cases are stored by
+upstream as base64(zlib(pickle(JSON string))) and must be decoded without
+executing arbitrary pickle payloads.
+
 BFCL v4 tasks carry their evaluation contract inside the converted bundle:
 `ground_truth.json` stores either `possible_answer/` data or the official
 relevance/irrelevance call-presence mode, `instruction.md` requires the agent

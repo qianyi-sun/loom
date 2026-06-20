@@ -13,6 +13,8 @@ Pins three contracts the catalog redesign relies on:
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from loom_benchmarks.catalog import _CATALOG_PATH, CATALOG, Catalog
 from pydantic import ValidationError
@@ -140,3 +142,11 @@ def test_catalog_aime_year_params_match_subclass_year_filter() -> None:
     assert CATALOG["aime-22"].params == {"year": "2022"}
     assert CATALOG["aime-23"].params == {"year": "2023"}
     assert CATALOG["aime-24"].params == {"year": "2024"}
+
+
+def test_livecodebench_upstream_is_pinned_to_hf_revision() -> None:
+    """#307: LiveCodeBench must publish a stable official task set;
+    floating HF HEAD would make future publish/register runs drift."""
+    revision = CATALOG["livecodebench"].upstream.revision
+    assert revision is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
