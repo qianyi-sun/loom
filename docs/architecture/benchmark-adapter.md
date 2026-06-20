@@ -399,7 +399,13 @@ For production, use `loom datasets publish-local <folder>` instead of
 `sync-config` when workers should materialize from object storage rather than a
 shared fixture mount. It uploads bundle files under
 `s3://<bucket>/<benchmark-id>/<task-id>/` and upserts DB rows with those
-sources, reusing the worker's existing `s3://` materializer.
+sources, reusing the worker's existing `s3://` materializer. Tasks may declare
+either `environment.docker_image` for a prebuilt sandbox image or
+`environment.dockerfile` for a Dockerfile inside the task bundle. Service-mode
+workers build Dockerfile tasks from the materialized bundle and cache the image
+under a deterministic `loom-task:<hash>` tag. Worker operators bound cache-miss
+build contexts with `LOOM_TASK_IMAGE_BUILD_MAX_FILES` (default 2000) and
+`LOOM_TASK_IMAGE_BUILD_MAX_BYTES` (default 536870912).
 
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 

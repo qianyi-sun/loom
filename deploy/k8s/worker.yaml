@@ -60,6 +60,10 @@ spec:
           value: '600'
         - name: LOOM_WORKER_SANDBOX_WORKER_INDEX
           value: '0'
+        - name: LOOM_TASK_IMAGE_BUILD_MAX_BYTES
+          value: '536870912'
+        - name: LOOM_TASK_IMAGE_BUILD_MAX_FILES
+          value: '2000'
         - name: LOOM_WORKER_TOKEN
           valueFrom:
             secretKeyRef:

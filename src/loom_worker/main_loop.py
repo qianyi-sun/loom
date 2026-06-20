@@ -60,6 +60,7 @@ from loom_worker.sandbox_singleton import (
     SingletonStartupError,
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
+from loom_worker.task_image import TaskImageBuildError, resolve_task_image
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
@@ -352,7 +353,18 @@ async def _spawn_trial(
                 fixtures_root=settings.fixtures_root,
                 benchmark_cache=settings.benchmark_cache,
             )
-        except (httpx.HTTPError, ValidationError, OSError, ValueError) as exc:
+            task_image = await resolve_task_image(
+                task_config=task_config,
+                task_dir=task_dir,
+                task_checksum=task_checksum,
+            )
+        except (
+            httpx.HTTPError,
+            ValidationError,
+            OSError,
+            ValueError,
+            TaskImageBuildError,
+        ) as exc:
             if task_dir is not None:
                 shutil.rmtree(task_dir, ignore_errors=True)
             await _mark_setup_failed(
@@ -395,7 +407,7 @@ async def _spawn_trial(
             task_dir=task_dir,
             trial_config=trial_config,
             driver_factory=lambda: DockerDriver(
-                image=task_config.environment.docker_image or "alpine",
+                image=task_image,
                 workspace=task_config.environment.workdir,
             ),
             agent_factory=_default_agent_factory(
@@ -508,6 +520,7 @@ async def _mark_setup_failed(
             worker_id=worker_id,
             state="failed",
             failure_reason=FailureReason.INTERNAL_ERROR.value,
+            failure_message=detail,
         )
     except Exception:
         logger.exception(

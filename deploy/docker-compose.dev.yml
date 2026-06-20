@@ -195,6 +195,8 @@ services:
       LOOM_WORKER_MINIO_SECRET_KEY: loomdev123
       LOOM_WORKER_LOG_LEVEL: debug
       LOOM_WORKER_MAX_CONCURRENT: "${LOOM_WORKER_MAX_CONCURRENT:-5}"
+      LOOM_TASK_IMAGE_BUILD_MAX_FILES: "${LOOM_TASK_IMAGE_BUILD_MAX_FILES:-2000}"
+      LOOM_TASK_IMAGE_BUILD_MAX_BYTES: "${LOOM_TASK_IMAGE_BUILD_MAX_BYTES:-536870912}"
       # Leave LOOM_WORKER_BLOCKING_IO_MAX_WORKERS unset so the worker derives
       # it from LOOM_WORKER_MAX_CONCURRENT. Set explicitly only for capacity
       # sweeps that need to isolate blocking Docker/S3/HF calls.

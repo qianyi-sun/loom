@@ -53,15 +53,17 @@ class _FakeCPClient:
         worker_id,
         state: str,
         failure_reason: str | None = None,
+        failure_message: str | None = None,
     ) -> bool:  # type: ignore[no-untyped-def]
-        self.patch_calls.append(
-            {
-                "trial_id": trial_id,
-                "worker_id": worker_id,
-                "state": state,
-                "failure_reason": failure_reason,
-            }
-        )
+        patch = {
+            "trial_id": trial_id,
+            "worker_id": worker_id,
+            "state": state,
+            "failure_reason": failure_reason,
+        }
+        if failure_message is not None:
+            patch["failure_message"] = failure_message
+        self.patch_calls.append(patch)
         return True
 
 
@@ -232,6 +234,7 @@ async def test_runner_exception_marks_claimed_trial_failed() -> None:
         "worker_id": worker_id,
         "state": "failed",
         "failure_reason": FailureReason.INTERNAL_ERROR.value,
+        "failure_message": "simulated agent error",
     } in cp.patch_calls
 
 
@@ -276,6 +279,101 @@ async def test_spawn_uses_script_verifier_from_task_config() -> None:
     verifier = verifier_factory()  # type: ignore[operator]
     assert isinstance(verifier, ScriptVerifier)
     assert verifier.script_path == PurePosixPath("/loom/verifier/run.sh")
+
+
+async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    cp.bundle["config"]["environment"] = {
+        "os": "linux",
+        "dockerfile": "environment/Dockerfile",
+    }
+    pool = RunnerPool(max_concurrent=1)
+    captured: dict[str, object] = {}
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run(self) -> None:
+            return None
+
+    async def fake_resolve_task_image(**kwargs: object) -> str:
+        captured["resolve_kwargs"] = kwargs
+        return "loom-task:resolved"
+
+    with (
+        patch.object(ml, "LocalTrialRunner", _CapturingRunner),
+        patch.object(ml, "resolve_task_image", fake_resolve_task_image),
+    ):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=uuid4(),
+            payload={
+                "trial_id": str(uuid4()),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    driver_factory = captured["driver_factory"]
+    assert callable(driver_factory)
+    driver = driver_factory()
+    assert driver.image == "loom-task:resolved"
+    resolve_kwargs = captured["resolve_kwargs"]
+    assert resolve_kwargs["task_checksum"] == "0" * 64
+    assert resolve_kwargs["task_config"].environment.dockerfile.as_posix() == (
+        "environment/Dockerfile"
+    )
+
+
+async def test_task_image_setup_failure_records_diagnostic_message() -> None:
+    from loom_worker.task_image import TaskImageBuildError
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    async def fail_resolve_task_image(**_kwargs: object) -> str:
+        raise TaskImageBuildError("Docker build context exceeds operator file limit")
+
+    with patch.object(ml, "resolve_task_image", fail_resolve_task_image):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    assert {
+        "trial_id": trial_id,
+        "worker_id": worker_id,
+        "state": "failed",
+        "failure_reason": FailureReason.INTERNAL_ERROR.value,
+        "failure_message": "Docker build context exceeds operator file limit",
+    } in cp.patch_calls
 
 
 async def test_tempdir_cleaned_on_cancellation() -> None:
@@ -358,6 +456,7 @@ async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> No
             "worker_id": worker_id,
             "state": "failed",
             "failure_reason": FailureReason.INTERNAL_ERROR.value,
+            "failure_message": "404 task bundle not found",
         }
     ]
 
@@ -435,6 +534,7 @@ async def test_setup_failure_inside_pool_marks_claimed_trial_failed() -> None:
             "worker_id": worker_id,
             "state": "failed",
             "failure_reason": FailureReason.INTERNAL_ERROR.value,
+            "failure_message": "500 task bundle unavailable",
         }
     ]
 

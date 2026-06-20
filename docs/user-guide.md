@@ -397,7 +397,35 @@ loom datasets audit team-evals --db-url "$LOOM_DB_URL"
 
 `publish-local` uploads each task bundle under
 `s3://loom-benchmarks/team-evals/<task-id>/` and registers task rows with those
-sources. The worker uses the existing object-store materializer at runtime.
+sources. The worker uses the existing object-store materializer at runtime. If a
+task declares `environment.dockerfile`, that Dockerfile and its build context
+are part of the uploaded bundle; the worker builds and caches a deterministic
+`loom-task:<hash>` image before the first service-mode trial that needs it. If
+the uploaded build context exceeds worker operator limits, the trial fails in
+setup with a diagnostic that names `LOOM_TASK_IMAGE_BUILD_MAX_FILES` or
+`LOOM_TASK_IMAGE_BUILD_MAX_BYTES`.
+
+For a cheap oracle smoke that does not call a model, omit provider/model flags:
+
+```bash
+loom eval batch create \
+  --name team-evals-oracle-smoke \
+  --agent oracle \
+  --benchmark team-evals \
+  --n-per-task 1
+```
+
+For model-backed agents, include a provider connection and model:
+
+```bash
+loom eval batch create \
+  --name team-evals-litellm-smoke \
+  --agent litellm \
+  --provider smoke-openai \
+  --model gpt-4o-mini \
+  --benchmark team-evals \
+  --n-per-task 1
+```
 
 ### Benchmark readiness audit
 

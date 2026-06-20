@@ -303,7 +303,7 @@ close to what PR J shipped, with three deliberate changes:
 
    **Backend is a free runtime choice, not task-locked.** Tasks
    describe their environmental needs in `TaskConfig.environment`
-   (docker_image, OS, GPU requirements via `requires_caps`). The
+   (docker_image or dockerfile, OS, GPU requirements via `requires_caps`). The
    backend is whatever sandbox provider runs that environment.
    The validation isn't a name-match against TaskConfig — it's a
    capability check:

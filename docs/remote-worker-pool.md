@@ -172,6 +172,13 @@ blocking setup and sandbox calls from capping admission around Python's
 small default thread pool. Override it only when a single-worker sweep
 shows blocking I/O threads are still the first bottleneck.
 
+Service-mode tasks that carry `environment.dockerfile` are built on the worker
+host from the materialized task bundle. Keep
+`LOOM_TASK_IMAGE_BUILD_MAX_FILES` and `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` at their
+defaults (2000 files and 536870912 bytes) unless a capacity test proves the
+host can safely absorb larger Docker build contexts. Exceeding either limit
+fails the trial during setup with a diagnostic before Docker build starts.
+
 The remote-worker compose file also raises the worker container's open-file
 limit to `nofile=65536`. High sandbox concurrency opens Docker socket,
 HTTP, object-store, and filesystem descriptors at the same time; the common

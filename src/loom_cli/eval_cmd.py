@@ -34,6 +34,7 @@ from loom_cli.server_client import (
     authed_client,
     require_logged_in,
 )
+from loom_service.agent_catalog import get_agent
 
 # Map provider_connection.type → ModelSpec.provider. The agent uses
 # the `provider/name` form for its LLM-call serialization (litellm,
@@ -109,6 +110,16 @@ def _load_task_filter_json(raw: str) -> dict[str, Any]:
             "--task-filter must be a JSON object",
         )
     return cast(dict[str, Any], data)
+
+
+def _agent_needs_model(agent_name: str) -> tuple[bool | None, str | None]:
+    agent = get_agent(agent_name)
+    if agent is None:
+        return None, (
+            f"error: unknown agent {agent_name!r}. "
+            "Run `loom agents list` or check GET /api/v1/agents.\n"
+        )
+    return agent.needs_model, None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -214,16 +225,48 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
 
 def _batch_create(args: argparse.Namespace) -> int:
     def _body() -> int:
+        needs_model, agent_err = _agent_needs_model(args.agent)
+        if agent_err is not None:
+            sys.stderr.write(agent_err)
+            return 2
+        assert needs_model is not None
+
+        if needs_model:
+            missing = [
+                flag for flag, value in (
+                    ("--provider", args.provider),
+                    ("--model", args.model),
+                ) if not value
+            ]
+            if missing:
+                message = (
+                    f"error: agent {args.agent!r} requires --provider and "
+                    "--model for batch creation; missing "
+                    + ", ".join(missing)
+                    + ".\n"
+                )
+                sys.stderr.write(message)
+                return 2
+        elif args.provider or args.model or args.agent_provider:
+            sys.stderr.write(
+                f"error: agent {args.agent!r} does not take a model; omit "
+                "--provider, --model, and --agent-provider.\n",
+            )
+            return 2
+
         cfg = require_logged_in()
         with authed_client(cfg) as c:
-            conn = _resolve_by_name(c, args.provider)
             trial_config: dict[str, Any] = {
                 "agent_name": args.agent,
-                "agent_model": _build_agent_model(
+                "agent_model": None,
+            }
+            conn: dict[str, Any] | None = None
+            if needs_model:
+                conn = _resolve_by_name(c, args.provider)
+                trial_config["agent_model"] = _build_agent_model(
                     conn["type"], args.model,
                     agent_provider_override=args.agent_provider,
-                ),
-            }
+                )
             # --benchmark is a SHORTCUT for the most common task_filter:
             # `{"benchmark_id": <slug>}`. Operators wanting richer
             # filters use --task-filter JSON instead. Both: rejected so
@@ -249,9 +292,10 @@ def _batch_create(args: argparse.Namespace) -> int:
                 "name": args.name,
                 "task_filter": task_filter,
                 "trial_config": trial_config,
-                "provider_connection_id": conn["id"],
-                "provider_model_id": args.model,
             }
+            if conn is not None:
+                payload["provider_connection_id"] = conn["id"]
+                payload["provider_model_id"] = args.model
             if args.n_per_task is not None:
                 payload["n_per_task"] = args.n_per_task
             if args.backend is not None:
@@ -460,8 +504,22 @@ def dispatch(argv: list[str]) -> int:
     p_bc = batch_sub.add_parser(
         "create", help="Create a batch + materialize trials.",
     )
-    p_bc.add_argument("--provider", required=True)
-    p_bc.add_argument("--model", required=True)
+    p_bc.add_argument(
+        "--provider",
+        default=None,
+        help=(
+            "Provider connection name. Required for agents that call a "
+            "model; omit for no-model agents such as oracle."
+        ),
+    )
+    p_bc.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Upstream model id. Required for agents that call a model; "
+            "omit for no-model agents such as oracle."
+        ),
+    )
     p_bc.add_argument("--agent", required=True)
     p_bc.add_argument(
         "--benchmark", default=None,

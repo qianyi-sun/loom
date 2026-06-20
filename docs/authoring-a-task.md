@@ -117,9 +117,19 @@ aggregate is computed from the steps that completed.
   must be present at runtime — `pip install` happens inside the
   container per step.
 - **Custom image:** `dockerfile = "environment/Dockerfile"`. Loom
-  builds the image once at task ingestion and caches it. Use this
-  when the runtime overhead of installing dependencies dominates
-  trial duration, or when the env has system-level requirements.
+  uploads the Dockerfile with the task bundle, then service-mode workers
+  build it from the materialized bundle before the first trial that needs
+  it. The built image is cached under a deterministic `loom-task:<hash>`
+  tag derived from the task id, checksum, and Dockerfile path. Use this
+  when the runtime overhead of installing dependencies dominates trial
+  duration, or when the env has system-level requirements. Keep the path
+  relative to the task bundle; absolute paths and `..` traversal are
+  rejected. `build_timeout_sec` controls the per-task image build timeout
+  and defaults to 1200 seconds. Workers also enforce operator-owned build
+  context limits before calling Docker: `LOOM_TASK_IMAGE_BUILD_MAX_FILES`
+  defaults to 2000 files and `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` defaults to
+  536870912 bytes. If either limit is exceeded, the trial fails during setup
+  with an actionable diagnostic instead of starting an unbounded Docker build.
 
 ## Network policy
 

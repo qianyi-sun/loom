@@ -353,6 +353,59 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["provider_model_id"] == "gpt-4o"
 
 
+def test_batch_create_oracle_does_not_require_provider_or_model(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+
+    rc = main([
+        "eval", "batch", "create",
+        "--agent", "oracle",
+        "--benchmark", "qa275-custom",
+        "--name", "oracle-smoke",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Created batch" in out
+    assert "oracle-smoke" in out
+    assert len(mock_server.requests) == 1
+    request = mock_server[0]
+    assert request.method == "POST"
+    assert request.url.path == "/api/v1/batches"
+    body = json.loads(request.content)
+    assert body == {
+        "name": "oracle-smoke",
+        "task_filter": {"benchmark_id": "qa275-custom"},
+        "trial_config": {"agent_name": "oracle", "agent_model": None},
+    }
+
+
+def test_batch_create_model_agent_requires_provider_and_model(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main([
+        "eval", "batch", "create",
+        "--agent", "litellm",
+        "--benchmark", "humaneval",
+        "--name", "missing-model",
+    ])
+
+    assert rc == 2
+    assert "requires --provider and --model" in capsys.readouterr().err
+    assert mock_server.requests == []
+
+
 def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:

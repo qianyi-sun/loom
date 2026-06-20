@@ -45,12 +45,19 @@ message, and service submit routes enforce the same readiness check so
 clients cannot create doomed batches by bypassing the browser.
 
 Use `loom agents audit-runtime --image <trial-sandbox-image>` to verify
-that the image used by task `environment.docker_image` contains the
-executables and Python modules declared by the agent catalog. This checks
-the trial sandbox boundary, not the `loom-worker` container. A clean
-runtime audit is necessary before flipping an external adapter to
-`service_mode_ready=true`; it still must be followed by a live
-end-to-end smoke that proves the adapter can finish a platform trial.
+that the resolved trial image contains the executables and Python modules
+declared by the agent catalog. For tasks with `environment.docker_image`,
+that is the configured image. For tasks with `environment.dockerfile`, the
+worker builds a deterministic `loom-task:<hash>` image from the materialized
+task bundle before the first trial and reuses that local image on later
+trials with the same task checksum and Dockerfile path. Before a cache-miss
+build, the worker rejects contexts above `LOOM_TASK_IMAGE_BUILD_MAX_FILES`
+(default 2000) or `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` (default 536870912), and
+`build_timeout_sec` bounds the Docker build call. This checks the trial
+sandbox boundary, not the `loom-worker` container. A clean runtime audit is
+necessary before flipping an external adapter to
+`service_mode_ready=true`; it still must be followed by a live end-to-end
+smoke that proves the adapter can finish a platform trial.
 
 The repo ships a candidate agent-capable sandbox image for operator smoke
 work:

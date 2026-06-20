@@ -238,6 +238,20 @@ used_by     = ["worker"]
 python_type = "int"
 description = "Maximum threads for the worker event-loop default executor used by blocking Docker, S3, HF, and filesystem calls. Leave unset to derive from max_concurrent."
 
+[service_config.task_image_build_max_files]
+used_by      = ["worker"]
+python_type  = "int"
+default      = 2000
+env_override = { worker = "LOOM_TASK_IMAGE_BUILD_MAX_FILES" }
+description  = "Maximum file count allowed in a task-bundle Dockerfile build context before the worker rejects the build."
+
+[service_config.task_image_build_max_bytes]
+used_by      = ["worker"]
+python_type  = "int"
+default      = 536870912
+env_override = { worker = "LOOM_TASK_IMAGE_BUILD_MAX_BYTES" }
+description  = "Maximum byte size allowed in a task-bundle Dockerfile build context before the worker rejects the build."
+
 [service_config.sandbox_isolation]
 used_by     = ["worker"]
 python_type = "bool"

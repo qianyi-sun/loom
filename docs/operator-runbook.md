@@ -728,9 +728,17 @@ concrete command or UI action.
 7. **Submit a small batch.** Pick `hello-world` (or another canonical
    fixture) and submit:
    ```bash
+   # No-model oracle canary; no provider/model flags are needed.
+   loom eval batch create \
+     --name oracle-smoke-$(date +%s) \
+    --task-filter '{"task_ids":["hello-world"]}' \
+     --agent oracle \
+     --n-per-task 1
+
+   # Model-backed path through the provider gateway.
    loom eval batch create \
      --name smoke-$(date +%s) \
-     --task-filter '{"task_ids":["hello-world"]}' \
+    --task-filter '{"task_ids":["hello-world"]}' \
      --provider smoke-openai --model gpt-4o-mini --agent litellm \
      --n-per-task 1
    # then tail it:

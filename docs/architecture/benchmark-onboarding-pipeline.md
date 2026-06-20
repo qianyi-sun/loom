@@ -311,11 +311,41 @@ loom datasets audit my-benchmark --db-url "$LOOM_DB_URL"
 `s3://<bucket>/<benchmark-id>/<task-id>/` and writes that prefix into
 `tasks.source`. Workers materialize those rows through the existing `s3://`
 materializer, so production does not require mounting the user's source folder.
+If a task declares `environment.dockerfile`, the Dockerfile and build context
+are uploaded with the same bundle. The worker builds the image from the
+materialized bundle before the first trial that needs it and caches the result
+under a deterministic `loom-task:<hash>` tag based on the task checksum and
+Dockerfile path. Operator-owned worker limits reject oversized build contexts
+before Docker starts: `LOOM_TASK_IMAGE_BUILD_MAX_FILES` defaults to 2000 and
+`LOOM_TASK_IMAGE_BUILD_MAX_BYTES` defaults to 536870912.
 
 After audit passes, launch a small first_n=3 smoke from the New Batch UI, or
-through the existing batch API/CLI with a complete provider/model/agent config
-and task_filter.benchmark_id set to my-benchmark. The smoke path should
-exercise the same registered task rows that production evaluations will use.
+through the existing batch API/CLI with `task_filter.benchmark_id` set to
+`my-benchmark`. For oracle/no-model smoke, omit provider and model:
+
+```bash
+loom eval batch create \
+  --name my-benchmark-oracle-smoke \
+  --agent oracle \
+  --benchmark my-benchmark \
+  --n-per-task 1
+```
+
+For model-backed agents such as `litellm`, include the provider connection and
+model id:
+
+```bash
+loom eval batch create \
+  --name my-benchmark-litellm-smoke \
+  --agent litellm \
+  --provider smoke-openai \
+  --model gpt-4o-mini \
+  --benchmark my-benchmark \
+  --n-per-task 1
+```
+
+The smoke path should exercise the same registered task rows that production
+evaluations will use.
 
 The `validate-local` path intentionally uses the same `TaskConfig` boundary as
 production trial execution: each discovered `task.toml` must validate before it
