@@ -174,6 +174,8 @@ Source materialization stays behind the existing worker materializer boundary:
 - `hf://...`: fetch one bundle path from a HuggingFace dataset repo.
 - `s3://...`: fetch one object-store prefix from S3-compatible storage.
 - `fixture://...`: dev/test fixture path only.
+- no `source`: allowed only for inline rows whose validated `TaskConfig` is
+  already complete in Postgres and does not need external bundle materialization.
 - local folder registration: accepted only when the worker fleet has access to
   the same configured `fixtures_root` or after the bundle is published to object
   storage.
@@ -215,14 +217,29 @@ operators.
 
 ## Service And SPA
 
-The service should expose readiness as catalog data once the CLI/readiness model
-is stable. The SPA must render readiness from API data rather than hard-coded
-benchmark names.
+The service exposes readiness as catalog data on `GET /api/v1/benchmarks` and
+`GET /api/v1/benchmarks/{id}`. The SPA renders readiness from those API fields
+rather than hard-coded benchmark names.
+
+The response keeps `task_count` as the runnable count: rows whose stored config
+validates as `TaskConfig`. It also includes diagnostic fields for operators and
+the New Batch picker:
+
+- `raw_task_count`
+- `valid_task_config_count`
+- `invalid_task_config_count`
+- `source_schemes`
+- `adapter_status`, `manifest_status`, `materializer_status`, `smoke_status`
+- `readiness_state`, `readiness_label`, `readiness_message`
+- `selectable`
+- `blocker_reason`
 
 New Batch behavior:
 
 - `Ready`: selectable; show runnable count.
-- `Needs publish`: disabled; show manifest/config blocker.
+- `Needs publish`: disabled; show publish/register guidance.
+- `Needs republish` or `Needs repair`: disabled; show raw-versus-runnable
+  count and the stored `TaskConfig` blocker.
 - `Smoke failed`: disabled by default; allow operator override later if needed.
 - `Heavy/special requirements`: disabled unless worker capabilities and runtime
   requirements are satisfied.

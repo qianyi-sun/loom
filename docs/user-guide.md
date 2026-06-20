@@ -416,6 +416,13 @@ legacy published manifest with task rows but empty `config` appears as
 `blocked` with `manifest_legacy_missing_task_config`; republish or
 backfill the benchmark before launching user batches.
 
+The same readiness model powers the service catalog. In New Batch, a benchmark
+marked `Ready` is selectable. `Needs publish` means no runnable tasks are
+registered yet. `Needs republish` means raw task rows exist but their stored
+configs are not valid `TaskConfig` objects. Disabled rows show the API-provided
+readiness message and raw-versus-runnable counts so operators know whether to
+publish, re-register, or repair the benchmark.
+
 If a benchmark is structurally runnable but a team policy rejects a
 selected task during batch fan-out, the batch becomes terminal instead of
 staying `submitted`. Open Batch Detail or run `loom eval batch show <id>`

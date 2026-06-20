@@ -354,6 +354,20 @@ export interface components {
       imported_at: string;
       imported_by: string | null;
       task_count: number;
+      raw_task_count?: number;
+      valid_task_config_count?: number;
+      invalid_task_config_count?: number;
+      source_schemes?: string[];
+      adapter_status?: string;
+      manifest_status?: string;
+      materializer_status?: string;
+      smoke_status?: string;
+      readiness_state?: string;
+      readiness_label?: string;
+      readiness_message?: string | null;
+      selectable?: boolean;
+      blocker_reason?: string | null;
+      series?: string | null;
     };
     BenchmarkList: {
       items: components["schemas"]["Benchmark"][];

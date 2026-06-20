@@ -177,14 +177,15 @@ async def test_benchmarks_listing_surfaces_series(
     tags_setup: tuple[FastAPI, str],
 ) -> None:
     """SPA reads `series` to group rows in the dropdown — confirm it
-    propagates from DB → manifest → SPA-facing response."""
+    propagates from DB → manifest → SPA-facing response. This fixture seeds
+    placeholder task configs, so use include_empty to inspect metadata rows."""
     app, raw = tags_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            "/api/v1/benchmarks",
+            "/api/v1/benchmarks?include_empty=true",
             headers={"Authorization": f"Bearer {raw}"},
         )
     items = r.json()["items"]

@@ -10,19 +10,56 @@ Cursor pagination uses `display_name` since rows are sorted by it.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.benchmark_readiness import (
+    BenchmarkAuditSource,
+    BenchmarkReadinessItem,
+    TaskAuditSource,
+    build_readiness_item,
+    readiness_display_fields,
+)
 from loom.db.schema import Benchmark, Task
 from loom_service.dependencies import SessionAndCtx
-from loom_service.task_config_validation import has_required_task_config_sections
 
 router = APIRouter()
 
 
-def _bench_row(b: Benchmark, task_count: int = 0) -> dict[str, Any]:
+def _load_registry_names() -> set[str]:
+    try:
+        from loom_benchmarks.registry import REGISTRY
+    except Exception:
+        return set()
+    return set(REGISTRY.keys())
+
+
+def _readiness_for_benchmark(
+    b: Benchmark,
+    *,
+    tasks: list[TaskAuditSource],
+    registry_names: set[str],
+) -> BenchmarkReadinessItem:
+    return build_readiness_item(
+        BenchmarkAuditSource(
+            id=b.id,
+            display_name=b.display_name,
+            series=b.series,
+            upstream_kind=b.upstream_kind,
+            upstream_locator=b.upstream_locator,
+            upstream_revision=b.upstream_revision,
+        ),
+        tasks=tasks,
+        registry_names=registry_names,
+    )
+
+
+def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any]:
+    readiness_fields = readiness_display_fields(readiness)
     return {
         "id": b.id,
         "display_name": b.display_name,
@@ -34,15 +71,59 @@ def _bench_row(b: Benchmark, task_count: int = 0) -> dict[str, Any]:
         "splits": list(b.splits),
         "imported_at": b.imported_at.isoformat(),
         "imported_by": b.imported_by,
-        # Plan 28: surface the imported-task count so the SPA can
-        # distinguish "ready to submit" benchmarks from metadata-only
-        # rows. Empty benchmarks are excluded from the default listing
-        # (see `include_empty` below).
-        "task_count": task_count,
+        # Plan 28/#276: task_count is the number of fully runnable
+        # TaskConfig-valid rows. Raw/invalid rows are exposed in the
+        # readiness diagnostics below so the SPA can explain why a
+        # benchmark is blocked instead of treating every zero as empty.
+        "task_count": readiness.valid_task_config_count,
         # PR-2 series/tags: surface series so the SPA can group
         # related benchmarks in the dropdown. NULL = standalone.
         "series": b.series,
+        **readiness_fields,
     }
+
+
+async def _benchmark_rows_with_readiness(
+    session: AsyncSession,
+    benchmarks: list[Benchmark],
+) -> list[tuple[Benchmark, BenchmarkReadinessItem]]:
+    if not benchmarks:
+        return []
+    benchmark_ids = [row.id for row in benchmarks]
+    task_rows = (
+        await session.execute(
+            select(
+                Task.benchmark_id,
+                Task.id,
+                Task.config,
+                Task.source,
+            ).where(Task.benchmark_id.in_(benchmark_ids)),
+        )
+    ).all()
+    tasks_by_benchmark: dict[str, list[TaskAuditSource]] = defaultdict(list)
+    for benchmark_id, task_id, config, source in task_rows:
+        if benchmark_id is None:
+            continue
+        tasks_by_benchmark[str(benchmark_id)].append(
+            TaskAuditSource(
+                id=str(task_id),
+                config=dict(config),
+                source=source,
+            )
+        )
+
+    registry_names = _load_registry_names()
+    return [
+        (
+            row,
+            _readiness_for_benchmark(
+                row,
+                tasks=tasks_by_benchmark.get(row.id, []),
+                registry_names=registry_names,
+            ),
+        )
+        for row in benchmarks
+    ]
 
 
 @router.get("/benchmarks")
@@ -59,31 +140,21 @@ async def list_benchmarks(
     include_empty: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
     s, _ctx = sc
-    # LEFT JOIN tasks for the count so empty benchmarks still show
-    # up when include_empty=True. GROUP BY on the PK is safe.
-    runnable_task_join = and_(
-        Task.benchmark_id == Benchmark.id,
-        has_required_task_config_sections(),
-    )
-    stmt = (
-        select(Benchmark, func.count(Task.id).label("task_count"))
-        .join(Task, runnable_task_join, isouter=True)
-        .group_by(Benchmark.id)
-        .order_by(Benchmark.display_name)
-    )
+    stmt = select(Benchmark).order_by(Benchmark.display_name)
     if cursor:
         stmt = stmt.where(Benchmark.display_name > cursor)
+    benchmarks = list((await s.scalars(stmt)).all())
+    rows = await _benchmark_rows_with_readiness(s, benchmarks)
     if not include_empty:
-        stmt = stmt.having(func.count(Task.id) > 0)
-    stmt = stmt.limit(limit + 1)
-    rows = list((await s.execute(stmt)).all())
+        rows = [row for row in rows if row[1].readiness_state == "runnable"]
+    rows = rows[: limit + 1]
     if len(rows) > limit:
         rows = rows[:limit]
         next_cursor: str | None = rows[-1][0].display_name
     else:
         next_cursor = None
     return {
-        "items": [_bench_row(b, int(c)) for b, c in rows],
+        "items": [_bench_row(b, readiness) for b, readiness in rows],
         "next_cursor": next_cursor,
     }
 
@@ -94,25 +165,16 @@ async def get_benchmark(
     sc: SessionAndCtx,
 ) -> dict[str, Any]:
     s, _ctx = sc
-    runnable_task_join = and_(
-        Task.benchmark_id == Benchmark.id,
-        has_required_task_config_sections(),
-    )
-    row = (
-        await s.execute(
-            select(Benchmark, func.count(Task.id).label("task_count"))
-            .join(Task, runnable_task_join, isouter=True)
-            .where(Benchmark.id == benchmark_id)
-            .group_by(Benchmark.id),
-        )
-    ).one_or_none()
-    if row is None:
+    b = (
+        await s.execute(select(Benchmark).where(Benchmark.id == benchmark_id))
+    ).scalar_one_or_none()
+    if b is None:
         raise HTTPException(
             status_code=404,
             detail="benchmark not found",
         )
-    b, count = row
-    return _bench_row(b, int(count))
+    rows = await _benchmark_rows_with_readiness(s, [b])
+    return _bench_row(rows[0][0], rows[0][1])
 
 
 @router.get("/benchmarks/{benchmark_id}/tags")

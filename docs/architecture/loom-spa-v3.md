@@ -333,8 +333,10 @@ close to what PR J shipped, with three deliberate changes:
 
    Benchmark `task_count` values shown here are runnable counts, not
    raw task-table row counts. Placeholder benchmark rows whose stored
-   `config` is empty or missing required `TaskConfig` sections surface
-   as `0 tasks — needs publish`. The real `/api/v1/tasks/count` check
+   `config` is empty or invalid surface as disabled readiness badges such as
+   `Needs publish`, `Needs republish`, or `Needs repair`. The picker uses the
+   API-provided `readiness_label`, `readiness_message`, and `selectable` fields
+   rather than hard-coded benchmark names. The real `/api/v1/tasks/count` check
    applies full stored-`TaskConfig` validation before enabling submit.
 
    The selection is a radio between the five modes plus a benchmark

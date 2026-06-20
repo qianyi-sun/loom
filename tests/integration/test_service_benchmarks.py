@@ -254,6 +254,92 @@ async def test_list_benchmarks_counts_only_runnable_task_configs(
     assert all_items["mbpp"]["task_count"] == 0
 
 
+async def test_list_benchmarks_surfaces_readiness_diagnostics(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """The SPA picker needs API-driven readiness details, not a
+    benchmark-name allowlist. Empty metadata rows, legacy placeholder
+    rows, and runnable rows must be distinguishable from one response.
+    """
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="humaneval/HumanEval/0",
+                benchmark_id="humaneval",
+                config=_valid_task_config("humaneval/HumanEval/0"),
+                checksum="0" * 64,
+                source="s3://bucket/prefix/",
+                license="MIT",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="mbpp/legacy-placeholder",
+                benchmark_id="mbpp",
+                config={},
+                checksum="1" * 64,
+                source="s3://bucket/legacy/",
+                license="CC-BY-4.0",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    items = {item["id"]: item for item in r.json()["items"]}
+
+    assert items["humaneval"] | {
+        "task_count": 1,
+        "raw_task_count": 1,
+        "valid_task_config_count": 1,
+        "invalid_task_config_count": 0,
+        "readiness_state": "runnable",
+        "readiness_label": "Ready",
+        "selectable": True,
+        "blocker_reason": None,
+    } == items["humaneval"]
+
+    assert items["aime"] | {
+        "task_count": 0,
+        "raw_task_count": 0,
+        "valid_task_config_count": 0,
+        "invalid_task_config_count": 0,
+        "readiness_state": "blocked",
+        "readiness_label": "Needs publish",
+        "selectable": False,
+        "blocker_reason": "manifest_missing",
+    } == items["aime"]
+    assert "Publish" in items["aime"]["readiness_message"]
+
+    assert items["mbpp"] | {
+        "task_count": 0,
+        "raw_task_count": 1,
+        "valid_task_config_count": 0,
+        "invalid_task_config_count": 1,
+        "readiness_state": "blocked",
+        "readiness_label": "Needs republish",
+        "selectable": False,
+        "blocker_reason": "manifest_legacy_missing_task_config",
+    } == items["mbpp"]
+    assert "valid TaskConfig" in items["mbpp"]["readiness_message"]
+
+
 async def test_pagination(
     benchmarks_setup: tuple[FastAPI, str],
 ) -> None:

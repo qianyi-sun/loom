@@ -148,24 +148,52 @@ const BENCHMARKS_RESPONSE = {
       id: "humaneval",
       display_name: "HumanEval",
       task_count: 12,
+      raw_task_count: 12,
+      valid_task_config_count: 12,
+      invalid_task_config_count: 0,
+      readiness_state: "runnable",
+      readiness_label: "Ready",
+      readiness_message: "12 runnable tasks are registered.",
+      selectable: true,
       series: null,
     },
     {
       id: "mbpp",
       display_name: "MBPP",
       task_count: 3,
+      raw_task_count: 3,
+      valid_task_config_count: 3,
+      invalid_task_config_count: 0,
+      readiness_state: "runnable",
+      readiness_label: "Ready",
+      readiness_message: "3 runnable tasks are registered.",
+      selectable: true,
       series: null,
     },
     {
       id: "aime-22",
       display_name: "AIME (AIMO validation 2022–2024)",
       task_count: 90,
+      raw_task_count: 90,
+      valid_task_config_count: 90,
+      invalid_task_config_count: 0,
+      readiness_state: "runnable",
+      readiness_label: "Ready",
+      readiness_message: "90 runnable tasks are registered.",
+      selectable: true,
       series: "aime",
     },
     {
       id: "aime-25",
       display_name: "AIME 2025",
       task_count: 30,
+      raw_task_count: 30,
+      valid_task_config_count: 30,
+      invalid_task_config_count: 0,
+      readiness_state: "runnable",
+      readiness_label: "Ready",
+      readiness_message: "30 runnable tasks are registered.",
+      selectable: true,
       series: "aime",
     },
   ],
@@ -218,6 +246,7 @@ const BATCH_RESPONSE = {
 function mockEndpoints(opts: {
   matchingTasks?: number;
   emptyBenchmark?: boolean;
+  legacyBenchmark?: boolean;
   /**
    * Override for `POST /api/v1/tasks/count`. When set, the count
    * endpoint returns this value regardless of body. Used by the
@@ -230,9 +259,40 @@ function mockEndpoints(opts: {
     ...BENCHMARKS_RESPONSE,
     items: BENCHMARKS_RESPONSE.items.map((b) =>
       b.id === "humaneval"
-        ? { ...b, task_count: matching }
+        ? {
+            ...b,
+            task_count: matching,
+            raw_task_count: matching,
+            valid_task_config_count: matching,
+            readiness_message: `${matching} runnable tasks are registered.`,
+          }
+        : opts.legacyBenchmark && b.id === "mbpp"
+          ? {
+              ...b,
+              task_count: 0,
+              raw_task_count: 3,
+              valid_task_config_count: 0,
+              invalid_task_config_count: 3,
+              readiness_state: "blocked",
+              readiness_label: "Needs republish",
+              readiness_message:
+                "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
+              selectable: false,
+              blocker_reason: "manifest_legacy_missing_task_config",
+            }
         : opts.emptyBenchmark && b.id === "mbpp"
-          ? { ...b, task_count: 0 }
+          ? {
+              ...b,
+              task_count: 0,
+              raw_task_count: 0,
+              valid_task_config_count: 0,
+              invalid_task_config_count: 0,
+              readiness_state: "blocked",
+              readiness_label: "Needs publish",
+              readiness_message: "Publish/register tasks before selecting this benchmark.",
+              selectable: false,
+              blocker_reason: "manifest_missing",
+            }
           : b,
     ),
   };
@@ -399,10 +459,27 @@ describe("NewBatch", () => {
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
 
-    const marker = await screen.findByText(/0 tasks — needs publish/i);
+    const marker = await screen.findByText(/Needs publish/i);
     expect(marker.closest("label")).toHaveAttribute(
       "title",
-      "This benchmark has no imported tasks yet. Publish or import tasks before selecting it.",
+      "Publish/register tasks before selecting this benchmark.",
+    );
+  });
+
+  it("uses API readiness states to distinguish legacy rows from unpublished benchmarks", async () => {
+    mockEndpoints({ legacyBenchmark: true });
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+
+    const legacy = await screen.findByRole("checkbox", {
+      name: /Select benchmark mbpp/i,
+    });
+    expect(legacy).toBeDisabled();
+    expect(legacy.closest("label")).toHaveTextContent(/Needs republish/i);
+    expect(legacy.closest("label")).toHaveTextContent(/0\/3 runnable/i);
+    expect(legacy.closest("label")).toHaveAttribute(
+      "title",
+      "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
     );
   });
 

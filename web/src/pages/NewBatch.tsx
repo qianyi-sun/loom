@@ -54,6 +54,14 @@ interface BenchmarkItem {
   id: string;
   display_name?: string;
   task_count?: number;
+  raw_task_count?: number;
+  valid_task_config_count?: number;
+  invalid_task_config_count?: number;
+  readiness_state?: string;
+  readiness_label?: string;
+  readiness_message?: string | null;
+  selectable?: boolean;
+  blocker_reason?: string | null;
   series?: string | null;
 }
 
@@ -260,6 +268,41 @@ function FieldLabel({
   );
 }
 
+function benchmarkSelectable(r: BenchmarkItem): boolean {
+  if (typeof r.selectable === "boolean") return r.selectable;
+  return (r.task_count ?? 0) > 0;
+}
+
+function benchmarkReadinessLabel(r: BenchmarkItem): string {
+  if (r.readiness_label) return r.readiness_label;
+  return benchmarkSelectable(r) ? "Ready" : "Needs publish";
+}
+
+function benchmarkReadinessMessage(r: BenchmarkItem): string | undefined {
+  if (r.readiness_message) return r.readiness_message;
+  return benchmarkSelectable(r) ? undefined : EMPTY_BENCHMARK_HELP;
+}
+
+function benchmarkCountText(r: BenchmarkItem): string | null {
+  const valid = r.valid_task_config_count ?? r.task_count;
+  const raw = r.raw_task_count;
+  if (valid === undefined) return null;
+  if (raw !== undefined && raw > valid) {
+    return `${valid}/${raw} runnable`;
+  }
+  return `${valid} task${valid === 1 ? "" : "s"}`;
+}
+
+function benchmarkReadinessBadgeClass(r: BenchmarkItem): string {
+  if (benchmarkSelectable(r)) {
+    return "rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700";
+  }
+  if (r.blocker_reason === "manifest_missing") {
+    return "rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700";
+  }
+  return "rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700";
+}
+
 /**
  * Series-grouped benchmark multi-select.
  *
@@ -302,7 +345,6 @@ function BenchmarkPicker({
       });
   }, [items]);
 
-  const isEmpty = (r: BenchmarkItem): boolean => r.task_count === 0;
   const toggleOne = (id: string): void => {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -310,7 +352,7 @@ function BenchmarkPicker({
     onChange(next);
   };
   const toggleGroup = (rows: BenchmarkItem[]): void => {
-    const selectable = rows.filter((r) => !isEmpty(r));
+    const selectable = rows.filter(benchmarkSelectable);
     if (selectable.length === 0) return;
     const next = new Set(selected);
     const allOn = selectable.every((r) => next.has(r.id));
@@ -331,7 +373,7 @@ function BenchmarkPicker({
     <div className="mt-1 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white">
       {groups.map(({ series, rows }) => {
         const seriesLabel = series === "" ? "Other" : series;
-        const selectableRows = rows.filter((r) => !isEmpty(r));
+        const selectableRows = rows.filter(benchmarkSelectable);
         const allOn =
           selectableRows.length > 0 &&
           selectableRows.every((r) => selected.has(r.id));
@@ -358,8 +400,8 @@ function BenchmarkPicker({
                 aria-label={`Select all in series ${seriesLabel}`}
                 title={
                   populated > 0
-                    ? `Select or clear all populated benchmarks in the ${seriesLabel} series.`
-                    : `The ${seriesLabel} series has no populated benchmarks to select.`
+                    ? `Select or clear all ready benchmarks in the ${seriesLabel} series.`
+                    : `The ${seriesLabel} series has no ready benchmarks to select.`
                 }
                 className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               />
@@ -381,44 +423,47 @@ function BenchmarkPicker({
                     : "ml-auto font-normal normal-case text-xs text-slate-400"
                 }
               >
-                {populated}/{rows.length} populated
+                {populated}/{rows.length} ready
               </span>
             </label>
             {rows.map((r) => {
               const label = r.display_name ?? r.id;
-              const count = r.task_count;
-              const empty = isEmpty(r);
+              const countText = benchmarkCountText(r);
+              const selectable = benchmarkSelectable(r);
+              const readinessLabel = benchmarkReadinessLabel(r);
               return (
                 <label
                   key={r.id}
                   className={
-                    empty
+                    !selectable
                       ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
                       : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                   }
-                  title={empty ? EMPTY_BENCHMARK_HELP : undefined}
+                  title={benchmarkReadinessMessage(r)}
                 >
                   <input
                     type="checkbox"
                     checked={selected.has(r.id)}
                     onChange={() => toggleOne(r.id)}
-                    disabled={empty}
+                    disabled={!selectable}
                     aria-label={`Select benchmark ${r.id}`}
                     className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed"
                   />
                   <span className="flex-1 truncate">{label}</span>
-                  {count !== undefined ? (
+                  {countText ? (
                     <span
                       className={
-                        empty
+                        !selectable
                           ? "text-xs italic text-slate-400"
                           : "text-xs text-slate-400"
                       }
                     >
-                      {count} task{count === 1 ? "" : "s"}
-                      {empty ? " — needs publish" : ""}
+                      {countText}
                     </span>
                   ) : null}
+                  <span className={benchmarkReadinessBadgeClass(r)}>
+                    {readinessLabel}
+                  </span>
                 </label>
               );
             })}

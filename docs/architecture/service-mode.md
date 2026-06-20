@@ -410,7 +410,10 @@ been re-verified.
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete
   `TaskConfig` data do not make a benchmark look launchable in New Batch;
-  the batch creation path still performs the final strict validation and
+  `GET /api/v1/benchmarks` also returns raw/valid/invalid counts,
+  readiness state, blocker reason, and a user-facing readiness message so the
+  SPA can disable blocked benchmarks without hard-coded benchmark names.
+  The batch creation path still performs the final strict validation and
   rejects invalid explicit selections with HTTP 400.
 - **Task bundle lookup** — workers fetch the full task body from
   `GET /tasks/{task_id}/bundle`; task ids may include slashes such as

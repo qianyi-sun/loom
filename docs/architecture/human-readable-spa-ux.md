@@ -137,6 +137,9 @@ Required changes:
 
 - Rename `Which tasks` to `Task selection`.
 - Explain that task selection decides which tasks will be expanded into trials.
+- Show benchmark readiness badges from `/api/v1/benchmarks`: `Ready` rows are
+  selectable, blocked rows are disabled with API-provided guidance and
+  raw-versus-runnable counts.
 - Add one-line explanations for each subset option:
   - `All tasks`: run every runnable task in the selected benchmarks.
   - `First N`: deterministic smoke slice from the start of the sorted task list.

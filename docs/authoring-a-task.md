@@ -209,7 +209,10 @@ through the normal bundle endpoint.
 Catalog counts are runnable counts. A task row inserted as an import
 placeholder with empty or incomplete `config` is not counted by benchmark
 `task_count` or `POST /api/v1/tasks/count`, so the New Batch screen shows
-the benchmark as needing publish instead of offering an evaluation run.
+the benchmark as blocked instead of offering an evaluation run. A benchmark
+with no registered task rows appears as `Needs publish`; a benchmark with raw
+legacy rows but no valid stored `TaskConfig` appears as `Needs republish` with
+the raw-versus-runnable count.
 
 For first-party adapter-backed benchmarks, prefer the manifest path:
 
