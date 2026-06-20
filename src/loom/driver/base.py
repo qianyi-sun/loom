@@ -42,6 +42,9 @@ class StartOptions:
     # Frozen-tuple shape so StartOptions stays hashable + the
     # dataclass-frozen contract holds.
     volumes: tuple[tuple[str, str, str], ...] = ()
+    # Environment variables to set on the primary sandbox container at
+    # create time. Tuple form preserves StartOptions' frozen/hashable shape.
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass

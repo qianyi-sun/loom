@@ -20,6 +20,7 @@ from loom_worker.task_image import TaskImageBuildError, resolve_task_image, task
 def _task_config(
     *, docker_image: str | None = None,
     dockerfile: str | None = None,
+    docker_build_context: str | None = None,
 ) -> TaskConfig:
     return TaskConfig(
         schema_version="1",
@@ -28,6 +29,10 @@ def _task_config(
             os="linux",
             docker_image=docker_image,
             dockerfile=(PurePosixPath(dockerfile) if dockerfile else None),
+            docker_build_context=(
+                PurePosixPath(docker_build_context)
+                if docker_build_context else None
+            ),
         ),
         agent=AgentDefaults(name="oracle"),
         verifier=VerifierDefaults(name="pytest"),
@@ -119,6 +124,34 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
         }
     ]
     assert fake_client.closed is True
+
+
+async def test_resolve_task_image_builds_from_explicit_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    build_context = task_dir / ".loom-build" / "client"
+    build_context.mkdir(parents=True)
+    (build_context / "Dockerfile").write_text("FROM alpine:3.19\n")
+    (build_context / "protected.txt").write_text("build-only\n")
+    (task_dir / "instruction.md").write_text("visible to the agent\n")
+    fake_images = _FakeImages()
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    cfg = _task_config(
+        dockerfile=".loom-build/client/Dockerfile",
+        docker_build_context=".loom-build/client",
+    )
+
+    image = await resolve_task_image(
+        task_config=cfg,
+        task_dir=task_dir,
+        task_checksum="abc123",
+    )
+
+    assert image == task_image_tag(cfg, task_checksum="abc123")
+    assert fake_images.build_calls[0]["path"] == str(build_context)
+    assert fake_images.build_calls[0]["dockerfile"] == "Dockerfile"
 
 
 async def test_resolve_task_image_reuses_cached_dockerfile_image(

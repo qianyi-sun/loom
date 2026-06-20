@@ -173,6 +173,9 @@ class Trial:
                             force_build=self.ctx.trial_config.force_build,
                             network=self.ctx.sandbox_network,
                             volumes=self.ctx.sandbox_volumes,
+                            environment=tuple(sorted(
+                                self.ctx.task_config.environment.environment.items(),
+                            )),
                         )
                     )
                     driver_started = True

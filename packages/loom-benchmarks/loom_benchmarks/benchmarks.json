@@ -40,9 +40,18 @@
       "name": "bfcl",
       "display_name": "BFCL",
       "series": "tool-use",
-      "upstream": {"kind": "git", "locator": "https://github.com/ShishirPatil/gorilla.git", "revision": "main"},
+      "upstream": {"kind": "git", "locator": "https://github.com/ShishirPatil/gorilla.git", "revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8"},
       "license": {"spdx": "Apache-2.0", "url": "https://github.com/ShishirPatil/gorilla/blob/main/LICENSE"},
       "splits": ["test"]
+    },
+    {
+      "name": "browsecomp",
+      "display_name": "BrowseComp",
+      "series": "browsing",
+      "upstream": {"kind": "git", "locator": "https://github.com/openai/simple-evals.git", "revision": "652c89d0ca9df547706735883097e9537d40dc47"},
+      "license": {"spdx": "MIT", "url": "https://github.com/openai/simple-evals/blob/main/LICENSE"},
+      "splits": ["test"],
+      "params": {"rows": "1266", "csv_url": "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv", "csv_etag": "0x8DD785A972BF8A0"}
     },
     {
       "name": "gaia",
@@ -51,6 +60,24 @@
       "upstream": {"kind": "huggingface", "locator": "gaia-benchmark/GAIA", "subset": "2023_all"},
       "license": {"spdx": "CC-BY-4.0", "url": "https://huggingface.co/datasets/gaia-benchmark/GAIA"},
       "splits": ["validation", "test"]
+    },
+    {
+      "name": "gpqa",
+      "display_name": "GPQA Extended",
+      "series": "reasoning",
+      "upstream": {"kind": "git", "locator": "https://github.com/idavidrein/gpqa.git", "revision": "56686c06f5e19865c153de0fdb11be3890014df7"},
+      "license": {"spdx": "MIT", "url": "https://github.com/idavidrein/gpqa/blob/main/LICENSE"},
+      "splits": ["test"],
+      "params": {"subset": "extended", "rows": "546"}
+    },
+    {
+      "name": "hendrycks-math",
+      "display_name": "MATH (Hendrycks)",
+      "series": "reasoning",
+      "upstream": {"kind": "huggingface", "locator": "HuggingFaceTB/MATH", "subset": "all", "revision": "140a673f1f7182daf7923fdc7108e8cdbf97df46", "trust_remote_code": true},
+      "license": {"spdx": "MIT", "url": "https://github.com/hendrycks/math/blob/main/LICENSE"},
+      "splits": ["test"],
+      "params": {"subset": "all", "rows": "5000"}
     },
     {
       "name": "humaneval",
@@ -75,6 +102,15 @@
       "upstream": {"kind": "huggingface", "locator": "google-research-datasets/mbpp", "subset": "sanitized"},
       "license": {"spdx": "CC-BY-4.0", "url": "https://github.com/google-research/google-research/blob/master/mbpp/LICENSE"},
       "splits": ["test"]
+    },
+    {
+      "name": "mmlu-pro",
+      "display_name": "MMLU-Pro",
+      "series": "knowledge",
+      "upstream": {"kind": "huggingface", "locator": "TIGER-Lab/MMLU-Pro", "revision": "b189ec765aa7ed75c8acfea42df31fdae71f97be"},
+      "license": {"spdx": "MIT", "url": "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro"},
+      "splits": ["test"],
+      "params": {"rows": "12032"}
     },
     {
       "name": "osworld",
@@ -123,6 +159,15 @@
       "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Multimodal"},
       "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
       "splits": ["test"]
+    },
+    {
+      "name": "tau2-bench",
+      "display_name": "tau2-bench",
+      "series": "tool-use",
+      "upstream": {"kind": "git", "locator": "https://huggingface.co/datasets/HuggingFaceH4/tau2-bench-data", "revision": "60e37c7a19672769a6034c45a5c8b36e7cd3768b"},
+      "license": {"spdx": "MIT", "url": "https://github.com/sierra-research/tau2-bench/blob/main/LICENSE"},
+      "splits": ["test"],
+      "params": {"domains": "airline,retail,telecom", "rows": "278"}
     },
     {
       "name": "webarena",

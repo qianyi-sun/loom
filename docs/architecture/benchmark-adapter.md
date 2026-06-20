@@ -101,10 +101,25 @@ name = "<display>"
 [environment]
 os = "linux"
 docker_image = "python:3.12-slim"
+# Alternative to docker_image for task-bundle builds.
+# dockerfile = ".loom-build/client/Dockerfile"
+# docker_build_context = ".loom-build/client"
 workdir = "/workspace"   # default; override for upstreams that expect /app
 gpu_vendor = "none"
+environment = { TEST_DIR = "/workspace/tests" }
 network_policies_supported = ["public", "allowlist"]
 baseline_network_policy = { kind = "public" }
+
+[[environment.sidecars]]
+name = "api"
+docker_image = "example/api:latest"
+command = ["python", "app.py"]
+environment = { DEBUG = "1" }
+depends_on = ["db"]
+
+[[environment.sidecars]]
+name = "db"
+docker_image = "postgres:15"
 
 [agent]
 name = "oracle"
@@ -135,6 +150,14 @@ upstreams with their own convention should declare it explicitly. For example,
 Terminal-Bench-2 tasks use `/app`, so their script verifier path is
 `/app/verifier/run.sh` and their test tree lands under
 `/app/environment/tb2-tests`.
+
+`environment.docker_build_context` lets an adapter keep Docker build-only
+files under a subdirectory such as `.loom-build/client`. The worker builds from
+that context, while workspace materialization skips `.loom-build` so hidden
+build assets are not uploaded into the agent-visible workdir. Sidecars are for
+auxiliary Docker services required by the task; Docker-backed workers start
+them on the same per-trial network as the primary sandbox and wait for declared
+healthchecks before running the agent.
 
 ## Publish/Register Boundary
 
@@ -195,7 +218,7 @@ remote service surface is described in
 
 ## Shipped adapters
 
-### `packages/loom-benchmarks/` — 16 adapters across 7 series
+### `packages/loom-benchmarks/` — 21 adapters across 10 series
 
 Source of truth: `packages/loom-benchmarks/loom_benchmarks/benchmarks.json`.
 Use `loom datasets list` to enumerate at runtime.
@@ -205,7 +228,10 @@ Use `loom datasets list` to enumerate at runtime.
 | `aime` | aime-22, aime-23, aime-24, aime-25 |
 | `swe-bench` | swe-bench, swe-bench-verified, swe-bench-multimodal |
 | `code` | humaneval, mbpp, livecodebench |
-| `tool-use` | bfcl |
+| `tool-use` | bfcl, tau2-bench |
+| `browsing` | browsecomp |
+| `knowledge` | mmlu-pro |
+| `reasoning` | gpqa, hendrycks-math |
 | `ui-agent` | osworld, webarena |
 | `research-agent` | gaia |
 | `skill` | skillflow, skilllearnbench |
@@ -233,6 +259,15 @@ to write `agent_output.json`, and `verifier/check.py` emits a Loom
 `VerifierResult`. Do not rely on an image-local `/opt/bfcl/evaluator.py` when
 adding BFCL categories; the script verifier bundle must stay self-contained.
 
+The #307 reasoning/browsing wave pins and publishes complete selected official
+sets: GPQA Extended (546), Hendrycks MATH test (5000), MMLU-Pro test (12032),
+tau2-bench default leaderboard domains (278), and BrowseComp (1266). GPQA,
+MATH, and MMLU-Pro are static answer verifiers. tau2-bench converts the
+official service-domain tasks into structured action/message tasks with domain
+assets in the bundle. BrowseComp records the OpenAI simple-evals git SHA and
+CSV ETag because the encrypted questions live in a public blob outside the git
+tree; executing it requires a browsing/network-capable agent.
+
 ### `packages/loom-benchmark-terminal-bench-2/` — 1 adapter
 
 | Slug | License | Upstream |
@@ -242,6 +277,11 @@ adding BFCL categories; the script verifier bundle must stay self-contained.
 The TB-2 adapter is broken out into its own package because it
 pins a specific upstream SHA + ships a verifier shim that
 translates pytest exit codes into the ScriptVerifier JSON contract.
+At the pinned v0.1.1 SHA it enumerates 86 official tasks. Each task uses a
+build-only `.loom-build/client` Docker context and `workdir = "/app"`; the 3
+multi-service tasks (`security-vulhub-minio`, `simple-sheets-put`, and
+`simple-web-scraper`) declare `environment.sidecars` instead of falling back to
+a single-image approximation.
 
 ## License enforcement
 

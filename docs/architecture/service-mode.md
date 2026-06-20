@@ -50,12 +50,18 @@ declared by the agent catalog. For tasks with `environment.docker_image`,
 that is the configured image. For tasks with `environment.dockerfile`, the
 worker builds a deterministic `loom-task:<hash>` image from the materialized
 task bundle before the first trial and reuses that local image on later
-trials with the same task checksum and Dockerfile path. Before a cache-miss
+trials with the same task checksum, Dockerfile path, and optional
+`environment.docker_build_context`. Build-only contexts should live under
+`.loom-build/`; workspace materialization skips that directory so hidden build
+assets are not copied into the agent-visible workdir. Before a cache-miss
 build, the worker rejects contexts above `LOOM_TASK_IMAGE_BUILD_MAX_FILES`
 (default 2000) or `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` (default 536870912), and
-`build_timeout_sec` bounds the Docker build call. This checks the trial
-sandbox boundary, not the `loom-worker` container. A clean runtime audit is
-necessary before flipping an external adapter to
+`build_timeout_sec` bounds the Docker build call. Tasks may also declare
+`environment.sidecars`; Docker-backed workers start those auxiliary containers
+on the same per-trial network, wait for declared healthchecks, pass
+`environment.environment` into the primary sandbox, and clean the sidecars up
+after the trial. This checks the trial sandbox boundary, not the `loom-worker`
+container. A clean runtime audit is necessary before flipping an external adapter to
 `service_mode_ready=true`; it still must be followed by a live end-to-end
 smoke that proves the adapter can finish a platform trial. Use
 `loom agents smoke-runtime --image <trial-sandbox-image>` for that second

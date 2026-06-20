@@ -8,7 +8,24 @@ instances into the Loom Postgres + MinIO state.
 
 See `docs/architecture/benchmark-adapter.md` for the framework
 reference (Protocol, canonical task layout, fetchers, how to add a
-new adapter). 16 adapters ship today.
+new adapter). 21 adapters ship today.
+
+## #307 full benchmark wave
+
+These adapters pin full selected official task sets rather than smoke or
+sample subsets:
+
+| Slug | Upstream pin | Count | Notes |
+|---|---:|---:|---|
+| `gpqa` | `idavidrein/gpqa` @ `56686c0` | 546 | GPQA Extended CSV from the password-protected official archive; final A-D answer verifier. |
+| `hendrycks-math` | `HuggingFaceTB/MATH` @ `140a673` | 5000 | Full `all` config test split; final boxed/exact answer verifier. |
+| `mmlu-pro` | `TIGER-Lab/MMLU-Pro` @ `b189ec7` | 12032 | Full test split; supports variable A-J option counts. |
+| `tau2-bench` | `HuggingFaceH4/tau2-bench-data` @ `60e37c7` | 278 | Default leaderboard domains: airline, retail, telecom. Bundles domain assets and grades structured `agent_output.json` actions/messages. |
+| `browsecomp` | `openai/simple-evals` @ `652c89d` plus CSV ETag `0x8DD785A972BF8A0` | 1266 | Requires network/browsing-capable agents; final `Exact Answer:` verifier. |
+
+Publish/register still follows the normal schema-v3 path. After publication,
+`loom datasets register <slug>` must store valid `TaskConfig` rows before the
+SPA marks the benchmark ready.
 
 ## LiveCodeBench coverage
 
@@ -47,7 +64,8 @@ placeholders and should audit as `Needs republish`, not runnable tasks.
 ## BFCL output contract
 
 The BFCL adapter targets the upstream v4 task layout under
-`berkeley-function-call-leaderboard/bfcl_eval/data`. It publishes every
+`berkeley-function-call-leaderboard/bfcl_eval/data`, pinned at Gorilla commit
+`6ea57973c7a6097fd7c5915698c54c17c5b1b6c8`. It publishes every
 JSONL task row with either the matching `possible_answer/` ground truth or
 the official relevance/irrelevance call-presence objective. Current upstream
 v4 coverage is 4696 tasks.

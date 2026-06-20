@@ -222,7 +222,17 @@ async def run_import(
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # Upsert benchmarks row first (A13.2: human-readable PK supports
-    # ON CONFLICT (id) DO UPDATE).
+    # ON CONFLICT (id) DO UPDATE). Direct imports carry the same catalog
+    # grouping metadata as publish/register so platform readiness and the SPA
+    # don't lose series on fully materialized benchmark rows.
+    adapter_series = getattr(adapter, "series", None)
+    update_set: dict[str, Any] = {
+        "upstream_revision": adapter.upstream_source.revision or "",
+        "imported_by": imported_by,
+    }
+    if adapter_series is not None:
+        update_set["series"] = adapter_series
+
     async with session_factory() as session:
         await session.execute(
             pg_insert(Benchmark)
@@ -235,14 +245,12 @@ async def run_import(
                 license_spdx=adapter.license_spdx,
                 license_url=adapter.license_url,
                 splits=list(adapter.splits),
+                series=adapter_series,
                 imported_by=imported_by,
             )
             .on_conflict_do_update(
                 index_elements=["id"],
-                set_={
-                    "upstream_revision": adapter.upstream_source.revision or "",
-                    "imported_by": imported_by,
-                },
+                set_=update_set,
             ),
         )
         await session.commit()

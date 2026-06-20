@@ -8,6 +8,10 @@ import pytest
 from loom_benchmark_terminal_bench_2.adapter import TerminalBench2Adapter
 
 
+def test_adapter_declares_series_metadata() -> None:
+    assert TerminalBench2Adapter.series == "tool-use"
+
+
 @pytest.fixture
 def source_root(tmp_path: Path, fixtures_dir: Path) -> Path:
     """Lay out a mock cloned upstream: tasks/<slug>/task.yaml ..."""

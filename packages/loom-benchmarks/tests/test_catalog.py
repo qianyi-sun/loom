@@ -152,9 +152,63 @@ def test_livecodebench_upstream_is_pinned_to_hf_revision() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
 
 
+def test_bfcl_upstream_is_pinned_to_git_revision() -> None:
+    """#307: BFCL v4 must publish a stable official task set; floating
+    `main` would make future publish/register runs drift."""
+    revision = CATALOG["bfcl"].upstream.revision
+    assert revision is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
+
+
 def test_swe_bench_verified_upstream_is_pinned_to_hf_revision() -> None:
     """#307: SWE-Bench Verified must publish the stable official 500-task set;
     floating HF HEAD would make future publish/register runs drift."""
     revision = CATALOG["swe-bench-verified"].upstream.revision
     assert revision is not None
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
+
+
+def test_gpqa_and_hendrycks_math_upstreams_are_pinned_full_sets() -> None:
+    """#307: reasoning benchmarks use selected full official sets, not
+    floating or sample subsets."""
+    gpqa = CATALOG["gpqa"]
+    assert gpqa.upstream.revision == "56686c06f5e19865c153de0fdb11be3890014df7"
+    assert gpqa.params == {"subset": "extended", "rows": "546"}
+
+    math = CATALOG["hendrycks-math"]
+    assert math.upstream.locator == "HuggingFaceTB/MATH"
+    assert math.upstream.subset == "all"
+    assert math.upstream.trust_remote_code is True
+    assert math.upstream.revision == "140a673f1f7182daf7923fdc7108e8cdbf97df46"
+    assert math.params == {"subset": "all", "rows": "5000"}
+
+
+def test_mmlu_pro_upstream_is_pinned_full_test_set() -> None:
+    """#307: MMLU-Pro publishes the full official test split."""
+    mmlu_pro = CATALOG["mmlu-pro"]
+    assert mmlu_pro.upstream.locator == "TIGER-Lab/MMLU-Pro"
+    assert mmlu_pro.upstream.revision == "b189ec765aa7ed75c8acfea42df31fdae71f97be"
+    assert mmlu_pro.params == {"rows": "12032"}
+
+
+def test_tau2_bench_upstream_is_pinned_default_leaderboard_set() -> None:
+    """#307: tau2-bench uses the complete default leaderboard domains,
+    not mock, telecom_small, or a task-id-filtered run."""
+    tau2 = CATALOG["tau2-bench"]
+    assert tau2.upstream.locator == "https://huggingface.co/datasets/HuggingFaceH4/tau2-bench-data"
+    assert tau2.upstream.revision == "60e37c7a19672769a6034c45a5c8b36e7cd3768b"
+    assert tau2.params == {"domains": "airline,retail,telecom", "rows": "278"}
+
+
+def test_browsecomp_upstream_is_pinned_full_csv_set() -> None:
+    """#307: BrowseComp publishes the complete official 1,266-question
+    simple-evals release and records the blob ETag because the data lives
+    outside the git tree."""
+    browsecomp = CATALOG["browsecomp"]
+    assert browsecomp.upstream.locator == "https://github.com/openai/simple-evals.git"
+    assert browsecomp.upstream.revision == "652c89d0ca9df547706735883097e9537d40dc47"
+    assert browsecomp.params == {
+        "rows": "1266",
+        "csv_url": "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv",
+        "csv_etag": "0x8DD785A972BF8A0",
+    }

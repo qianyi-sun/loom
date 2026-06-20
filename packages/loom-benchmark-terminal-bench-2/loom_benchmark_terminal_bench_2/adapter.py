@@ -10,10 +10,12 @@ without re-walking.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import tomli_w
 import yaml
 from loom_benchmarks.base import (
     BenchmarkInstance,
@@ -30,6 +32,7 @@ from loom_benchmark_terminal_bench_2.upstream import (
 class TerminalBench2Adapter:
     name = "terminal-bench-2"
     display_name = "Terminal-Bench-2.0 (core v0.1.1)"
+    series = "tool-use"
     upstream_source: UpstreamSource = UPSTREAM_SOURCE
     license_spdx = "Apache-2.0"
     license_url = "https://github.com/laude-institute/terminal-bench/blob/main/LICENSE"
@@ -63,9 +66,7 @@ class TerminalBench2Adapter:
     def convert_instance(
         self, instance: BenchmarkInstance, *, out_dir: Path,
     ) -> ConvertedTask:
-        from textwrap import dedent
-
-        from loom_benchmarks.util import sha256_of_dir, toml_string
+        from loom_benchmarks.util import sha256_of_dir
 
         r = instance.raw
         task_id = f"{self.name}/{instance.instance_id}"
@@ -74,40 +75,26 @@ class TerminalBench2Adapter:
         instruction = str(r.get("instruction", "")).rstrip() + "\n"
         (out_dir / "instruction.md").write_text(instruction)
 
-        docker_image, warnings = self._resolve_docker_image(r)
+        environment, warnings = self._stage_environment(r, out_dir)
         agent_timeout = float(r.get("max_agent_timeout_sec", 360.0))
         verifier_timeout = float(r.get("max_test_timeout_sec", 60.0))
 
-        toml_id = toml_string(task_id)
-        toml_name = toml_string(f"{self.display_name} — {instance.instance_id}")
-        toml_image = toml_string(docker_image)
-        (out_dir / "task.toml").write_text(dedent(f"""
-            schema_version = "1"
-
-            [task]
-            id = {toml_id}
-            name = {toml_name}
-
-            [environment]
-            os = "linux"
-            docker_image = {toml_image}
-            workdir = "/app"
-
-            [agent]
-            name = "oracle"
-            timeout_sec = {agent_timeout}
-
-            [verifier]
-            name = "script"
-            timeout_sec = {verifier_timeout}
-
-            [verifier.args]
-            script_path = "/app/verifier/run.sh"
-
-            [[steps]]
-            name = "main"
-            artifacts = ["tb2-verifier.json"]
-        """).strip() + "\n")
+        task_toml = {
+            "schema_version": "1",
+            "task": {
+                "id": task_id,
+                "name": f"{self.display_name} — {instance.instance_id}",
+            },
+            "environment": environment,
+            "agent": {"name": "oracle", "timeout_sec": agent_timeout},
+            "verifier": {
+                "name": "script",
+                "timeout_sec": verifier_timeout,
+                "args": {"script_path": "/app/verifier/run.sh"},
+            },
+            "steps": [{"name": "main", "artifacts": ["tb2-verifier.json"]}],
+        }
+        (out_dir / "task.toml").write_text(tomli_w.dumps(task_toml))
 
         self._copy_tests(r, out_dir)
         self._copy_solution(r, out_dir)
@@ -120,40 +107,157 @@ class TerminalBench2Adapter:
             warnings=tuple(warnings),
         )
 
-    def _resolve_docker_image(
-        self, raw: dict[str, Any],
-    ) -> tuple[str, list[str]]:
-        """Return (image_ref, warnings).
-
-        TB-2 tasks may declare a multi-service docker-compose.yaml.
-        Loom's environment model boots a single image per trial; for
-        compose topologies with more than the `client` service we warn
-        and use the client Dockerfile alone. Pure single-image tasks
-        pass through cleanly.
-        """
+    def _stage_environment(
+        self, raw: dict[str, Any], out_dir: Path,
+    ) -> tuple[dict[str, Any], list[str]]:
         warnings: list[str] = []
         src = Path(raw["__source_path"])
-        compose = src / "docker-compose.yaml"
-        if compose.is_file():
-            services = self._compose_service_names(compose)
-            non_client = [s for s in services if s != "client"]
-            if non_client:
-                warnings.append(
-                    f"docker-compose declares non-client services "
-                    f"{sorted(non_client)!r}; running single-image client "
-                    "only — some tasks may not grade faithfully",
-                )
-
-        dockerfile = src / "Dockerfile"
-        if dockerfile.is_file():
-            for line in dockerfile.read_text().splitlines():
-                stripped = line.strip()
-                if stripped.upper().startswith("FROM "):
-                    return stripped[len("FROM "):].strip(), warnings
-        warnings.append(
-            "no Dockerfile FROM found; defaulted to TB-2 base image",
+        compose_doc = self._compose_doc(src / "docker-compose.yaml")
+        services = compose_doc.get("services") if compose_doc else None
+        services = services if isinstance(services, dict) else {}
+        client_service = services.get("client") if services else None
+        client_build = self._resolve_service_build(
+            src=src,
+            service=client_service if isinstance(client_service, dict) else None,
+            default_context=src,
         )
-        return "ghcr.io/laude-institute/t-bench/python-3-13:latest", warnings
+        client_context = out_dir / ".loom-build" / "client"
+        self._copy_tree_without_symlinks(client_build.context, client_context)
+        rel_client_dockerfile = client_build.dockerfile.relative_to(
+            client_build.context,
+        )
+
+        environment: dict[str, Any] = {
+            "os": "linux",
+            "dockerfile": (
+                Path(".loom-build") / "client" / rel_client_dockerfile
+            ).as_posix(),
+            "docker_build_context": ".loom-build/client",
+            "workdir": "/app",
+        }
+        client_environment = self._parse_environment(
+            client_service.get("environment")
+            if isinstance(client_service, dict) else None,
+        )
+        if client_environment:
+            environment["environment"] = {
+                key: self._expand_tb2_env_value(value)
+                for key, value in client_environment.items()
+            }
+        environment.setdefault("environment", {})["TEST_DIR"] = (
+            "/app/environment/tb2-tests"
+        )
+
+        sidecars: list[dict[str, Any]] = []
+        for name, service in services.items():
+            if name == "client":
+                continue
+            if not isinstance(service, dict):
+                warnings.append(f"ignored malformed compose service {name!r}")
+                continue
+            sidecar = self._sidecar_from_compose_service(
+                src=src,
+                out_dir=out_dir,
+                name=str(name),
+                service=service,
+            )
+            sidecars.append(sidecar)
+        if sidecars:
+            environment["sidecars"] = sidecars
+        return environment, warnings
+
+    @staticmethod
+    def _compose_doc(compose_path: Path) -> dict[str, Any]:
+        if not compose_path.is_file():
+            return {}
+        try:
+            doc = yaml.safe_load(compose_path.read_text()) or {}
+        except yaml.YAMLError:
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    class _ServiceBuild:
+        def __init__(self, *, context: Path, dockerfile: Path) -> None:
+            self.context = context
+            self.dockerfile = dockerfile
+
+    def _resolve_service_build(
+        self,
+        *,
+        src: Path,
+        service: dict[str, Any] | None,
+        default_context: Path,
+    ) -> _ServiceBuild:
+        build = (service or {}).get("build")
+        context = default_context
+        dockerfile_name = "Dockerfile"
+        if isinstance(build, str):
+            context = src / build
+        elif isinstance(build, dict):
+            raw_context = build.get("context") or "."
+            raw_dockerfile = build.get("dockerfile") or "Dockerfile"
+            if isinstance(raw_context, str):
+                context = src / raw_context
+            if isinstance(raw_dockerfile, str):
+                dockerfile_name = raw_dockerfile
+        dockerfile = context / dockerfile_name
+        if not dockerfile.is_file():
+            fallback = src / "Dockerfile"
+            if fallback.is_file():
+                context = src
+                dockerfile = fallback
+        return self._ServiceBuild(context=context, dockerfile=dockerfile)
+
+    def _sidecar_from_compose_service(
+        self,
+        *,
+        src: Path,
+        out_dir: Path,
+        name: str,
+        service: dict[str, Any],
+    ) -> dict[str, Any]:
+        sidecar: dict[str, Any] = {"name": name}
+        image = service.get("image")
+        build = service.get("build")
+        if isinstance(build, (str, dict)):
+            service_build = self._resolve_service_build(
+                src=src,
+                service=service,
+                default_context=src,
+            )
+            sidecar_context = out_dir / ".loom-build" / "sidecars" / name
+            self._copy_tree_without_symlinks(
+                service_build.context,
+                sidecar_context,
+            )
+            rel_dockerfile = service_build.dockerfile.relative_to(
+                service_build.context,
+            )
+            sidecar["dockerfile"] = (
+                Path(".loom-build") / "sidecars" / name / rel_dockerfile
+            ).as_posix()
+            sidecar["docker_build_context"] = (
+                Path(".loom-build") / "sidecars" / name
+            ).as_posix()
+        elif isinstance(image, str):
+            sidecar["docker_image"] = image
+
+        command = service.get("command")
+        if isinstance(command, (str, list)):
+            sidecar["command"] = command
+        environment = self._parse_environment(service.get("environment"))
+        if environment:
+            sidecar["environment"] = environment
+        hostname = service.get("hostname")
+        if isinstance(hostname, str):
+            sidecar["hostname"] = hostname
+        depends_on = self._parse_depends_on(service.get("depends_on"))
+        if depends_on:
+            sidecar["depends_on"] = depends_on
+        healthcheck = self._parse_healthcheck(service.get("healthcheck"))
+        if healthcheck:
+            sidecar["healthcheck"] = healthcheck
+        return sidecar
 
     @staticmethod
     def _compose_service_names(compose_path: Path) -> list[str]:
@@ -169,6 +273,98 @@ class TerminalBench2Adapter:
         if not isinstance(services, dict):
             return []
         return list(services.keys())
+
+    @staticmethod
+    def _parse_environment(raw: object) -> dict[str, str]:
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items()}
+        if not isinstance(raw, list):
+            return {}
+        parsed: dict[str, str] = {}
+        for item in raw:
+            if not isinstance(item, str) or "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            parsed[key] = value
+        return parsed
+
+    @staticmethod
+    def _expand_tb2_env_value(value: str) -> str:
+        return value.replace("${T_BENCH_TEST_DIR}", "/app/environment/tb2-tests")
+
+    @staticmethod
+    def _parse_depends_on(raw: object) -> list[str]:
+        if isinstance(raw, dict):
+            return [str(k) for k in raw]
+        if isinstance(raw, list):
+            return [str(v) for v in raw]
+        return []
+
+    @staticmethod
+    def _parse_healthcheck(raw: object) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        test = raw.get("test")
+        command: str | None = None
+        if isinstance(test, str):
+            command = test
+        elif isinstance(test, list) and test:
+            mode = test[0]
+            parts = [str(p) for p in test[1:]]
+            if mode == "CMD-SHELL" and parts:
+                command = parts[0]
+            elif mode == "CMD" and parts:
+                command = shlex.join(parts)
+        if not command:
+            return None
+        healthcheck: dict[str, Any] = {"command": command}
+        interval = TerminalBench2Adapter._parse_duration_sec(raw.get("interval"))
+        timeout = TerminalBench2Adapter._parse_duration_sec(raw.get("timeout"))
+        start_period = TerminalBench2Adapter._parse_duration_sec(
+            raw.get("start_period"),
+        )
+        if interval is not None:
+            healthcheck["interval_sec"] = interval
+        if timeout is not None:
+            healthcheck["timeout_sec"] = timeout
+        if start_period is not None:
+            healthcheck["start_period_sec"] = start_period
+        retries = raw.get("retries")
+        if isinstance(retries, int):
+            healthcheck["retries"] = retries
+        return healthcheck
+
+    @staticmethod
+    def _parse_duration_sec(raw: object) -> float | None:
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if not isinstance(raw, str) or not raw:
+            return None
+        unit = raw[-1]
+        try:
+            value = float(raw[:-1])
+        except ValueError:
+            return None
+        if unit == "s":
+            return value
+        if unit == "m":
+            return value * 60.0
+        if unit == "h":
+            return value * 3600.0
+        return None
+
+    @staticmethod
+    def _copy_tree_without_symlinks(src: Path, dst: Path) -> None:
+        import shutil
+
+        if not src.is_dir():
+            return
+        for child in src.rglob("*"):
+            if child.is_dir() or child.is_symlink():
+                continue
+            target = dst / child.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, target)
 
     def _copy_tests(self, raw: dict[str, Any], out_dir: Path) -> None:
         """Stage TB-2's tests/ subtree + run-tests.sh under

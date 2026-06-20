@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID
 
 from loom.agent.base import AgentRuntime
@@ -33,6 +34,7 @@ from loom_worker.sandbox_network import (
     teardown_sandbox_bridge,
 )
 from loom_worker.sandbox_singleton import SandboxSingletonManager
+from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,15 @@ OutputProjectionCallback = Callable[
 AgentFactory = Callable[
     [Path, LLMGatewayClient, "ModelSpec | None", str], AgentRuntime,
 ]
+
+
+class TaskSidecarRuntime(Protocol):
+    async def start(self, network_name: str | None = None) -> str: ...
+
+    async def stop(self) -> None: ...
+
+
+TaskSidecarRuntimeFactory = Callable[[], TaskSidecarRuntime]
 
 
 @dataclass
@@ -101,6 +112,7 @@ class LocalTrialRunner:
     ) = None
     sandbox_secrets_root: Path | None = None
     sandbox_step_jwt_ttl_sec: int = 600
+    sidecar_runtime_factory: TaskSidecarRuntimeFactory | None = None
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
@@ -135,6 +147,25 @@ class LocalTrialRunner:
                 await self.sandbox_singleton.attach_to_bridge(sandbox_bridge)
 
             on_driver_started_cb = _attach_singleton
+
+        sidecar_runtime: TaskSidecarRuntime | None = None
+        if self.task_config.environment.sidecars:
+            if not driver.capabilities.supports_custom_network:
+                raise RuntimeError(
+                    "task sidecars require a driver that supports "
+                    "StartOptions.network; pair sidecar tasks with a "
+                    "DockerDriver-backed worker",
+                )
+            sidecar_runtime = (
+                self.sidecar_runtime_factory()
+                if self.sidecar_runtime_factory is not None
+                else DockerTaskSidecarRuntime(
+                    task_config=self.task_config,
+                    task_dir=self.task_dir,
+                    task_checksum=self.task_checksum,
+                    trial_id=self.trial_id,
+                )
+            )
 
         # Phase D: per-trial JWT rotator. Built when isolation is on
         # AND mint+secrets-root are configured. The rotator writes
@@ -202,9 +233,7 @@ class LocalTrialRunner:
                 self.local_trajectory_root / f"{self.trial_id}.jsonl"
             ),
             llm_calls_fetcher=self.llm_calls_fetcher,
-            sandbox_network=(
-                sandbox_bridge.name if sandbox_bridge is not None else None
-            ),
+            sandbox_network=(sandbox_bridge.name if sandbox_bridge is not None else None),
             on_driver_started=on_driver_started_cb,
             sandbox_volumes=sandbox_volumes,
         )
@@ -238,6 +267,12 @@ class LocalTrialRunner:
         if jwt_rotator is not None:
             await jwt_rotator.__aenter__()
         try:
+            if sidecar_runtime is not None:
+                ctx.sandbox_network = await sidecar_runtime.start(
+                    network_name=(
+                        sandbox_bridge.name if sandbox_bridge is not None else None
+                    ),
+                )
             result = await trial.run()
             await self._patch_output_projection(result)
             return result
@@ -261,6 +296,14 @@ class LocalTrialRunner:
                 return result
             raise
         finally:
+            if sidecar_runtime is not None:
+                try:
+                    await sidecar_runtime.stop()
+                except Exception:
+                    logger.exception(
+                        "task_sidecar_teardown_failed trial=%s",
+                        self.trial_id,
+                    )
             # Phase D: stop the rotator BEFORE bridge teardown so the
             # rotation task isn't competing with the bind-mount source
             # dir going away.

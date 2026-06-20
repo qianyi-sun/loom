@@ -113,6 +113,8 @@ class DockerDriver:
                     host: {"bind": container, "mode": mode}
                     for host, container, mode in opts.volumes
                 }
+            if opts.environment:
+                run_kwargs["environment"] = dict(opts.environment)
             # to_thread can't unify the **kwargs overloads of
             # docker-py's containers.run, so wrap the call in a
             # closure whose signature is unambiguous to mypy.

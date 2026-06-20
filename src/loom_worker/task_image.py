@@ -36,10 +36,15 @@ def task_image_tag(task_config: TaskConfig, *, task_checksum: str) -> str:
 
     dockerfile = task_config.environment.dockerfile
     dockerfile_text = dockerfile.as_posix() if dockerfile is not None else ""
+    build_context = task_config.environment.docker_build_context
+    build_context_text = (
+        build_context.as_posix() if build_context is not None else ""
+    )
     material = "\n".join([
         task_config.task.id,
         task_checksum,
         dockerfile_text,
+        build_context_text,
     ])
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"loom-task:{digest}"
@@ -68,6 +73,11 @@ async def resolve_task_image(
         task_dir=task_dir,
         dockerfile=task_config.environment.dockerfile,
     )
+    build_context = _resolve_build_context_path(
+        task_dir=task_dir,
+        dockerfile=dockerfile,
+        docker_build_context=task_config.environment.docker_build_context,
+    )
     tag = task_image_tag(task_config, task_checksum=task_checksum)
     timeout = task_config.environment.build_timeout_sec
     try:
@@ -79,6 +89,7 @@ async def resolve_task_image(
                 task_checksum=task_checksum,
                 task_dir=task_dir,
                 dockerfile=dockerfile,
+                build_context=build_context,
             ),
             timeout=timeout,
         )
@@ -106,6 +117,38 @@ def _resolve_dockerfile_path(*, task_dir: Path, dockerfile: PurePosixPath) -> Pa
     return path
 
 
+def _resolve_build_context_path(
+    *,
+    task_dir: Path,
+    dockerfile: Path,
+    docker_build_context: PurePosixPath | None,
+) -> Path:
+    if docker_build_context is None:
+        return task_dir
+    if docker_build_context.is_absolute() or ".." in docker_build_context.parts:
+        raise TaskImageBuildError(
+            "environment.docker_build_context must stay inside the task "
+            f"bundle; got {docker_build_context.as_posix()!r}",
+        )
+    path = task_dir.joinpath(*docker_build_context.parts)
+    if not path.is_dir():
+        raise TaskImageBuildError(
+            "environment.docker_build_context "
+            f"{docker_build_context.as_posix()!r} was not found under "
+            f"materialized task bundle {task_dir}",
+        )
+    try:
+        dockerfile.relative_to(path)
+    except ValueError as exc:
+        raise TaskImageBuildError(
+            "environment.dockerfile must be inside "
+            "environment.docker_build_context; got "
+            f"dockerfile={dockerfile.relative_to(task_dir).as_posix()!r} "
+            f"context={docker_build_context.as_posix()!r}",
+        ) from exc
+    return path
+
+
 def _ensure_dockerfile_image(
     *,
     tag: str,
@@ -113,6 +156,7 @@ def _ensure_dockerfile_image(
     task_checksum: str,
     task_dir: Path,
     dockerfile: Path,
+    build_context: Path,
 ) -> None:
     configured_dockerfile = task_config.environment.dockerfile
     assert configured_dockerfile is not None
@@ -124,10 +168,10 @@ def _ensure_dockerfile_image(
         except ImageNotFound:
             pass
 
-        rel_dockerfile = dockerfile.relative_to(task_dir).as_posix()
-        _enforce_build_context_limits(task_dir)
+        rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
+        _enforce_build_context_limits(build_context)
         client.images.build(
-            path=str(task_dir),
+            path=str(build_context),
             dockerfile=rel_dockerfile,
             tag=tag,
             rm=True,

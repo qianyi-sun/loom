@@ -34,6 +34,7 @@ from loom.driver.base import Driver
 # the per-file check below specifically also looks at any segment).
 _SKIP_NAMES = frozenset({
     "task.toml",
+    ".loom-build",
     ".git",
     "__pycache__",
     "node_modules",

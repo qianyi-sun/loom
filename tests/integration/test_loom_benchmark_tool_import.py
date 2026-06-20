@@ -95,8 +95,8 @@ async def test_import_humaneval_with_fixture(
             "SELECT count(*) FROM tasks WHERE benchmark_id = 'humaneval'",
         )).scalar_one()
         bench_row = conn.execute(text(
-            "SELECT license_spdx, upstream_kind, imported_by FROM benchmarks "
-            "WHERE id='humaneval'",
+            "SELECT license_spdx, upstream_kind, imported_by, series "
+            "FROM benchmarks WHERE id='humaneval'",
         )).one()
         task_row = conn.execute(text(
             "SELECT license, source FROM tasks "
@@ -108,6 +108,7 @@ async def test_import_humaneval_with_fixture(
     assert bench_row.license_spdx == "MIT"
     assert bench_row.upstream_kind == "huggingface"
     assert bench_row.imported_by == "ci"
+    assert bench_row.series == "code"
     assert task_row.license == "MIT"
     assert task_row.source == "s3://loom-benchmarks/humaneval/HumanEval/0/"
 
@@ -240,3 +241,70 @@ async def test_import_idempotent(
 
     assert n_tasks == len(fixture_records)
     assert n_bench == 1
+
+
+async def test_import_backfills_series_on_existing_benchmark_row(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _cleanup: None,
+) -> None:
+    """Import updates pre-existing benchmark rows with adapter series.
+
+    Older direct imports wrote otherwise-ready benchmark rows with
+    ``series=NULL``. Re-importing should repair catalog grouping metadata
+    without needing a separate migration or manual SQL patch.
+    """
+    from loom_benchmarks.adapters import humaneval as hv
+    from loom_benchmarks.base import BenchmarkInstance
+
+    fixture_records = json.loads(_FIXTURE.read_text())
+
+    def _fake_list(
+        self: hv.HumanEvalAdapter, *, source_dir: Path, split: str,
+    ) -> Iterator[BenchmarkInstance]:
+        for r in fixture_records[:1]:
+            yield BenchmarkInstance(
+                instance_id=r["task_id"], split=split, raw=r,
+            )
+
+    monkeypatch.setattr(hv.HumanEvalAdapter, "list_instances", _fake_list)
+    monkeypatch.setattr(
+        "loom_benchmark_tool.import_cmd.fetch_upstream",
+        lambda *a, **kw: tmp_path / "stub-source",
+    )
+
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO benchmarks "
+            "(id, display_name, upstream_kind, upstream_locator, "
+            "upstream_revision, license_spdx, license_url, splits, "
+            "series) VALUES "
+            "('humaneval', 'HumanEval', 'huggingface', 'openai/openai_humaneval', "
+            "'old-revision', 'MIT', 'https://example.test/license', "
+            "ARRAY['test'], NULL)",
+        ))
+
+    stats = await run_import(
+        benchmark="humaneval",
+        db_url=postgres_url,
+        object_store=FakeObjectStore(),
+        bucket="loom-benchmarks",
+        cache_dir=tmp_path / "cache",
+        imported_by="ci",
+    )
+
+    assert stats["converted"] == 1
+    assert stats["warnings"] == 0
+
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT series, upstream_revision, imported_by "
+            "FROM benchmarks WHERE id='humaneval'",
+        )).one()
+    engine.dispose()
+
+    assert row.series == "code"
+    assert row.upstream_revision != "old-revision"
+    assert row.imported_by == "ci"
