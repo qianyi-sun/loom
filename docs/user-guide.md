@@ -2,7 +2,8 @@
 
 Everything a researcher needs to run LLMs against customizable tasks
 from a laptop. Pluggable agents (use one of the 11 shipped harnesses
-or write your own); pluggable task adapters (14 ship). One
+or write your own); pluggable task adapters (21 ship in the core package,
+plus optional Terminal-Bench-2). One
 `uv sync`, then `loom run`.
 
 ## Install
@@ -16,7 +17,7 @@ source .venv/bin/activate                        # so `loom` is on PATH
 ```
 
 The last package is optional (TB-2 adapter). All others ship the core
-14-adapter slate.
+21-adapter slate.
 
 > Why `uv`? It's what the repo's tests + CI use; it creates the venv
 > for you on first sync, sidestepping the PEP 668 "externally managed
@@ -132,6 +133,24 @@ BFCL is a tool-use benchmark. Its task instructions require the agent to
 write `agent_output.json` with a `calls` list, or a `turns` list for
 multi-turn tasks; it does not use the `oracle` baseline because there is no
 preseeded `solution/solve.sh`.
+
+The reasoning and browsing benchmark adapters added for #307 use the same
+catalog lifecycle but have different runtime assumptions:
+
+- `gpqa` publishes the full official GPQA Extended set (546 rows) from the
+  pinned `idavidrein/gpqa` repository and grades a final A-D answer letter.
+- `hendrycks-math` publishes the full 5000-row MATH test split from the pinned
+  `HuggingFaceTB/MATH` `all` config and grades the final boxed/exact answer.
+- `mmlu-pro` publishes the full 12032-row MMLU-Pro test split and grades a
+  final A-J option letter.
+- `tau2-bench` publishes the default leaderboard task sets for airline,
+  retail, and telecom (278 tasks). The task bundle includes domain assets and
+  expects `agent_output.json` containing planned tool actions and user-facing
+  messages; the verifier is deterministic, so operators should document any
+  future switch to the upstream interactive simulator separately.
+- `browsecomp` publishes the full 1266-question BrowseComp release from
+  OpenAI simple-evals. It requires network/browsing capability at execution
+  time and grades the `Exact Answer:` line deterministically.
 
 Daytona usage rows land in the `cloud_compute_records` table when the
 run is connected to a Loom service (`--server-url`). Standalone
@@ -413,9 +432,13 @@ loom datasets audit team-evals --db-url "$LOOM_DB_URL"
 sources. The worker uses the existing object-store materializer at runtime. If a
 task declares `environment.dockerfile`, that Dockerfile and its build context
 are part of the uploaded bundle; the worker builds and caches a deterministic
-`loom-task:<hash>` image before the first service-mode trial that needs it. If
-the uploaded build context exceeds worker operator limits, the trial fails in
-setup with a diagnostic that names `LOOM_TASK_IMAGE_BUILD_MAX_FILES` or
+`loom-task:<hash>` image before the first service-mode trial that needs it.
+Tasks may narrow the Docker build root with `environment.docker_build_context`,
+and build-only contexts under `.loom-build/` are not uploaded into the agent
+workspace. Tasks can also declare `environment.sidecars` for Docker services
+that must run on the same per-trial network as the primary sandbox. If the
+uploaded build context exceeds worker operator limits, the trial fails in setup
+with a diagnostic that names `LOOM_TASK_IMAGE_BUILD_MAX_FILES` or
 `LOOM_TASK_IMAGE_BUILD_MAX_BYTES`.
 
 For a cheap oracle smoke that does not call a model, omit provider/model flags:

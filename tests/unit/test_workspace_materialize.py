@@ -71,6 +71,29 @@ async def test_skips_dev_cruft_at_any_depth(tmp_path: Path) -> None:
     assert PurePosixPath("/workspace/build/thing.pyo") not in fs
 
 
+async def test_skips_build_only_contexts(tmp_path: Path) -> None:
+    (tmp_path / "instruction.md").write_text("solve it\n")
+    build_context = tmp_path / ".loom-build" / "client"
+    build_context.mkdir(parents=True)
+    (build_context / "Dockerfile").write_text("FROM alpine:3.19\n")
+    (build_context / "protected").mkdir()
+    (build_context / "protected" / "answer.txt").write_text("secret\n")
+
+    d = FakeDriver()
+    await d.start()
+    count = await materialize_workspace(
+        driver=d, task_dir=tmp_path, dst=PurePosixPath("/workspace"),
+    )
+
+    assert count == 1
+    fs = d.filesystem
+    assert PurePosixPath("/workspace/instruction.md") in fs
+    assert PurePosixPath("/workspace/.loom-build/client/Dockerfile") not in fs
+    assert PurePosixPath(
+        "/workspace/.loom-build/client/protected/answer.txt",
+    ) not in fs
+
+
 async def test_empty_task_dir_uploads_nothing(tmp_path: Path) -> None:
     d = FakeDriver()
     await d.start()

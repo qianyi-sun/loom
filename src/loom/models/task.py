@@ -33,12 +33,27 @@ class TaskMetadata(BaseModel):
     labels: list[str] = []
 
 
+class TaskSidecarConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    name: str
+    docker_image: str | None = None
+    dockerfile: PurePosixPath | None = None
+    docker_build_context: PurePosixPath | None = None
+    command: str | list[str] | None = None
+    environment: dict[str, str] = {}
+    hostname: str | None = None
+    healthcheck: HealthcheckSpec | None = None
+    depends_on: list[str] = []
+
+
 class EnvironmentConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     os: OS
     gpu_vendor: GPUVendor = "none"
     docker_image: str | None = None
     dockerfile: PurePosixPath | None = None
+    docker_build_context: PurePosixPath | None = None
+    environment: dict[str, str] = {}
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
     user: str | int = "agent"
@@ -47,6 +62,7 @@ class EnvironmentConfig(BaseModel):
     skills_dir: PurePosixPath | None = None
     mcp_servers: list[MCPConnection] = []
     build_timeout_sec: float = Field(default=1200, gt=0)
+    sidecars: list[TaskSidecarConfig] = []
 
 
 class AgentDefaults(BaseModel):

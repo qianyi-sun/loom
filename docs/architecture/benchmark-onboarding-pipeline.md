@@ -370,10 +370,12 @@ surfaces:
 - MBPP: second code benchmark, cheap and simple.
 - AIME 2022-2025: lightweight provider/model smoke with full per-year
   registration and notice-only source-license policy.
-- Terminal-Bench-2 core slice: terminal sandbox behavior. The first registered
-  slice is `terminal-bench-2/hello-world`; it declares `workdir = "/app"`,
-  runs the upstream bash `run-tests.sh` through the script verifier, and has a
-  Docker oracle smoke with reward `1.0` on `platform-dev`.
+- Terminal-Bench-2 full pinned v0.1.1 task set: terminal sandbox behavior. The
+  registered set contains 86 valid task configs, each declaring
+  `workdir = "/app"`, a build-only `.loom-build/client` Docker context, and the
+  upstream bash `run-tests.sh` script verifier. The 3 multi-service tasks use
+  `environment.sidecars` so workers run the official auxiliary services instead
+  of a single-image approximation.
 - SkillFlow or SkillLearnBench slice: research-demanded agentic skill learning
   path, if adapter/runtime requirements are ready.
 

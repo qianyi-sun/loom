@@ -53,11 +53,44 @@ def test_convert_writes_task_toml_with_required_fields(
     assert cfg.task.id == "terminal-bench-2/hello-world"
     assert cfg.task.name.endswith("hello-world")
     assert cfg.environment.os == "linux"
-    assert cfg.environment.docker_image is not None
+    assert cfg.environment.docker_image is None
+    assert cfg.environment.dockerfile.as_posix() == (
+        ".loom-build/client/Dockerfile"
+    )
+    assert cfg.environment.docker_build_context.as_posix() == (
+        ".loom-build/client"
+    )
     assert str(cfg.environment.workdir) == "/app"
     assert cfg.verifier.name == "script"
     assert cfg.verifier.args["script_path"] == "/app/verifier/run.sh"
     assert cfg.agent.name == "oracle"
+
+
+def test_convert_stages_build_context_without_exposing_it_to_workspace(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    staged = tmp_path / "tasks" / "protected-copy"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "Dockerfile").write_text(
+        "FROM ghcr.io/laude-institute/t-bench/python-3-13:latest\n"
+        "COPY ./protected/answer.txt /protected/answer.txt\n"
+    )
+    (staged / "protected").mkdir()
+    (staged / "protected" / "answer.txt").write_text("hidden\n")
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    assert (out / ".loom-build" / "client" / "Dockerfile").exists()
+    assert (
+        out / ".loom-build" / "client" / "protected" / "answer.txt"
+    ).read_text() == "hidden\n"
+    assert not (out / "protected").exists()
 
 
 def test_convert_task_toml_id_escapes_special_chars(
@@ -174,29 +207,98 @@ def multiservice_instance(
     return only
 
 
-def test_multiservice_emits_warning(
+def test_multiservice_stages_sidecar_services_without_warning(
     multiservice_instance: BenchmarkInstance, tmp_path: Path,
 ) -> None:
     out = tmp_path / "out"
     result = TerminalBench2Adapter().convert_instance(
         multiservice_instance, out_dir=out,
     )
-    assert any(
-        "docker-compose" in w and "single-image" in w for w in result.warnings
-    ), result.warnings
+    assert result.warnings == ()
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out / "task.toml").read_text()),
+    )
+    assert cfg.environment.dockerfile.as_posix() == (
+        ".loom-build/client/Dockerfile"
+    )
+    assert cfg.environment.docker_build_context.as_posix() == (
+        ".loom-build/client"
+    )
+    assert len(cfg.environment.sidecars) == 1
+    sidecar = cfg.environment.sidecars[0]
+    assert sidecar.name == "server"
+    assert sidecar.docker_image == "linuxserver/openssh-server:latest"
+    assert sidecar.environment == {"PUID": "1000"}
 
 
-def test_multiservice_falls_back_to_client_dockerfile(
-    multiservice_instance: BenchmarkInstance, tmp_path: Path,
+def test_multiservice_stages_sidecar_build_contexts(
+    tmp_path: Path,
 ) -> None:
+    staged = tmp_path / "tasks" / "api-task"
+    (staged / "client").mkdir(parents=True)
+    (staged / "api").mkdir()
+    (staged / "client" / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    (staged / "api" / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    (staged / "api" / "app.py").write_text("print('api')\n")
+    (staged / "task.yaml").write_text(
+        "instruction: call the api\n"
+        "parser_name: pytest\n"
+        "max_agent_timeout_sec: 10\n"
+        "max_test_timeout_sec: 10\n"
+    )
+    (staged / "docker-compose.yaml").write_text(
+        "services:\n"
+        "  client:\n"
+        "    build:\n"
+        "      context: client\n"
+        "      dockerfile: Dockerfile\n"
+        "    environment:\n"
+        "      - API_URL=http://api:8000\n"
+        "    depends_on:\n"
+        "      api:\n"
+        "        condition: service_healthy\n"
+        "  api:\n"
+        "    build: ./api\n"
+        "    command: [\"python\", \"app.py\"]\n"
+        "    environment:\n"
+        "      - DEBUG=1\n"
+        "    healthcheck:\n"
+        "      test: [\"CMD\", \"python\", \"-c\", \"print('ok')\"]\n"
+        "      interval: 5s\n"
+        "      timeout: 5s\n"
+        "      retries: 5\n"
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
     out = tmp_path / "out"
     TerminalBench2Adapter().convert_instance(
-        multiservice_instance, out_dir=out,
+        only, out_dir=out,
     )
-    parsed = tomllib.loads((out / "task.toml").read_text())
-    assert parsed["environment"]["docker_image"].startswith(
-        "ghcr.io/laude-institute/t-bench/",
+
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out / "task.toml").read_text()),
     )
+    assert cfg.environment.dockerfile.as_posix() == (
+        ".loom-build/client/Dockerfile"
+    )
+    assert cfg.environment.sidecars[0].name == "api"
+    assert cfg.environment.sidecars[0].dockerfile.as_posix() == (
+        ".loom-build/sidecars/api/Dockerfile"
+    )
+    assert cfg.environment.sidecars[0].docker_build_context.as_posix() == (
+        ".loom-build/sidecars/api"
+    )
+    assert cfg.environment.sidecars[0].command == ["python", "app.py"]
+    assert cfg.environment.sidecars[0].environment == {"DEBUG": "1"}
+    assert cfg.environment.sidecars[0].healthcheck is not None
+    assert cfg.environment.environment == {
+        "API_URL": "http://api:8000",
+        "TEST_DIR": "/app/environment/tb2-tests",
+    }
+    assert (out / ".loom-build" / "sidecars" / "api" / "app.py").exists()
 
 
 def test_checksum_stable_across_runs(

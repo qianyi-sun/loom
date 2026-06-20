@@ -173,11 +173,15 @@ small default thread pool. Override it only when a single-worker sweep
 shows blocking I/O threads are still the first bottleneck.
 
 Service-mode tasks that carry `environment.dockerfile` are built on the worker
-host from the materialized task bundle. Keep
+host from the materialized task bundle, or from
+`environment.docker_build_context` when the task declares one. Keep
 `LOOM_TASK_IMAGE_BUILD_MAX_FILES` and `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` at their
 defaults (2000 files and 536870912 bytes) unless a capacity test proves the
 host can safely absorb larger Docker build contexts. Exceeding either limit
 fails the trial during setup with a diagnostic before Docker build starts.
+Tasks with `environment.sidecars` require Docker networking support on the
+worker host; each trial starts the sidecars on the same per-trial bridge as the
+primary sandbox and removes them during teardown.
 
 The remote-worker compose file also raises the worker container's open-file
 limit to `nofile=65536`. High sandbox concurrency opens Docker socket,

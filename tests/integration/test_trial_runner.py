@@ -11,7 +11,9 @@ import pytest
 
 from loom.agent.gateway_client import FakeLLMGatewayClient
 from loom.agent.oracle import OracleAgent
+from loom.driver.base import StartOptions
 from loom.driver.fake import FakeDriver, command_table_handler
+from loom.models.capabilities import Capabilities
 from loom.models.exec import ExecResult
 from loom.models.result import FailureReason, TrialState
 from loom.models.task import (
@@ -20,6 +22,7 @@ from loom.models.task import (
     StepConfig,
     TaskConfig,
     TaskMetadata,
+    TaskSidecarConfig,
     VerifierDefaults,
 )
 from loom.models.verifier import VerifierResult
@@ -48,11 +51,21 @@ def hello_task(tmp_path: Path) -> Path:
     return d
 
 
-def _task_config(*, artifacts: list[str] | None = None) -> TaskConfig:
+def _task_config(
+    *,
+    artifacts: list[str] | None = None,
+    sidecars: list[TaskSidecarConfig] | None = None,
+    environment: dict[str, str] | None = None,
+) -> TaskConfig:
     return TaskConfig(
         schema_version="1",
         task=TaskMetadata(id="hello", name="hello"),
-        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        environment=EnvironmentConfig(
+            os="linux",
+            docker_image="alpine",
+            sidecars=sidecars or [],
+            environment=environment or {},
+        ),
         agent=AgentDefaults(name="oracle"),
         verifier=VerifierDefaults(name="pass"),
         steps=[StepConfig(name="main", artifacts=artifacts or [])],
@@ -61,6 +74,18 @@ def _task_config(*, artifacts: list[str] | None = None) -> TaskConfig:
 
 def _driver_factory(handler: Any) -> Any:
     return lambda: FakeDriver(exec_handler=handler)
+
+
+def _docker_supporting_caps() -> Capabilities:
+    return Capabilities(
+        os="linux",
+        gpu_vendor="none",
+        network_policies=frozenset(["public", "no-network", "allowlist"]),
+        dynamic_network_policy=True,
+        mounted_fs=True,
+        resource_modes=frozenset(["auto", "limit", "guarantee"]),
+        supports_custom_network=True,
+    )
 
 
 async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped-def]
@@ -103,6 +128,83 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
     assert result.state == TrialState.SUCCEEDED
     assert ("running", None) in state_calls
     assert ("succeeded", None) in state_calls
+
+
+async def test_runner_starts_sidecars_and_uses_returned_network(
+    hello_task: Path, tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class CapturingDriver(FakeDriver):
+        start_options: StartOptions | None = None
+
+        async def start(self, *, options: StartOptions | None = None) -> None:
+            events.append("driver-start")
+            self.start_options = options
+            await super().start(options=options)
+
+        async def stop(self, *, delete: bool = True) -> None:
+            events.append("driver-stop")
+            await super().stop(delete=delete)
+
+    class FakeSidecars:
+        async def start(self, network_name: str | None = None) -> str:
+            events.append(f"sidecars-start:{network_name}")
+            return "loom-sidecar-network"
+
+        async def stop(self) -> None:
+            events.append("sidecars-stop")
+
+    async def fake_state_patch(
+        state: str,
+        failure_reason: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
+        return True
+
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    driver = CapturingDriver(
+        capabilities=_docker_supporting_caps(),
+        exec_handler=handler,
+    )
+    trial_id = uuid4()
+    runner = LocalTrialRunner(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=_task_config(
+            sidecars=[TaskSidecarConfig(name="api", docker_image="api:latest")],
+            environment={"API_URL": "http://api:8000"},
+        ),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=lambda: driver,
+        agent_factory=lambda task_dir, _gw, _model, _name:
+            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+        sidecar_runtime_factory=lambda: FakeSidecars(),
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert driver.start_options is not None
+    assert driver.start_options.network == "loom-sidecar-network"
+    assert driver.start_options.environment == (("API_URL", "http://api:8000"),)
+    assert events == [
+        "sidecars-start:None",
+        "driver-start",
+        "driver-stop",
+        "sidecars-stop",
+    ]
 
 
 async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped-def]
