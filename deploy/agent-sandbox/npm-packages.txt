@@ -1,0 +1,8 @@
+# External agent CLIs required by src/loom_service/agent_catalog.py.
+# Keep this list in sync with runtime_contract.required_packages.
+@anthropic-ai/claude-code@2.1.183
+@openai/codex@0.141.0
+@google/gemini-cli@0.47.0
+@moonshot-ai/kimi-code@0.18.0
+opencode-ai@1.17.8
+@qwen-code/qwen-code@0.18.3

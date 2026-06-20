@@ -1,0 +1,4 @@
+# Python module agent runtimes required by src/loom_service/agent_catalog.py.
+# Keep this list in sync with runtime_contract.required_packages.
+openhands-ai==1.8.0
+-e git+https://github.com/SWE-agent/SWE-agent@v1.1.0#egg=sweagent

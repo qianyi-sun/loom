@@ -160,6 +160,23 @@ loom agents audit-runtime --image python:3.11-slim
 loom agents audit-runtime --image my-agent-sandbox:dev --agent opencode --json
 ```
 
+For service-mode smoke work, build the candidate all-agent sandbox image
+from this repo and audit that exact image:
+
+```bash
+docker build -f deploy/Dockerfile.agent-sandbox -t loom-agent-sandbox:dev .
+loom agents audit-runtime --image loom-agent-sandbox:dev --json
+```
+
+The image provisions Node 22 CLI adapters (`claude`, `codex`, `gemini`,
+`kimi`, `opencode`, `qwen`) and Python runtimes for `aider`,
+`mini-swe-agent`, `openhands`, and `swe-agent`. `aider` and
+`mini-swe-agent` live in isolated virtual environments with PATH shims;
+OpenHands and SWE-agent stay importable from the main Python 3.12
+runtime because their adapters invoke `python -m ...`. SWE-agent is
+installed editable from its tagged source tree so its upstream `config/`
+layout is present at runtime.
+
 The audit runs dependency probes inside the named Docker image and
 reports one row per displayed agent. `blocked` means an executable or
 Python module declared by `runtime_contract` is missing. `gated` means
@@ -168,6 +185,12 @@ marks the agent unavailable pending the product readiness flip and an
 end-to-end platform-dev smoke. The command does not pull images
 implicitly; build or pull the target sandbox image first so the audit
 checks exactly what workers will run.
+
+Dependency audit findings can also expose adapter drift. Current
+OpenHands SDK wheels provide `openhands.sdk`, not the historical
+`openhands_sdk.run` module assumed by the `openhands-sdk` adapter. Keep
+that agent blocked until the adapter has a real one-shot SDK runner and
+an end-to-end smoke.
 
 ## Adding a new agent adapter
 

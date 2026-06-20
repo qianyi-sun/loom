@@ -52,6 +52,25 @@ runtime audit is necessary before flipping an external adapter to
 `service_mode_ready=true`; it still must be followed by a live
 end-to-end smoke that proves the adapter can finish a platform trial.
 
+The repo ships a candidate agent-capable sandbox image for operator smoke
+work:
+
+```bash
+docker build -f deploy/Dockerfile.agent-sandbox -t loom-agent-sandbox:dev .
+loom agents audit-runtime --image loom-agent-sandbox:dev --json
+```
+
+`deploy/Dockerfile.agent-sandbox` uses Python 3.12 plus Node 22 because
+the displayed catalog spans both Python-module agents and modern Node
+CLIs. Python CLI-only agents such as `aider` and `mini-swe-agent` are
+installed in isolated virtual environments and linked onto `PATH` so
+their pinned dependencies do not conflict with OpenHands. A successful
+image build or dependency audit does not by itself make an agent ready:
+the catalog should stay gated until a platform-dev trial smoke passes.
+As of this slice, `openhands-sdk` remains blocked because the adapter
+expects `openhands_sdk.run`, while current OpenHands SDK packages expose
+the `openhands.sdk` library but no such one-shot runner.
+
 ## Process model
 
 ```
