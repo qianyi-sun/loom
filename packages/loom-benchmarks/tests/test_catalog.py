@@ -150,3 +150,11 @@ def test_livecodebench_upstream_is_pinned_to_hf_revision() -> None:
     revision = CATALOG["livecodebench"].upstream.revision
     assert revision is not None
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
+
+
+def test_swe_bench_verified_upstream_is_pinned_to_hf_revision() -> None:
+    """#307: SWE-Bench Verified must publish the stable official 500-task set;
+    floating HF HEAD would make future publish/register runs drift."""
+    revision = CATALOG["swe-bench-verified"].upstream.revision
+    assert revision is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)

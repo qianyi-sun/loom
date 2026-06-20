@@ -26,6 +26,24 @@ compare the returned Python value to the expected JSON value. The benchmark is
 licensed `CC-BY-NC-4.0`, so teams must explicitly allow non-commercial
 execution before submitting runs.
 
+## SWE-Bench Verified coverage
+
+The SWE-Bench Verified adapter targets the official Hugging Face dataset
+`princeton-nlp/SWE-bench_Verified` pinned at revision
+`c104f840cc67f8b6eec6f759ebc8b2693d585d4a`. That pinned test split contains
+500 tasks.
+
+Each converted bundle writes the issue body to `instruction.md`, the reference
+patch application script to `solution/solve.sh`, and a pytest verifier that runs
+the upstream `FAIL_TO_PASS` plus `PASS_TO_PASS` node ids inside the per-instance
+SWE-Bench eval image. The generated `task.toml` points at
+`swebench/sweb.eval.x86_64.<instance>:latest`, so service-mode workers must be
+able to pull those per-instance images before executing the benchmark.
+
+Republish this benchmark with the schema-v3 manifest path before treating it as
+ready. Older registered rows without `task_config` remain explicit legacy
+placeholders and should audit as `Needs republish`, not runnable tasks.
+
 ## BFCL output contract
 
 The BFCL adapter targets the upstream v4 task layout under

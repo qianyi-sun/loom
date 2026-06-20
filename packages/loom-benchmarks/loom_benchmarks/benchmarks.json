@@ -112,7 +112,7 @@
       "name": "swe-bench-verified",
       "display_name": "SWE-Bench Verified",
       "series": "swe-bench",
-      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Verified"},
+      "upstream": {"kind": "huggingface", "locator": "princeton-nlp/SWE-bench_Verified", "revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"},
       "license": {"spdx": "MIT", "url": "https://github.com/princeton-nlp/SWE-bench/blob/main/LICENSE"},
       "splits": ["test"]
     },

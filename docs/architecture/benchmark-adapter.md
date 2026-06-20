@@ -217,6 +217,15 @@ LiveCodeBench is pinned to `livecodebench/code_generation_lite` revision
 upstream as base64(zlib(pickle(JSON string))) and must be decoded without
 executing arbitrary pickle payloads.
 
+SWE-Bench Verified is pinned to `princeton-nlp/SWE-bench_Verified` revision
+`c104f840cc67f8b6eec6f759ebc8b2693d585d4a`. The selected official test split
+has 500 tasks. Its converter emits per-instance bundles that run the upstream
+`FAIL_TO_PASS` plus `PASS_TO_PASS` pytest node ids inside the corresponding
+`swebench/sweb.eval.x86_64.<instance>:latest` image. Because historical
+registered rows may have `config={}`, readiness must come from a republished
+schema-v3 manifest with embedded validated `TaskConfig` payloads, not from raw
+legacy task-row counts.
+
 BFCL v4 tasks carry their evaluation contract inside the converted bundle:
 `ground_truth.json` stores either `possible_answer/` data or the official
 relevance/irrelevance call-presence mode, `instruction.md` requires the agent

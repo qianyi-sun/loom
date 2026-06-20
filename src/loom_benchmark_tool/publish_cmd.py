@@ -25,17 +25,17 @@ command + worker can read it without reaching back into adapter code.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from huggingface_hub import HfApi
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
+from loom_benchmarks.util import sha256_of_dir
 
 from loom.license_policy import tags_with_license_execution_policy
 from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
@@ -67,7 +67,7 @@ from loom_benchmark_tool.manifest import (
 #       "task_id": str,            # the DB-level id (benchmark/instance)
 #       "instance_id": str,        # the adapter-level id
 #       "hf_path": str,            # path within the HF repo, ends in "/"
-#       "checksum": str,           # "sha256:..." over the bundle tree
+#       "checksum": str,           # 64-char sha256 hex over the bundle tree
 #       "license_spdx": str,
 #       "split": str,
 #       "tags": dict[str, str],    # v2+: open-ended task metadata
@@ -96,16 +96,7 @@ def _bundle_checksum(bundle_dir: Path) -> str:
     path so independent re-builds produce the same digest if the
     bundle contents match byte-for-byte. Same hashing scheme the
     import command writes into `tasks.checksum`."""
-    h = hashlib.sha256()
-    for p in sorted(bundle_dir.rglob("*")):
-        if p.is_dir():
-            continue
-        rel = p.relative_to(bundle_dir).as_posix()
-        h.update(rel.encode("utf-8"))
-        h.update(b"\0")
-        h.update(p.read_bytes())
-        h.update(b"\0")
-    return f"sha256:{h.hexdigest()}"
+    return cast(str, sha256_of_dir(bundle_dir))
 
 
 def run_publish(

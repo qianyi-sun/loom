@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import pytest
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
+from loom_benchmarks.util import sha256_of_dir
 
 from loom_benchmark_tool.publish_cmd import (
     MANIFEST_SCHEMA_VERSION,
@@ -70,7 +71,7 @@ def test_bundle_checksum_is_stable_across_invocations(tmp_path: Path) -> None:
     digest1 = _bundle_checksum(a)
     digest2 = _bundle_checksum(a)
     assert digest1 == digest2
-    assert digest1.startswith("sha256:")
+    assert len(digest1) == 64
 
 
 def test_bundle_checksum_differs_on_content_change(tmp_path: Path) -> None:
@@ -133,12 +134,13 @@ def test_run_publish_includes_valid_task_config_in_manifest(
             (out_dir / "instruction.md").write_text("solve it\n")
             return ConvertedTask(
                 task_id="fake-bench/task-001",
-                checksum=_bundle_checksum(out_dir),
+                checksum=sha256_of_dir(out_dir),
                 license_spdx="MIT",
                 warnings=(),
             )
 
     captured_manifest: dict[str, Any] = {}
+    captured_bundle_checksums: dict[str, str] = {}
 
     class FakeHfApi:
         def __init__(self, *, token: str) -> None:
@@ -152,6 +154,7 @@ def test_run_publish_includes_valid_task_config_in_manifest(
             captured_manifest.update(
                 json.loads((folder / "manifest.json").read_text()),
             )
+            captured_bundle_checksums["task-001"] = sha256_of_dir(folder / "task-001")
             return SimpleNamespace(oid="fake-revision")
 
     monkeypatch.setitem(publish_cmd.REGISTRY, "fake-bench", FakeAdapter())
@@ -170,8 +173,10 @@ def test_run_publish_includes_valid_task_config_in_manifest(
     )
 
     assert stats["published"] == 1
+    assert stats["warnings"] == 0
     assert captured_manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
     task = cast(dict[str, Any], captured_manifest["tasks"][0])
+    assert task["checksum"] == captured_bundle_checksums["task-001"]
     assert task["task_config"]["task"]["id"] == "fake-bench/task-001"
     assert task["task_config"]["environment"]["docker_image"] == "python:3.12-slim"
     assert task["tags"] == {
