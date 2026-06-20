@@ -122,6 +122,8 @@ type BatchDetail =
   paths["/api/v1/batches/{id}"]["get"]["responses"][200]["content"]["application/json"];
 type BatchCreate =
   paths["/api/v1/batches"]["post"]["responses"][201]["content"]["application/json"];
+type BatchFailedRerun =
+  paths["/api/v1/batches/{id}/rerun-failed"]["post"]["responses"][201]["content"]["application/json"];
 type Usage =
   paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
 type Team =
@@ -492,6 +494,11 @@ export const api = {
   cancelBatch: (id: string) =>
     apiFetch<{ batch_id: string; state: string }>(
       `/api/v1/batches/${id}/cancel`,
+      { method: "POST" },
+    ),
+  rerunFailedBatch: (id: string) =>
+    apiFetch<BatchFailedRerun>(
+      `/api/v1/batches/${id}/rerun-failed`,
       { method: "POST" },
     ),
   listRateCards: () =>

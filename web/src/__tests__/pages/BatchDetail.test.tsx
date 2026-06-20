@@ -32,6 +32,14 @@ const BATCH_BODY = {
   failure_reason: null,
   failure_message: null,
   fanout_errors: [],
+  rerun_of_batch_id: null,
+  rerun_targets: [],
+  rerun_batches: [],
+  rerunnable_failed_count: 0,
+  effective_trial_summary: {},
+  effective_result_status: null,
+  effective_aggregate_reward: null,
+  effective_total_cost_usd: 0,
   created_at: "2026-06-19T20:23:00Z",
   finished_at: null,
   created_by_token_prefix: "test:web",
@@ -41,11 +49,26 @@ const BATCH_BODY = {
   total_cost_usd: 0,
 };
 
-function mockBatch(body = BATCH_BODY): ReturnType<typeof vi.spyOn> {
+function mockBatch(
+  body = BATCH_BODY,
+  rerunBody: Record<string, unknown> | null = null,
+): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
-    .mockImplementation((input: RequestInfo | URL) => {
+    .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
+      if (
+        url.endsWith(`/api/v1/batches/${BATCH_ID}/rerun-failed`) &&
+        init?.method === "POST" &&
+        rerunBody
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify(rerunBody), {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
       if (url.endsWith(`/api/v1/batches/${BATCH_ID}`)) {
         return Promise.resolve(
           new Response(JSON.stringify(body), {
@@ -99,5 +122,36 @@ describe("BatchDetail run plan", () => {
       expect(screen.getByText("task_filter")).toBeInTheDocument();
       expect(screen.getByText("trial_config")).toBeInTheDocument();
     });
+  });
+
+  it("offers a rerun action when transient failed cases are available", async () => {
+    const failedBatch = {
+      ...BATCH_BODY,
+      state: "finished",
+      result_status: "partial_failed",
+      trial_summary: { succeeded: 160, failed: 4 },
+      rerunnable_failed_count: 4,
+      effective_trial_summary: { succeeded: 160, failed: 4 },
+      effective_result_status: "partial_failed",
+    };
+    const fetchMock = mockBatch(failedBatch, {
+      batch_id: "rerun-batch-id",
+      rerun_of_batch_id: BATCH_ID,
+      expected_trial_count: 4,
+      state: "submitted",
+      rerun_target_count: 4,
+    });
+    renderBatchDetail();
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Rerun failed cases/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/v1/batches/${BATCH_ID}/rerun-failed`),
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    expect(await screen.findByText(/Rerun queued/i)).toBeInTheDocument();
   });
 });

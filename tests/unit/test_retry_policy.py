@@ -22,10 +22,10 @@ def test_backoff_rejects_jitter_above_one():
         BackoffSpec(jitter=1.5)
 
 
-def test_retry_policy_default_is_no_retry():
+def test_retry_policy_default_retries_transient_gateway_errors():
     p = RetryPolicy()
-    assert p.max_attempts == 1
-    assert p.retry_on == frozenset()
+    assert p.max_attempts == 3
+    assert p.retry_on == frozenset({RetryReason.GATEWAY_ERROR})
 
 
 def test_retry_reason_values():
@@ -35,5 +35,6 @@ def test_retry_reason_values():
         "agent_timeout",
         "verifier_timeout",
         "trajectory_flush_failed",
+        "gateway_error",
     ):
         assert RetryReason(v).value == v

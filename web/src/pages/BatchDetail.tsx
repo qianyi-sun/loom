@@ -79,6 +79,12 @@ export default function BatchDetail(): JSX.Element {
       queryClient.invalidateQueries({ queryKey: ["batch", batchId] }),
   });
 
+  const rerunFailed = useMutation({
+    mutationFn: () => api.rerunFailedBatch(batchId!),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["batch", batchId] }),
+  });
+
   if (!batchId) {
     return <ErrorState error={new Error("missing batchId")} />;
   }
@@ -90,6 +96,9 @@ export default function BatchDetail(): JSX.Element {
     matchedTaskCount: c.expected_trial_count,
   });
   const trialConfigSummary = humanizeTrialConfig(c.trial_config);
+  const rerunnableFailedCount = c.rerunnable_failed_count ?? 0;
+  const effectiveSucceeded = c.effective_trial_summary?.succeeded ?? 0;
+  const effectiveFailed = c.effective_trial_summary?.failed ?? 0;
   const diagnostics = [
     { title: "task_filter", data: c.task_filter, expanded: true },
     { title: "trial_config", data: c.trial_config, expanded: true },
@@ -215,6 +224,65 @@ export default function BatchDetail(): JSX.Element {
                 {cancel.isPending ? "Cancelling…" : "Cancel batch"}
               </Button>
               {cancel.isError ? <ErrorState error={cancel.error} /> : null}
+            </div>
+          ) : null}
+
+          {!ACTIVE_STATES.has(c.state) &&
+          rerunnableFailedCount > 0 &&
+          effectiveFailed > 0 ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-950">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-semibold">
+                    {rerunnableFailedCount} failed case
+                    {rerunnableFailedCount === 1 ? "" : "s"} can be rerun
+                  </div>
+                  <div className="mt-1 text-xs text-amber-800">
+                    Creates a linked batch for transient gateway failures and
+                    keeps original results available.
+                  </div>
+                </div>
+                <Button
+                  variant="secondary"
+                  onClick={() => rerunFailed.mutate()}
+                  disabled={rerunFailed.isPending}
+                  title="Create a linked batch that reruns only the failed transient cases."
+                >
+                  {rerunFailed.isPending
+                    ? "Queueing rerun…"
+                    : "Rerun failed cases"}
+                </Button>
+              </div>
+              {rerunFailed.isError ? (
+                <ErrorState error={rerunFailed.error} />
+              ) : null}
+              {rerunFailed.data ? (
+                <div className="mt-2 text-xs text-amber-800">
+                  <Link
+                    to={`/batches/${rerunFailed.data.batch_id}`}
+                    className="font-semibold text-accent hover:text-accent-hover"
+                    title="Open the linked rerun batch."
+                  >
+                    Rerun queued
+                  </Link>{" "}
+                  for {rerunFailed.data.rerun_target_count} failed case
+                  {rerunFailed.data.rerun_target_count === 1 ? "" : "s"}.
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {c.rerun_batches.length > 0 ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              <div className="font-semibold text-slate-900">
+                Effective result after linked reruns
+              </div>
+              <div className="mt-1 text-xs text-slate-600">
+                {effectiveSucceeded} succeeded, {effectiveFailed} failed ·
+                reward {c.effective_aggregate_reward != null
+                  ? c.effective_aggregate_reward.toFixed(3)
+                  : "—"} · cost ${c.effective_total_cost_usd.toFixed(4)}
+              </div>
             </div>
           ) : null}
         </Card.Body>

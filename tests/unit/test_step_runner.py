@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from loom.agent.oracle import OracleAgent
@@ -18,6 +19,7 @@ from loom.models.task import (
     VerifierDefaults,
 )
 from loom.models.trajectory import EventKind
+from loom.models.trial import BackoffSpec, RetryPolicy, RetryReason
 from loom.models.verifier import VerifierResult
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.storage import FakeObjectStore
@@ -131,6 +133,63 @@ async def test_run_step_records_agent_error(context: TrialContext, tmp_path: Pat
     reader = TrajectoryReader(context.local_trajectory_path)
     kinds = [e.kind for e in reader.iter_all()]
     assert EventKind.STEP_END in kinds
+
+
+async def test_run_step_retries_retryable_gateway_failure(context: TrialContext):
+    """A transient gateway 503 during agent.run should consume retry budget
+    and continue the same step before the trial is marked failed."""
+
+    class _FlakyGatewayAgent:
+        mode = "out-of-box"
+        name = "flaky-gateway"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **_):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                request = httpx.Request(
+                    "POST",
+                    "http://loom-llm-gateway:9100/v1/chat/completions",
+                )
+                response = httpx.Response(503, request=request)
+                raise httpx.HTTPStatusError(
+                    "HTTP 503",
+                    request=request,
+                    response=response,
+                )
+
+    agent = _FlakyGatewayAgent()
+    context.agent = agent  # type: ignore[assignment]
+    context.trial_config = stub_trial_config(
+        retry=RetryPolicy(
+            max_attempts=2,
+            retry_on=frozenset({RetryReason.GATEWAY_ERROR}),
+            backoff=BackoffSpec(base_sec=0.001, max_sec=0.001, jitter=0),
+        )
+    )
+
+    writer = TrajectoryWriter(
+        local_path=context.local_trajectory_path,
+        store=context.object_store,
+        bucket=context.trajectory_bucket, key=context.trajectory_key,
+        min_part_bytes=0,
+    )
+    async with writer:
+        sr = await run_step(
+            ctx=context, step=context.task_config.steps[0],
+            trajectory=writer, baseline_policy=Public(),
+        )
+
+    assert sr.error is None
+    assert agent.calls == 2
+    reader = TrajectoryReader(context.local_trajectory_path)
+    kinds = [e.kind for e in reader.iter_all()]
+    assert EventKind.AGENT_RETRY in kinds
 
 
 async def test_run_step_records_verifier_exception(context: TrialContext):

@@ -13,7 +13,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -755,6 +755,217 @@ async def test_get_batch_detail_exposes_fanout_failure(
     assert body["failure_reason"] == "fanout_submit_failed"
     assert "proprietary-MAA" in body["failure_message"]
     assert body["fanout_errors"] == fanout_errors
+
+
+async def test_rerun_failed_batch_creates_linked_exact_targets(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    failed_trial_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="gateway-flaked",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=2,
+                n_per_task=2,
+                result_status="partial_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result={"aggregate_reward": 1.0, "cost_usd": 0.01},
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=failed_trial_id,
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="Loom gateway returned HTTP 503.",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=1,
+                combination_idx=0,
+                result=None,
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    rerun_batch_id = UUID(body["batch_id"])
+    assert body["rerun_of_batch_id"] == str(batch_id)
+    assert body["expected_trial_count"] == 1
+    assert body["rerun_target_count"] == 1
+
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        row = s.execute(
+            select(Batch).where(Batch.id == rerun_batch_id),
+        ).scalar_one()
+    sync_engine.dispose()
+
+    assert row.rerun_of_batch_id == batch_id
+    assert row.rerun_targets == [
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 1,
+            "combination_idx": 0,
+            "original_trial_id": str(failed_trial_id),
+            "failure_reason": "gateway_error",
+        }
+    ]
+
+
+async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    rerun_batch_id = uuid4()
+    failed_trial_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="original",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=2,
+                n_per_task=2,
+                result_status="partial_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result={"aggregate_reward": 1.0, "cost_usd": 0.01},
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=failed_trial_id,
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=1,
+                combination_idx=0,
+            )
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=rerun_batch_id,
+                team_id=team_id,
+                name="original failed-case rerun",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                result_status="succeeded",
+                finished_at=datetime.now(UTC),
+                rerun_of_batch_id=batch_id,
+                rerun_targets=[
+                    {
+                        "task_id": "local/mit-0",
+                        "sample_idx": 1,
+                        "combination_idx": 0,
+                        "original_trial_id": str(failed_trial_id),
+                        "failure_reason": "gateway_error",
+                    }
+                ],
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="succeeded",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=rerun_batch_id,
+                sample_idx=1,
+                combination_idx=0,
+                result={"aggregate_reward": 0.8, "cost_usd": 0.02},
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["trial_summary"]["succeeded"] == 1
+    assert body["trial_summary"]["failed"] == 1
+    assert body["effective_trial_summary"]["succeeded"] == 2
+    assert body["effective_trial_summary"]["failed"] == 0
+    assert body["effective_result_status"] == "succeeded"
+    assert body["effective_aggregate_reward"] == pytest.approx(0.9)
+    assert body["effective_total_cost_usd"] == pytest.approx(0.03)
+    assert body["rerunnable_failed_count"] == 1
+    assert body["rerun_batches"][0]["id"] == str(rerun_batch_id)
 
 
 async def test_get_batch_not_found(

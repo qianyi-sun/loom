@@ -136,6 +136,7 @@ async def runner_setup(
                     ),
                     idempotency_key=idem,
                     sample_idx=int(body.get("sample_idx") or 0),
+                    combination_idx=int(body.get("combination_idx") or 0),
                     provider_connection_id=(
                         UUID(body["provider_connection_id"])
                         if body.get("provider_connection_id") else None
@@ -272,6 +273,76 @@ async def test_runner_is_idempotent(
         ).scalars().all()
     sync_engine.dispose()
     assert len(trials) == 5
+
+
+async def test_runner_uses_rerun_targets_instead_of_original_filter(
+    runner_setup: tuple[
+        async_sessionmaker, httpx.AsyncClient, UUID, list[str], list[dict],
+    ],
+    postgres_url: str,
+) -> None:
+    session_factory, http_client, team_id, task_ids, captured = runner_setup
+    targets = [
+        {
+            "task_id": task_ids[1],
+            "sample_idx": 2,
+            "combination_idx": 0,
+            "original_trial_id": str(uuid4()),
+            "failure_reason": "gateway_error",
+        },
+        {
+            "task_id": task_ids[3],
+            "sample_idx": 1,
+            "combination_idx": 0,
+            "original_trial_id": str(uuid4()),
+            "failure_reason": "gateway_error",
+        },
+    ]
+    async with session_factory() as s:
+        c = Batch(
+            team_id=team_id,
+            name="rerun",
+            task_filter={"license": "MIT"},
+            trial_config={"agent": {"name": "fake"}},
+            state="submitted",
+            created_by_token_prefix="abcdef12",
+            expected_trial_count=2,
+            n_per_task=99,
+            rerun_targets=targets,
+        )
+        s.add(c)
+        await s.commit()
+        await s.refresh(c)
+        cid = c.id
+
+    await run_once(
+        session_factory=session_factory,
+        http_client=http_client,
+        batch_size=10,
+        submit_rate_per_sec=100,
+    )
+
+    assert [body["task_id"] for body in captured] == [task_ids[1], task_ids[3]]
+    assert [body["sample_idx"] for body in captured] == [2, 1]
+    assert [body["combination_idx"] for body in captured] == [0, 0]
+    assert [body["idempotency_key"] for body in captured] == [
+        _idempotency_key(cid, task_ids[1], 2, combination_idx=0),
+        _idempotency_key(cid, task_ids[3], 1, combination_idx=0),
+    ]
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        trials = s.execute(
+            select(Trial)
+            .where(Trial.batch_id == cid)
+            .order_by(Trial.task_id.asc()),
+        ).scalars().all()
+    sync_engine.dispose()
+    assert [(t.task_id, t.sample_idx, t.combination_idx) for t in trials] == [
+        (task_ids[1], 2, 0),
+        (task_ids[3], 1, 0),
+    ]
 
 
 async def test_runner_advances_to_finished_when_all_terminal(

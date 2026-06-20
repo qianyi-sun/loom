@@ -56,6 +56,9 @@ class _SubmitResult:
     error: dict[str, Any] | None = None
 
 
+PendingUnit = tuple[str, int | None, dict[str, Any], int]
+
+
 def next_batch_state(
     *,
     current: str,
@@ -150,6 +153,69 @@ def _materialize_trial_config(
     out["agent_name"] = combination["agent_name"]
     out["agent_model"] = combination.get("agent_model")
     return out
+
+
+def _rerun_targets(batch: Batch) -> list[dict[str, Any]]:
+    return [item for item in (batch.rerun_targets or []) if isinstance(item, dict)]
+
+
+async def _pending_rerun_units(
+    session: AsyncSession,
+    batch: Batch,
+    targets: list[dict[str, Any]],
+    failed_fanout_keys: set[str],
+) -> list[PendingUnit]:
+    target_task_ids = sorted({str(t.get("task_id")) for t in targets if t.get("task_id")})
+    valid_task_ids, invalid_tasks = await split_valid_task_configs(
+        session, target_task_ids,
+    )
+    valid_task_id_set = set(valid_task_ids)
+    if invalid_tasks:
+        logger.warning(
+            "rerun batch %s skipped %d invalid target task configs: %s",
+            batch.id,
+            len(invalid_tasks),
+            [item.task_id for item in invalid_tasks],
+        )
+
+    existing = {
+        (row[0], int(row[1]), int(row[2]))
+        for row in (await session.execute(
+            select(Trial.task_id, Trial.combination_idx, Trial.sample_idx)
+            .where(Trial.batch_id == batch.id),
+        )).all()
+    }
+    shared_config = dict(batch.trial_config)
+    pending: list[PendingUnit] = []
+    for target in targets:
+        task_id = str(target.get("task_id") or "")
+        if not task_id or task_id not in valid_task_id_set:
+            continue
+        sample_idx = int(target.get("sample_idx") or 0)
+        combination_idx = int(target.get("combination_idx") or 0)
+        key = _idempotency_key(
+            batch.id,
+            task_id,
+            sample_idx,
+            combination_idx=combination_idx,
+        )
+        if key in failed_fanout_keys:
+            continue
+        if (task_id, combination_idx, sample_idx) in existing:
+            continue
+        combination = None
+        if batch.combinations:
+            if combination_idx < 0 or combination_idx >= len(batch.combinations):
+                logger.warning(
+                    "rerun batch %s target has out-of-range combination_idx=%s",
+                    batch.id,
+                    combination_idx,
+                )
+                continue
+            combination = batch.combinations[combination_idx]
+        cfg = _materialize_trial_config(shared_config, combination)
+        pending.append((task_id, combination_idx, cfg, sample_idx))
+    return pending
 
 
 async def _submit_one(
@@ -315,9 +381,8 @@ async def run_once(
     # exists in the DB. For multi-combination, combination_idx is
     # 0..len(combinations)-1.
     #
-    # Each work item is (batch_id, [(task_id, combination_or_None,
+    # Each work item is (batch_id, [(task_id, combination_idx_or_None,
     # trial_config, sample_idx), ...]).
-    PendingUnit = tuple[str, int | None, dict[str, Any], int]  # noqa: N806
     work: list[tuple[UUID, UUID | None, str | None, list[PendingUnit]]] = []
     async with session_factory() as s:
         batches_to_process = (await s.execute(
@@ -328,6 +393,16 @@ async def run_once(
         for b in batches_to_process:
             existing_fanout_errors = _fanout_errors(b)
             failed_fanout_keys = _fanout_error_keys(existing_fanout_errors)
+            targets = _rerun_targets(b)
+            if targets:
+                rerun_pending_units = await _pending_rerun_units(
+                    s, b, targets, failed_fanout_keys,
+                )
+                work.append((
+                    b.id, b.provider_connection_id, b.provider_model_id,
+                    rerun_pending_units,
+                ))
+                continue
             task_ids = await resolve_task_filter(s, b.task_filter)
             task_ids, invalid_tasks = await split_valid_task_configs(
                 s, task_ids,

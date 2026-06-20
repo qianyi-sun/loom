@@ -234,6 +234,25 @@ export interface paths {
       };
     };
   };
+  "/api/v1/batches/{id}/rerun-failed": {
+    post: {
+      parameters: { path: { id: string } };
+      responses: {
+        201: {
+          content: {
+            "application/json": {
+              batch_id: string;
+              rerun_of_batch_id: string;
+              expected_trial_count: number;
+              state: string;
+              created_at: string;
+              rerun_target_count: number;
+            };
+          };
+        };
+      };
+    };
+  };
   "/api/v1/rate-cards": {
     get: {
       responses: {
@@ -397,6 +416,8 @@ export interface components {
       failure_reason: string | null;
       failure_message: string | null;
       fanout_errors: Record<string, unknown>[];
+      rerun_of_batch_id: string | null;
+      rerun_targets: Record<string, unknown>[];
       created_at: string;
       finished_at: string | null;
       created_by_token_prefix: string;
@@ -416,6 +437,20 @@ export interface components {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
       total_cost_usd: number;
+      rerun_batches: {
+        id: string;
+        name: string;
+        state: string;
+        result_status: string | null;
+        expected_trial_count: number;
+        created_at: string;
+        finished_at: string | null;
+      }[];
+      rerunnable_failed_count: number;
+      effective_trial_summary: Record<string, number>;
+      effective_result_status: string | null;
+      effective_aggregate_reward: number | null;
+      effective_total_cost_usd: number;
     };
     UsageBucket: {
       start_at: string;

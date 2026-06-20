@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from loom.db.schema import Batch, Trial
 from loom.models.batch import Combination
@@ -46,6 +46,12 @@ from loom_service.task_filter import resolve_task_filter
 from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
+
+_RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset({
+    "gateway_error",
+    "retry_exhausted",
+    "exhausted_retries",
+})
 
 
 class _CreateBatch(BaseModel):
@@ -80,6 +86,7 @@ def _serialize(
     summary: dict[str, int] | None = None,
     aggregate_reward: float | None = None,
     total_cost_usd: float = 0.0,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": str(b.id),
@@ -93,6 +100,10 @@ def _serialize(
         "failure_reason": b.failure_reason,
         "failure_message": b.failure_message,
         "fanout_errors": b.fanout_errors,
+        "rerun_of_batch_id": (
+            str(b.rerun_of_batch_id) if b.rerun_of_batch_id else None
+        ),
+        "rerun_targets": b.rerun_targets,
         "created_at": b.created_at.isoformat(),
         "finished_at": (
             b.finished_at.isoformat() if b.finished_at else None
@@ -107,6 +118,8 @@ def _serialize(
         out["trial_summary"] = summary
         out["aggregate_reward"] = aggregate_reward
         out["total_cost_usd"] = total_cost_usd
+    if extra:
+        out.update(extra)
     return out
 
 
@@ -417,6 +430,82 @@ def _rollup_from_result(result: dict[str, Any] | None) -> tuple[float | None, fl
     return reward_f, cost_f
 
 
+def _empty_trial_summary() -> dict[str, int]:
+    return {
+        k: 0 for k in (
+            "queued", "claimed", "running",
+            "succeeded", "failed", "cancelled",
+        )
+    }
+
+
+def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
+    summary = _empty_trial_summary()
+    for trial in trials:
+        state = str(trial.state)
+        summary[state] = summary.get(state, 0) + 1
+    return summary
+
+
+def _rollup_from_trials(trials: Sequence[Trial]) -> tuple[float | None, float]:
+    reward_sum = 0.0
+    reward_n = 0
+    cost_total = 0.0
+    for trial in trials:
+        if str(trial.state) not in {"succeeded", "failed"}:
+            continue
+        rew, cost = _rollup_from_result(trial.result)
+        cost_total += cost
+        if rew is not None:
+            reward_sum += rew
+            reward_n += 1
+    avg_reward = (reward_sum / reward_n) if reward_n > 0 else None
+    return avg_reward, cost_total
+
+
+def _trial_key(trial: Trial) -> tuple[str, int, int]:
+    return (trial.task_id, int(trial.sample_idx), int(trial.combination_idx))
+
+
+def _is_rerunnable_failure(trial: Trial) -> bool:
+    return (
+        str(trial.state) == "failed"
+        and trial.failure_reason in _RERUNNABLE_FAILURE_REASONS
+    )
+
+
+def _effective_trials(
+    original_trials: Sequence[Trial],
+    rerun_trials: Sequence[Trial],
+) -> list[Trial]:
+    original_by_key = {_trial_key(trial): trial for trial in original_trials}
+    effective = dict(original_by_key)
+    for trial in rerun_trials:
+        if str(trial.state) != "succeeded":
+            continue
+        key = _trial_key(trial)
+        original = original_by_key.get(key)
+        if original is None or not _is_rerunnable_failure(original):
+            continue
+        effective[key] = trial
+    return list(effective.values())
+
+
+def _result_status_from_trials(trials: Sequence[Trial]) -> str | None:
+    if not trials:
+        return None
+    states = [str(trial.state) for trial in trials]
+    if any(state in {"queued", "claimed", "running"} for state in states):
+        return None
+    succeeded = sum(1 for state in states if state == "succeeded")
+    failed = len(states) - succeeded
+    if failed == 0 and succeeded > 0:
+        return "succeeded"
+    if succeeded == 0:
+        return "all_failed"
+    return "partial_failed"
+
+
 @router.get("/batches/{batch_id}")
 async def get_batch(
     request: Request,
@@ -434,50 +523,168 @@ async def get_batch(
         )
     require_team_or_admin(ctx, b.team_id)
 
-    # Per-state counts come from a single GROUP BY query.
-    state_counts = (await s.execute(
-        select(Trial.state, func.count(Trial.id))
-        .where(Trial.batch_id == batch_id)
-        .group_by(Trial.state),
-    )).all()
-    summary: dict[str, int] = {
-        k: 0 for k in (
-            "queued", "claimed", "running",
-            "succeeded", "failed", "cancelled",
-        )
-    }
-    for st, n in state_counts:
-        summary[str(st)] = int(n)
-
-    # Reward + cost are inside Trial.result JSONB (no top-level
-    # columns in v0.7). Pull every finished row's result and roll
-    # up in Python — finished-trial count is bounded by
-    # expected_trial_count which the batch already knows.
-    results = (await s.execute(
-        select(Trial.result).where(
-            and_(
-                Trial.batch_id == batch_id,
-                Trial.state.in_(["succeeded", "failed"]),
-            ),
-        ),
+    original_trials = (await s.execute(
+        select(Trial).where(Trial.batch_id == batch_id),
     )).scalars().all()
-    reward_sum = 0.0
-    reward_n = 0
-    cost_total = 0.0
-    for r in results:
-        rew, cost = _rollup_from_result(r)
-        cost_total += cost
-        if rew is not None:
-            reward_sum += rew
-            reward_n += 1
-    avg_reward = (reward_sum / reward_n) if reward_n > 0 else None
+    summary = _summary_from_trials(original_trials)
+    avg_reward, cost_total = _rollup_from_trials(original_trials)
+
+    rerun_batches = (await s.execute(
+        select(Batch)
+        .where(Batch.rerun_of_batch_id == batch_id)
+        .order_by(Batch.created_at.asc(), Batch.id.asc()),
+    )).scalars().all()
+    rerun_batch_ids = [child.id for child in rerun_batches]
+    rerun_trials: list[Trial] = []
+    if rerun_batch_ids:
+        rerun_trials = list((await s.execute(
+            select(Trial).where(Trial.batch_id.in_(rerun_batch_ids)),
+        )).scalars().all())
+    effective_trials = _effective_trials(original_trials, rerun_trials)
+    effective_summary = _summary_from_trials(effective_trials)
+    effective_reward, effective_cost = _rollup_from_trials(effective_trials)
+    rerunnable_failed_count = sum(
+        1 for trial in original_trials if _is_rerunnable_failure(trial)
+    )
+    extra = {
+        "rerun_batches": [
+            {
+                "id": str(child.id),
+                "name": child.name,
+                "state": child.state,
+                "result_status": child.result_status,
+                "expected_trial_count": child.expected_trial_count,
+                "created_at": child.created_at.isoformat(),
+                "finished_at": (
+                    child.finished_at.isoformat() if child.finished_at else None
+                ),
+            }
+            for child in rerun_batches
+        ],
+        "rerunnable_failed_count": rerunnable_failed_count,
+        "effective_trial_summary": effective_summary,
+        "effective_result_status": _result_status_from_trials(effective_trials),
+        "effective_aggregate_reward": effective_reward,
+        "effective_total_cost_usd": effective_cost,
+    }
 
     return _serialize(
         b,
         summary=summary,
         aggregate_reward=avg_reward,
         total_cost_usd=cost_total,
+        extra=extra,
     )
+
+
+@router.post("/batches/{batch_id}/rerun-failed", status_code=201)
+async def rerun_failed_batch(
+    request: Request,
+    sc: SessionAndCtx,
+    batch_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "submit")
+    b = (await s.execute(
+        select(Batch).where(Batch.id == batch_id),
+    )).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    require_team_or_admin(ctx, b.team_id)
+
+    active_backends = await get_active_backends(s)
+    if b.backend not in active_backends:
+        available_str = (
+            ", ".join(sorted(active_backends)) if active_backends
+            else "(none -- no active workers)"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"no active worker advertises backend {b.backend!r}. "
+                f"Currently available: {available_str}."
+            ),
+        )
+
+    failed_trials = (await s.execute(
+        select(Trial)
+        .where(
+            and_(
+                Trial.batch_id == batch_id,
+                Trial.state == "failed",
+                Trial.failure_reason.in_(sorted(_RERUNNABLE_FAILURE_REASONS)),
+            ),
+        )
+        .order_by(Trial.task_id.asc(), Trial.combination_idx.asc(), Trial.sample_idx.asc()),
+    )).scalars().all()
+    child_batch_ids = (await s.execute(
+        select(Batch.id).where(Batch.rerun_of_batch_id == batch_id),
+    )).scalars().all()
+    successful_rerun_keys: set[tuple[str, int, int]] = set()
+    if child_batch_ids:
+        successful_rerun_keys = {
+            _trial_key(trial)
+            for trial in (await s.execute(
+                select(Trial).where(
+                    and_(
+                        Trial.batch_id.in_(child_batch_ids),
+                        Trial.state == "succeeded",
+                    ),
+                ),
+            )).scalars().all()
+        }
+        failed_trials = [
+            trial for trial in failed_trials
+            if _trial_key(trial) not in successful_rerun_keys
+        ]
+    if not failed_trials:
+        raise HTTPException(
+            status_code=400,
+            detail="batch has no rerunnable failed trials",
+        )
+
+    targets = [
+        {
+            "task_id": trial.task_id,
+            "sample_idx": int(trial.sample_idx),
+            "combination_idx": int(trial.combination_idx),
+            "original_trial_id": str(trial.id),
+            "failure_reason": trial.failure_reason,
+        }
+        for trial in failed_trials
+    ]
+    task_ids = sorted({trial.task_id for trial in failed_trials})
+    token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
+    rerun = Batch(
+        team_id=b.team_id,
+        name=f"{b.name} failed-case rerun",
+        description=(
+            f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."
+        ),
+        task_filter={"subset_kind": "explicit", "task_ids": task_ids},
+        trial_config=dict(b.trial_config),
+        state="submitted",
+        created_by_token_prefix=token_prefix,
+        expected_trial_count=len(targets),
+        n_per_task=1,
+        backend=b.backend,
+        combinations=list(b.combinations or []),
+        provider_connection_id=b.provider_connection_id,
+        provider_model_id=b.provider_model_id,
+        rerun_of_batch_id=b.id,
+        rerun_targets=targets,
+    )
+    s.add(rerun)
+    await s.commit()
+    await s.refresh(rerun)
+    return {
+        "batch_id": str(rerun.id),
+        "rerun_of_batch_id": str(b.id),
+        "expected_trial_count": rerun.expected_trial_count,
+        "state": rerun.state,
+        "created_at": rerun.created_at.isoformat(),
+        "rerun_target_count": len(targets),
+    }
 
 
 @router.post("/batches/{batch_id}/cancel")

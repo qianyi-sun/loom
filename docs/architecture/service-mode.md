@@ -432,6 +432,16 @@ been re-verified.
   `expected_trial_count`, marks the batch `partial_failed` or
   `all_failed`, and skips the same idempotency key on later ticks. Network
   errors, `429`, and `5xx` remain retryable.
+- **Transient gateway retry + failed-case reruns** — trial config defaults
+  to retrying `gateway_error` up to 3 attempts with bounded backoff. The
+  worker classifies gateway `5xx`, timeouts, connection resets, and remote
+  protocol drops as retryable gateway failures, while provider `4xx` remains
+  a non-retryable provider/config error. Batch Detail can create a linked
+  rerun batch through `POST /api/v1/batches/{id}/rerun-failed`; the child
+  batch stores `rerun_of_batch_id` and exact `rerun_targets` so the runner
+  re-submits only those task/sample/combination coordinates. Detail views
+  expose both original rollups and effective rollups where successful reruns
+  replace the original transient failures.
 - **Runnable task counts** — benchmark `task_count` and
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete

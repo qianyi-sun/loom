@@ -98,6 +98,12 @@ and advanced trial settings in product terms. Batch Detail shows a
 Run plan, Monitor shows planned trials and evaluator score, and Trial
 Detail separates platform outcome from evaluator reward.
 
+When a finished batch has transient gateway failures, Batch Detail shows
+`Rerun failed cases`. That action creates a linked rerun batch containing
+only the failed task/sample/combination coordinates. The original batch
+keeps its original trial counts, and Batch Detail also shows the effective
+result after successful linked reruns replace those transient failures.
+
 Raw data is still available when you need to debug or reproduce an API
 request. Look for `Diagnostics`, `Raw event data`, or explicit
 advanced disclosures. Those panels contain internal field names such
@@ -455,6 +461,12 @@ If a benchmark is structurally runnable but a team policy rejects a
 selected task during batch fan-out, the batch becomes terminal instead of
 staying `submitted`. Open Batch Detail or run `loom eval batch show <id>`
 to inspect `failure_reason`, `failure_message`, and `fanout_errors`.
+
+If a model gateway returns transient `502`, `503`, `504`, timeout, or
+connection-reset failures, Loom retries the agent call within the trial
+before marking the trial failed. If retry budget is exhausted, rerun the
+remaining failed cases from Batch Detail instead of launching the whole
+batch again.
 
 ## `loom config` reference
 

@@ -261,6 +261,17 @@ class Batch(Base):
     fanout_errors: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Issue #298: failed-case reruns are represented as ordinary child
+    # batches with exact trial coordinates to re-submit. The parent batch
+    # remains immutable; service/UI detail views compute an effective rollup.
+    rerun_of_batch_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("batches.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    rerun_targets: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("jsonb_build_array()"), default=list,
+    )
     # cluster-deploy.md §Schema additions: per-batch provider override.
     # When set, the gateway uses this connection (decrypts its API key,
     # forwards to base_url) for every trial in this batch instead of

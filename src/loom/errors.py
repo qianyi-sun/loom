@@ -150,6 +150,37 @@ def _classify_http_status_error(exc: BaseException) -> tuple[FailureReason, str 
     return None
 
 
+def _classify_http_transport_error(exc: BaseException) -> tuple[FailureReason, str | None] | None:
+    """Classify gateway transport failures that are safe to retry.
+
+    These are failures between the worker and Loom's gateway, before a
+    provider can return a semantically meaningful 4xx. They include gateway
+    timeouts, connection resets, and remote protocol drops.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    retryable_types = (
+        httpx.TimeoutException,
+        httpx.NetworkError,
+        httpx.RemoteProtocolError,
+    )
+    if not isinstance(exc, retryable_types):
+        return None
+
+    excerpt = _redact_body(str(exc))
+    msg = (
+        "Loom gateway timeout."
+        if isinstance(exc, httpx.TimeoutException)
+        else "Loom gateway transport error."
+    )
+    if excerpt:
+        msg = f"{msg} {excerpt}"
+    return FailureReason.GATEWAY_ERROR, msg
+
+
 def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
     """Map an uncaught exception in ``Trial.run()`` to a ``(FailureReason,
     optional user-facing message)`` tuple.
@@ -165,6 +196,10 @@ def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
     http_result = _classify_http_status_error(exc)
     if http_result is not None:
         return http_result
+
+    transport_result = _classify_http_transport_error(exc)
+    if transport_result is not None:
+        return transport_result
 
     if isinstance(exc, AgentSetupTimeoutError):
         return FailureReason.AGENT_ERROR, None

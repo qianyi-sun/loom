@@ -26,6 +26,10 @@ def _http_status_error(status_code: int, body: str = "") -> httpx.HTTPStatusErro
     )
 
 
+def _gateway_request() -> httpx.Request:
+    return httpx.Request("POST", "http://loom-llm-gateway:9100/v1/chat/completions")
+
+
 # ─── pre-existing error types (must still return (reason, None)) ──────────────
 
 def test_agent_setup_timeout_to_agent_error():
@@ -106,6 +110,27 @@ def test_http_502_is_gateway_error():
 def test_http_503_is_gateway_error():
     reason, _ = classify_failure(_http_status_error(503))
     assert reason == FailureReason.GATEWAY_ERROR
+
+
+def test_http_504_is_gateway_error():
+    reason, msg = classify_failure(_http_status_error(504))
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg is not None
+    assert "504" in msg
+
+
+def test_gateway_read_timeout_is_gateway_error():
+    reason, msg = classify_failure(httpx.ReadTimeout("gateway timed out", request=_gateway_request()))
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg is not None
+    assert "timeout" in msg.lower()
+
+
+def test_gateway_connection_reset_is_gateway_error():
+    reason, msg = classify_failure(httpx.ConnectError("connection reset by peer", request=_gateway_request()))
+    assert reason == FailureReason.GATEWAY_ERROR
+    assert msg is not None
+    assert "connection" in msg.lower()
 
 
 # ─── redaction ────────────────────────────────────────────────────────────────

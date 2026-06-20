@@ -36,6 +36,7 @@ class EventKind(StrEnum):
     LLM_CALL = "llm_call"
     TOOL_USE = "tool_use"
     AGENT_THOUGHT = "agent_thought"
+    AGENT_RETRY = "agent_retry"
     # Verifier-level
     VERIFIER_START = "verifier_start"
     VERIFIER_END = "verifier_end"
@@ -231,6 +232,15 @@ class AgentThoughtEvent(_EventBase):
     tokens: int | None = None
 
 
+class AgentRetryEvent(_EventBase):
+    kind: Literal[EventKind.AGENT_RETRY] = EventKind.AGENT_RETRY
+    attempt: int = Field(ge=1)
+    max_attempts: int = Field(ge=1)
+    failure_reason: str
+    failure_message: str | None = None
+    retry_after_sec: float = Field(ge=0)
+
+
 class VerifierStartEvent(_EventBase):
     kind: Literal[EventKind.VERIFIER_START] = EventKind.VERIFIER_START
     verifier_name: str
@@ -270,7 +280,7 @@ TrajectoryEvent = Annotated[
     | StepStartEvent | StepEndEvent
     | EnvStartEvent | EnvReadyEvent | EnvStopEvent | EnvExecEvent
     | FileUploadEvent | FileDownloadEvent
-    | LLMCallEvent | ToolUseEvent | AgentThoughtEvent
+    | LLMCallEvent | ToolUseEvent | AgentThoughtEvent | AgentRetryEvent
     | VerifierStartEvent | VerifierEndEvent | VerifierCheckEvent
     | NetworkPolicyChangeEvent
     | WorkerLostClaimEvent | WorkerDrainInterruptedEvent,
