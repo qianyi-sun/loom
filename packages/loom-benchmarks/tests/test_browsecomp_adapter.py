@@ -16,9 +16,9 @@ from loom.models.task import TaskConfig
 from loom.models.verifier import VerifierResult
 
 
-def _encrypt(text: str, password: str) -> str:
+def _encrypt(text: str, canary: str) -> str:
     h = hashlib.sha256()
-    h.update(password.encode())
+    h.update(canary.encode())
     key = h.digest()
     full_key = key * (len(text.encode()) // len(key)) + key[: len(text.encode()) % len(key)]
     encrypted = bytes(a ^ b for a, b in zip(text.encode(), full_key, strict=True))
