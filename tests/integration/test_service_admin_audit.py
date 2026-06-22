@@ -53,6 +53,7 @@ async def audit_app(
             for table_name in (
                 "admin_audit_events",
                 "tokens",
+                "team_invites",
                 "team_quotas",
                 "pending_team_registrations",
                 "teams",
@@ -133,15 +134,15 @@ async def test_registration_review_writes_safe_audit_events(
 
     approve_event = by_action["team_registration.approve"]
     approved_body = approved.json()
-    raw_team_token = approved_body["team_token"]
+    raw_invite_code = approved_body["invite_code"]
     assert approve_event["actor"] == "qianyi"
     assert approve_event["target_type"] == "team_registration"
     assert approve_event["target_id"] == approved_registration_id
     assert approve_event["metadata"]["team_id"] == approved_body["team"]["id"]
-    assert approve_event["metadata"]["team_token_hash_prefix"] == (
-        approved_body["token_hash_prefix"]
+    assert approve_event["metadata"]["invite_prefix"] == (
+        approved_body["invite"]["code_prefix"]
     )
-    assert raw_team_token not in json.dumps(approve_event)
+    assert raw_invite_code not in json.dumps(approve_event)
 
     reject_event = by_action["team_registration.reject"]
     assert reject_event["actor"] == "hongjian"
@@ -271,10 +272,20 @@ async def test_admin_audit_endpoint_rejects_team_tokens(
             f"/api/v1/admin/team-registrations/{registration_id}/approve",
             headers=_admin_headers("qianyi"),
         )
-        team_token = approved.json()["team_token"]
+        token = await client.post(
+            "/api/v1/tokens",
+            headers=_admin_headers("qianyi"),
+            json={
+                "type": "team",
+                "scopes": ["read:own"],
+                "team_id": approved.json()["team"]["id"],
+                "expires_in_days": 1,
+            },
+        )
+        assert token.status_code == 201, token.text
         audit = await client.get(
             "/api/v1/admin/audit-events",
-            headers={"Authorization": f"Bearer {team_token}"},
+            headers={"Authorization": f"Bearer {token.json()['token']}"},
         )
 
     assert audit.status_code == 403, audit.text

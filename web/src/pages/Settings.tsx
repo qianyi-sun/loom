@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useAuth } from "../auth/useAuth";
@@ -12,6 +13,10 @@ import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
+import { cn } from "../lib/cn";
+
+const LINK_BUTTON =
+  "inline-flex items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-medium";
 
 export default function Settings(): JSX.Element {
   const {
@@ -28,6 +33,8 @@ export default function Settings(): JSX.Element {
   const [email, setEmail] = useState("");
   const [loginToken, setLoginToken] = useState("");
   const [loginStarted, setLoginStarted] = useState(false);
+  const [requestTeamName, setRequestTeamName] = useState("");
+  const [requestEmail, setRequestEmail] = useState("");
 
   const queryClient = useQueryClient();
   const tokens = useQuery({
@@ -53,72 +60,138 @@ export default function Settings(): JSX.Element {
     mutationFn: (prefix: string) => api.revokeToken(prefix),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tokens"] }),
   });
+  const requestAccess = useMutation({
+    mutationFn: () =>
+      api.requestTeamRegistration({
+        name: requestTeamName.trim(),
+        contact_email: requestEmail.trim(),
+      }),
+  });
 
   if (!isAuthenticated) {
     return (
-      <Card>
-        <Card.Body className="space-y-4">
-          <div>
-            <p className="text-xs uppercase tracking-wider text-slate-400">
-              loom
-            </p>
-            <h1 className="mt-1 text-2xl font-bold text-slate-900">
-              Sign in
-            </h1>
-            <p className="mt-2 text-sm text-slate-500">
-              Use your invited email address. Browser sessions use HttpOnly
-              cookies; raw bearer tokens are not stored in this browser.
-            </p>
-          </div>
-          <Input
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            aria-label="email"
-            title="Email address associated with your Loom invite."
-          />
-          <Button
-            variant="primary"
-            className="w-full"
-            onClick={() => start.mutate(email.trim())}
-            disabled={!email.trim() || start.isPending}
-            title="Request a one-time login link."
-          >
-            Continue
-          </Button>
-          {loginStarted ? (
-            <div className="space-y-3 border-t border-slate-100 pt-4">
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <Card.Body className="space-y-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-slate-400">
+                loom
+              </p>
+              <h1 className="mt-1 text-2xl font-bold text-slate-900">
+                Sign in
+              </h1>
+              <p className="mt-2 text-sm text-slate-500">
+                Use your invited email address. Browser sessions use HttpOnly
+                cookies; raw bearer tokens are not stored in this browser.
+              </p>
+            </div>
+            <Input
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              aria-label="email"
+              title="Email address associated with your Loom invite."
+            />
+            <Button
+              variant="primary"
+              className="w-full"
+              onClick={() => start.mutate(email.trim())}
+              disabled={!email.trim() || start.isPending}
+              title="Request a one-time login link."
+            >
+              Continue
+            </Button>
+            {loginStarted ? (
+              <div className="space-y-3 border-t border-slate-100 pt-4">
+                <Input
+                  placeholder="One-time login token"
+                  value={loginToken}
+                  onChange={(e) => setLoginToken(e.target.value)}
+                  aria-label="login token"
+                  title="Paste the one-time login token from your email or local dev response."
+                />
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  onClick={() => complete.mutate(loginToken.trim())}
+                  disabled={!loginToken.trim() || complete.isPending}
+                  title="Complete sign-in and create a browser session."
+                >
+                  Sign in
+                </Button>
+              </div>
+            ) : null}
+            {authError || start.isError || complete.isError ? (
+              <p
+                role="alert"
+                className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+              >
+                {authError ??
+                  (start.error instanceof Error ? start.error.message : null) ??
+                  (complete.error instanceof Error ? complete.error.message : null) ??
+                  "Sign-in failed."}
+              </p>
+            ) : null}
+          </Card.Body>
+        </Card>
+
+        <div className="space-y-4">
+          <Card>
+            <Card.Header
+              title="Have an invite"
+              description="Open an invite link to join a team."
+            />
+            <Card.Body>
+              <Link
+                to="/invites/accept"
+                className={cn(
+                  LINK_BUTTON,
+                  "w-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                )}
+              >
+                Open invite page
+              </Link>
+            </Card.Body>
+          </Card>
+
+          <Card>
+            <Card.Header
+              title="Request access"
+              description="Submit a team request for admin review."
+            />
+            <Card.Body className="space-y-3">
               <Input
-                placeholder="One-time login token"
-                value={loginToken}
-                onChange={(e) => setLoginToken(e.target.value)}
-                aria-label="login token"
-                title="Paste the one-time login token from your email or local dev response."
+                aria-label="Requested team name"
+                value={requestTeamName}
+                onChange={(event) => setRequestTeamName(event.target.value)}
+                placeholder="Team name"
+              />
+              <Input
+                aria-label="Request contact email"
+                value={requestEmail}
+                onChange={(event) => setRequestEmail(event.target.value)}
+                placeholder="you@example.com"
               />
               <Button
                 variant="secondary"
                 className="w-full"
-                onClick={() => complete.mutate(loginToken.trim())}
-                disabled={!loginToken.trim() || complete.isPending}
-                title="Complete sign-in and create a browser session."
+                disabled={
+                  !requestTeamName.trim() ||
+                  !requestEmail.trim() ||
+                  requestAccess.isPending
+                }
+                onClick={() => requestAccess.mutate()}
               >
-                Sign in
+                Request access
               </Button>
-            </div>
-          ) : null}
-          {authError || start.isError || complete.isError ? (
-            <p
-              role="alert"
-              className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
-            >
-              {authError ??
-                (start.error instanceof Error ? start.error.message : null) ??
-                (complete.error instanceof Error ? complete.error.message : null) ??
-                "Sign-in failed."}
-            </p>
-          ) : null}
-        </Card.Body>
-      </Card>
+              {requestAccess.isSuccess ? (
+                <p className="text-sm text-emerald-700">Request submitted.</p>
+              ) : null}
+              {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
+            </Card.Body>
+          </Card>
+        </div>
+      </div>
     );
   }
 

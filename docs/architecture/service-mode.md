@@ -364,6 +364,7 @@ state before propagating:
 | `tasks` + `benchmarks` | Operator CLI | Cluster task catalog |
 | `team_quotas` | CP | DRF weights + license allowlists |
 | `pending_team_registrations` | Service | Default-closed team onboarding queue and admin review state |
+| `team_invites` | Service | Hashed invite links for user membership onboarding |
 | `tokens` | Service / CP | Bearer tokens (all 4 kinds) |
 | `batches` | Service | Batch grouping + idempotency keys |
 | `cloud_compute_records` | Cloud drivers | Per-sandbox lifetime + cost; `cloud_provider` column |
@@ -393,10 +394,10 @@ Migrations: `migrations/versions/0001_initial_schema.py` through
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — browser session state, current team/role, team-token
-  management, and local client settings
-- **Admin access** — pending team registrations, one-time approved team-token
-  reveal, and admin audit event review
+- **Settings** — browser session state, invite entry, access requests, current
+  team/role, team-token management, and local client settings
+- **Admin access** — pending team registrations, one-time invite-link reveal,
+  invite create/list/revoke/resend, and admin audit event review
 - **NotFound**
 
 Auth model: browser users sign in through `/api/v1/auth/*`. The service sets an

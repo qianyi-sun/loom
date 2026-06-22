@@ -14,6 +14,7 @@ from loom.db.schema import AdminAuditEvent
 
 _SECRET_MARKERS = (
     "loom_admin_",
+    "loom_invite_",
     "loom_team_",
     "loom_w_",
     "sk-",

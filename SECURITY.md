@@ -53,6 +53,11 @@ For public repository operation:
 - The singleton admin secret is an operator/bootstrap credential, not a normal
   browser identity. Public users use persisted user sessions and team
   memberships.
+- Invite onboarding uses one-time revealed `loom_invite_...` links. The
+  database stores only invite hashes and safe prefixes; invite list, lookup,
+  logs, and audit metadata must never include raw invite codes. Accepting an
+  invite creates or reuses the browser user, creates the team membership, and
+  sets the HttpOnly session cookie.
 - Legacy team bearer tokens remain supported for CLI/backward compatibility
   until scoped public CLI/API tokens replace normal CLI auth.
 - Team is the execution, cost, provider credential, quota, member, and API-token
@@ -83,7 +88,8 @@ For public repository operation:
 - Secret injection into sandboxed jobs.
 - Network egress policy for execution environments.
 - Artifact retention, deletion, and org-wide Run Library share-state rules.
-- Audit log requirements for PM, infra, and research users. The first #10
-  backend audit surface now covers team-registration approve/reject and
-  `loom_service` token admin mint/revoke, with a SPA audit review table for
-  operators. Broader admin mutation coverage remains follow-up work.
+- Audit log requirements for PM, infra, and research users. The first auth
+  backend audit surface now covers team-registration approve/reject,
+  invite create/revoke/resend/accept, and `loom_service` token admin
+  mint/revoke, with a SPA audit review table for operators. Broader admin
+  mutation coverage remains follow-up work.

@@ -108,6 +108,58 @@ class TeamMembership(Base):
     )
 
 
+class TeamInvite(Base):
+    __tablename__ = "team_invites"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('owner', 'member', 'viewer')",
+            name="team_invites_role_check",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'accepted', 'revoked', 'expired')",
+            name="team_invites_status_check",
+        ),
+        CheckConstraint(
+            "max_uses IS NULL OR max_uses > 0",
+            name="team_invites_max_uses_positive_check",
+        ),
+        CheckConstraint(
+            "accepted_uses >= 0",
+            name="team_invites_accepted_uses_nonnegative_check",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False,
+    )
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    code_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    code_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    accepted_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by_actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class UserSession(Base):
     __tablename__ = "user_sessions"
     session_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)

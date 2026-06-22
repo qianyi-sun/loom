@@ -13,7 +13,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("AdminAccess", () => {
-  it("reviews pending registrations and reveals approved token once", async () => {
+  it("reviews registrations and reveals approved invite link once", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -32,9 +32,26 @@ describe("AdminAccess", () => {
                 approved_team_id: "team-1",
               },
               team: { id: "team-1", name: "latent-team" },
-              team_token: "loom_team_revealed",
-              token_hash_prefix: "abc12345",
-              expires_at: "2027-06-16T00:00:00Z",
+              invite: {
+                id: "invite-1",
+                team_id: "team-1",
+                team_name: "latent-team",
+                email: "latent@example.com",
+                allowed_domain: null,
+                role: "owner",
+                status: "pending",
+                code_prefix: "abc12345",
+                max_uses: 1,
+                accepted_uses: 0,
+                created_by_actor: "qianyi",
+                created_at: "2026-06-16T00:01:00Z",
+                expires_at: "2026-06-30T00:01:00Z",
+                last_sent_at: "2026-06-16T00:01:00Z",
+                accepted_at: null,
+                revoked_at: null,
+              },
+              invite_code: "loom_invite_revealed",
+              invite_link: "https://loom.example.com/invites/accept?code=loom_invite_revealed",
             });
           }
           return jsonResponse({
@@ -71,21 +88,48 @@ describe("AdminAccess", () => {
             next_cursor: null,
           });
         }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "invite-1",
+                team_id: "team-1",
+                team_name: "latent-team",
+                email: "latent@example.com",
+                allowed_domain: null,
+                role: "owner",
+                status: "pending",
+                code_prefix: "abc12345",
+                max_uses: 1,
+                accepted_uses: 0,
+                created_by_actor: "qianyi",
+                created_at: "2026-06-16T00:01:00Z",
+                expires_at: "2026-06-30T00:01:00Z",
+                last_sent_at: "2026-06-16T00:01:00Z",
+                accepted_at: null,
+                revoked_at: null,
+              },
+            ],
+          });
+        }
         return jsonResponse({ detail: `unhandled ${url}` }, 404);
       },
     );
 
     renderWithProviders(<AdminAccess />);
 
-    expect(await screen.findByText("latent-team")).toBeInTheDocument();
-    expect(screen.getByText("latent@example.com")).toBeInTheDocument();
+    expect((await screen.findAllByText("latent-team")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("latent@example.com").length).toBeGreaterThan(0);
     expect(screen.getByText("team_registration.approve")).toBeInTheDocument();
 
     await userEvent.clear(screen.getByLabelText("Admin actor"));
     await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
 
-    expect(await screen.findByText("loom_team_revealed")).toBeInTheDocument();
+    expect(await screen.findByText(
+      "https://loom.example.com/invites/accept?code=loom_invite_revealed",
+    )).toBeInTheDocument();
+    expect(screen.getByText("Pending invites")).toBeInTheDocument();
     await waitFor(() => {
       const approveCall = fetchSpy.mock.calls.find(([input]) =>
         String(input).endsWith("/reg-1/approve"),

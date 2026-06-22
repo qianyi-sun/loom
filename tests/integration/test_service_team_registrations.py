@@ -50,6 +50,11 @@ async def registration_app(
         sync_engine = create_engine(postgres_url)
         with sync_engine.begin() as conn:
             for table_name in (
+                "team_invites",
+                "user_sessions",
+                "login_challenges",
+                "team_memberships",
+                "users",
                 "admin_audit_events",
                 "tokens",
                 "team_quotas",
@@ -135,7 +140,7 @@ async def test_open_registration_setting_fails_closed_until_challenge_hook(
     assert "challenge hook" in response.json()["detail"]
 
 
-async def test_admin_can_list_approve_and_use_revealed_team_token(
+async def test_admin_can_list_approve_and_accept_owner_invite(
     registration_app: FastAPI,
 ) -> None:
     transport = httpx.ASGITransport(app=registration_app)
@@ -161,19 +166,24 @@ async def test_admin_can_list_approve_and_use_revealed_team_token(
 
         assert approved.status_code == 200, approved.text
         approved_body = approved.json()
-        team_token = approved_body["team_token"]
+        invite_code = approved_body["invite_code"]
         team_id = approved_body["team"]["id"]
-        team_detail = await client.get(
-            f"/api/v1/teams/{team_id}",
-            headers={"Authorization": f"Bearer {team_token}"},
+        accepted = await client.post(
+            "/api/v1/invites/accept",
+            json={"code": invite_code, "email": "latent@example.com"},
         )
+        team_detail = await client.get(f"/api/v1/teams/{team_id}")
 
     assert listed.status_code == 200, listed.text
     assert [item["id"] for item in listed.json()["items"]] == [registration_id]
     assert approved_body["registration"]["status"] == "approved"
     assert approved_body["team"]["name"] == "latent-reasoning"
-    assert team_token.startswith("loom_team_")
-    assert len(approved_body["token_hash_prefix"]) == 8
+    assert "team_token" not in approved_body
+    assert invite_code.startswith("loom_invite_")
+    assert approved_body["invite_link"].endswith(f"code={invite_code}")
+    assert approved_body["invite"]["role"] == "owner"
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["current_team"]["role"] == "owner"
     assert second_approve.status_code == 409, second_approve.text
     assert team_detail.status_code == 200, team_detail.text
     assert team_detail.json()["id"] == team_id

@@ -297,12 +297,17 @@ export interface TeamRegistrationEntry {
   approved_team_id: string | null;
 }
 
+export interface TeamRegistrationRequestBody {
+  name: string;
+  contact_email: string;
+}
+
 export interface TeamRegistrationApproval {
   registration: TeamRegistrationEntry;
   team: { id: string; name: string };
-  team_token: string;
-  token_hash_prefix: string;
-  expires_at: string;
+  invite: InviteEntry;
+  invite_code: string;
+  invite_link: string;
 }
 
 export interface AdminAuditEvent {
@@ -316,6 +321,50 @@ export interface AdminAuditEvent {
   source_ip_hash: string | null;
   user_agent_hash: string | null;
   metadata: Record<string, unknown>;
+}
+
+export type InviteStatus = "pending" | "accepted" | "revoked" | "expired";
+export type InviteRole = "owner" | "member" | "viewer";
+
+export interface InviteEntry {
+  id: string;
+  team_id: string;
+  team_name: string | null;
+  email: string;
+  allowed_domain: string | null;
+  role: InviteRole;
+  status: InviteStatus;
+  code_prefix: string;
+  max_uses: number | null;
+  accepted_uses: number;
+  created_by_actor: string;
+  created_at: string;
+  expires_at: string;
+  last_sent_at: string | null;
+  accepted_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface InviteCreateBody {
+  email: string;
+  team_id?: string;
+  role: InviteRole;
+  expires_in_days: number;
+  max_uses?: number | null;
+  allowed_domain?: string | null;
+}
+
+export interface InviteReveal {
+  invite: InviteEntry;
+  invite_code: string;
+  invite_link: string;
+}
+
+export interface InviteLookup {
+  team_name: string;
+  role: InviteRole;
+  status: InviteStatus;
+  code_prefix: string;
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -338,6 +387,15 @@ export const api = {
     apiFetch<AuthMe>("/api/v1/auth/login/complete", {
       method: "POST",
       body: JSON.stringify({ token }),
+    }),
+  lookupInvite: (code: string) =>
+    apiFetch<InviteLookup>(
+      `/api/v1/invites/lookup${qs({ code })}`,
+    ),
+  acceptInvite: (body: { code: string; email?: string | null }) =>
+    apiFetch<AuthMe>("/api/v1/invites/accept", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   switchTeam: (teamId: string) =>
     apiFetch<AuthMe>("/api/v1/auth/team", {
@@ -499,6 +557,11 @@ export const api = {
     ),
   revokeToken: (prefix: string) =>
     apiFetch<void>(`/api/v1/tokens/${prefix}`, { method: "DELETE" }),
+  requestTeamRegistration: (body: TeamRegistrationRequestBody) =>
+    apiFetch<TeamRegistrationEntry>("/api/v1/teams/register", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listTeamRegistrations: (
     status: TeamRegistrationEntry["status"] = "pending",
   ) =>
@@ -520,6 +583,33 @@ export const api = {
         method: "POST",
         headers: { "X-Loom-Admin-Actor": actor },
         body: JSON.stringify({ reason: reason ?? null }),
+      },
+    ),
+  listInvites: (q: { team_id?: string; status?: InviteStatus } = {}) =>
+    apiFetch<{ items: InviteEntry[] }>(
+      `/api/v1/invites${qs(q)}`,
+    ),
+  createInvite: (body: InviteCreateBody, actor?: string) =>
+    apiFetch<InviteReveal>("/api/v1/invites", {
+      method: "POST",
+      headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
+      body: JSON.stringify(body),
+    }),
+  revokeInvite: (id: string, reason?: string, actor?: string) =>
+    apiFetch<InviteEntry>(
+      `/api/v1/invites/${encodeURIComponent(id)}/revoke`,
+      {
+        method: "POST",
+        headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
+        body: JSON.stringify({ reason: reason ?? null }),
+      },
+    ),
+  resendInvite: (id: string, actor?: string) =>
+    apiFetch<InviteReveal>(
+      `/api/v1/invites/${encodeURIComponent(id)}/resend`,
+      {
+        method: "POST",
+        headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
       },
     ),
   listAdminAuditEvents: (limit = 50, cursor?: string) =>

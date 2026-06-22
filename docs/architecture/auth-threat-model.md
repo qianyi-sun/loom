@@ -121,8 +121,8 @@ Out of scope for this document:
 ## Current Residual Risk
 
 Admin authority is now file-backed rather than DB-backed, and the development
-stack uses the same singleton-admin path as production. The remaining auth risk
-for this phase is the bearer-token SPA model: admin and team tokens are still
-pasted into the browser and stored client-side for development/pilot use. A
-production deployment should move that browser surface to the dedicated
-cookie/SSO/RBAC follow-up before broad external exposure.
+stack uses the same singleton-admin path as production. Browser users now use
+HttpOnly session cookies, CSRF protection, invite acceptance, and persisted
+team memberships instead of pasted bearer tokens. Remaining public-beta auth
+risk is concentrated in completing scoped CLI/API tokens, quota/rate limiting,
+and broader audit/incident controls before broad external exposure.

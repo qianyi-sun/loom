@@ -7,6 +7,7 @@ import ProviderCreate from "./pages/ProviderCreate";
 import ProviderDetail from "./pages/ProviderDetail";
 import ProvidersList from "./pages/ProvidersList";
 import BatchDetail from "./pages/BatchDetail";
+import InviteAccept from "./pages/InviteAccept";
 import Monitor from "./pages/Monitor";
 import NewBatch from "./pages/NewBatch";
 import NotFound from "./pages/NotFound";
@@ -39,6 +40,7 @@ export default function App(): JSX.Element {
         <Route path="providers/:id" element={<ProviderDetail />} />
         <Route path="providers" element={<ProvidersList />} />
         <Route path="admin/access" element={<AdminAccess />} />
+        <Route path="invites/accept" element={<InviteAccept />} />
         <Route path="rate-cards" element={<RateCardsAdmin />} />
         <Route path="settings" element={<Settings />} />
         <Route path="*" element={<NotFound />} />

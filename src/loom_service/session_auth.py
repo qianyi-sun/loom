@@ -223,6 +223,57 @@ async def consume_login_challenge(
     return CreatedSession(raw_session=raw_session, raw_csrf=raw_csrf, ctx=ctx)
 
 
+async def create_session_for_user(
+    session: AsyncSession,
+    *,
+    user: User,
+    session_ttl_seconds: int,
+    current_team_id: UUID | None = None,
+) -> CreatedSession:
+    """Create a browser session after a trusted onboarding action.
+
+    Invite acceptance uses the invite secret as the bootstrap proof. It creates
+    or finds the user, creates the membership, then calls this helper so the
+    user lands in the invited team without receiving a raw team token.
+    """
+    now = datetime.now(UTC)
+    role = "platform_admin" if user.is_platform_admin else None
+    team_id: UUID | None = None
+    if role is None:
+        if current_team_id is not None:
+            membership_row = await _membership_for_team(
+                session, user_id=user.id, team_id=current_team_id,
+            )
+        else:
+            membership_row = await _first_membership(session, user.id)
+        if membership_row is None:
+            raise HTTPException(status_code=403, detail="user has no teams")
+        membership, _team = membership_row
+        role = membership.role
+        team_id = membership.team_id
+
+    raw_session = _raw_secret("loom_session")
+    raw_csrf = _raw_secret("loom_csrf")
+    user_session = UserSession(
+        session_hash=hash_secret(raw_session),
+        user_id=user.id,
+        current_team_id=team_id,
+        csrf_hash=hash_secret(raw_csrf),
+        issued_at=now,
+        expires_at=now + timedelta(seconds=session_ttl_seconds),
+        revoked_at=None,
+        last_seen_at=now,
+    )
+    session.add(user_session)
+    await session.execute(
+        update(User).where(User.id == user.id).values(last_login_at=now),
+    )
+    ctx = _ctx_from_session(
+        user=user, user_session=user_session, role=role, team_id=team_id,
+    )
+    return CreatedSession(raw_session=raw_session, raw_csrf=raw_csrf, ctx=ctx)
+
+
 async def verify_session_cookie(
     session: AsyncSession, raw_cookie: str | None,
 ) -> AuthContext | None:

@@ -38,6 +38,7 @@ from loom_service.routes import (
     batches,
     benchmarks,
     health,
+    invites,
     local_servers,
     models,
     provider_connections,
@@ -178,6 +179,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(invites.router, prefix="/api/v1")
     app.include_router(tokens.router, prefix="/api/v1")
     app.include_router(trials.router, prefix="/api/v1")
     app.include_router(trajectory.router, prefix="/api/v1")

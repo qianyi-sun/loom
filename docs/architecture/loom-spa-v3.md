@@ -287,9 +287,13 @@ The SPA reduces from 7 nav entries to 3:
   layout under both. Harbor's pattern: route is
   `/monitor?view=batches|trials` and switching the toggle
   preserves filters.
-- **Settings** — browser session, current team, role, team tokens, rate cards,
-  and profile. Token-paste login is no longer the normal production SPA auth
-  path.
+- **Settings** — browser session, invite entry, access requests, current team,
+  role, team tokens, rate cards, and profile. Token-paste login is no longer
+  the normal production SPA auth path.
+- **InviteAccept** — invite lookup and acceptance states for pending, expired,
+  revoked, and already-used links.
+- **Admin access** — pending team registrations, one-time invite-link reveal,
+  invite create/list/revoke/resend, and admin audit event review.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy

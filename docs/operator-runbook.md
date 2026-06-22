@@ -46,8 +46,9 @@ Each verb:
 | `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown | 0 / 1 on failure or operator-cancelled prompt |
 
 The detailed manual flow (build images → create Secrets → apply
-each manifest → mint tokens → approve registrations) below documents
-the bootstrap and operator steps the CLI doesn't yet automate. It's
+each manifest → mint internal tokens → approve registrations and deliver
+invite links) below documents the bootstrap and operator steps the CLI doesn't
+yet automate. It's
 also the fallback when `cluster-config.toml` doesn't yet expose the
 knob you need.
 
@@ -184,16 +185,24 @@ knob you need.
      -H "Authorization: Bearer $ADMIN_TOKEN" \
      -H "X-Loom-Admin-Actor: qianyi"
    ```
-   The approval response reveals the raw `loom_team_...` token exactly once;
-   store or deliver it through an operator-approved secure channel. Reject
-   accidental requests with `POST .../$REG_ID/reject` and the same actor header.
-   Review backend audit evidence with:
+   The approval response reveals a raw `loom_invite_...` code and browser invite
+   link exactly once. Deliver the link to the requested contact; the contact
+   accepts it to create their user session and owner membership without seeing a
+   raw team token. If the link is lost, resend the invite to rotate the stored
+   hash and reveal a replacement:
+   ```bash
+   curl -X POST https://loom.example.com/api/v1/invites/$INVITE_ID/resend \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Loom-Admin-Actor: qianyi"
+   ```
+   Reject accidental requests with `POST .../$REG_ID/reject` and the same actor
+   header. Review backend audit evidence with:
    ```bash
    curl https://loom.example.com/api/v1/admin/audit-events?limit=20 \
      -H "Authorization: Bearer $ADMIN_TOKEN"
    ```
    Audit rows include the operator-attested actor and safe metadata such as
-   token hash prefixes, never raw bearer tokens.
+   invite prefixes, never raw bearer or invite tokens.
 
 ## Upgrade
 

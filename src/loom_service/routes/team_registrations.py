@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -14,13 +12,18 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import PendingTeamRegistration, Team, TeamQuota, Token
+from loom.db.schema import PendingTeamRegistration, Team, TeamInvite, TeamQuota
 from loom_service.admin_audit import (
     hash_optional,
     require_admin_actor,
     write_admin_audit_event,
 )
 from loom_service.dependencies import AdminSessionAndCtx
+from loom_service.routes.invites import (
+    _invite_link,
+    _mint_invite_code,
+    _serialize_invite,
+)
 
 router = APIRouter()
 
@@ -53,10 +56,6 @@ class _RejectRegistrationReq(BaseModel):
     @classmethod
     def _strip_reason(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
-
-
-def _hash_prefix(token_hash: bytes) -> str:
-    return token_hash.hex()[:8]
 
 
 def _serialize_registration(row: PendingTeamRegistration) -> dict[str, Any]:
@@ -102,13 +101,6 @@ async def _team_exists(
         .where(func.lower(Team.name) == normalized_name)
         .limit(1),
     )).scalar_one_or_none() is not None
-
-
-def _mint_team_token(team_id: UUID) -> tuple[str, bytes, datetime]:
-    raw = f"loom_team_{secrets.token_urlsafe(32)}"
-    token_hash = hashlib.sha256(raw.encode()).digest()
-    expires_at = datetime.now(UTC) + timedelta(days=365)
-    return raw, token_hash, expires_at
 
 
 @router.post("/teams/register", status_code=202)
@@ -202,20 +194,30 @@ async def approve_team_registration(
         )
 
     team_id = uuid4()
-    raw_token, token_hash, expires_at = _mint_team_token(team_id)
     now = datetime.now(UTC)
     team = Team(id=team_id, name=registration.name, created_at=now)
     session.add(team)
     await session.flush()
     session.add(TeamQuota(team_id=team_id))
-    session.add(Token(
-        token_hash=token_hash,
-        type="team",
-        scopes=["read:own", "submit"],
+    raw_invite, code_hash, code_prefix = _mint_invite_code()
+    owner_invite = TeamInvite(
+        id=uuid4(),
         team_id=team_id,
-        issued_at=now,
-        expires_at=expires_at,
-    ))
+        email=registration.contact_email.lower(),
+        allowed_domain=None,
+        role="owner",
+        status="pending",
+        code_hash=code_hash,
+        code_prefix=code_prefix,
+        max_uses=1,
+        accepted_uses=0,
+        created_by_actor=actor,
+        created_by_user_id=None,
+        created_at=now,
+        expires_at=now + timedelta(days=14),
+        last_sent_at=now,
+    )
+    session.add(owner_invite)
     registration.status = "approved"
     registration.reviewed_at = now
     registration.reviewed_by_actor = actor
@@ -230,7 +232,7 @@ async def approve_team_registration(
         metadata={
             "team_id": str(team_id),
             "team_name": team.name,
-            "team_token_hash_prefix": _hash_prefix(token_hash),
+            "invite_prefix": owner_invite.code_prefix,
         },
     )
     try:
@@ -242,9 +244,9 @@ async def approve_team_registration(
     return {
         "registration": _serialize_registration(registration),
         "team": {"id": str(team_id), "name": team.name},
-        "team_token": raw_token,
-        "token_hash_prefix": _hash_prefix(token_hash),
-        "expires_at": expires_at.isoformat(),
+        "invite": _serialize_invite(owner_invite, team=team, now=now),
+        "invite_code": raw_invite,
+        "invite_link": _invite_link(request, raw_invite),
     }
 
 

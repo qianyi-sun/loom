@@ -28,15 +28,14 @@ invite-only public platform track.
 
 ## Non-Goals
 
-- SSO, SAML, or OIDC.
-- Invite acceptance and access-request workflows; those belong to #327 and will
-  create users/memberships against this schema.
+- SSO, SAML, OIDC, and automated email delivery. Invite links are revealed once
+  to an admin/team owner on create or resend; a later mailer can deliver the
+  same link without changing the database contract.
 - Scoped public CLI/API tokens; those belong to #328. Legacy team bearer tokens
   stay supported until that replacement lands.
 - Org-wide completed-result sharing and artifact reuse; those belong to #336 and
   must use explicit Run Library/share-state checks instead of weakening existing
   team-scoped execution/control routes.
-- Automated email delivery for team credentials.
 - Changing step-scoped sandbox JWTs or gateway provider egress controls.
 
 ## Target Flow
@@ -51,9 +50,10 @@ flowchart TD
   AdminSPA["Admin SPA"] --> Approve["Approve or reject request"]
   Approve --> Audit["admin_audit_events row"]
   Approve --> Team["teams and team_quotas rows"]
-  Approve --> Token["team token hash row"]
-  Token --> Reveal["One-time token reveal to admin"]
-  Reveal --> Researcher
+  Approve --> Invite["team_invites hash row"]
+  Invite --> Reveal["One-time invite link reveal"]
+  Reveal --> Accept["Invite acceptance"]
+  Accept --> Membership["users + team_memberships + session"]
 ```
 
 ## Principal Model
@@ -202,6 +202,26 @@ The primary key is `(team_id, user_id)`. Normal users must have a membership
 before selecting a current team. Platform-admin users can inspect across teams
 but should still choose a current team for ordinary submission flows.
 
+### `team_invites`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Stable invite id. |
+| `team_id` | UUID | Team that will receive the membership. |
+| `email` | text | Intended invite email, normalized lower-case. |
+| `allowed_domain` | text nullable | Optional explicit domain policy for multi-use invites. |
+| `role` | text | `owner`, `member`, or `viewer`. |
+| `status` | text | `pending`, `accepted`, `revoked`, or `expired`. |
+| `code_hash` | bytea | SHA-256 of the raw `loom_invite_...` code. |
+| `code_prefix` | text | Short safe prefix for display and audit. |
+| `max_uses`, `accepted_uses` | integer | Use limit and current use count. |
+| `created_by_actor`, `created_by_user_id` | text / UUID | Audit attribution. |
+| `created_at`, `expires_at`, `last_sent_at` | timestamptz | Lifecycle timestamps. |
+| `accepted_at`, `revoked_at`, `revoked_reason` | nullable | Terminal lifecycle metadata. |
+
+The raw invite code/link is returned only from create/resend responses. List,
+lookup, audit, and database rows expose only the safe `code_prefix`.
+
 ### `user_sessions`
 
 | Column | Type | Notes |
@@ -251,8 +271,8 @@ Request:
 Closed mode is the default: create a pending row and return `202 Accepted` with
 the registration id and status. Open mode is explicitly enabled by
 `LOOM_SVC_TEAM_REGISTRATION_OPEN=true`; open mode still requires rate limiting
-and a challenge hook before it can return an approved team token. Until that
-challenge hook ships, the backend accepts the setting but returns an explicit
+and a challenge hook before it can auto-approve access. Until that challenge
+hook ships, the backend accepts the setting but returns an explicit
 `501` for open-registration attempts instead of silently issuing credentials.
 
 ### Admin Review
@@ -264,16 +284,55 @@ Returns pending registration summaries. Requires admin auth.
 `POST /api/v1/admin/team-registrations/{id}/approve`
 
 Requires admin auth plus `X-Loom-Admin-Actor`. Creates `teams`, `team_quotas`,
-and one `tokens` row with `type='team'`, then returns the raw team token
-exactly once in the approval response. The raw token is not stored after
-hashing. If the admin UI loses the response, the admin must mint a replacement
-team token and revoke the lost hash prefix.
+and one owner invite for the registration contact. The approval response
+returns the raw invite code/link exactly once; the database stores only the
+invite code hash and safe prefix. The contact accepts the invite link to create
+or reuse a browser user, create the owner membership, and receive an HttpOnly
+browser session. If the admin UI loses the response, use invite resend to rotate
+and reveal a replacement link.
 
 `POST /api/v1/admin/team-registrations/{id}/reject`
 
 Requires admin auth plus `X-Loom-Admin-Actor`. Marks the request rejected and
 records review metadata on the registration row. It does not delete the request
 row.
+
+### Invites
+
+`POST /api/v1/invites`
+
+Requires a platform admin or team owner. Creates an invite with `email`,
+`team_id` (optional for a team owner using their current team), `role`,
+`expires_in_days`, optional `max_uses`, and optional `allowed_domain`. Returns
+the invite summary plus `invite_code` and `invite_link` exactly once.
+
+`GET /api/v1/invites?team_id=<team>&status=pending`
+
+Lists invite summaries for team owners/admins. Responses include email, role,
+status, counts, timestamps, and `code_prefix`, never raw invite code or link.
+
+`GET /api/v1/invites/lookup?code=loom_invite_...`
+
+Public safe lookup for the SPA invite page. It returns only team name, role,
+status, and code prefix so expired/revoked/used states can be explained without
+leaking membership data.
+
+`POST /api/v1/invites/accept`
+
+Accepts `{ "code": "loom_invite_...", "email": "user@example.com" }`.
+Acceptance succeeds only when the email matches the intended email or an
+explicit invite `allowed_domain`. It creates the user if needed, creates the
+team membership, records an `invite.accept` audit event with safe metadata, sets
+the HttpOnly session cookie, and returns the `/auth/me` shape with a CSRF token.
+
+`POST /api/v1/invites/{id}/revoke`
+
+Revokes a pending/expired invite. The raw code remains unrecoverable.
+
+`POST /api/v1/invites/{id}/resend`
+
+Rotates the invite code hash, extends expiry, and reveals a new raw link exactly
+once. The old link fails with `invalid invite`.
 
 ### Admin Audit
 
@@ -377,12 +436,21 @@ auth responses into the configured header for unsafe methods.
 Settings is the session surface:
 
 - signed-out users enter an email and then a login token/link;
+- signed-out users can open an invite link or submit a team access request from
+  the same surface;
 - signed-in users see their user, current team, role, platform-admin flag, and
   team list;
 - team switching clears cached queries because the current-team context changes
   authorization and result scope;
-- owner users can manage team API tokens/provider credentials surfaced in this
-  PR; member/viewer users see server-side 403s for those mutations.
+- owner users can manage team API tokens/provider credentials and invites
+  surfaced in this PR; member/viewer users see server-side 403s for those
+  mutations.
+
+The invite acceptance page at `/invites/accept?code=...` performs a safe lookup
+that displays team name, role, invite status, and code prefix. Pending invites
+show an email field and accept action; expired, revoked, and already-used
+invites show human-readable terminal states without exposing raw membership
+data.
 
 The legacy Admin Access page and singleton admin secret remain operator tools.
 They are not normal browser identity for public users.
@@ -420,7 +488,10 @@ They are not normal browser identity for public users.
   team switch, unknown-email non-disclosure, CSRF denial, role-derived scopes,
   and cross-team denial.
 - API tests for closed-mode registration, duplicate pending names, approve,
-  reject, one-time token reveal, and team-token usability after approval.
+  reject, one-time invite reveal, invite acceptance, and owner membership after
+  approval.
+- Invite API tests for create/list/revoke/resend/accept, expired and duplicate
+  acceptance, explicit domain policy, and raw-code redaction from list/audit.
 - Audit tests proving admin mutations fail if audit insertion fails, team users
   cannot read the audit endpoint, admin token mutations require an actor, and
   audit metadata excludes raw secrets.
@@ -433,9 +504,10 @@ They are not normal browser identity for public users.
   are no longer created or accepted.
 - Production deployment is blocked unless the same singleton admin secret is
   mounted into `loom_service`, Control Plane, and LLM Gateway.
-- Backend audit is present for #10 registration review and service token admin
-  mutations; broader admin mutation coverage should be handled by follow-up
-  issues instead of silently claiming complete platform-wide audit.
+- Backend audit is present for #10 registration review, invite create/revoke/
+  resend/accept, and service token admin mutations; broader admin mutation
+  coverage should be handled by follow-up issues instead of silently claiming
+  complete platform-wide audit.
 - Browser sessions must set HttpOnly, SameSite cookies. Production deployments
   must use Secure cookies by running with `LOOM_ENV=production` behind HTTPS.
 - Until #336 lands, existing batch/trial/artifact execution and control routes
