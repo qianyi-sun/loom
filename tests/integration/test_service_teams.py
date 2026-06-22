@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import Team, TeamQuota, Token
+from loom.db.schema import Team, TeamMembership, TeamQuota, Token, User
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -68,15 +68,37 @@ async def teams_setup(
         # TeamQuota for team A only — team B has no quota to test the
         # quota=None branch.
         s.execute(insert(TeamQuota).values(team_id=team_a))
+        owner_id, member_id = uuid4(), uuid4()
+        now = datetime.now(UTC)
+        s.execute(insert(User).values(
+            id=owner_id,
+            email="owner@example.com",
+            display_name="Owner Example",
+            is_platform_admin=False,
+            created_at=now,
+        ))
+        s.execute(insert(User).values(
+            id=member_id,
+            email="member@example.com",
+            display_name=None,
+            is_platform_admin=False,
+            created_at=now,
+        ))
+        s.execute(insert(TeamMembership).values(
+            team_id=team_a, user_id=owner_id, role="owner", created_at=now,
+        ))
+        s.execute(insert(TeamMembership).values(
+            team_id=team_a, user_id=member_id, role="member", created_at=now,
+        ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(team_a_raw.encode()).digest(),
             type="team", scopes=["read:own"], team_id=team_a,
-            issued_at=datetime.now(UTC),
+            issued_at=now,
         ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(b"member-2").digest(),
             type="team", scopes=["submit"], team_id=team_a,
-            issued_at=datetime.now(UTC),
+            issued_at=now,
         ))
         s.commit()
     try:
@@ -87,6 +109,8 @@ async def teams_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Token))
+            s.execute(delete(TeamMembership))
+            s.execute(delete(User))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.commit()
@@ -123,6 +147,22 @@ async def test_get_own_team_with_quota_and_members(
     # No raw secret leaks — only an 8-char hex prefix.
     for m in body["members"]:
         assert len(m["token_hash_prefix"]) == 8
+    assert body["user_members"] == [
+        {
+            "user_id": body["user_members"][0]["user_id"],
+            "email": "member@example.com",
+            "display_name": None,
+            "role": "member",
+            "joined_at": body["user_members"][0]["joined_at"],
+        },
+        {
+            "user_id": body["user_members"][1]["user_id"],
+            "email": "owner@example.com",
+            "display_name": "Owner Example",
+            "role": "owner",
+            "joined_at": body["user_members"][1]["joined_at"],
+        },
+    ]
 
 
 async def test_team_b_has_no_quota(

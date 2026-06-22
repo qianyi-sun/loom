@@ -502,6 +502,13 @@ export interface components {
       revoked_at: string | null;
       last_seen_at: string | null;
     };
+    TeamUserMember: {
+      user_id: string;
+      email: string;
+      display_name: string | null;
+      role: string;
+      joined_at: string;
+    };
     TeamQuota: {
       fair_share_weight: number;
       max_attempts: number;
@@ -514,6 +521,7 @@ export interface components {
       created_at: string;
       quota: components["schemas"]["TeamQuota"] | null;
       members: components["schemas"]["TeamMember"][];
+      user_members?: components["schemas"]["TeamUserMember"][];
     };
   };
 }

@@ -100,7 +100,7 @@ keeps in memory; the browser sends cookies automatically, and mutating requests
 include the CSRF header. You should not paste a raw bearer token into the
 production SPA.
 
-Your current team controls execution, cost, provider credentials, quotas,
+Your current team controls execution, cost attribution, provider credentials,
 members, and team API tokens. Roles are enforced by the API:
 
 - `viewer` can read the current team's batches, trials, provider summaries, and
@@ -109,9 +109,15 @@ members, and team API tokens. Roles are enforced by the API:
 - `owner` can manage team API tokens and provider connections.
 - `platform_admin` is an operator role with cross-team inspection/admin access.
 
+Team Settings shows the signed-in user, current team, role, team switcher,
+joined browser users, and role-aware setup links. Team owners get Team access
+for invites and API tokens; members and viewers see only the actions their role
+allows.
+
 The CLI uses named team API tokens for service workflows. Create, rotate, or
-revoke those tokens from Team access only as a team owner, then authenticate
-with `loom auth login --server URL --token env:LOOM_API_TOKEN`. Use
+revoke those tokens from Team access only as a team owner. The one-time reveal
+shows CLI setup commands such as `export LOOM_API_TOKEN=loom_api_...` and
+`loom auth login --server URL --token env:LOOM_API_TOKEN`. Use
 `loom auth whoami` to verify the active server, team, scopes, and token prefix
 without printing the raw token. Completed run metadata and safe artifacts will
 become organization-visible through the separate Run Library work; ordinary

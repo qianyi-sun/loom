@@ -399,10 +399,12 @@ Migrations: `migrations/versions/0001_initial_schema.py` through
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — browser session state, invite entry, access requests, current
-  team/role, team-token management, and local client settings
-- **Admin access** — pending team registrations, one-time invite-link reveal,
-  invite create/list/revoke/resend, and admin audit event review
+- **Settings** — signed-out invite/request-access/CLI onboarding; signed-in
+  current team, role, team switcher, joined browser members, role-aware setup
+  links, and API-token summaries
+- **Admin access** — owner/team-admin invite create/list/revoke/resend and
+  one-time API-token reveal with CLI setup commands; platform-admin users also
+  see pending team registrations and admin audit review
 - **NotFound**
 
 Auth model: browser users sign in through `/api/v1/auth/*`. The service sets an

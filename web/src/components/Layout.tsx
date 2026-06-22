@@ -10,7 +10,7 @@ import { useAuth } from "../auth/useAuth";
 import NavBar from "./NavBar";
 
 export default function Layout(): JSX.Element {
-  const { isAuthenticated, isLoading, isAdmin } = useAuth();
+  const { isAuthenticated, isLoading, isAdmin, me } = useAuth();
   const loc = useLocation();
   const isSettings = loc.pathname.startsWith("/settings");
 
@@ -34,7 +34,10 @@ export default function Layout(): JSX.Element {
 
   return (
     <div className="flex h-screen bg-slate-50">
-      <NavBar isAdmin={isAdmin} />
+      <NavBar
+        isAdmin={isAdmin}
+        currentTeamRole={me?.current_team?.role ?? null}
+      />
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-7xl px-8 py-8 animate-fade-in">
           <Outlet />

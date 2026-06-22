@@ -265,9 +265,9 @@ and Settings reload against the new team context.
 Issue #336 will add the separate org-wide Run Library. That future view can
 show completed run metadata and safe shared artifacts across teams, with owner
 team labels and explicit share states. It must not reuse current-team execution
-routes as a cross-team bypass: running/submitted work, provider secrets, quota,
-member management, cancellation, reruns, private artifacts, and blocked
-artifacts remain controlled by the owner team.
+routes as a cross-team bypass: running/submitted work, provider secrets, member
+management, cancellation, reruns, private artifacts, and blocked artifacts
+remain controlled by the owner team.
 
 ## Surfaces
 
@@ -287,13 +287,15 @@ The SPA reduces from 7 nav entries to 3:
   layout under both. Harbor's pattern: route is
   `/monitor?view=batches|trials` and switching the toggle
   preserves filters.
-- **Settings** — browser session, invite entry, access requests, current team,
-  role, team tokens, rate cards, and profile. Token-paste login is no longer
-  the normal production SPA auth path.
+- **Settings** — signed-out sign-in/invite/request-access/CLI setup guidance;
+  signed-in current team, role, team switcher, joined browser members,
+  role-aware setup links, and API-token summaries. Token-paste login is no
+  longer the normal production SPA auth path.
 - **InviteAccept** — invite lookup and acceptance states for pending, expired,
   revoked, and already-used links.
-- **Admin access** — pending team registrations, one-time invite-link reveal,
-  invite create/list/revoke/resend, and admin audit event review.
+- **Admin access** — team-owner invite create/list/revoke/resend, scoped
+  CLI/API token lifecycle with one-time token reveal and setup commands, plus
+  platform-admin-only registration review and audit events.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy

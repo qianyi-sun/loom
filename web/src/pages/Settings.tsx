@@ -1,10 +1,10 @@
-/** Session sign-in and team token management. */
+/** Invite-only onboarding and team settings. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, type ApiTokenEntry } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -15,8 +15,81 @@ import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { cn } from "../lib/cn";
 
+type TeamDetail = Awaited<ReturnType<typeof api.getTeam>>;
+type TeamUserMember = NonNullable<TeamDetail["user_members"]>[number];
+
 const LINK_BUTTON =
   "inline-flex items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-medium";
+
+const ROLE_DESCRIPTIONS: Record<string, string> = {
+  owner: "Can manage team access, API tokens, provider credentials, and submissions.",
+  member: "Can submit and monitor this team's evaluation work.",
+  viewer: "Can read this team's completed and in-progress work.",
+  platform_admin: "Can administer platform access and shared configuration.",
+};
+
+function hasScope(scopes: string[] | undefined, scope: string): boolean {
+  return Boolean(scopes?.includes(scope));
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) return "-";
+  return new Date(value).toLocaleDateString();
+}
+
+function roleLabel(role: string | null | undefined): string {
+  if (!role) return "No team role";
+  return role.replaceAll("_", " ");
+}
+
+function tokenStatus(token: ApiTokenEntry): JSX.Element {
+  if (token.revoked_at) {
+    return <StatusPill variant="cancelled">Revoked</StatusPill>;
+  }
+  if (token.expires_at && Date.parse(token.expires_at) <= Date.now()) {
+    return <StatusPill variant="neutral">Expired</StatusPill>;
+  }
+  return <StatusPill variant="success">Active</StatusPill>;
+}
+
+function TeamMembers({
+  members,
+}: {
+  members: TeamUserMember[] | undefined;
+}): JSX.Element {
+  if (!members || members.length === 0) {
+    return <EmptyState label="No browser users have joined this team yet." />;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+          <tr>
+            <th className="px-4 py-3 font-semibold">Member</th>
+            <th className="px-4 py-3 font-semibold">Role</th>
+            <th className="px-4 py-3 font-semibold">Joined</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 bg-white">
+          {members.map((member) => (
+            <tr key={member.user_id}>
+              <td className="px-4 py-3">
+                <div className="font-medium text-slate-900">
+                  {member.display_name ?? member.email}
+                </div>
+                <div className="text-xs text-slate-500">{member.email}</div>
+              </td>
+              <td className="px-4 py-3 text-slate-700">{roleLabel(member.role)}</td>
+              <td className="px-4 py-3 text-slate-600">
+                {formatDate(member.joined_at)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export default function Settings(): JSX.Element {
   const {
@@ -28,6 +101,7 @@ export default function Settings(): JSX.Element {
     teams,
     loginStart,
     loginComplete,
+    switchTeam,
     logout,
   } = useAuth();
   const [email, setEmail] = useState("");
@@ -37,10 +111,23 @@ export default function Settings(): JSX.Element {
   const [requestEmail, setRequestEmail] = useState("");
 
   const queryClient = useQueryClient();
+  const currentTeam = teams.find((team) => team.id === currentTeamId) ?? null;
+  const scopes = me?.scopes ?? [];
+  const canSubmit = isAdmin || hasScope(scopes, "submit");
+  const canManageProviders = isAdmin || hasScope(scopes, "providers:manage");
+  const canManageTokens = isAdmin || hasScope(scopes, "tokens:manage");
+  const canManageTeam = isAdmin || currentTeam?.role === "owner";
+
   const tokens = useQuery({
     queryKey: ["tokens"],
     queryFn: () => api.listTokens(),
-    enabled: isAuthenticated,
+    enabled: isAuthenticated && canManageTokens,
+    retry: false,
+  });
+  const teamDetail = useQuery({
+    queryKey: ["team", currentTeamId],
+    queryFn: () => api.getTeam(currentTeamId ?? ""),
+    enabled: isAuthenticated && currentTeamId !== null,
     retry: false,
   });
 
@@ -48,12 +135,20 @@ export default function Settings(): JSX.Element {
     mutationFn: (value: string) => loginStart(value),
     onSuccess: (result) => {
       setLoginStarted(true);
-      if (result.login_token) setLoginToken(result.login_token);
+      setLoginToken(result.login_token ?? "");
     },
   });
 
   const complete = useMutation({
     mutationFn: (value: string) => loginComplete(value),
+  });
+
+  const switchTeamMutation = useMutation({
+    mutationFn: (teamId: string) => switchTeam(teamId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["team"] });
+      queryClient.invalidateQueries({ queryKey: ["tokens"] });
+    },
   });
 
   const revoke = useMutation({
@@ -103,12 +198,16 @@ export default function Settings(): JSX.Element {
             </Button>
             {loginStarted ? (
               <div className="space-y-3 border-t border-slate-100 pt-4">
+                <p className="text-sm text-slate-600">
+                  Check your email for the one-time sign-in link. Local dev
+                  servers may also return the code inline.
+                </p>
                 <Input
-                  placeholder="One-time login token"
+                  placeholder="One-time login code"
                   value={loginToken}
                   onChange={(e) => setLoginToken(e.target.value)}
                   aria-label="login token"
-                  title="Paste the one-time login token from your email or local dev response."
+                  title="Paste the one-time login code from your email or local dev response."
                 />
                 <Button
                   variant="secondary"
@@ -190,26 +289,41 @@ export default function Settings(): JSX.Element {
               {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
             </Card.Body>
           </Card>
+
+          <Card>
+            <Card.Header
+              title="CLI setup"
+              description="After an owner creates a scoped API token, point the CLI at this server."
+            />
+            <Card.Body>
+              <pre className="overflow-x-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-50">
+                <code>loom auth login --server &lt;server-url&gt; --token env:LOOM_API_TOKEN</code>
+              </pre>
+            </Card.Body>
+          </Card>
         </div>
       </div>
     );
   }
 
-  const currentTeam = teams.find((team) => team.id === currentTeamId) ?? null;
-
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
+        <h1 className="text-2xl font-bold text-slate-900">Team Settings</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Manage your browser session and team API tokens.
+          Manage your browser session, current team, members, provider setup,
+          and CLI credentials.
         </p>
       </header>
 
       <Card>
         <Card.Header
-          title="Browser session"
-          description="Session cookies are HttpOnly; unsafe requests use CSRF protection."
+          title="Current team"
+          description={
+            currentTeam?.role
+              ? ROLE_DESCRIPTIONS[currentTeam.role] ?? "This role controls which team actions are available."
+              : "Select a team to scope runs, credentials, and artifacts."
+          }
           actions={
             <Button
               variant="secondary"
@@ -220,87 +334,205 @@ export default function Settings(): JSX.Element {
             </Button>
           }
         />
-        <Card.Body>
-          <div className="flex flex-wrap items-center gap-3">
-            <StatusPill variant={isAdmin ? "info" : "success"}>
-              {isAdmin ? "Platform admin" : currentTeam?.role ?? "User"}
-            </StatusPill>
-            <span className="text-sm text-slate-700">{me?.user.email}</span>
-            {currentTeam ? (
-              <span className="text-sm text-slate-500">
-                {currentTeam.name}
-              </span>
-            ) : null}
+        <Card.Body className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <StatusPill variant={isAdmin ? "info" : "success"}>
+                {isAdmin ? "Platform admin" : roleLabel(currentTeam?.role)}
+              </StatusPill>
+              <span className="text-sm text-slate-700">{me?.user.email}</span>
+              {currentTeam ? (
+                <span className="text-sm font-medium text-slate-900">
+                  {currentTeam.name}
+                </span>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {canSubmit ? <StatusPill variant="success">Can submit</StatusPill> : null}
+              {canManageProviders ? (
+                <StatusPill variant="info">Can manage providers</StatusPill>
+              ) : null}
+              {canManageTokens ? (
+                <StatusPill variant="info">Can manage CLI tokens</StatusPill>
+              ) : null}
+              {!canSubmit && !canManageProviders && !canManageTokens ? (
+                <StatusPill variant="neutral">Read only</StatusPill>
+              ) : null}
+            </div>
+          </div>
+
+          <div>
+            <label
+              htmlFor="current-team"
+              className="block text-sm font-medium text-slate-700"
+            >
+              Current team
+            </label>
+            <select
+              id="current-team"
+              aria-label="Current team"
+              className="mt-2 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+              value={currentTeamId ?? ""}
+              disabled={teams.length <= 1 || switchTeamMutation.isPending}
+              onChange={(event) => switchTeamMutation.mutate(event.target.value)}
+            >
+              {teams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name} ({roleLabel(team.role)})
+                </option>
+              ))}
+            </select>
           </div>
         </Card.Body>
       </Card>
 
       <Card>
         <Card.Header
-          title="Team API tokens"
-          description="Prefixes identify credentials without exposing secrets. Scoped CLI tokens will replace normal bearer-token workflows in the public track."
+          title="Team members"
+          description="Browser users who accepted an invite for the current team."
         />
         <Card.Body className="p-0">
-          {tokens.isPending ? <LoadingState /> : null}
-          {tokens.isError ? (
+          {teamDetail.isPending ? <LoadingState /> : null}
+          {teamDetail.isError ? (
             <div className="p-5">
-              <ErrorState error={tokens.error} />
+              <ErrorState error={teamDetail.error} />
             </div>
           ) : null}
-          {tokens.data ? (
-            tokens.data.items.length === 0 ? (
-              <EmptyState label="No tokens." />
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
-                  <thead>
-                    <tr className="bg-slate-50/50">
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Prefix</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Type</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Scopes</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Issued</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Expires</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Status</th>
-                      <th className="px-4 py-3" />
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {tokens.data.items.map((t) => (
-                      <tr key={t.token_hash_prefix} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 font-mono text-xs text-slate-700">{t.token_hash_prefix}</td>
-                        <td className="px-4 py-3 text-slate-700">{t.type}</td>
-                        <td className="px-4 py-3 text-slate-600">{t.scopes.join(", ")}</td>
-                        <td className="px-4 py-3 text-xs text-slate-500">{t.issued_at.slice(0, 10)}</td>
-                        <td className="px-4 py-3 text-xs text-slate-500">{t.expires_at?.slice(0, 10) ?? "-"}</td>
-                        <td className="px-4 py-3">
-                          {t.revoked_at ? (
-                            <StatusPill variant="cancelled">Revoked</StatusPill>
-                          ) : (
-                            <StatusPill variant="success">Active</StatusPill>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          {!t.revoked_at ? (
-                            <Button
-                              size="sm"
-                              variant="danger"
-                              onClick={() => revoke.mutate(t.token_hash_prefix)}
-                              disabled={revoke.isPending}
-                              title="Revoke this token so it can no longer call the API."
-                            >
-                              Revoke
-                            </Button>
-                          ) : null}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
+          {teamDetail.data ? (
+            <TeamMembers members={teamDetail.data.user_members ?? []} />
           ) : null}
         </Card.Body>
       </Card>
+
+      <Card>
+        <Card.Header
+          title="Setup actions"
+          description="Role-aware shortcuts for common team setup tasks."
+        />
+        <Card.Body className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {canSubmit ? (
+            <Link
+              to="/batches/new"
+              className={cn(LINK_BUTTON, "border-accent bg-accent text-white hover:bg-accent-hover")}
+            >
+              New batch
+            </Link>
+          ) : null}
+          <Link
+            to="/providers"
+            className={cn(
+              LINK_BUTTON,
+              canManageProviders
+                ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                : "pointer-events-none border-slate-200 bg-slate-50 text-slate-400",
+            )}
+            aria-disabled={!canManageProviders}
+            title={
+              canManageProviders
+                ? "Create and test provider connections."
+                : "Provider connection management requires an owner role."
+            }
+          >
+            Provider connections
+          </Link>
+          {canManageTeam ? (
+            <Link
+              to="/admin/access"
+              className={cn(
+                LINK_BUTTON,
+                "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+              )}
+            >
+              Team access
+            </Link>
+          ) : null}
+          <Link
+            to="/usage"
+            className={cn(
+              LINK_BUTTON,
+              "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+            )}
+          >
+            Usage
+          </Link>
+        </Card.Body>
+      </Card>
+
+      {canManageTokens ? (
+        <Card>
+          <Card.Header
+            title="API tokens"
+            description="Prefixes identify credentials without exposing secrets. Create new CLI tokens from Team access."
+            actions={
+              <Link
+                to="/admin/access"
+                className={cn(
+                  LINK_BUTTON,
+                  "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                )}
+              >
+                Create CLI token
+              </Link>
+            }
+          />
+          <Card.Body className="p-0">
+            {tokens.isPending ? <LoadingState /> : null}
+            {tokens.isError ? (
+              <div className="p-5">
+                <ErrorState error={tokens.error} />
+              </div>
+            ) : null}
+            {tokens.data ? (
+              tokens.data.items.length === 0 ? (
+                <EmptyState label="No API tokens." />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead>
+                      <tr className="bg-slate-50/50">
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Name</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Prefix</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Scopes</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Issued</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Expires</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Status</th>
+                        <th className="px-4 py-3" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {tokens.data.items.map((token) => (
+                        <tr key={token.token_hash_prefix} className="hover:bg-slate-50">
+                          <td className="px-4 py-3 font-medium text-slate-900">
+                            {token.name?.trim() || token.token_hash_prefix}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs text-slate-700">{token.token_hash_prefix}</td>
+                          <td className="px-4 py-3 text-slate-600">{token.scopes.join(", ")}</td>
+                          <td className="px-4 py-3 text-xs text-slate-500">{formatDate(token.issued_at)}</td>
+                          <td className="px-4 py-3 text-xs text-slate-500">{formatDate(token.expires_at)}</td>
+                          <td className="px-4 py-3">{tokenStatus(token)}</td>
+                          <td className="px-4 py-3 text-right">
+                            {!token.revoked_at ? (
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                onClick={() => revoke.mutate(token.token_hash_prefix)}
+                                disabled={revoke.isPending}
+                                title="Revoke this token so it can no longer call the API."
+                              >
+                                Revoke
+                              </Button>
+                            ) : null}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : null}
+          </Card.Body>
+        </Card>
+      ) : null}
     </div>
   );
 }

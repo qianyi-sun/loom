@@ -18,8 +18,9 @@ const NAV_ITEMS = [
   { to: "/providers", label: "Providers" },
 ];
 
-const ADMIN_NAV_ITEMS = [
-  { to: "/admin/access", label: "Team access" },
+const TEAM_ADMIN_NAV_ITEM = { to: "/admin/access", label: "Team access" };
+
+const PLATFORM_ADMIN_NAV_ITEMS = [
   { to: "/rate-cards", label: "Rate cards" },
 ];
 
@@ -30,9 +31,14 @@ const LINK_ACTIVE = "bg-accent text-white hover:bg-accent-hover";
 
 export interface NavBarProps {
   isAdmin: boolean;
+  currentTeamRole?: string | null;
 }
 
-export default function NavBar({ isAdmin }: NavBarProps): JSX.Element {
+export default function NavBar({
+  isAdmin,
+  currentTeamRole = null,
+}: NavBarProps): JSX.Element {
+  const canManageTeam = isAdmin || currentTeamRole === "owner";
   return (
     <nav
       aria-label="Primary"
@@ -57,12 +63,20 @@ export default function NavBar({ isAdmin }: NavBarProps): JSX.Element {
             {item.label}
           </NavLink>
         ))}
-        {isAdmin ? (
+        {canManageTeam ? (
           <>
             <div className="mt-3 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Admin
+              {isAdmin ? "Admin" : "Team"}
             </div>
-            {ADMIN_NAV_ITEMS.map((item) => (
+            <NavLink
+              to={TEAM_ADMIN_NAV_ITEM.to}
+              className={({ isActive }) =>
+                cn(LINK_BASE, isActive ? LINK_ACTIVE : LINK_INACTIVE)
+              }
+            >
+              {TEAM_ADMIN_NAV_ITEM.label}
+            </NavLink>
+            {isAdmin ? PLATFORM_ADMIN_NAV_ITEMS.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -72,7 +86,7 @@ export default function NavBar({ isAdmin }: NavBarProps): JSX.Element {
               >
                 {item.label}
               </NavLink>
-            ))}
+            )) : null}
           </>
         ) : null}
       </div>

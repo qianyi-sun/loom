@@ -12,6 +12,7 @@ import {
   type InviteStatus,
   type TeamRegistrationApproval,
 } from "../api/client";
+import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
@@ -132,9 +133,33 @@ function tokenLifetimeDays(value: string): number {
   return Math.floor(parsed);
 }
 
+function CliSetupCommands({ token }: { token: string }): JSX.Element {
+  const commands = [
+    `export LOOM_API_TOKEN=${token}`,
+    "loom auth login --server <server-url> --token env:LOOM_API_TOKEN",
+    "loom auth whoami",
+  ];
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium text-emerald-950">CLI setup commands</p>
+      <div className="space-y-1 rounded-lg border border-emerald-200 bg-white p-3">
+        {commands.map((command) => (
+          <code
+            key={command}
+            className="block overflow-x-auto whitespace-nowrap font-mono text-xs text-slate-800"
+          >
+            {command}
+          </code>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 type RevealedInvite = TeamRegistrationApproval | InviteReveal;
 
 export default function AdminAccess(): JSX.Element {
+  const { isAdmin, isLoading, me } = useAuth();
   const [actor, setActor] = useState("");
   const [rejectedReason, setRejectedReason] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<RevealedInvite | null>(null);
@@ -149,22 +174,28 @@ export default function AdminAccess(): JSX.Element {
   const [tokenScopes, setTokenScopes] = useState<string[]>(["read:own", "submit"]);
   const [revealedToken, setRevealedToken] = useState<ApiTokenReveal | null>(null);
   const queryClient = useQueryClient();
+  const currentRole = me?.current_team?.role ?? null;
+  const canManageTeam = isAdmin || currentRole === "owner";
 
   const registrations = useQuery({
     queryKey: ["admin", "team-registrations", "pending"],
     queryFn: () => api.listTeamRegistrations("pending"),
+    enabled: isAdmin,
   });
   const audit = useQuery({
     queryKey: ["admin", "audit-events"],
     queryFn: () => api.listAdminAuditEvents(50),
+    enabled: isAdmin,
   });
   const invites = useQuery({
     queryKey: ["invites", inviteStatus],
     queryFn: () => api.listInvites({ status: inviteStatus }),
+    enabled: canManageTeam,
   });
   const tokens = useQuery({
     queryKey: ["api-tokens"],
     queryFn: () => api.listTokens(),
+    enabled: canManageTeam,
   });
 
   const approve = useMutation({
@@ -250,7 +281,7 @@ export default function AdminAccess(): JSX.Element {
     },
   });
 
-  const actorMissing = actor.trim().length === 0;
+  const actorMissing = isAdmin && actor.trim().length === 0;
   const tokenCreateDisabled =
     tokenNameInput.trim().length === 0 ||
     tokenScopes.length === 0 ||
@@ -263,33 +294,55 @@ export default function AdminAccess(): JSX.Element {
     });
   }
 
+  if (isLoading) return <LoadingState />;
+
+  if (!canManageTeam) {
+    return (
+      <Card>
+        <Card.Header
+          title="Team access"
+          description="Team access management requires the owner role."
+        />
+        <Card.Body>
+          <p className="text-sm text-slate-600">
+            Ask a team owner to manage invites, members, and CLI tokens.
+          </p>
+        </Card.Body>
+      </Card>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Team access</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Approve pending team registrations and audit access decisions.
+          {isAdmin
+            ? "Approve pending team registrations, issue invites, and audit access decisions."
+            : "Manage team invites and CLI/API tokens for the current team."}
         </p>
       </header>
 
-      <Card>
-        <Card.Header
-          title="Admin actor"
-          description="Recorded in audit events for approve and reject actions."
-        />
-        <Card.Body>
-          <label className="block text-sm font-medium text-slate-700" htmlFor="admin-actor">
-            Admin actor
-          </label>
-          <Input
-            id="admin-actor"
-            className="mt-2 max-w-sm"
-            value={actor}
-            onChange={(event) => setActor(event.target.value)}
-            placeholder="qianyi"
+      {isAdmin ? (
+        <Card>
+          <Card.Header
+            title="Admin actor"
+            description="Recorded in audit events for approve, reject, and platform-admin invite actions."
           />
-        </Card.Body>
-      </Card>
+          <Card.Body>
+            <label className="block text-sm font-medium text-slate-700" htmlFor="admin-actor">
+              Admin actor
+            </label>
+            <Input
+              id="admin-actor"
+              className="mt-2 max-w-sm"
+              value={actor}
+              onChange={(event) => setActor(event.target.value)}
+              placeholder="qianyi"
+            />
+          </Card.Body>
+        </Card>
+      ) : null}
 
       {revealed ? (
         <Card className="border-emerald-200">
@@ -341,6 +394,7 @@ export default function AdminAccess(): JSX.Element {
             >
               Copy token
             </Button>
+            <CliSetupCommands token={revealedToken.token} />
           </Card.Body>
         </Card>
       ) : null}
@@ -497,77 +551,79 @@ export default function AdminAccess(): JSX.Element {
         </Card.Body>
       </Card>
 
-      <Card>
-        <Card.Header
-          title="Pending registrations"
-          description="Approve creates an owner invite link for the requested contact."
-        />
-        <Card.Body>
-          {registrations.isPending ? <LoadingState /> : null}
-          {registrations.isError ? <ErrorState error={registrations.error} /> : null}
-          {registrations.data ? (
-            registrations.data.items.length === 0 ? (
-              <EmptyState label="No pending registrations." />
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
-                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2 font-semibold">Team</th>
-                      <th className="px-3 py-2 font-semibold">Contact</th>
-                      <th className="px-3 py-2 font-semibold">Requested</th>
-                      <th className="px-3 py-2 font-semibold">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 bg-white">
-                    {registrations.data.items.map((item) => (
-                      <tr key={item.id}>
-                        <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
-                        <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
-                        <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
-                        <td className="px-3 py-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actorMissing || approve.isPending}
-                              onClick={() => approve.mutate(item.id)}
-                            >
-                              Approve
-                            </Button>
-                            <Input
-                              aria-label={`Reject reason for ${item.name}`}
-                              className="w-48"
-                              value={rejectedReason[item.id] ?? ""}
-                              onChange={(event) =>
-                                setRejectedReason((current) => ({
-                                  ...current,
-                                  [item.id]: event.target.value,
-                                }))
-                              }
-                              placeholder="reason"
-                            />
-                            <Button
-                              size="sm"
-                              variant="danger"
-                              disabled={actorMissing || reject.isPending}
-                              onClick={() => reject.mutate(item.id)}
-                            >
-                              Reject
-                            </Button>
-                          </div>
-                        </td>
+      {isAdmin ? (
+        <Card>
+          <Card.Header
+            title="Pending registrations"
+            description="Approve creates an owner invite link for the requested contact."
+          />
+          <Card.Body>
+            {registrations.isPending ? <LoadingState /> : null}
+            {registrations.isError ? <ErrorState error={registrations.error} /> : null}
+            {registrations.data ? (
+              registrations.data.items.length === 0 ? (
+                <EmptyState label="No pending registrations." />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 font-semibold">Team</th>
+                        <th className="px-3 py-2 font-semibold">Contact</th>
+                        <th className="px-3 py-2 font-semibold">Requested</th>
+                        <th className="px-3 py-2 font-semibold">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          ) : null}
-          {approve.isError ? <ErrorState error={approve.error} /> : null}
-          {reject.isError ? <ErrorState error={reject.error} /> : null}
-        </Card.Body>
-      </Card>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {registrations.data.items.map((item) => (
+                        <tr key={item.id}>
+                          <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
+                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
+                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
+                          <td className="px-3 py-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actorMissing || approve.isPending}
+                                onClick={() => approve.mutate(item.id)}
+                              >
+                                Approve
+                              </Button>
+                              <Input
+                                aria-label={`Reject reason for ${item.name}`}
+                                className="w-48"
+                                value={rejectedReason[item.id] ?? ""}
+                                onChange={(event) =>
+                                  setRejectedReason((current) => ({
+                                    ...current,
+                                    [item.id]: event.target.value,
+                                  }))
+                                }
+                                placeholder="reason"
+                              />
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                disabled={actorMissing || reject.isPending}
+                                onClick={() => reject.mutate(item.id)}
+                              >
+                                Reject
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : null}
+            {approve.isError ? <ErrorState error={approve.error} /> : null}
+            {reject.isError ? <ErrorState error={reject.error} /> : null}
+          </Card.Body>
+        </Card>
+      ) : null}
 
       <Card>
         <Card.Header
@@ -714,17 +770,19 @@ export default function AdminAccess(): JSX.Element {
         </Card.Body>
       </Card>
 
-      <Card>
-        <Card.Header
-          title="Audit log"
-          description="Recent admin access decisions with actor, action, and target."
-        />
-        <Card.Body>
-          {audit.isPending ? <LoadingState /> : null}
-          {audit.isError ? <ErrorState error={audit.error} /> : null}
-          {audit.data ? <AuditRows events={audit.data.items} /> : null}
-        </Card.Body>
-      </Card>
+      {isAdmin ? (
+        <Card>
+          <Card.Header
+            title="Audit log"
+            description="Recent admin access decisions with actor, action, and target."
+          />
+          <Card.Body>
+            {audit.isPending ? <LoadingState /> : null}
+            {audit.isError ? <ErrorState error={audit.error} /> : null}
+            {audit.data ? <AuditRows events={audit.data.items} /> : null}
+          </Card.Body>
+        </Card>
+      ) : null}
     </div>
   );
 }

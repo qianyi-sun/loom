@@ -4,10 +4,10 @@ import { describe, expect, it } from "vitest";
 
 import NavBar from "../../components/NavBar";
 
-function renderNav(isAdmin: boolean) {
+function renderNav(isAdmin: boolean, currentTeamRole: string | null = null) {
   return render(
     <MemoryRouter>
-      <NavBar isAdmin={isAdmin} />
+      <NavBar isAdmin={isAdmin} currentTeamRole={currentTeamRole} />
     </MemoryRouter>,
   );
 }
@@ -21,7 +21,7 @@ describe("NavBar", () => {
   });
 
   it("hides admin-only links from a team user", () => {
-    renderNav(false);
+    renderNav(false, "member");
     expect(
       screen.queryByRole("link", { name: "Rate cards" }),
     ).not.toBeInTheDocument();
@@ -29,6 +29,16 @@ describe("NavBar", () => {
       screen.queryByRole("link", { name: "Team access" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("Admin")).not.toBeInTheDocument();
+  });
+
+  it("shows team access to team owners without exposing platform admin tools", () => {
+    renderNav(false, "owner");
+    expect(
+      screen.getByRole("link", { name: "Team access" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Rate cards" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows admin section for an admin token", () => {

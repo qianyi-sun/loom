@@ -1,6 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import AdminAccess from "../../pages/AdminAccess";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
@@ -12,12 +12,49 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+const platformAdminMe = {
+  user: {
+    id: "admin-user",
+    email: "admin@example.com",
+    display_name: "Admin Example",
+    is_platform_admin: true,
+  },
+  teams: [{ id: "team-1", name: "latent-team", role: "platform_admin" }],
+  current_team: { id: "team-1", name: "latent-team", role: "platform_admin" },
+  role: "platform_admin",
+  scopes: ["admin:platform"],
+  is_platform_admin: true,
+  csrf_token: "csrf-admin",
+};
+
+const ownerMe = {
+  user: {
+    id: "owner-user",
+    email: "owner@example.com",
+    display_name: "Owner Example",
+    is_platform_admin: false,
+  },
+  teams: [{ id: "team-1", name: "latent-team", role: "owner" }],
+  current_team: { id: "team-1", name: "latent-team", role: "owner" },
+  role: "owner",
+  scopes: ["read:own", "submit", "tokens:manage", "providers:manage", "team:manage"],
+  is_platform_admin: false,
+  csrf_token: "csrf-owner",
+};
+
 describe("AdminAccess", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("reviews registrations and reveals approved invite link once", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
         if (url.includes("/api/v1/admin/team-registrations")) {
           if (init?.method === "POST" && url.endsWith("/approve")) {
             return jsonResponse({
@@ -149,6 +186,9 @@ describe("AdminAccess", () => {
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
         if (url.includes("/api/v1/admin/team-registrations")) {
           return jsonResponse({ items: [] });
         }
@@ -236,6 +276,10 @@ describe("AdminAccess", () => {
     await userEvent.click(screen.getByRole("button", { name: "Create API token" }));
 
     expect(await screen.findByText("loom_api_revealed_create_secret")).toBeInTheDocument();
+    expect(screen.getByText("CLI setup commands")).toBeInTheDocument();
+    expect(screen.getByText("export LOOM_API_TOKEN=loom_api_revealed_create_secret")).toBeInTheDocument();
+    expect(screen.getByText("loom auth login --server <server-url> --token env:LOOM_API_TOKEN")).toBeInTheDocument();
+    expect(screen.getByText("loom auth whoami")).toBeInTheDocument();
     await waitFor(() => {
       const createCall = fetchSpy.mock.calls.find(([input, init]) =>
         String(input).endsWith("/api/v1/tokens") && init?.method === "POST",
@@ -263,6 +307,46 @@ describe("AdminAccess", () => {
         String(input).endsWith("/api/v1/tokens/abc12345") &&
         init?.method === "DELETE",
       )).toBe(true);
+    });
+  });
+
+  it("lets team owners manage invites and tokens without platform-admin registration calls", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(ownerMe);
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ detail: "platform admin required" }, 403);
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ detail: "platform admin required" }, 403);
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<AdminAccess />);
+
+    expect(await screen.findByText("API tokens")).toBeInTheDocument();
+    expect(screen.getAllByText("Create invite").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Pending registrations")).not.toBeInTheDocument();
+    expect(screen.queryByText("Admin actor")).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.some(([input]) =>
+        String(input).includes("/api/v1/admin/team-registrations"),
+      )).toBe(false);
+      expect(fetchSpy.mock.calls.some(([input]) =>
+        String(input).includes("/api/v1/admin/audit-events"),
+      )).toBe(false);
     });
   });
 });

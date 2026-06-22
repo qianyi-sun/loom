@@ -81,10 +81,10 @@ without making the singleton admin secret a browser identity.
 | `owner` | `read:own`, `submit`, `tokens:manage`, `providers:manage`, `team:manage` | Manage team API tokens, provider connections, and team-admin surfaces exposed by the service. |
 | `platform_admin` | `admin:platform` | Global operator/admin user for inspection and incident response. |
 
-The team boundary remains the execution, cost, credential, quota, member, and
-API-token boundary. Completed run metadata and safe artifacts are planned to be
-organization-visible through #336's Run Library only after explicit
-redaction/share-state checks pass.
+The team boundary remains the execution, cost attribution, credential, member,
+and API-token administration boundary. Completed run metadata and safe
+artifacts are planned to be organization-visible through #336's Run Library
+only after explicit redaction/share-state checks pass.
 
 ## Admin Secret File
 
@@ -193,7 +193,7 @@ Issue #326 adds the browser identity tables:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `team_id` | UUID | Team boundary for execution/cost/credentials/quota/tokens. |
+| `team_id` | UUID | Team boundary for execution, cost attribution, credentials, members, and tokens. |
 | `user_id` | UUID | User assigned to the team. |
 | `role` | text | `owner`, `member`, or `viewer`. |
 | `created_at`, `updated_at` | timestamptz | Server timestamps. |
@@ -437,18 +437,20 @@ out, and any later `401` clears cached user/team data. The shared API client
 always sends `credentials: "include"` and copies the in-memory CSRF token from
 auth responses into the configured header for unsafe methods.
 
-Settings is the session surface:
+Settings is the session and team-settings surface:
 
 - signed-out users enter an email and then a login token/link;
 - signed-out users can open an invite link or submit a team access request from
   the same surface;
-- signed-in users see their user, current team, role, platform-admin flag, and
-  team list;
+- signed-out users also see CLI setup guidance that points them to scoped team
+  API tokens after they have joined a team;
+- signed-in users see their user, current team, role, platform-admin flag, team
+  list, joined browser users, and role-derived capabilities;
 - team switching clears cached queries because the current-team context changes
   authorization and result scope;
-- owner users can manage team API tokens/provider credentials and invites
-  surfaced in this PR; member/viewer users see server-side 403s for those
-  mutations.
+- owner users can navigate to Team access for invites and scoped CLI/API token
+  lifecycle, plus provider setup; member/viewer users do not get owner-only UI
+  affordances and still receive server-side 403s for forbidden mutations.
 
 The invite acceptance page at `/invites/accept?code=...` performs a safe lookup
 that displays team name, role, invite status, and code prefix. Pending invites
