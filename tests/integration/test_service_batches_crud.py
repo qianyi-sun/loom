@@ -13,7 +13,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -31,6 +31,24 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
         "verifier": {"name": "pytest"},
         "steps": [{"name": "main"}],
     }
+
+
+def _counter_value(
+    metric_name: str,
+    sample_name: str,
+    labels: dict[str, str],
+) -> float:
+    from prometheus_client import REGISTRY
+
+    for metric in REGISTRY.collect():
+        if metric.name != metric_name:
+            continue
+        for sample in metric.samples:
+            if sample.name == sample_name and all(
+                sample.labels.get(k) == v for k, v in labels.items()
+            ):
+                return float(sample.value)
+    return 0.0
 
 
 @pytest.fixture
@@ -192,6 +210,53 @@ async def test_post_batch_with_n_per_task_multiplies_count(
     body = r.json()
     assert body["expected_trial_count"] == 9
     assert body["n_per_task"] == 3
+
+
+async def test_paused_team_rejects_batch_and_records_reason(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, team_id = camp_setup
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE teams "
+                "SET submissions_paused_at = NOW(), "
+                "submissions_paused_reason = 'incident hold' "
+                "WHERE id = :team_id",
+            ),
+            {"team_id": team_id},
+        )
+    sync_engine.dispose()
+
+    before = _counter_value(
+        "loom_svc_submission_rejects",
+        "loom_svc_submission_rejects_total",
+        {"reason": "team_paused"},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "paused-submit",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+            },
+        )
+
+    assert r.status_code == 403, r.text
+    assert "paused" in r.json()["detail"]
+    after = _counter_value(
+        "loom_svc_submission_rejects",
+        "loom_svc_submission_rejects_total",
+        {"reason": "team_paused"},
+    )
+    assert after == before + 1
 
 
 async def test_post_batch_rejects_n_per_task_out_of_range(

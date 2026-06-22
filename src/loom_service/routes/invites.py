@@ -18,6 +18,7 @@ from loom.db.schema import Team, TeamInvite, TeamMembership, User
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
+from loom_service.metrics import INVITES_TOTAL
 from loom_service.routes.auth import _serialize_me, _set_auth_cookies
 from loom_service.session_auth import (
     create_session_for_user,
@@ -267,6 +268,7 @@ async def create_invite(
         },
     )
     await session.commit()
+    INVITES_TOTAL.labels(action="create", result="success").inc()
 
     return {
         "invite": _serialize_invite(invite, team=team, now=now),
@@ -447,6 +449,7 @@ async def accept_invite(
             csrf_token=created_session.raw_csrf,
         )
         await session.commit()
+        INVITES_TOTAL.labels(action="accept", result="success").inc()
 
     _set_auth_cookies(response, request, raw_session=created_session.raw_session)
     return body
@@ -489,6 +492,7 @@ async def revoke_invite(
         },
     )
     await session.commit()
+    INVITES_TOTAL.labels(action="revoke", result="success").inc()
     return _serialize_invite(invite, team=team, now=now)
 
 
@@ -535,6 +539,7 @@ async def resend_invite(
         },
     )
     await session.commit()
+    INVITES_TOTAL.labels(action="resend", result="success").inc()
     return {
         "invite": _serialize_invite(invite, team=team, now=now),
         "invite_code": raw_code,

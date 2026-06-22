@@ -366,6 +366,7 @@ async def download_artifact(
         bucket=_artifact_bucket(artifact, settings.artifacts_bucket),
         key=key,
         filename=_artifact_filename(key),
+        artifact_kind="artifact",
     )
 
 

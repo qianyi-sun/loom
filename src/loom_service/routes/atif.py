@@ -46,5 +46,6 @@ async def download_atif(
         bucket=settings.trajectories_bucket,
         key=f"{trial.team_id}/{trial.id}/atif.json",
         filename=f"{trial.id}-atif.json",
+        artifact_kind="atif",
         media_type="application/json",
     )

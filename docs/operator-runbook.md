@@ -241,6 +241,72 @@ knob you need.
    Audit rows include the operator-attested actor and safe metadata such as
    invite prefixes, never raw bearer or invite tokens.
 
+10. **Public-beta incident controls.** Use the same admin token plus an
+    operator-attested `X-Loom-Admin-Actor` for every emergency mutation:
+    ```bash
+    # Revoke a leaked or overused API token by hash prefix.
+    curl -X DELETE https://loom.example.com/api/v1/tokens/$TOKEN_PREFIX \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Loom-Admin-Actor: incident-commander"
+
+    # Revoke an invite link.
+    curl -X POST https://loom.example.com/api/v1/invites/$INVITE_ID/revoke \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Loom-Admin-Actor: incident-commander" \
+      -H "Content-Type: application/json" \
+      -d '{"reason":"reported outside intended recipient"}'
+
+    # Disable or re-enable a team. Disabled teams cannot call team APIs.
+    curl -X POST https://loom.example.com/api/v1/admin/teams/$TEAM_ID/disable \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Loom-Admin-Actor: incident-commander" \
+      -H "Content-Type: application/json" \
+      -d '{"reason":"suspected token leak"}'
+    curl -X POST https://loom.example.com/api/v1/admin/teams/$TEAM_ID/enable \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Loom-Admin-Actor: incident-commander" \
+      -H "Content-Type: application/json" \
+      -d '{"reason":"leak contained"}'
+
+    # Pause or resume only new submissions for a team.
+    curl -X POST https://loom.example.com/api/v1/admin/teams/$TEAM_ID/pause-submissions \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Loom-Admin-Actor: incident-commander" \
+      -H "Content-Type: application/json" \
+      -d '{"reason":"provider incident hold"}'
+    curl -X POST https://loom.example.com/api/v1/admin/teams/$TEAM_ID/resume-submissions \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Loom-Admin-Actor: incident-commander" \
+      -H "Content-Type: application/json" \
+      -d '{"reason":"provider restored"}'
+
+    # Rotate a provider connection secret.
+    loom providers rotate-key "$PROVIDER_CONNECTION" --api-key env:OPENAI_API_KEY
+    ```
+    Correlate incidents with `GET /api/v1/admin/audit-events?limit=100`,
+    `loom eval usage --team-id "$TEAM_ID"`, the Gateway cost dashboard, and
+    the Service dashboard's auth-failure / submission-reject panels. Provider
+    create/update/test/delete mutations are audit-logged without raw API keys.
+
+11. **Scan logs for leaked secrets before sharing incident bundles.** Pull the
+    relevant logs, then fail closed if token, provider-key, or signed-URL
+    patterns appear:
+    ```bash
+    kubectl logs -n loom -l app=loom-service --since=30m > /tmp/loom-service.log
+    kubectl logs -n loom -l app=loom-llm-gateway --since=30m > /tmp/loom-gateway.log
+    kubectl logs -n loom -l app=loom-worker --since=30m > /tmp/loom-worker.log
+
+    if rg -n --pcre2 \
+      '(loom_(team|admin|invite)_[A-Za-z0-9_-]+|X-Amz-Signature=|AWSAccessKeyId=|sk-[A-Za-z0-9_-]{20,}|api[_-]?key=)' \
+      /tmp/loom-service.log /tmp/loom-gateway.log /tmp/loom-worker.log; then
+      echo "Potential secret leak in logs; do not share bundle"
+      exit 1
+    fi
+    ```
+    For completed artifacts, run
+    `python scripts/check_no_provider_keys_in_artifacts.py <artifact-path>`
+    before publishing or attaching them to issues.
+
 ## Upgrade
 
 ### Breaking changes by release
@@ -770,12 +836,15 @@ the `groups` block into your `prometheus.yml`.
 | `LoomClaimLatencyP95High` | warning | `histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m]))) > 1.0` for 15m | DRF claim scan p95 > 1 second. Workers spinning instead of running. | Verify `trials(state, submitted_at)` index is hot; check `pg_stat_statements` for the claim query. |
 | `LoomLLMGatewayDown` | **critical** | `up{job=~".*loom-llm-gateway.*"} == 0` for 5m | Prometheus cannot scrape Gateway, so provider-call metrics are blind. | `kubectl get pods -n loom -l app=loom-llm-gateway`; `kubectl logs -n loom -l app=loom-llm-gateway --tail=200`. |
 | `LoomGatewayProviderErrorRate` | warning | provider-level `loom_gateway_llm_calls_total{result!="ok"}` ratio > 5% for 10m | A provider is failing calls; common causes are expired keys, provider outage, SSRF/egress policy, or dialect drift. | `kubectl logs -n loom -l app=loom-llm-gateway --since=15m`; run `loom providers test <connection-name>`; check provider status. |
+| `LoomGatewayCostSpike` | warning | `increase(loom_gateway_cost_usd_total[30m]) > 10` per team for 10m | A team accumulated more than $10 provider-attributed Gateway cost in 30 minutes. This is an alert only, not quota enforcement. | Inspect Gateway cost dashboard by `team_id`; check recent batches and provider configuration; disable the team or rotate provider secrets if spend is unintended. |
 | `LoomServiceDown` | **critical** | `up{job=~".*loom-service.*"} == 0` for 5m | Prometheus cannot scrape the public API service. | `kubectl get pods -n loom -l app=loom-service`; `kubectl describe svc -n loom loom-service`; verify ServiceMonitor selectors. |
 | `LoomServiceHighErrorRate` | warning | `loom_svc_http_requests_total{status_class="5xx"}` ratio > 2% for 10m | The public API is returning elevated 5xx responses. | `kubectl logs -n loom -l app=loom-service --since=15m \| grep -i "500\|exception\|traceback"`; check Control Plane and Gateway dependencies. |
+| `LoomServiceAuthFailureSpike` | warning | `sum(rate(loom_svc_auth_failures_total[5m])) > 1` for 10m | Browser/session or bearer-token failures exceed 60/min. | Inspect Service dashboard by `auth_kind` and `reason`; check ingress source concentration; revoke affected API tokens or disable the team if abusive. |
+| `LoomServiceSubmissionRejectSpike` | warning | `sum(rate(loom_svc_submission_rejects_total[5m])) > 0.2` for 10m | Batch submissions are being rejected before fan-out more than 12/min. | Inspect Service dashboard rejection reasons; `no_workers` maps to worker capacity, `team_paused` maps to an operator hold, and `invalid_input`/`provider_connection` map to user or provider config. |
 | `LoomWorkerProcessDown` | warning | `up{job=~".*loom-worker.*"} == 0` for 5m | A worker scrape target is silent. `LoomNoWorkersActive` remains the page for full capacity loss. | `kubectl get pod -n loom -l app=loom-worker`; `kubectl logs -n loom -l app=loom-worker --previous`. |
 | `LoomWorkerHeartbeatFailing` | warning | `rate(loom_worker_heartbeat_failures_total[5m]) > 0` for 10m | Worker heartbeats to CP are failing; CP will eventually reclaim that worker's trials. | Verify worker-to-CP reachability; check `loom_worker_claim_loop_iterations_total{result="error"}` for related connectivity failures. |
 | `LoomWorkerTrialFailureRateHigh` | warning | worker `loom_worker_trials_completed_total{result!="succeeded"}` ratio > 20% for 15m | Many worker-run trials are failing, cancelling, or crashing. | Inspect `sum by (result) (rate(loom_worker_trials_completed_total[5m]))`; compare recent trajectories for common failure reasons. |
-| `LoomRetryExhaustedSpiking` | warning | `rate(loom_retry_exhausted_total[5m]) > 0.1` for 10m | CP's retry-exhausted sweeper is transitioning > 6 trials/min to `failed/retry_exhausted`. Indicates either workloads consistently hitting the team's `max_attempts` quota, or a flaky upstream causing real failures across many trials. | Inspect `sum by (team_id, task_id) (rate(loom_trials_state_total{to_state="failed"}[15m]))`; correlate with `LoomWorkerTrialFailureRateHigh` + recent provider/sandbox failures; consider raising team `max_attempts` if the workload is genuinely retry-heavy. |
+| `LoomRetryExhaustedSpiking` | warning | `rate(loom_retry_exhausted_total[5m]) > 0.1` for 10m | CP's retry-exhausted sweeper is transitioning > 6 trials/min to `failed/retry_exhausted`. Indicates workloads are exhausting their retry budget or a flaky upstream is causing real failures across many trials. | Inspect `sum by (team_id, task_id) (rate(loom_trials_state_total{to_state="failed"}[15m]))`; correlate with `LoomWorkerTrialFailureRateHigh` + recent provider/sandbox failures; inspect `max_attempts` only if the workload is genuinely retry-heavy. |
 
 Thresholds are starting points — tune per team's trial volume +
 workload shape. Halve the `for:` durations for staging.

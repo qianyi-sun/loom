@@ -35,17 +35,53 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext, verify_bearer_token
+from loom.db.schema import Team
 from loom_service.auth_guards import (
     is_admin,
     require_human_or_admin,
     require_team_or_admin,
 )
+from loom_service.metrics import AUTH_FAILURES_TOTAL
 from loom_service.session_auth import verify_csrf, verify_session_cookie
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _request_auth_kind(request: Request, authorization: str | None) -> str:
+    if authorization:
+        return "bearer"
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None and request.cookies.get(
+        settings.auth_session_cookie_name,
+    ):
+        return "session"
+    return "anonymous"
+
+
+def _auth_failure_reason(exc: HTTPException) -> str:
+    detail = str(exc.detail)
+    if "worker tokens" in detail or "step session tokens" in detail:
+        return "unsupported_principal"
+    if "unsupported token type" in detail:
+        return "unsupported_principal"
+    return "missing_or_invalid"
+
+
+async def _reject_disabled_team(
+    session: AsyncSession,
+    ctx: AuthContext,
+) -> None:
+    if ctx.team_id is None or is_admin(ctx):
+        return
+    disabled_at = (await session.execute(
+        select(Team.disabled_at).where(Team.id == ctx.team_id),
+    )).scalar_one_or_none()
+    if disabled_at is not None:
+        raise HTTPException(status_code=403, detail="team is disabled")
 
 
 async def authed_session(
@@ -72,14 +108,29 @@ async def authed_session(
                     session,
                     request.cookies.get(settings.auth_session_cookie_name),
                 )
-        ctx = require_human_or_admin(ctx_optional)
+        try:
+            ctx = require_human_or_admin(ctx_optional)
+        except HTTPException as exc:
+            AUTH_FAILURES_TOTAL.labels(
+                auth_kind=_request_auth_kind(request, authorization),
+                reason=_auth_failure_reason(exc),
+            ).inc()
+            raise
+        await _reject_disabled_team(session, ctx)
         if request.method.upper() not in _SAFE_METHODS:
             settings = getattr(request.app.state, "settings", None)
             header_name = (
                 settings.auth_csrf_header_name
                 if settings is not None else "X-Loom-CSRF"
             )
-            verify_csrf(ctx, request.headers.get(header_name))
+            try:
+                verify_csrf(ctx, request.headers.get(header_name))
+            except HTTPException:
+                AUTH_FAILURES_TOTAL.labels(
+                    auth_kind=ctx.auth_kind,
+                    reason="csrf",
+                ).inc()
+                raise
         yield session, ctx
 
 

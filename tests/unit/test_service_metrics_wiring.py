@@ -47,6 +47,11 @@ def test_service_metric_objects_registered() -> None:
         "loom_svc_http_request_latency_sec",
         "loom_svc_batch_runner_ticks",
         "loom_svc_batch_runner_trials_dispatched",
+        "loom_svc_auth_failures",
+        "loom_svc_invites",
+        "loom_svc_submission_rejects",
+        "loom_svc_artifact_download_bytes",
+        "loom_svc_team_emergency_actions",
         "loom_svc_tokens_issued",
         "loom_svc_tokens_revoked",
     }

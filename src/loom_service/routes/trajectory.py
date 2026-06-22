@@ -123,5 +123,6 @@ async def download_trajectory(
         bucket=settings.trajectories_bucket,
         key=_key(trial.team_id, trial.id),
         filename=f"{trial.id}-events.jsonl",
+        artifact_kind="trajectory",
         media_type="application/x-ndjson",
     )

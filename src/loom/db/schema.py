@@ -42,6 +42,16 @@ class Team(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submissions_paused_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    submissions_paused_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+    )
 
 
 class TeamQuota(Base):

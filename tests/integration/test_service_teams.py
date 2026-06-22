@@ -17,7 +17,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
-from loom.db.schema import Team, TeamMembership, TeamQuota, Token, User
+from loom.db.schema import (
+    AdminAuditEvent,
+    Team,
+    TeamMembership,
+    TeamQuota,
+    Token,
+    User,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -108,6 +115,7 @@ async def teams_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(AdminAuditEvent))
             s.execute(delete(Token))
             s.execute(delete(TeamMembership))
             s.execute(delete(User))
@@ -115,6 +123,31 @@ async def teams_setup(
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
+
+
+def _admin_headers(actor: str | None = "ops-admin") -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    if actor is not None:
+        headers["X-Loom-Admin-Actor"] = actor
+    return headers
+
+
+def _counter_value(
+    metric_name: str,
+    sample_name: str,
+    labels: dict[str, str],
+) -> float:
+    from prometheus_client import REGISTRY
+
+    for metric in REGISTRY.collect():
+        if metric.name != metric_name:
+            continue
+        for sample in metric.samples:
+            if sample.name == sample_name and all(
+                sample.labels.get(k) == v for k, v in labels.items()
+            ):
+                return float(sample.value)
+    return 0.0
 
 
 async def test_get_own_team_with_quota_and_members(
@@ -193,6 +226,102 @@ async def test_team_b_has_no_quota(
         )
     assert r.status_code == 200
     assert r.json()["quota"] is None
+
+
+async def test_missing_auth_records_auth_failure_metric(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+) -> None:
+    app, _raw, team_a_str, _team_a, _team_b = teams_setup
+    before = _counter_value(
+        "loom_svc_auth_failures",
+        "loom_svc_auth_failures_total",
+        {"auth_kind": "anonymous", "reason": "missing_or_invalid"},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(f"/api/v1/teams/{team_a_str}")
+
+    assert r.status_code == 401
+    after = _counter_value(
+        "loom_svc_auth_failures",
+        "loom_svc_auth_failures_total",
+        {"auth_kind": "anonymous", "reason": "missing_or_invalid"},
+    )
+    assert after == before + 1
+
+
+async def test_admin_team_emergency_controls_update_state_and_audit(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+) -> None:
+    app, raw, _team_a_str, team_a, _team_b = teams_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        paused = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/pause-submissions",
+            headers=_admin_headers("incident-commander"),
+            json={"reason": "provider incident"},
+        )
+        paused_detail = await ac.get(
+            f"/api/v1/teams/{team_a}",
+            headers=_admin_headers(),
+        )
+        resumed = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/resume-submissions",
+            headers=_admin_headers("incident-commander"),
+            json={"reason": "provider restored"},
+        )
+        disabled = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/disable",
+            headers=_admin_headers("incident-commander"),
+            json={"reason": "suspected token leak"},
+        )
+        blocked = await ac.get(
+            f"/api/v1/teams/{team_a}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        enabled = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/enable",
+            headers=_admin_headers("incident-commander"),
+            json={"reason": "leak contained"},
+        )
+        restored = await ac.get(
+            f"/api/v1/teams/{team_a}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        audit = await ac.get(
+            "/api/v1/admin/audit-events?limit=10",
+            headers=_admin_headers(),
+        )
+
+    assert paused.status_code == 200, paused.text
+    assert paused_detail.status_code == 200, paused_detail.text
+    paused_body = paused_detail.json()
+    assert paused_body["submissions_paused_at"] is not None
+    assert paused_body["submissions_paused_reason"] == "provider incident"
+    assert resumed.status_code == 200, resumed.text
+    assert disabled.status_code == 200, disabled.text
+    assert blocked.status_code == 403, blocked.text
+    assert "disabled" in blocked.json()["detail"]
+    assert enabled.status_code == 200, enabled.text
+    assert restored.status_code == 200, restored.text
+
+    actions = [
+        event["action"] for event in audit.json()["items"]
+        if event["target_type"] == "team" and event["target_id"] == str(team_a)
+    ]
+    assert actions[:4] == [
+        "team.enable",
+        "team.disable",
+        "team.submissions.resume",
+        "team.submissions.pause",
+    ]
+    for event in audit.json()["items"]:
+        assert "provider incident" not in str(event["metadata"])
+        assert event["actor"] == "incident-commander" or event["actor"] == "ops-admin"
 
 
 async def test_cross_team_forbidden(

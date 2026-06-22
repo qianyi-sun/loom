@@ -10,6 +10,8 @@ from botocore.exceptions import ClientError
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
+from loom_service.metrics import ARTIFACT_DOWNLOAD_BYTES
+
 _CHUNK_SIZE = 64 * 1024
 
 
@@ -47,6 +49,7 @@ def stream_object_response(
     bucket: str,
     key: str,
     filename: str,
+    artifact_kind: str,
     media_type: str = "application/octet-stream",
 ) -> StreamingResponse:
     try:
@@ -68,6 +71,9 @@ def stream_object_response(
     content_length = obj.get("ContentLength")
     if isinstance(content_length, int):
         headers["Content-Length"] = str(content_length)
+        ARTIFACT_DOWNLOAD_BYTES.labels(
+            artifact_kind=artifact_kind,
+        ).inc(content_length)
 
     return StreamingResponse(
         _iter_body(obj["Body"]),

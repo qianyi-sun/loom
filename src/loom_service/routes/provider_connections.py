@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -40,6 +40,7 @@ from loom.security.secret_store import (
     SecretStore,
     SecretStoreError,
 )
+from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.provider_connections_service import (
@@ -280,6 +281,35 @@ def _make_secret_store(session: AsyncSession) -> SecretStore:
     return LocalEncryptedSecretStore(session)
 
 
+def _provider_audit_actor(
+    ctx: AuthContext,
+    x_loom_admin_actor: str | None,
+) -> str:
+    if ctx.type == "admin":
+        return require_admin_actor(x_loom_admin_actor)
+    if is_admin(ctx):
+        if ctx.user_id is not None:
+            return f"user:{ctx.user_id}"
+        return "platform_admin"
+    token_prefix = ctx.token_hash.hex()[:16] if ctx.token_hash else "none"
+    return f"{ctx.type}:{token_prefix}"
+
+
+def _provider_audit_metadata(
+    row: ProviderConnection,
+    *,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "team_id": str(row.team_id),
+        "provider_type": row.provider_type,
+        "display_name": row.display_name,
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
+
+
 async def _get_provider_api_key(
     session: AsyncSession,
     row: ProviderConnection,
@@ -344,7 +374,10 @@ async def _team_allows_private(session: AsyncSession, team_id: UUID) -> bool:
     status_code=201,
 )
 async def create_connection(
-    payload: ProviderConnectionCreate, sc: SessionAndCtx,
+    request: Request,
+    payload: ProviderConnectionCreate,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
 ) -> ProviderConnectionResponse:
     session, ctx = sc
     _require_provider_management(ctx)
@@ -435,6 +468,22 @@ async def create_connection(
                 f"exists for this team"
             ),
         ) from e
+    await write_admin_audit_event(
+        session,
+        actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_connection.create",
+        target_type="provider_connection",
+        target_id=str(row.id),
+        request=request,
+        metadata=_provider_audit_metadata(
+            row,
+            extra={
+                "pricing_source": pricing_source,
+                "rate_card_provider": rate_card_provider,
+                "allowed_models_present": payload.allowed_models is not None,
+            },
+        ),
+    )
     await session.commit()
 
     return _row_to_response(row)
@@ -484,9 +533,11 @@ async def get_connection(
     response_model=ProviderConnectionResponse,
 )
 async def update_connection(
+    request: Request,
     connection_id: UUID,
     payload: ProviderConnectionUpdate,
     sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
 ) -> ProviderConnectionResponse:
     session, ctx = sc
     _require_provider_management(ctx)
@@ -496,12 +547,14 @@ async def update_connection(
             detail="PATCH requires team-scoped or admin token",
         )
     row = await _get_active_connection(session, connection_id, ctx)
+    changed_fields: list[str] = []
 
     # base_url change → re-derive upstream_host + re-resolve IPs.
     # PATCH validates against the OWNER team's allow_private flag,
     # not the caller's (admin updating another team's row uses that
     # team's policy).
     if payload.base_url is not None:
+        changed_fields.append("base_url")
         allow_private = await _team_allows_private(session, row.team_id)
         try:
             resolved = resolve_and_validate(
@@ -523,6 +576,7 @@ async def update_connection(
 
     # Pricing change: re-validate the combined source + data.
     if payload.pricing_source is not None or payload.pricing_data is not None:
+        changed_fields.append("pricing")
         new_source = payload.pricing_source or row.pricing_source
         new_data = (
             payload.pricing_data if payload.pricing_data is not None
@@ -536,9 +590,11 @@ async def update_connection(
         row.pricing_data = new_data
 
     if payload.allowed_models is not None:
+        changed_fields.append("allowed_models")
         row.allowed_models = payload.allowed_models
 
     if payload.rate_card_provider is not None:
+        changed_fields.append("rate_card_provider")
         row.rate_card_provider = payload.rate_card_provider
 
     # API key rotation: encrypt new value, swap ref, queue old ref for
@@ -548,6 +604,7 @@ async def update_connection(
     # window). Phase 5 ships a cleanup job for revoked refs older than
     # the cache TTL.
     if payload.api_key is not None:
+        changed_fields.append("api_key")
         secret_store = _make_secret_store(session)
         new_ref = await secret_store.put(
             namespace=f"team:{row.team_id}", value=payload.api_key,
@@ -559,6 +616,21 @@ async def update_connection(
         row.status = "pending"
 
     await session.flush()  # trigger touches updated_at
+    await write_admin_audit_event(
+        session,
+        actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_connection.update",
+        target_type="provider_connection",
+        target_id=str(row.id),
+        request=request,
+        metadata=_provider_audit_metadata(
+            row,
+            extra={
+                "changed_fields": sorted(set(changed_fields)),
+                "api_key_rotated": payload.api_key is not None,
+            },
+        ),
+    )
     await session.commit()
     return _row_to_response(row)
 
@@ -568,7 +640,10 @@ async def update_connection(
     response_model=ProviderConnectionTestResponse,
 )
 async def test_connection(
-    connection_id: UUID, sc: SessionAndCtx,
+    request: Request,
+    connection_id: UUID,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
 ) -> ProviderConnectionTestResponse:
     """Probe the configured base_url with the stored (decrypted) api_key.
 
@@ -600,6 +675,21 @@ async def test_connection(
             status=result.status,
             last_validated_at=now,
             last_validation_error=result.error,
+        ),
+    )
+    await write_admin_audit_event(
+        session,
+        actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_connection.test",
+        target_type="provider_connection",
+        target_id=str(row.id),
+        request=request,
+        metadata=_provider_audit_metadata(
+            row,
+            extra={
+                "status": result.status,
+                "http_status": result.http_status,
+            },
         ),
     )
     await session.commit()
@@ -940,7 +1030,10 @@ async def unhide_model(
     status_code=204,
 )
 async def delete_connection(
-    connection_id: UUID, sc: SessionAndCtx,
+    request: Request,
+    connection_id: UUID,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
 ) -> None:
     """Soft-delete: sets `deleted_at = now()`. Existing Trial /
     Batch FKs (when those land in the next PR) retain attribution
@@ -958,5 +1051,14 @@ async def delete_connection(
         update(ProviderConnection)
         .where(ProviderConnection.id == row.id)
         .values(deleted_at=datetime.now(UTC), status="disabled"),
+    )
+    await write_admin_audit_event(
+        session,
+        actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_connection.delete",
+        target_type="provider_connection",
+        target_id=str(row.id),
+        request=request,
+        metadata=_provider_audit_metadata(row),
     )
     await session.commit()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import socket
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import (
+    AdminAuditEvent,
     ProviderConnection,
     Secret,
     Team,
@@ -161,6 +163,7 @@ async def app_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(AdminAuditEvent))
             s.execute(delete(ProviderConnection))
             s.execute(delete(Secret))
             s.execute(delete(Token))
@@ -175,6 +178,10 @@ def _client(app: FastAPI) -> TestClient:
 
 
 def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _admin_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -624,6 +631,75 @@ def test_update_to_invalid_pricing_returns_400(app_setup) -> None:
         json={"pricing_source": "operator-supplied"},  # no pricing_data
     )
     assert r.status_code == 400
+
+
+def test_provider_mutations_write_secret_safe_audit_events(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.provider_connections_service import ProbeResult
+
+    async def _fake_probe(*args, **kwargs) -> ProbeResult:  # type: ignore[no-untyped-def]
+        return ProbeResult(status="valid", http_status=200, error=None)
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections",
+        headers=_auth(tokens["team_a"]),
+        json={
+            "name": "audited-provider",
+            "type": "openai-compatible",
+            "base_url": "https://api.openai.com/",
+            "api_key": "sk-create-secret",
+        },
+    )
+    conn_id = create.json()["id"]
+    rotate = c.patch(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+        json={"api_key": "sk-rotated-secret"},
+    )
+    probe = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+    deleted = c.delete(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    )
+    audit = c.get(
+        "/api/v1/admin/audit-events?limit=20",
+        headers=_admin_headers(tokens["admin"]),
+    )
+
+    assert create.status_code == 201, create.text
+    assert rotate.status_code == 200, rotate.text
+    assert probe.status_code == 200, probe.text
+    assert deleted.status_code == 204, deleted.text
+    assert audit.status_code == 200, audit.text
+    events = [
+        event for event in audit.json()["items"]
+        if event["target_type"] == "provider_connection"
+        and event["target_id"] == conn_id
+    ]
+    assert [event["action"] for event in events] == [
+        "provider_connection.delete",
+        "provider_connection.test",
+        "provider_connection.update",
+        "provider_connection.create",
+    ]
+    for event in events:
+        assert event["metadata"]["team_id"] == str(team_ids["a"])
+        assert event["metadata"]["provider_type"] == "openai-compatible"
+
+    serialized = json.dumps(events)
+    assert "sk-create-secret" not in serialized
+    assert "sk-rotated-secret" not in serialized
 
 
 # ──────────────────────────────────────────────────────────────────────

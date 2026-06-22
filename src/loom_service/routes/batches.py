@@ -15,14 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select, update
 
-from loom.db.schema import Batch, Trial
+from loom.db.schema import Batch, Team, Trial
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
@@ -35,6 +35,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
+from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.task_config_validation import (
@@ -78,6 +79,28 @@ class _CreateBatch(BaseModel):
     # before insertion.
     provider_connection_id: UUID | None = None
     provider_model_id: str | None = None
+
+
+def _reject_submission(
+    *,
+    reason: str,
+    status_code: int,
+    detail: str,
+) -> NoReturn:
+    SUBMISSION_REJECTS_TOTAL.labels(reason=reason).inc()
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
+    paused_at = (await session.execute(
+        select(Team.submissions_paused_at).where(Team.id == team_id),
+    )).scalar_one_or_none()
+    if paused_at is not None:
+        _reject_submission(
+            reason="team_paused",
+            status_code=403,
+            detail="team submissions are paused",
+        )
 
 
 def _serialize(
@@ -130,13 +153,19 @@ async def create_batch(
     payload: _CreateBatch,
 ) -> dict[str, Any]:
     s, ctx = sc
-    require_scope(ctx, "submit")
+    try:
+        require_scope(ctx, "submit")
+    except HTTPException:
+        SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
+        raise
     if ctx.team_id is None:
-        raise HTTPException(
+        _reject_submission(
+            reason="invalid_input",
             status_code=400,
             detail="admin tokens must scope batches to a team — "
                    "use the service's per-team admin token",
         )
+    await _reject_if_team_paused(s, ctx.team_id)
 
     catalog = known_names()
 
@@ -146,7 +175,8 @@ async def create_batch(
         # those live on each Combination.
         for forbidden in ("agent_name", "agent_model"):
             if forbidden in payload.trial_config:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=(
                         f"trial_config.{forbidden} must be absent when "
@@ -158,7 +188,8 @@ async def create_batch(
         # Combination.
         for i, combo in enumerate(payload.combinations):
             if combo.agent_name not in catalog:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=(
                         f"combinations[{i}].agent_name "
@@ -170,7 +201,8 @@ async def create_batch(
                 combo.agent_name, combo.agent_model,
             )
             if err is not None:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=f"combinations[{i}]: {err}",
                 )
@@ -180,7 +212,8 @@ async def create_batch(
         for i, combo in enumerate(payload.combinations):
             label = combo.label or _derive_combination_label(combo)
             if label in seen_labels:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=(
                         f"combinations[{i}] label {label!r} is "
@@ -194,7 +227,8 @@ async def create_batch(
         agent_name = payload.trial_config.get("agent_name")
         if isinstance(agent_name, str) and agent_name:
             if agent_name not in catalog:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=(
                         f"unknown agent_name {agent_name!r} in "
@@ -202,7 +236,8 @@ async def create_batch(
                     ),
                 )
             if "agent_model" not in payload.trial_config:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=(
                         "trial_config.agent_model is required when "
@@ -218,16 +253,18 @@ async def create_batch(
                 try:
                     model = ModelSpec.model_validate(model_raw)
                 except Exception as exc:
-                    raise HTTPException(
+                    _reject_submission(
+                        reason="invalid_input",
                         status_code=400,
                         detail=(
                             "trial_config.agent_model failed to "
                             f"validate: {exc}"
                         ),
-                    ) from exc
+                    )
             err = validate_agent_model_compat(agent_name, model)
             if err is not None:
-                raise HTTPException(
+                _reject_submission(
+                    reason="invalid_input",
                     status_code=400,
                     detail=f"trial_config: {err}",
                 )
@@ -244,7 +281,8 @@ async def create_batch(
             ", ".join(sorted(active_backends)) if active_backends
             else "(none — no active workers)"
         )
-        raise HTTPException(
+        _reject_submission(
+            reason="no_workers",
             status_code=400,
             detail=(
                 f"no active worker advertises backend "
@@ -257,7 +295,8 @@ async def create_batch(
     # Audit M2: a filter materializing to zero tasks creates a
     # batch stuck in `submitted` forever — reject up front.
     if not task_ids:
-        raise HTTPException(
+        _reject_submission(
+            reason="empty_filter",
             status_code=400,
             detail=(
                 f"task_filter {payload.task_filter} matched zero "
@@ -269,7 +308,8 @@ async def create_batch(
         s, task_ids,
     )
     if invalid_tasks:
-        raise HTTPException(
+        _reject_submission(
+            reason="invalid_task_config",
             status_code=400,
             detail=invalid_task_config_detail(invalid_tasks),
         )
@@ -299,9 +339,15 @@ async def create_batch(
     # Validate provider_connection_id BEFORE constructing the Batch
     # row so we 400 on bad input rather than 500 on FK violation.
     if payload.provider_connection_id is not None and ctx.team_id is not None:
-        await validate_provider_connection(
-            s, payload.provider_connection_id, team_id=ctx.team_id,
-        )
+        try:
+            await validate_provider_connection(
+                s, payload.provider_connection_id, team_id=ctx.team_id,
+            )
+        except HTTPException:
+            SUBMISSION_REJECTS_TOTAL.labels(
+                reason="provider_connection",
+            ).inc()
+            raise
 
     b = Batch(
         team_id=ctx.team_id,
@@ -584,13 +630,22 @@ async def rerun_failed_batch(
     batch_id: UUID,
 ) -> dict[str, Any]:
     s, ctx = sc
-    require_scope(ctx, "submit")
+    try:
+        require_scope(ctx, "submit")
+    except HTTPException:
+        SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
+        raise
     b = (await s.execute(
         select(Batch).where(Batch.id == batch_id),
     )).scalar_one_or_none()
     if b is None:
-        raise HTTPException(status_code=404, detail="batch not found")
+        _reject_submission(
+            reason="invalid_input",
+            status_code=404,
+            detail="batch not found",
+        )
     require_team_or_admin(ctx, b.team_id)
+    await _reject_if_team_paused(s, b.team_id)
 
     active_backends = await get_active_backends(s)
     if b.backend not in active_backends:
@@ -598,7 +653,8 @@ async def rerun_failed_batch(
             ", ".join(sorted(active_backends)) if active_backends
             else "(none -- no active workers)"
         )
-        raise HTTPException(
+        _reject_submission(
+            reason="no_workers",
             status_code=400,
             detail=(
                 f"no active worker advertises backend {b.backend!r}. "
@@ -638,7 +694,8 @@ async def rerun_failed_batch(
             if _trial_key(trial) not in successful_rerun_keys
         ]
     if not failed_trials:
-        raise HTTPException(
+        _reject_submission(
+            reason="invalid_input",
             status_code=400,
             detail="batch has no rerunnable failed trials",
         )

@@ -212,6 +212,86 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Auth Failures by Kind and Reason",
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (auth_kind, reason) (rate(loom_svc_auth_failures_total[5m]))",
+          "legendFormat": "{{auth_kind}} / {{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Submission Rejects by Reason",
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(loom_svc_submission_rejects_total[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Invite Lifecycle Mutations",
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, result) (rate(loom_svc_invites_total[5m]))",
+          "legendFormat": "{{action}} / {{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Artifact Download Volume and Team Controls",
+      "gridPos": { "x": 12, "y": 40, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (artifact_kind) (rate(loom_svc_artifact_download_bytes_total[5m]))",
+          "legendFormat": "bytes/s {{artifact_kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (action) (rate(loom_svc_team_emergency_actions_total[5m]))",
+          "legendFormat": "team action/s {{action}}",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

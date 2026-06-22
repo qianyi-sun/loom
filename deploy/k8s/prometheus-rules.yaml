@@ -261,6 +261,29 @@ spec:
                 loom providers test <connection-name>
                 Check provider status page.
 
+        - alert: LoomGatewayCostSpike
+          expr: |
+            sum by (team_id) (
+              increase(loom_gateway_cost_usd_total[30m])
+            ) > 10
+          for: 10m
+          labels:
+            severity: warning
+            component: llm-gateway
+          annotations:
+            summary: "Per-team gateway spend increased by > $10 in 30m"
+            description: |
+              One team accumulated more than $10 of provider-attributed
+              gateway cost in 30 minutes. This is not quota enforcement;
+              it is an operator signal to inspect traffic and provider
+              configuration.
+
+              Triage:
+                - Inspect the Gateway cost dashboard by team_id.
+                - Check recent batches for the affected team.
+                - If spend is unintended, disable the team or rotate the
+                  provider connection secret from the public-beta runbook.
+
     - name: loom.service.health
       interval: 30s
       rules:
@@ -303,6 +326,48 @@ spec:
                 kubectl logs -n loom -l app=loom-service --since=15m \
                   | grep -i "500\|exception\|traceback"
                 Check upstream control-plane and gateway dependencies.
+
+        - alert: LoomServiceAuthFailureSpike
+          expr: |
+            sum(rate(loom_svc_auth_failures_total[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+            component: service
+          annotations:
+            summary: "Service auth failures > 1/sec for 10m"
+            description: |
+              Browser sessions or bearer tokens are failing service auth
+              at more than 60 failures/min for 10 minutes. Could be a
+              leaked stale token, broken CLI config, expired sessions, or
+              probing.
+
+              Triage:
+                - Inspect auth_kind/reason on the service dashboard.
+                - Check public ingress logs for source concentration.
+                - Revoke affected API tokens or disable the team if the
+                  pattern looks abusive.
+
+        - alert: LoomServiceSubmissionRejectSpike
+          expr: |
+            sum(rate(loom_svc_submission_rejects_total[5m])) > 0.2
+          for: 10m
+          labels:
+            severity: warning
+            component: service
+          annotations:
+            summary: "Submission rejects > 0.2/sec for 10m"
+            description: |
+              Batch submissions are being rejected before fan-out at more
+              than 12/min for 10 minutes. Common reasons include no live
+              workers, invalid task/provider input, missing submit scope,
+              team isolation, or an operator-paused team.
+
+              Triage:
+                - Inspect rejection reasons on the service dashboard.
+                - If reason=no_workers, check LoomNoWorkersActive.
+                - If reason=team_paused, confirm the incident hold is
+                  intentional before resuming submissions.
 
     - name: loom.worker.health
       interval: 30s
