@@ -181,6 +181,51 @@ def _classify_http_transport_error(exc: BaseException) -> tuple[FailureReason, s
     return FailureReason.GATEWAY_ERROR, msg
 
 
+# ─── retry classification (#298) ────────────────────────────────────
+#
+# `is_retryable` is read by the gateway's per-request retry loop
+# (`loom_llm_gateway.retry`). Returns True for failures where reissuing
+# the same request might succeed: transient gateway/upstream 5xx,
+# 429 rate-limits, 408 timeouts, and httpx transport-level errors.
+# Returns False for deterministic 4xx (auth, schema, bad model) and
+# anything unrelated to the HTTP boundary (verifier/agent/env crashes).
+#
+# 504 is INCLUDED despite the well-known idempotency caveat (upstream
+# may have processed the request and we lost the response → retrying
+# can double-bill). Decision logged in plan §D-idempotency:
+# - In practice most 504s happen before any tokens stream, so providers
+#   don't bill them. The rare cases that do bill are acceptable for v1
+#   in exchange for the ~higher recovery rate.
+# - We meter every 504 retry in `loom_gateway_llm_retry_ambiguous_504_total`
+#   so we can revisit if the rate gets ugly.
+
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def is_retryable(exc: BaseException) -> bool:
+    """True iff `exc` is a transient failure worth reissuing.
+
+    Used by the gateway's retry loop. Mirrors `classify_failure`'s
+    dispatch but answers a different question — should we retry?
+    """
+    try:
+        import httpx
+    except ImportError:
+        return False
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_HTTP_STATUSES
+
+    if isinstance(exc, (
+        httpx.TimeoutException,
+        httpx.NetworkError,
+        httpx.RemoteProtocolError,
+    )):
+        return True
+
+    return False
+
+
 def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
     """Map an uncaught exception in ``Trial.run()`` to a ``(FailureReason,
     optional user-facing message)`` tuple.

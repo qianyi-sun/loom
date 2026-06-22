@@ -23,6 +23,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.retry import send_with_retry
 
 router = APIRouter()
 
@@ -77,12 +78,15 @@ async def gemini_generate_content(
         )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    upstream_response = await upstream.post(
-        f"{GEMINI_BASE_URL}/v1beta/models/{model_path}",
-        json=payload,
-        params={"key": settings.google_api_key.get_secret_value()},
-        headers={"content-type": "application/json"},
-        timeout=settings.upstream_timeout_sec,
+    upstream_response = await send_with_retry(
+        lambda: upstream.post(
+            f"{GEMINI_BASE_URL}/v1beta/models/{model_path}",
+            json=payload,
+            params={"key": settings.google_api_key.get_secret_value()},
+            headers={"content-type": "application/json"},
+            timeout=settings.upstream_timeout_sec,
+        ),
+        settings=settings, dialect="gemini",
     )
     if upstream_response.status_code >= 400:
         raise HTTPException(

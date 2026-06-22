@@ -54,3 +54,31 @@ PROVIDER_VALIDATION_TOTAL = Counter(
     # result: valid / invalid / unreachable
     labelnames=("provider", "result"),
 )
+
+# ─── #298 Slice A: transient-failure retry ──────────────────────────
+
+RETRY_ATTEMPTS = Histogram(
+    "loom_gateway_llm_retry_attempts",
+    "Number of attempts taken to satisfy one upstream LLM request "
+    "(1 = first attempt succeeded, no retries).",
+    labelnames=("dialect",),
+    buckets=(1, 2, 3, 4, 5, 10),
+)
+
+RETRY_TOTAL = Counter(
+    "loom_gateway_llm_retry_total",
+    "Outcomes of the gateway retry loop.",
+    # outcome: success | exhausted | budget_exceeded
+    # status:  the HTTP status of the LAST attempt (e.g. 503 for
+    #          exhausted; 200 for success when at least one earlier
+    #          attempt 5xx'd; 0 for transport-level errors).
+    labelnames=("dialect", "outcome", "status"),
+)
+
+RETRY_AMBIGUOUS_504_TOTAL = Counter(
+    "loom_gateway_llm_retry_ambiguous_504_total",
+    "Times we retried a 504 from upstream. Counts the potentially-"
+    "duplicate-completion case from #298 §D-idempotency so operators "
+    "can spot if the risk is materializing.",
+    labelnames=("dialect",),
+)

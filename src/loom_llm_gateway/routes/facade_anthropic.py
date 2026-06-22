@@ -42,6 +42,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
     redact_api_key,
@@ -135,12 +136,15 @@ async def anthropic_messages_facade(
         request.app.state.egress_client_pool.get(connection_id)
     )
     try:
-        upstream_response = await upstream.post(
-            upstream_url,
-            json=payload,
-            headers=upstream_headers,
-            timeout=settings.upstream_timeout_sec,
-            follow_redirects=False,
+        upstream_response = await send_with_retry(
+            lambda: upstream.post(
+                upstream_url,
+                json=payload,
+                headers=upstream_headers,
+                timeout=settings.upstream_timeout_sec,
+                follow_redirects=False,
+            ),
+            settings=settings, dialect="facade_anthropic",
         )
     except httpx.TimeoutException as e:
         raise HTTPException(

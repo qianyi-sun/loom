@@ -145,6 +145,41 @@ used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 120.0
 
+# ─── Per-request retry on transient upstream failures (#298 Slice A) ───
+# Retry classification + budget live in `loom_llm_gateway/retry.py`.
+# Defaults are conservative (worst-case ~4s of waits before exhausting
+# 3 attempts) to fit inside subprocess agent client timeouts (60-120s).
+
+[service_config.llm_retry_max_attempts]
+used_by     = ["llm-gateway"]
+python_type = "int"
+default     = 3
+description = "Max attempts per upstream LLM request including the initial call. 1 disables retry (#298 Slice A)."
+
+[service_config.llm_retry_base_backoff_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 0.5
+description = "Exponential-backoff base. Attempt N waits min(base * 2^(N-1) + jitter, max_backoff_sec)."
+
+[service_config.llm_retry_jitter_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 0.25
+description = "Uniform jitter ±this many seconds added to each backoff wait. Reduces thundering-herd against the upstream."
+
+[service_config.llm_retry_max_backoff_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 4.0
+description = "Per-attempt backoff ceiling. Stops exponential growth before subprocess agent timeouts kick in."
+
+[service_config.llm_retry_budget_sec]
+used_by     = ["llm-gateway"]
+python_type = "float"
+default     = 30.0
+description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Sized to leave room within the typical 60-120s subprocess agent timeout for the actual upstream call."
+
 [service_config.egress_proxy_url]
 used_by     = ["llm-gateway"]
 python_type = "str"

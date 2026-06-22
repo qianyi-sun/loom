@@ -40,6 +40,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
     redact_api_key,
@@ -361,6 +362,7 @@ async def chat_completions(
             messages=chat_messages,
             extra_kwargs=extra_kwargs,
             timeout=settings.upstream_timeout_sec,
+            settings=settings,
         )
     else:
         acompletion_kwargs = dict(
@@ -499,6 +501,7 @@ async def _forward_openai_compatible_byo_chat(
     messages: list[dict[str, Any]],
     extra_kwargs: dict[str, Any],
     timeout: float,
+    settings: Any,
 ) -> dict[str, Any]:
     """Forward BYO OpenAI-compatible chat through the egress client pool.
 
@@ -519,12 +522,15 @@ async def _forward_openai_compatible_byo_chat(
     }
     upstream: httpx.AsyncClient = await egress_client_pool.get(connection_id)
     try:
-        upstream_response = await upstream.post(
-            upstream_url,
-            json=payload,
-            headers=headers,
-            timeout=timeout,
-            follow_redirects=False,
+        upstream_response = await send_with_retry(
+            lambda: upstream.post(
+                upstream_url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+                follow_redirects=False,
+            ),
+            settings=settings, dialect="chat_byo",
         )
     except httpx.TimeoutException as exc:
         raise HTTPException(

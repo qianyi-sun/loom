@@ -45,6 +45,16 @@ class _CapturingEgressPool:
         return self.client
 
 
+class _StubRetrySettings:
+    """Minimal subset of GatewaySettings the retry helper reads (#298)."""
+
+    llm_retry_max_attempts = 1
+    llm_retry_base_backoff_sec = 0.0
+    llm_retry_jitter_sec = 0.0
+    llm_retry_max_backoff_sec = 0.0
+    llm_retry_budget_sec = 30.0
+
+
 async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
     pool = _CapturingEgressPool()
     connection_id = uuid4()
@@ -59,6 +69,7 @@ async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
             messages=[{"role": "user", "content": "hi"}],
             extra_kwargs={"temperature": 0},
             timeout=30.0,
+            settings=_StubRetrySettings(),
         )
     finally:
         await pool.client.aclose()

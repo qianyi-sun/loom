@@ -22,6 +22,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.retry import send_with_retry
 
 router = APIRouter()
 
@@ -61,14 +62,17 @@ async def responses(
         )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    upstream_response = await upstream.post(
-        f"{OPENAI_BASE_URL}/v1/responses",
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {settings.openai_api_key.get_secret_value()}",
-            "content-type": "application/json",
-        },
-        timeout=settings.upstream_timeout_sec,
+    upstream_response = await send_with_retry(
+        lambda: upstream.post(
+            f"{OPENAI_BASE_URL}/v1/responses",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key.get_secret_value()}",
+                "content-type": "application/json",
+            },
+            timeout=settings.upstream_timeout_sec,
+        ),
+        settings=settings, dialect="responses",
     )
     if upstream_response.status_code >= 400:
         raise HTTPException(
