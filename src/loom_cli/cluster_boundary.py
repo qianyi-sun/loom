@@ -7,8 +7,9 @@ multi-doc YAML and flags:
   allowed for internal workloads; the public surface goes through the
   shared Ingress).
 - Ingress backends that aren't on the public allowlist (`loom-service`
-  + `loom-web` by default; `loom-llm-gateway` only when the operator
-  explicitly opts in via `gateway_public_host`).
+  + `loom-web` only), or route the allowlisted backend on the wrong
+  public path.
+- Ingresses without TLS, or with a defaultBackend catch-all.
 - `hostPort` declarations on any pod template (a hostPort binds to a
   node interface — equivalent to a NodePort but harder to spot in
   review).
@@ -27,13 +28,14 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-# Service names allowed as Ingress backends in the default install.
-# loom-service: public REST API; loom-web: SPA shell.
+# Service names allowed as Ingress backends. loom-service is the
+# public REST API under /api/v1; loom-web is the SPA shell at /.
 _PUBLIC_ALLOWLIST: frozenset[str] = frozenset({"loom-service", "loom-web"})
 
-# Service names allowed only when the operator opts in (currently:
-# loom-llm-gateway, gated on `gateway_public_host` being set).
-_PUBLIC_ALLOWLIST_OPTIONAL: frozenset[str] = frozenset({"loom-llm-gateway"})
+_EXPECTED_INGRESS_ROUTES: dict[str, str] = {
+    "loom-service": "/api/v1",
+    "loom-web": "/",
+}
 
 # Pods that MUST have a NetworkPolicy selecting them (#78 slice C).
 # These are the in-cluster Loom components; an internal-only workload
@@ -67,7 +69,7 @@ class BoundaryViolation:
     """One boundary violation. `kind` is the violation category;
     `object_*` identifies the offending manifest object."""
 
-    kind: str  # "service-type" | "ingress-backend" | "host-port"
+    kind: str
     object_kind: str  # "Service" | "Ingress" | "Deployment" | ...
     object_name: str
     detail: str
@@ -80,10 +82,9 @@ def audit_boundary(
 ) -> list[BoundaryViolation]:
     """Walk rendered manifests and flag boundary violations.
 
-    `gateway_public_host` is the operator's opt-in flag for exposing
-    the LLM gateway on its own public host. When set (non-empty),
-    `loom-llm-gateway` is added to the Ingress backend allowlist;
-    when None/empty, an Ingress rule pointing at it is flagged.
+    `gateway_public_host` is accepted for backwards-compatible callers
+    but no longer changes the allowlist: the public-beta boundary keeps
+    the LLM Gateway internal-only.
 
     `require_network_policies` (default True, matching the CLI's
     behavior) flags Loom components that aren't selected by any
@@ -94,8 +95,6 @@ def audit_boundary(
     """
     violations: list[BoundaryViolation] = []
     allowlist = set(_PUBLIC_ALLOWLIST)
-    if gateway_public_host:
-        allowlist |= _PUBLIC_ALLOWLIST_OPTIONAL
 
     # Track which Loom components have a NetworkPolicy selecting them
     # (#78 slice C). We collect the set of selected app-labels in
@@ -177,6 +176,16 @@ def _audit_ingress(
 ) -> list[BoundaryViolation]:
     out: list[BoundaryViolation] = []
     spec = doc.get("spec", {}) or {}
+    if not _ingress_has_valid_tls(spec):
+        out.append(BoundaryViolation(
+            kind="ingress-tls",
+            object_kind="Ingress",
+            object_name=name,
+            detail=(
+                "Ingress must declare TLS with at least one host and "
+                "secretName. Public Loom traffic must use HTTPS."
+            ),
+        ))
     # `rules` may be missing entirely (defaultBackend-only Ingress is
     # legal) or null. Treat both as "no rules" — the defaultBackend
     # check below still runs.
@@ -197,24 +206,47 @@ def _audit_ingress(
                         f"the public Ingress."
                     ),
                 ))
+                continue
+            if svc_name:
+                expected_path = _EXPECTED_INGRESS_ROUTES[svc_name]
+                actual_path = path.get("path", "")
+                if actual_path != expected_path:
+                    out.append(BoundaryViolation(
+                        kind="ingress-path",
+                        object_kind="Ingress",
+                        object_name=name,
+                        detail=(
+                            f"Ingress backend {svc_name!r} must be routed "
+                            f"only at {expected_path!r}; found path "
+                            f"{actual_path!r}. Public ingress may expose "
+                            f"only SPA '/' and API '/api/v1'."
+                        ),
+                    ))
     # `defaultBackend` catches every request that doesn't match a
     # rule — pointing it at an internal service is the same boundary
     # violation as listing one under `rules`.
     default = spec.get("defaultBackend") or {}
     default_svc = default.get("service", {}).get("name")
-    if default_svc and default_svc not in allowlist:
+    if default_svc:
         out.append(BoundaryViolation(
-            kind="ingress-backend",
+            kind="ingress-default-backend",
             object_kind="Ingress",
             object_name=name,
             detail=(
-                f"Ingress defaultBackend {default_svc!r} is not on "
-                f"the public allowlist {sorted(allowlist)}. "
-                f"defaultBackend catches every unmatched request — "
-                f"internal services must not appear here."
+                f"Ingress defaultBackend {default_svc!r} catches every "
+                f"unmatched request. Public Loom ingress must use explicit "
+                f"paths only: /api/v1 -> loom-service and / -> loom-web."
             ),
         ))
     return out
+
+
+def _ingress_has_valid_tls(spec: dict[str, Any]) -> bool:
+    for entry in spec.get("tls") or []:
+        hosts = entry.get("hosts") or []
+        if entry.get("secretName") and any(isinstance(h, str) and h for h in hosts):
+            return True
+    return False
 
 
 def _audit_pod_template(

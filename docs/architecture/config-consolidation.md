@@ -111,7 +111,15 @@ description = "Image tag applied to every loom-* image."
 python_type = "str"
 default     = "loom.example.com"
 
-[render_config.gateway_public_host]
+[render_config.ingress_class_name]
+python_type = "str"
+default     = "nginx"
+
+[render_config.ingress_tls_secret_name]
+python_type = "str"
+default     = "loom-tls"
+
+[render_config.ingress_cert_manager_cluster_issuer]
 python_type = "str"
 default     = ""
 

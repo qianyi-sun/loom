@@ -57,6 +57,22 @@ def test_compose_workers_raise_nofile_limit_for_concurrent_sandboxes() -> None:
         }
 
 
+def test_dev_compose_published_ports_default_to_loopback() -> None:
+    """Dev compose is not the public deployment path; every host port
+    must bind to loopback unless an operator opts into wider exposure."""
+    data = yaml.safe_load(_DEV_COMPOSE.read_text(encoding="utf-8"))
+    published: list[str] = []
+    for service in data["services"].values():
+        published.extend(service.get("ports", []))
+
+    assert published, "expected dev compose to publish local development ports"
+    assert all(
+        isinstance(port, str)
+        and port.startswith("${LOOM_DEV_BIND_ADDR:-127.0.0.1}:")
+        for port in published
+    )
+
+
 def test_remote_worker_compose_has_no_environment_specific_hosts() -> None:
     text = _COMPOSE.read_text(encoding="utf-8")
     forbidden = (

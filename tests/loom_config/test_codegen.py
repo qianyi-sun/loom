@@ -72,6 +72,9 @@ def test_renders_cluster_config_example() -> None:
     out = render_cluster_config_example(schema)
     assert "image_tag = \"0.7\"" in out
     assert "ingress_host = \"loom.example.com\"" in out
+    assert "ingress_class_name = \"nginx\"" in out
+    assert "ingress_tls_secret_name = \"loom-tls\"" in out
+    assert "ingress_cert_manager_cluster_issuer = \"\"" in out
     assert "[replicas]" in out
     assert "service = 2" in out
     assert "control_plane = 2" in out

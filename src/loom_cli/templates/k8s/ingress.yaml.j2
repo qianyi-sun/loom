@@ -6,7 +6,15 @@ metadata:
     # Adjust to match your cluster's ingress controller (nginx, traefik,
     # gke-ingress, alb, etc.). Defaults assume nginx.
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+{% if ingress_cert_manager_cluster_issuer %}
+    cert-manager.io/cluster-issuer: {{ ingress_cert_manager_cluster_issuer }}
+{% endif %}
 spec:
+  ingressClassName: {{ ingress_class_name }}
+  tls:
+    - hosts:
+        - {{ ingress_host }}
+      secretName: {{ ingress_tls_secret_name }}
   rules:
     # On `{{ ingress_host }}`:
     #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
@@ -33,23 +41,6 @@ spec:
                 name: loom-web
                 port:
                   number: 80
-{% if gateway_public_host %}
-    # LLM Gateway is exposed at its own host because agents inside
-    # sandboxes need a stable URL to call from outside the cluster.
-    # Bearer auth is enforced at the route level.
-    # Opt-in via `gateway_public_host` config; default install keeps
-    # the gateway internal-only (#77 boundary enforcement).
-    - host: {{ gateway_public_host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: loom-llm-gateway
-                port:
-                  number: 9100
-{% endif %}
   # NOTE: the Control Plane (`loom-control-plane:8080`) is intentionally
   # NOT exposed via Ingress. It carries worker-only routes
   # (`POST /trials/claim`, `PATCH /trials/{id}/state`) and admin
@@ -58,3 +49,8 @@ spec:
   # reach the CP through cluster DNS (`http://loom-control-plane:8080`).
   # For operator-side admin curls, port-forward:
   #   kubectl port-forward deploy/loom-control-plane 8080:8080
+  #
+  # The LLM Gateway is also intentionally NOT exposed via public
+  # Ingress. Sandboxes reach it through the internal gateway-router /
+  # singleton path; public browser and CLI traffic goes through
+  # `loom-service` under `/api/v1`.

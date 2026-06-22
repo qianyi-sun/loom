@@ -127,7 +127,7 @@ def _set_auth_cookies(
 def _clear_auth_cookies(response: Response, request: Request) -> None:
     settings = request.app.state.settings
     response.delete_cookie(settings.auth_session_cookie_name, path="/")
-    response.delete_cookie("loom_csrf", path="/")
+    response.delete_cookie(settings.auth_csrf_cookie_name, path="/")
 
 
 @router.post("/login/start")

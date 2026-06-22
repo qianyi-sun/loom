@@ -17,7 +17,10 @@ cat > cluster-config.toml <<EOF
 namespace = "loom"
 image_tag = "0.7"
 ingress_host = "loom.example.com"
-# gateway_public_host = "gateway.loom.example.com"  # opt in to expose
+ingress_class_name = "nginx"
+ingress_tls_secret_name = "loom-tls"
+# Optional when cert-manager manages the TLS Secret:
+# ingress_cert_manager_cluster_issuer = "letsencrypt-prod"
 EOF
 
 # 2. One-time bootstrap (Secrets) — see "Bootstrap Secrets" below
@@ -40,7 +43,7 @@ Each verb:
 |---|---|---|
 | `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK | 0 pass / 1 fail / 2 cluster unreachable |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
-| `loom cluster audit` | Static public/internal boundary check on rendered manifests (no LoadBalancer/NodePort, Ingress backends on allowlist, no hostPort) | 0 clean / 1 violation / 2 bad config |
+| `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
 | `loom cluster up` | Preflight → render → `kubectl apply` → wait for components ready | 0 ready / 1 not-ready / 2 unreachable or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints | 0 all-ready / 1 not-ready / 2 unreachable |
 | `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown | 0 / 1 on failure or operator-cancelled prompt |
@@ -87,7 +90,7 @@ knob you need.
    bash /tmp/loom-secret.sh
    ```
 
-   The `worker-token` value is overwritten in step 5.
+   The `worker-token` value is overwritten in step 6.
 
    Create the singleton admin secret file with the operator CLI and mount it as
    `loom-admin-secret`:
@@ -99,7 +102,36 @@ knob you need.
      --from-file=secrets.toml=./secrets.toml
    ```
 
-3. **Apply manifests in dependency order:**
+3. **Prepare DNS and TLS for the public Web/API ingress.** `loom cluster`
+   is the production/public path; dev compose is loopback-only by default and
+   must not be used as the Internet-facing deployment.
+
+   - Create a DNS A/AAAA or CNAME record for `ingress_host` pointing at your
+     ingress controller's public address.
+   - Install an ingress controller matching `ingress_class_name` (default
+     `nginx`).
+   - Either pre-create the TLS Secret named by `ingress_tls_secret_name`, or
+     install cert-manager and set `ingress_cert_manager_cluster_issuer` in
+     `cluster-config.toml`.
+
+   Example cert-manager setup:
+
+   ```bash
+   helm repo add jetstack https://charts.jetstack.io
+   helm upgrade --install cert-manager jetstack/cert-manager \
+     --namespace cert-manager --create-namespace --set crds.enabled=true
+
+   kubectl apply -f letsencrypt-prod-cluster-issuer.yaml
+   ```
+
+   Rendered Ingress should show exactly one public host and TLS:
+
+   ```bash
+   loom cluster render --config cluster-config.toml \
+     | yq '. | select(.kind == "Ingress") | .spec'
+   ```
+
+4. **Apply manifests in dependency order:**
    ```bash
    kubectl apply -f deploy/k8s/postgres.yaml
    kubectl apply -f deploy/k8s/minio.yaml
@@ -112,12 +144,12 @@ knob you need.
    kubectl apply -f deploy/k8s/ingress.yaml
    ```
 
-4. **Run migrations** (one-off Job, from a pod with the Control Plane image):
+5. **Run migrations** (one-off Job, from a pod with the Control Plane image):
    ```bash
    kubectl exec deploy/loom-control-plane -- alembic upgrade head
    ```
 
-5. **Mint a worker token** via the admin API. The admin credential is the
+6. **Mint a worker token** via the admin API. The admin credential is the
    singleton `loom-admin-secret` mounted into `loom_service`, the Control Plane,
    and the LLM Gateway. Use the same `ADMIN_TOKEN` revealed in step 2; do not
    create a database-backed admin row for this bootstrap path.
@@ -134,7 +166,7 @@ knob you need.
    Update the `worker-token` key in `loom-secrets` with the returned
    raw token, then `kubectl rollout restart deploy/loom-worker`.
 
-6. **(Optional) Provision the batch-runner CP token.** The
+7. **(Optional) Provision the batch-runner CP token.** The
    `loom_service` batch-runner needs a `submit:batch` internal token
    to fan out trials from batches. Without it, the runner skips
    its tick with a warning — batches will not advance. The token is
@@ -154,7 +186,7 @@ knob you need.
    kubectl rollout restart deploy/loom-service
    ```
 
-7. **Verify service-proxied downloads.** `loom_service` should use the
+8. **Verify service-proxied downloads.** `loom_service` should use the
    cluster-internal MinIO endpoint for object reads, then stream ATIF,
    trajectory, and artifact downloads through authenticated API routes. Browser
    and laptop CLI users should not need direct access to the MinIO S3 port.
@@ -169,7 +201,7 @@ knob you need.
    `curl -L` against those URLs should return the object body without opening a
    separate MinIO tunnel.
 
-8. **Approve team registration requests.** Public registration is
+9. **Approve team registration requests.** Public registration is
    default-closed. A researcher can submit a request without a bearer token:
    ```bash
    curl -X POST https://loom.example.com/api/v1/teams/register \
@@ -284,13 +316,14 @@ restore from snapshot — gate destructive migrations behind a flag.
 Costs are computed from versioned rate cards. To bump prices:
 
 ```bash
-curl -X POST https://gateway.loom.example.com/admin/rate-cards \
+curl -X POST https://loom.example.com/api/v1/rate-cards \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d @new-rate-card.json
 ```
 
-The Gateway's in-memory cache invalidates immediately; in-flight
-requests use whatever card was active when they started.
+The public request is authenticated by `loom_service` and forwarded to the
+internal Gateway admin route. The Gateway's in-memory cache invalidates
+immediately; in-flight requests use whatever card was active when they started.
 
 ## Token rotation
 
@@ -715,8 +748,10 @@ concrete command or UI action.
    index when `loom-web` replicas > 0.
 3. **Boundary holds.** `loom cluster audit` exits 0. `kubectl get svc -n loom`
    shows no `LoadBalancer` / `NodePort` services. `kubectl get ingress -n loom`
-   shows backends only for `loom-service` and `loom-web` (plus
-   `loom-llm-gateway` when `gateway_public_host` is configured).
+   shows TLS enabled and backends only for `loom-service` at `/api/v1` and
+   `loom-web` at `/`. `loom-llm-gateway`, Control Plane, Postgres, MinIO,
+   workers, worker-token admin routes, and batch-runner bootstrap routes stay
+   internal-only.
 4. **API token issuance.** Mint a named team API token and verify it can read
    the team surface:
    ```bash

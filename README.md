@@ -207,6 +207,10 @@ the dev singleton admin secret exists, runs migrations, seeds team/worker
 tokens, prints the team bearer + endpoint URLs, and writes the admin token to
 the ignored local env file for explicit `reveal-admin` use.
 
+Dev compose is for local development, not public hosting. Published ports bind
+to `127.0.0.1` by default through `LOOM_DEV_BIND_ADDR`; use `loom cluster`
+with TLS Ingress for public deployments.
+
 URLs printed at the end of `loom service up`:
 
 | What | URL |

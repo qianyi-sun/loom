@@ -579,10 +579,7 @@ def _audit(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {exc}\n")
         return 2
 
-    violations = audit_boundary(
-        manifests,
-        gateway_public_host=config.gateway_public_host or None,
-    )
+    violations = audit_boundary(manifests)
     sys.stdout.write(format_violations(violations))
     return 0 if not violations else 1
 
@@ -1692,7 +1689,8 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Render manifests and check the public/internal boundary: "
             "no LoadBalancer/NodePort Services, no Ingress backends "
-            "outside the allowlist, no hostPort declarations. Exits "
+            "outside the allowlist, TLS on public Ingress, explicit "
+            "Web/API paths, no unsafe hostPort declarations. Exits "
             "0 on clean, 1 on any violation."
         ),
     )
@@ -1700,9 +1698,9 @@ def dispatch(argv: list[str]) -> int:
         "--config",
         default=None,
         help=(
-            "Path to cluster-config.toml. Omit for all defaults; "
-            "`gateway_public_host` in the config opts the LLM gateway "
-            "into the public Ingress allowlist."
+            "Path to cluster-config.toml. Omit for all defaults. "
+            "Only the Web/API ingress is public; the LLM gateway "
+            "remains internal-only."
         ),
     )
     p_audit.set_defaults(handler=_audit)

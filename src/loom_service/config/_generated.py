@@ -19,6 +19,7 @@ class LoomServiceSettings(BaseSettings):
 
     admin_secret_file: Path | None = None
     artifacts_bucket: str = "artifacts"
+    auth_csrf_cookie_name: str = "loom_csrf"
     auth_csrf_header_name: str = "X-Loom-CSRF"
     auth_login_challenge_ttl_sec: int = 900
     auth_return_login_token: bool = False

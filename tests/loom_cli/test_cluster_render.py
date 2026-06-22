@@ -48,12 +48,14 @@ def _load_docs(yaml_text: str) -> list[dict]:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_default_config_omits_gateway_public_host() -> None:
-    """Issue #77 boundary: default install MUST NOT expose the gateway
-    publicly. If this changes, the operator-facing security posture
-    changes too — needs a deliberate decision, not a default flip."""
+def test_default_config_includes_public_tls_knobs() -> None:
+    """Public deploys must render an HTTPS ingress by default, with
+    operator-overridable host, class, and certificate secret knobs."""
     cfg = ClusterConfig()
-    assert cfg.gateway_public_host == ""
+    assert cfg.ingress_host == "loom.example.com"
+    assert cfg.ingress_class_name == "nginx"
+    assert cfg.ingress_tls_secret_name == "loom-tls"
+    assert cfg.ingress_cert_manager_cluster_issuer == ""
 
 
 def test_default_replicas_match_spec() -> None:
@@ -72,7 +74,9 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     cfg_path.write_text(
         'image_tag = "1.2.3"\n'
         'ingress_host = "loom.acme.example"\n'
-        'gateway_public_host = "gw.acme.example"\n'
+        'ingress_class_name = "public-nginx"\n'
+        'ingress_tls_secret_name = "loom-acme-tls"\n'
+        'ingress_cert_manager_cluster_issuer = "letsencrypt-prod"\n'
         '[replicas]\n'
         'service = 5\n'
         'worker = 10\n',
@@ -81,11 +85,24 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     cfg = load_cluster_config(cfg_path)
     assert cfg.image_tag == "1.2.3"
     assert cfg.ingress_host == "loom.acme.example"
-    assert cfg.gateway_public_host == "gw.acme.example"
+    assert cfg.ingress_class_name == "public-nginx"
+    assert cfg.ingress_tls_secret_name == "loom-acme-tls"
+    assert cfg.ingress_cert_manager_cluster_issuer == "letsencrypt-prod"
     assert cfg.replicas.service == 5
     assert cfg.replicas.worker == 10
     # Unspecified fields keep their defaults.
     assert cfg.replicas.control_plane == 2
+
+
+def test_load_config_rejects_deprecated_gateway_public_host(
+    tmp_path: Path,
+) -> None:
+    """The public-beta boundary no longer allows a public LLM Gateway
+    host; old configs must fail instead of silently exposing it."""
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text('gateway_public_host = "gw.acme.example"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"gateway_public_host.*no longer supported"):
+        load_cluster_config(cfg_path)
 
 
 def test_load_config_rejects_unknown_top_level_key(tmp_path: Path) -> None:
@@ -194,29 +211,54 @@ def test_render_with_custom_image_tag_applies_to_every_loom_image() -> None:
         )
 
 
-def test_render_with_gateway_public_host_emits_second_ingress_rule() -> None:
-    """Opt-in: setting gateway_public_host adds a second host rule
-    to the Ingress without disturbing the primary one."""
-    cfg = ClusterConfig(gateway_public_host="gw.example.com")
+def test_render_default_ingress_uses_tls_secret_and_class() -> None:
+    cfg = ClusterConfig()
     docs = _load_docs(render_manifests(cfg))
     ingress = next(d for d in docs if d["kind"] == "Ingress")
-    hosts = [r["host"] for r in ingress["spec"]["rules"]]
-    assert "loom.example.com" in hosts
-    assert "gw.example.com" in hosts
-    # The gateway rule routes to the right service.
-    gw_rule = next(
-        r for r in ingress["spec"]["rules"] if r["host"] == "gw.example.com"
+    assert ingress["spec"]["ingressClassName"] == "nginx"
+    assert ingress["spec"]["tls"] == [{
+        "hosts": ["loom.example.com"],
+        "secretName": "loom-tls",
+    }]
+    assert "cert-manager.io/cluster-issuer" not in ingress["metadata"]["annotations"]
+
+
+def test_render_with_cert_manager_cluster_issuer_annotation() -> None:
+    cfg = ClusterConfig(
+        ingress_host="loom.acme.example",
+        ingress_class_name="public-nginx",
+        ingress_tls_secret_name="loom-acme-tls",
+        ingress_cert_manager_cluster_issuer="letsencrypt-prod",
     )
-    backend = gw_rule["http"]["paths"][0]["backend"]["service"]
-    assert backend["name"] == "loom-llm-gateway"
-    assert backend["port"]["number"] == 9100
+    docs = _load_docs(render_manifests(cfg))
+    ingress = next(d for d in docs if d["kind"] == "Ingress")
+    assert ingress["spec"]["ingressClassName"] == "public-nginx"
+    assert ingress["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == (
+        "letsencrypt-prod"
+    )
+    assert ingress["spec"]["tls"] == [{
+        "hosts": ["loom.acme.example"],
+        "secretName": "loom-acme-tls",
+    }]
 
 
-def test_render_without_gateway_public_host_emits_only_primary_host() -> None:
+def test_render_ingress_routes_only_api_and_spa_backends() -> None:
     docs = _load_docs(render_manifests(ClusterConfig()))
     ingress = next(d for d in docs if d["kind"] == "Ingress")
-    hosts = {r["host"] for r in ingress["spec"]["rules"]}
-    assert hosts == {"loom.example.com"}
+    assert [r["host"] for r in ingress["spec"]["rules"]] == ["loom.example.com"]
+    paths = ingress["spec"]["rules"][0]["http"]["paths"]
+    assert [
+        (
+            p["path"],
+            p["pathType"],
+            p["backend"]["service"]["name"],
+            p["backend"]["service"]["port"]["number"],
+        )
+        for p in paths
+    ] == [
+        ("/api/v1", "Prefix", "loom-service", 8090),
+        ("/", "Prefix", "loom-web", 80),
+    ]
 
 
 def test_render_custom_storage_sizes() -> None:

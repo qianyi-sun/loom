@@ -205,6 +205,12 @@ python_type = "str"
 default     = "X-Loom-CSRF"
 description = "Header required on unsafe browser session requests. The SPA gets this token from auth JSON responses and keeps it in memory; bearer-token service/CLI requests are not CSRF-gated (#326)."
 
+[service_config.auth_csrf_cookie_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom_csrf"
+description = "Legacy CSRF cookie name to clear during logout; current SPA keeps CSRF tokens in memory."
+
 [service_config.auth_session_ttl_sec]
 used_by     = ["loom-service"]
 python_type = "int"
@@ -426,10 +432,20 @@ description = "Image tag applied to every loom-* image."
 python_type = "str"
 default     = "loom.example.com"
 
-[render_config.gateway_public_host]
+[render_config.ingress_class_name]
+python_type = "str"
+default     = "nginx"
+description = "Kubernetes IngressClass used by the public Web/API ingress."
+
+[render_config.ingress_tls_secret_name]
+python_type = "str"
+default     = "loom-tls"
+description = "TLS Secret name referenced by the public Web/API ingress."
+
+[render_config.ingress_cert_manager_cluster_issuer]
 python_type = "str"
 default     = ""
-description = "Empty = no public gateway ingress (default, per #77 boundary)."
+description = "Optional cert-manager ClusterIssuer name for automatic TLS."
 
 [render_config.postgres_image]
 python_type = "str"

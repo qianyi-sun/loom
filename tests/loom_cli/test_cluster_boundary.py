@@ -50,6 +50,9 @@ spec:
               service:
                 name: loom-web
                 port: { number: 80 }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -152,6 +155,9 @@ spec:
               service:
                 name: loom-control-plane
                 port: { number: 8080 }
+  tls:
+    - hosts: [leaky.example.com]
+      secretName: loom-tls
 """
     violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
@@ -161,9 +167,7 @@ spec:
 
 
 def test_audit_flags_gateway_when_not_opted_in() -> None:
-    """`loom-llm-gateway` only joins the allowlist when
-    `gateway_public_host` is non-empty. Without the opt-in, an
-    Ingress rule for it is a boundary violation."""
+    """`loom-llm-gateway` is always internal-only in public beta."""
     yaml_text = """\
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -178,14 +182,17 @@ spec:
               service:
                 name: loom-llm-gateway
                 port: { number: 9100 }
+  tls:
+    - hosts: [gateway.example.com]
+      secretName: loom-tls
 """
     violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     assert "loom-llm-gateway" in violations[0].detail
 
 
-def test_audit_accepts_gateway_when_opted_in() -> None:
-    """With `gateway_public_host` set, gateway is allowlisted."""
+def test_audit_rejects_gateway_even_with_deprecated_opt_in() -> None:
+    """The public-beta boundary no longer allows a public gateway host."""
     yaml_text = """\
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -200,12 +207,16 @@ spec:
               service:
                 name: loom-llm-gateway
                 port: { number: 9100 }
+  tls:
+    - hosts: [gateway.example.com]
+      secretName: loom-tls
 """
     violations = audit_boundary(
         yaml_text, gateway_public_host="gateway.example.com",
         require_network_policies=False,
     )
-    assert violations == []
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-backend"
 
 
 def test_audit_flags_default_backend_off_allowlist() -> None:
@@ -222,11 +233,14 @@ spec:
     service:
       name: loom-control-plane
       port: { number: 8080 }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
 """
     violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
     v = violations[0]
-    assert v.kind == "ingress-backend"
+    assert v.kind == "ingress-default-backend"
     assert "defaultBackend" in v.detail
     assert "loom-control-plane" in v.detail
 
@@ -249,14 +263,18 @@ spec:
       http:
         paths:
           - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
 """
     violations = audit_boundary(yaml_text, require_network_policies=False)
     assert len(violations) == 1
+    assert violations[0].kind == "ingress-default-backend"
     assert "defaultBackend" in violations[0].detail
     assert "loom-llm-gateway" in violations[0].detail
 
 
-def test_audit_default_backend_allowlisted_passes() -> None:
+def test_audit_default_backend_allowlisted_is_still_rejected() -> None:
     yaml_text = """\
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -264,13 +282,17 @@ metadata: { name: catchall }
 spec:
   defaultBackend:
     service: { name: loom-web, port: { number: 80 } }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
 """
-    assert audit_boundary(yaml_text, require_network_policies=False) == []
+    violations = audit_boundary(yaml_text, require_network_policies=False)
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-default-backend"
 
 
-def test_audit_default_backend_gateway_opted_in() -> None:
-    """gateway_public_host opt-in covers defaultBackend just like
-    rules."""
+def test_audit_rejects_gateway_default_backend_even_with_deprecated_opt_in() -> None:
+    """gateway_public_host no longer opts the gateway into Ingress."""
     yaml_text = """\
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -278,11 +300,16 @@ metadata: { name: gw }
 spec:
   defaultBackend:
     service: { name: loom-llm-gateway, port: { number: 9100 } }
+  tls:
+    - hosts: [gateway.example.com]
+      secretName: loom-tls
 """
-    assert audit_boundary(
+    violations = audit_boundary(
         yaml_text, gateway_public_host="gateway.example.com",
         require_network_policies=False,
-    ) == []
+    )
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-default-backend"
 
 
 def test_audit_accepts_allowlisted_ingress_backends() -> None:
@@ -298,8 +325,91 @@ spec:
         paths:
           - { path: /api/v1, backend: { service: { name: loom-service, port: { number: 8090 } } } }
           - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
 """
     assert audit_boundary(yaml_text, require_network_policies=False) == []
+
+
+def test_audit_flags_api_backend_on_non_api_path() -> None:
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: bad-api-path }
+spec:
+  rules:
+    - host: loom.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-service
+                port: { number: 8090 }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
+"""
+    violations = audit_boundary(yaml_text, require_network_policies=False)
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-path"
+    assert "/api/v1" in violations[0].detail
+
+
+def test_audit_flags_spa_backend_on_api_path() -> None:
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: bad-spa-path }
+spec:
+  rules:
+    - host: loom.example.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-web
+                port: { number: 80 }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
+"""
+    violations = audit_boundary(yaml_text, require_network_policies=False)
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-path"
+    assert "loom-web" in violations[0].detail
+
+
+def test_audit_flags_ingress_without_tls() -> None:
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: no-tls }
+spec:
+  rules:
+    - host: loom.example.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-service
+                port: { number: 8090 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loom-web
+                port: { number: 80 }
+"""
+    violations = audit_boundary(yaml_text, require_network_policies=False)
+    assert len(violations) == 1
+    assert violations[0].kind == "ingress-tls"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -421,6 +531,9 @@ spec:
               service:
                 name: postgres
                 port: { number: 5432 }
+  tls:
+    - hosts: [loom.example.com]
+      secretName: loom-tls
 ---
 apiVersion: apps/v1
 kind: Deployment

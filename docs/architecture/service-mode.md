@@ -25,9 +25,11 @@ CLI with the Compose plugin before running `loom service up`, `down`, or
 
 Layering: SPA / external curl → `loom_service` (`/api/v1/*`) → CP
 over cluster DNS. `deploy/k8s/ingress.yaml` exposes only
-`loom_service` (at `loom.example.com`) and the LLM Gateway (at
-`gateway.loom.example.com`); CP is reachable only inside the cluster.
-For operator-side admin curls, port-forward CP:
+`loom_service` under `/api/v1` and `loom-web` at `/` on the configured
+public host. The Control Plane and LLM Gateway are reachable only inside the
+cluster; sandbox traffic reaches the Gateway through the singleton /
+gateway-router path, not public Ingress. For operator-side admin curls,
+port-forward CP:
 `kubectl port-forward deploy/loom-control-plane 8080:8080`.
 
 The SPA's launch model picker is BYO-provider aware. It reads
@@ -415,10 +417,9 @@ login state in `localStorage`.
 **Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
 node-slim builds the Vite bundle, nginx-alpine serves it.
 `deploy/k8s/web.yaml` is a 2-replica Deployment + Service on port
-80. The `loom-ingress` routes `loom.example.com/api/v1/*` to
-`loom-service:8090` and everything else to `loom-web:80`; nginx
-inside `loom-web` falls back to `index.html` for client-side
-React Router paths.
+80. The TLS `loom-ingress` routes `<ingress_host>/api/v1/*` to
+`loom-service:8090` and everything else to `loom-web:80`; nginx inside
+`loom-web` falls back to `index.html` for client-side React Router paths.
 
 For local dev: `cd web && npm run dev` runs Vite's dev server on
 :5173 with HMR. Vite's `server.proxy` config sends `/api/*` to
@@ -427,7 +428,9 @@ For local dev: `cd web && npm run dev` runs Vite's dev server on
 service pins `node:20.19.5-slim` and uses `npm ci` because
 `web/package-lock.json` is bind-mounted; avoid switching back to
 `npm install` or a floating Node tag unless lockfile stability has
-been re-verified.
+been re-verified. Dev compose host ports bind to
+`${LOOM_DEV_BIND_ADDR:-127.0.0.1}` by default; set
+`LOOM_DEV_BIND_ADDR=0.0.0.0` only for deliberate shared-dev exposure.
 
 ## Cross-cutting concerns
 

@@ -2,11 +2,15 @@
 # Operator-tunable knobs for `loom cluster render --config <FILE>`.
 # Each value below is the default; uncomment + edit to override.
 
-# Empty = no public gateway ingress (default, per #77 boundary).
-gateway_public_host = ""
 # Image tag applied to every loom-* image.
 image_tag = "0.7"
+# Optional cert-manager ClusterIssuer name for automatic TLS.
+ingress_cert_manager_cluster_issuer = ""
+# Kubernetes IngressClass used by the public Web/API ingress.
+ingress_class_name = "nginx"
 ingress_host = "loom.example.com"
+# TLS Secret name referenced by the public Web/API ingress.
+ingress_tls_secret_name = "loom-tls"
 minio_image = "minio/minio"
 minio_storage_gi = 500
 namespace = "loom"

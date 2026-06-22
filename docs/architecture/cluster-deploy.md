@@ -167,9 +167,9 @@ and the kind smoke runs it before `kubectl apply` — see #77.
 
 | Component | Public via Ingress | Reason |
 |---|---|---|
-| `loom-service` | Yes (default) — `https://<ingress_host>/api/v1/*` | The user-facing REST surface. |
-| `loom-web` | Yes (default) — `https://<ingress_host>/` | The React SPA. Replica count is 0 by default; operators scale up to enable. |
-| `loom-llm-gateway` | Opt-in — set `gateway_public_host` in `cluster-config.toml` to expose at its own host | Some agents inside sandboxes need a stable external URL. Default install keeps the gateway internal-only; operators opt in case by case. |
+| `loom-service` | Yes — `https://<ingress_host>/api/v1/*` | The user-facing REST surface and authenticated service-proxied downloads. |
+| `loom-web` | Yes — `https://<ingress_host>/` | The React SPA. Replica count is 0 by default; operators scale up to enable. |
+| `loom-llm-gateway` | **No** | LLM calls stay behind the sandbox singleton / gateway-router path. Public browser and CLI clients use `loom-service` under `/api/v1`. |
 | `loom-control-plane` | **No** — port-forward for operator-side admin curls | Worker claim path + admin token issuance must not be reachable from the public Internet. |
 | `loom-worker` | **No** | Worker pods talk only to control-plane via cluster DNS. |
 | `postgres`, `minio` | **No** | State + object store sit behind `loom_service` signed-URL routes. |
@@ -181,11 +181,19 @@ for concurrent sandbox/container cleanup. Compose-based dev and remote-worker
 deployments set `nofile=65536`; Kubernetes deployments should set an
 equivalent node/container-runtime limit before raising worker concurrency.
 
+The public Ingress is TLS-first. `cluster-config.toml` controls
+`ingress_host`, `ingress_class_name`, `ingress_tls_secret_name`, and optional
+`ingress_cert_manager_cluster_issuer`. With cert-manager, the rendered Ingress
+gets a `cert-manager.io/cluster-issuer` annotation; without cert-manager,
+operators pre-create the named TLS Secret.
+
 The audit checks:
 
 1. **Service type.** Every `Service` must be `ClusterIP`. `LoadBalancer` or `NodePort` would publish a pod to external traffic; the public surface is supposed to flow through the shared Ingress.
-2. **Ingress backends.** Only `loom-service` + `loom-web` are on the default allowlist. `loom-llm-gateway` joins the allowlist only when `gateway_public_host` is set in config.
-3. **`hostPort` declarations.** Any container port that binds to the node interface is flagged. The auditor catches accidental hostPort use; future revisions of the canonical templates that legitimately need hostPort (e.g., the gateway-router DaemonSet when shipped) will get an explicit allowlist entry.
+2. **Ingress TLS and paths.** Every Ingress must declare TLS. `loom-service` may appear only at `/api/v1`; `loom-web` may appear only at `/`; `defaultBackend` is rejected because it hides catch-all routing.
+3. **Ingress backends.** Only `loom-service` and `loom-web` are allowed. Control Plane, LLM Gateway, Postgres, MinIO, worker, egress, worker-token admin, and batch-runner bootstrap surfaces must not be reachable from public Ingress.
+4. **`hostPort` declarations.** Any container port that binds to the node interface is flagged unless it is the explicitly allowlisted `loom-gateway-router` path used by sandbox-Docker → gateway routing.
+5. **NetworkPolicy coverage.** Required Loom components must have a matching NetworkPolicy selector so Kubernetes does not fall back to namespace default allow-all.
 
 Operators run the audit ad-hoc with `loom cluster audit [--config cluster-config.toml]`; it exits 0 on clean, 1 on any violation. CI runs it on every PR touching the cluster CLI or templates via the `cluster-smoke` workflow.
 
@@ -239,7 +247,9 @@ loom cluster {render,preflight,up,down} --nodes HOSTFILE
     [--storage embedded|external]
     [--postgres-url URL] [--s3-endpoint URL] [--s3-bucket NAME]   # required if --storage external
     [--backup-target s3://...]                                    # required to enable backup CronJob
-    [--registry URL] [--ingress nginx|none] [--tls-cert PATH --tls-key PATH]
+    [--registry URL]                                               # image registry override
+    # ingress_host, ingress_class_name, ingress_tls_secret_name, and
+    # ingress_cert_manager_cluster_issuer live in cluster-config.toml.
     [--co-locate-workers-on-control]                              # opt-in; control node tainted by default
     [--etcd-encryption-attested | --allow-plaintext-etcd]         # one required
     [--worker-concurrency N] [--sandbox-cidr CIDR]

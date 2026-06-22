@@ -77,9 +77,11 @@ if TYPE_CHECKING:
 
     @dataclass(frozen=True)
     class ClusterConfig:
-        gateway_public_host: str = ""
         image_tag: str = "0.7"
+        ingress_cert_manager_cluster_issuer: str = ""
+        ingress_class_name: str = "nginx"
         ingress_host: str = "loom.example.com"
+        ingress_tls_secret_name: str = "loom-tls"
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"
@@ -93,6 +95,15 @@ else:
     ClusterConfig = _build_cluster_config_cls()
 
 
+_DEPRECATED_TOP_LEVEL_KEYS: dict[str, str] = {
+    "gateway_public_host": (
+        "gateway_public_host is no longer supported; public beta keeps "
+        "loom-llm-gateway internal-only. Remove it and route all public "
+        "clients through ingress_host + /api/v1."
+    ),
+}
+
+
 def load_cluster_config(path: Path | None) -> ClusterConfig:
     """Same semantics as before #146: empty/missing path → defaults;
     unknown top-level or nested keys raise loudly."""
@@ -101,6 +112,10 @@ def load_cluster_config(path: Path | None) -> ClusterConfig:
     if not path.exists():
         raise FileNotFoundError(f"cluster config not found: {path}")
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    deprecated = set(raw) & set(_DEPRECATED_TOP_LEVEL_KEYS)
+    if deprecated:
+        messages = [_DEPRECATED_TOP_LEVEL_KEYS[key] for key in sorted(deprecated)]
+        raise ValueError("; ".join(messages))
     field_names = {f.name for f in fields(ClusterConfig)}
     unknown = set(raw.keys()) - field_names
     if unknown:

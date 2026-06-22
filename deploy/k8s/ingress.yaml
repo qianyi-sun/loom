@@ -7,6 +7,11 @@ metadata:
     # gke-ingress, alb, etc.). Defaults assume nginx.
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
 spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - loom.example.com
+      secretName: loom-tls
   rules:
     # On `loom.example.com`:
     #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
@@ -41,3 +46,8 @@ spec:
   # reach the CP through cluster DNS (`http://loom-control-plane:8080`).
   # For operator-side admin curls, port-forward:
   #   kubectl port-forward deploy/loom-control-plane 8080:8080
+  #
+  # The LLM Gateway is also intentionally NOT exposed via public
+  # Ingress. Sandboxes reach it through the internal gateway-router /
+  # singleton path; public browser and CLI traffic goes through
+  # `loom-service` under `/api/v1`.
