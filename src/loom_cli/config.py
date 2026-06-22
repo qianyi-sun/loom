@@ -57,8 +57,8 @@ class LoomConfig:
     server_url: str | None = None
     # Bearer token for `server_url` API calls (set by `loom auth login`).
     # Stored in plain TOML — operators with shared-machine concerns should
-    # either restrict $XDG_CONFIG_HOME/loom/config.toml permissions or use
-    # env-var-only auth (LOOM_TOKEN, set per-shell, never persisted).
+    # either rely on the default 0600 config file mode or use env-var-only
+    # auth (LOOM_API_TOKEN, set per-shell, never persisted).
     auth_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
@@ -140,7 +140,11 @@ def load_config() -> LoomConfig:
 def save_config(cfg: LoomConfig) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        path.parent.chmod(0o700)
     path.write_text(tomli_w.dumps(cfg.to_toml_dict()))
+    if os.name != "nt":
+        path.chmod(0o600)
 
 
 def set_local_provider(

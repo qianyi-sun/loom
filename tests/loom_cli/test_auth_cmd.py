@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+from stat import S_IMODE
 from typing import Any
 
 import httpx
@@ -46,6 +47,23 @@ def test_login_with_env_persists_token(
     cfg = load_config()
     assert cfg.server_url == "https://loom.example.com"
     assert cfg.auth_token == "loom_admin_abcdef123456"
+
+
+def test_login_writes_config_file_owner_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MY_LOOM_TOKEN", "loom_api_owner_only_abcdef123456")
+
+    rc = main([
+        "auth", "login",
+        "--server", "https://loom.example.com",
+        "--token", "env:MY_LOOM_TOKEN",
+    ])
+
+    assert rc == 0
+    from loom_cli.config import config_path
+    config_file = config_path()
+    assert S_IMODE(config_file.stat().st_mode) == 0o600
 
 
 def test_login_strips_trailing_slash(
@@ -259,7 +277,8 @@ def test_whoami_when_not_logged_in_returns_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "not logged in" in err
-    assert "loom auth login --server URL --token env:LOOM_TOKEN" in err
+    assert "Create a team API token in the web UI" in err
+    assert "loom auth login --server URL --token env:LOOM_API_TOKEN" in err
 
 
 def test_whoami_prints_server_principal_team_scopes_and_prefix(
@@ -329,5 +348,41 @@ def test_whoami_rejected_token_returns_clear_error(
     err = capsys.readouterr().err
     assert "token rejected by server" in err
     assert "revoked, expired, or missing scope" in err
-    assert "loom auth login --server URL --token env:LOOM_TOKEN" in err
+    assert "loom auth login --server URL --token env:LOOM_API_TOKEN" in err
     assert raw_token not in err
+
+
+def test_whoami_auth_error_redacts_signed_url_and_token(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_token = "loom_api_plain_secret_abcdef123456"
+    monkeypatch.setenv("TOK", raw_token)
+    assert main([
+        "auth", "login",
+        "--server", "https://loom.test",
+        "--token", "env:TOK",
+    ]) == 0
+    capsys.readouterr()
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        403,
+        json={
+            "detail": (
+                "denied https://minio.internal/bucket/key?"
+                "X-Amz-Signature=secret-sig with token "
+                "loom_api_leaked_detail_abcdef"
+            ),
+        },
+    )
+
+    rc = main(["auth", "whoami"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "token rejected by server" in err
+    assert "minio.internal" not in err
+    assert "X-Amz-Signature=secret-sig" not in err
+    assert "loom_api_leaked_detail_abcdef" not in err
+    assert raw_token not in err
+    assert "[REDACTED:" in err

@@ -22,15 +22,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+from pathlib import Path
 from typing import Any, cast
 
+from loom.security.redaction import redact_mapping
 from loom_cli.providers_cmd import (
     _resolve_by_name,
     _run_with_error_handling,
 )
 from loom_cli.server_client import (
     assert_2xx,
+    assert_2xx_response,
     authed_client,
     require_logged_in,
 )
@@ -150,6 +154,11 @@ def _print_trial_summary(item: dict[str, Any]) -> None:
         print(f"finished_at:     {item['finished_at']}")
     if item.get("failure_reason"):
         print(f"failure_reason:   {item['failure_reason']}")
+
+
+def _dump_json(data: Any) -> None:
+    """Print JSON safely for public CLI output."""
+    print(json.dumps(redact_mapping(data), indent=2))
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -326,7 +335,7 @@ def _batch_list(args: argparse.Namespace) -> int:
         body = assert_2xx(resp, action="list batches")
         items = body["items"]
         if args.format == "json":
-            print(json.dumps(items, indent=2))
+            _dump_json(items)
             return 0
         if not items:
             print("(no batches — run `loom eval batch create`)")
@@ -358,7 +367,7 @@ def _batch_show(args: argparse.Namespace) -> int:
             resp = c.get(f"/api/v1/batches/{args.batch_id}")
         body = assert_2xx(resp, action=f"show batch {args.batch_id!r}")
         if args.format == "json":
-            print(json.dumps(body, indent=2))
+            _dump_json(body)
         else:
             _print_batch_summary(body)
         return 0
@@ -401,7 +410,7 @@ def _trial_list(args: argparse.Namespace) -> int:
         body = assert_2xx(resp, action="list trials")
         items = body["items"]
         if args.format == "json":
-            print(json.dumps(items, indent=2))
+            _dump_json(items)
             return 0
         if not items:
             print("(no trials)")
@@ -432,13 +441,128 @@ def _trial_show(args: argparse.Namespace) -> int:
             resp = c.get(f"/api/v1/trials/{args.trial_id}")
         body = assert_2xx(resp, action=f"show trial {args.trial_id!r}")
         if args.format == "json":
-            print(json.dumps(body, indent=2))
+            _dump_json(body)
         else:
             _print_trial_summary(body)
-            if body.get("atif_ready") and body.get("atif_url"):
-                print(f"atif_url:         {body['atif_url']}")
-            if body.get("trajectory_ready") and body.get("trajectory_url"):
-                print(f"trajectory_url:   {body['trajectory_url']}")
+            _print_trial_download_commands(body, args.trial_id)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _print_trial_download_commands(
+    body: dict[str, Any], trial_id: str,
+) -> None:
+    commands: list[tuple[str, str]] = []
+    if body.get("atif_ready"):
+        commands.append((
+            "atif",
+            f"loom eval trial download {shlex.quote(trial_id)} "
+            "--kind atif",
+        ))
+    if body.get("trajectory_ready"):
+        commands.append((
+            "trajectory",
+            f"loom eval trial download {shlex.quote(trial_id)} "
+            "--kind trajectory",
+        ))
+    artifacts = body.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            key = artifact.get("key")
+            if not isinstance(key, str) or not key:
+                continue
+            label = str(artifact.get("path") or key)
+            commands.append((
+                f"artifact {label}",
+                f"loom eval trial download {shlex.quote(trial_id)} "
+                f"--kind artifact --artifact-key {shlex.quote(key)}",
+            ))
+    if not commands:
+        return
+    print("downloads:")
+    for label, command in commands:
+        print(f"  {label:<16} {command}")
+
+
+def _trial_download(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        if args.kind == "artifact" and not args.artifact_key:
+            sys.stderr.write(
+                "error: --kind artifact requires --artifact-key.\n",
+            )
+            return 2
+        if args.kind != "artifact" and args.artifact_key:
+            sys.stderr.write(
+                "error: --artifact-key is only valid with --kind artifact.\n",
+            )
+            return 2
+
+        cfg = require_logged_in()
+        params: dict[str, Any] | None = None
+        if args.kind == "atif":
+            path = f"/api/v1/trials/{args.trial_id}/atif"
+            default_name = f"{args.trial_id}-atif.json"
+        elif args.kind == "trajectory":
+            path = f"/api/v1/trials/{args.trial_id}/trajectory/download"
+            default_name = f"{args.trial_id}-events.jsonl"
+        else:
+            path = f"/api/v1/trials/{args.trial_id}/artifacts/download"
+            params = {"key": args.artifact_key}
+            default_name = Path(args.artifact_key).name or (
+                f"{args.trial_id}-artifact"
+            )
+
+        output = Path(args.output) if args.output else Path(default_name)
+        with authed_client(cfg) as c:
+            resp = c.get(path, params=params)
+        assert_2xx_response(
+            resp, action=f"download {args.kind} for trial {args.trial_id!r}",
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(resp.content)
+        print(f"Downloaded {args.kind} to {output}")
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _usage(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        params: dict[str, Any] = {
+            "start": args.start,
+            "end": args.end,
+            "group_by": args.group_by,
+        }
+        if args.team_id is not None:
+            params["team_id"] = args.team_id
+        with authed_client(cfg) as c:
+            resp = c.get("/api/v1/usage", params=params)
+        body = assert_2xx(resp, action="fetch usage")
+        if args.format == "json":
+            _dump_json(body)
+            return 0
+        buckets = body.get("buckets") or []
+        if body.get("degraded"):
+            print("(usage unavailable: server returned degraded=true)")
+            return 0
+        if not buckets:
+            print("(no usage in range)")
+            return 0
+        print("start_at                      trials  success  failed  cost_usd  in_tok  out_tok")
+        for bucket in buckets:
+            print(
+                f"{bucket.get('start_at', '')!s:<29} "
+                f"{bucket.get('trial_count', 0):>6} "
+                f"{bucket.get('succeeded_count', 0):>8} "
+                f"{bucket.get('failed_count', 0):>7} "
+                f"{bucket.get('total_cost_usd', 0):>8} "
+                f"{bucket.get('llm_input_tokens', 0):>7} "
+                f"{bucket.get('llm_output_tokens', 0):>8}",
+            )
         return 0
 
     return _run_with_error_handling(_body)
@@ -591,11 +715,49 @@ def dispatch(argv: list[str]) -> int:
     p_tl.set_defaults(handler=_trial_list)
 
     p_ts = trial_sub.add_parser(
-        "show", help="Show trial details + ATIF/trajectory download URLs.",
+        "show", help="Show trial details + copyable download commands.",
     )
     p_ts.add_argument("trial_id", help="Trial UUID.")
     p_ts.add_argument("--format", choices=["text", "json"], default="text")
     p_ts.set_defaults(handler=_trial_show)
+
+    p_td = trial_sub.add_parser(
+        "download",
+        help="Download a trial ATIF, trajectory, or artifact through the public API.",
+    )
+    p_td.add_argument("trial_id", help="Trial UUID.")
+    p_td.add_argument(
+        "--kind",
+        choices=["atif", "trajectory", "artifact"],
+        required=True,
+        help="Object to download.",
+    )
+    p_td.add_argument(
+        "--artifact-key",
+        default=None,
+        help="Artifact key from `loom eval trial show`; required for --kind artifact.",
+    )
+    p_td.add_argument(
+        "--output",
+        default=None,
+        help="Destination path. Defaults to a filename derived from the trial/key.",
+    )
+    p_td.set_defaults(handler=_trial_download)
+
+    p_usage = sub.add_parser(
+        "usage",
+        help="Show usage and cost rollups from the public API.",
+    )
+    p_usage.add_argument("--start", required=True, help="Start date YYYY-MM-DD.")
+    p_usage.add_argument("--end", required=True, help="End date YYYY-MM-DD.")
+    p_usage.add_argument(
+        "--group-by",
+        choices=["day", "week", "month"],
+        default="day",
+    )
+    p_usage.add_argument("--team-id", default=None)
+    p_usage.add_argument("--format", choices=["table", "json"], default="table")
+    p_usage.set_defaults(handler=_usage)
 
     args = parser.parse_args(argv)
     return cast(int, args.handler(args))

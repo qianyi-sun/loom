@@ -195,11 +195,16 @@ knob you need.
    curl -H "Authorization: Bearer $TEAM_TOKEN" \
      "$LOOM_API/api/v1/trials/$TRIAL_ID" \
      | jq -r '.trajectory_url,.atif_url,.artifacts[].download_url'
+
+   loom eval trial show "$TRIAL_ID"
+   loom eval trial download "$TRIAL_ID" --kind atif --output atif.json
+   loom eval trial download "$TRIAL_ID" --kind trajectory --output events.jsonl
    ```
 
    Every returned URL should stay on the Loom API host, and a normal authorized
    `curl -L` against those URLs should return the object body without opening a
-   separate MinIO tunnel.
+   separate MinIO tunnel. The CLI should print download commands rather than
+   raw MinIO/S3 signed URLs.
 
 9. **Approve team registration requests.** Public registration is
    default-closed. A researcher can submit a request without a bearer token:
@@ -890,6 +895,8 @@ concrete command or UI action.
     artifact `download_url` entries from trial detail return object bodies. The
     URLs must stay on `/api/v1/trials/...`, not raw MinIO/S3 signed URLs, and
     cross-team callers must not be able to use owner-team artifact proxy URLs.
+    Verify the public CLI path with `loom eval trial download ...`; it should
+    write the object body locally without printing internal object-store URLs.
 11. **Provider error surfaces.** Temporarily rotate the provider key
     to an invalid value, re-run a trial, and confirm the SPA + API
     surface a clear `provider_error` reason rather than a generic 500. Confirm

@@ -124,6 +124,55 @@ become organization-visible through the separate Run Library work; ordinary
 batch/trial/detail/download routes remain current-team scoped until that
 feature adds explicit share-state checks.
 
+### Public server CLI flow
+
+From a fresh shell, authenticate with a scoped team API token from Team access:
+
+```bash
+export LOOM_API_TOKEN=loom_api_...
+loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN
+loom auth whoami
+```
+
+Provider keys also use indirection so secrets do not appear in shell history:
+
+```bash
+export OPENAI_API_KEY=sk-...
+loom providers create \
+  --name smoke-openai \
+  --type openai-compatible \
+  --base-url https://api.openai.com/v1 \
+  --api-key env:OPENAI_API_KEY
+loom providers test smoke-openai
+```
+
+Submit, monitor, inspect usage, and download through public `/api/v1` routes:
+
+```bash
+loom eval batch create \
+  --name public-cli-smoke \
+  --agent litellm \
+  --provider smoke-openai \
+  --model gpt-4o-mini \
+  --benchmark humaneval \
+  --n-per-task 1
+
+loom eval batch show <batch-id>
+loom eval trial list --state succeeded --limit 5
+loom eval usage --start 2026-06-01 --end 2026-06-30
+loom eval trial show <trial-id>
+loom eval trial download <trial-id> --kind atif --output atif.json
+loom eval trial download <trial-id> --kind trajectory --output events.jsonl
+loom eval trial download <trial-id> --kind artifact \
+  --artifact-key <artifact-key-from-trial-show> \
+  --output artifact.bin
+```
+
+Auth and permission errors use the same remediation hint across CLI subcommands.
+Text and JSON output redact raw bearer tokens, provider keys, internal service
+hosts, and signed object-store URLs. `loom eval trial show` prints copyable
+download commands instead of MinIO/S3 signed URLs.
+
 ## Default views and diagnostics
 
 The SPA defaults to readable summaries instead of raw API payloads.

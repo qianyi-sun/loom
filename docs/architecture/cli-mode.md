@@ -168,6 +168,32 @@ given path after `asyncio.gather` resolves. Lazy import — the TB-2
 sibling package is optional unless the flag is actually used. Missing
 package logs a warning, doesn't crash.
 
+## Public server subcommands
+
+`loom auth`, `loom providers`, and `loom eval` talk to a deployed Loom service
+through the public API. They do not require direct access to Control Plane, LLM
+Gateway, Postgres, MinIO, or worker routes.
+
+- `loom auth login --server URL --token env:LOOM_API_TOKEN` stores the public
+  server URL and scoped team API token in
+  `$XDG_CONFIG_HOME/loom/config.toml`. The config directory is owner-only and
+  the config file is written with mode `0600` on POSIX systems.
+- `loom auth whoami` calls `GET /api/v1/auth/whoami` and prints server, team,
+  role/scopes, and token prefix without printing raw token material.
+- `loom providers ...` manages team provider connections through
+  `/api/v1/provider-connections`; provider keys use `env:VAR`, `file:PATH`, or
+  stdin sources rather than literal argv values.
+- `loom eval batch ...`, `loom eval trial ...`, and `loom eval usage ...` use
+  `/api/v1/batches`, `/api/v1/trials`, and `/api/v1/usage`.
+- `loom eval trial download TRIAL_ID --kind atif|trajectory|artifact` downloads
+  through service-proxied `/api/v1/trials/...` routes. The CLI does not print
+  raw MinIO/S3 signed URLs; `trial show` prints download commands.
+
+All server-talking commands share the same not-logged-in and 401/403 handling:
+the message points back to Team access token setup and redacts bearer tokens,
+provider keys, signed URLs, and internal service hostnames from server detail
+text.
+
 ## `loom config` + `loom datasets`
 
 See [../user-guide.md](../user-guide.md) for the command reference.
@@ -175,9 +201,9 @@ Internals:
 
 - **Config** — `src/loom_cli/config.py`. XDG-aware loader/writer at
   `$XDG_CONFIG_HOME/loom/config.toml` (default
-  `~/.config/loom/config.toml`). `LoomConfig` dataclass with `tokens`
-  + `server_url`. `loom config show` redacts token values to
-  `<first2>***<last2>`.
+  `~/.config/loom/config.toml`). `LoomConfig` dataclass with upstream provider
+  `tokens`, deployed `server_url`, scoped `auth_token`, and local provider
+  entries. `loom config show` redacts token values to `<first2>***<last2>`.
 - **Environment** — `src/loom_cli/__main__.py` loads the nearest
   project `.env` on CLI startup, walking upward from CWD and stopping
   at the first git root or home directory. Loading uses

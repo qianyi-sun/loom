@@ -124,7 +124,7 @@ def test_run_resolves_provider_then_posts_trial(
             "id": _TRIAL_ID,
             "task_id": "humaneval/HumanEval/0",
             "state": "queued",
-            "agent_name": "claude-code",
+            "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
             "submitted_at": "2026-06-16T00:00:00Z",
         },
@@ -133,7 +133,7 @@ def test_run_resolves_provider_then_posts_trial(
         "eval", "run",
         "--provider", "openai-prod",
         "--model", "gpt-4o",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--task", "humaneval/HumanEval/0",
     ])
     assert rc == 0
@@ -152,7 +152,7 @@ def test_run_resolves_provider_then_posts_trial(
     assert body == {
         "task_id": "humaneval/HumanEval/0",
         "config": {
-            "agent_name": "claude-code",
+            "agent_name": "litellm",
             "agent_model": {
                 "provider": "openai",
                 "name": "gpt-4o",
@@ -177,7 +177,7 @@ def test_run_summary_uses_submitted_task_when_response_omits_task_id(
         "eval", "run",
         "--provider", "openai-prod",
         "--model", "gpt-4o",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--task", "hello-world",
     ])
 
@@ -201,7 +201,7 @@ def test_run_with_anthropic_provider_maps_type_to_provider(
         "eval", "run",
         "--provider", "anthropic-prod",
         "--model", "claude-opus-4-7",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--task", "humaneval/HumanEval/0",
     ])
     assert rc == 0
@@ -227,7 +227,7 @@ def test_run_agent_provider_override_wins_over_type_mapping(
         "eval", "run",
         "--provider", "together-prod",
         "--model", "meta-llama/Llama-3.1-70B-Instruct",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--task", "humaneval/HumanEval/0",
         "--agent-provider", "together",
     ])
@@ -258,7 +258,7 @@ def test_batch_create_agent_provider_override(
         "eval", "batch", "create",
         "--provider", "fireworks-prod",
         "--model", "accounts/fireworks/models/llama-v3p1-70b-instruct",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--benchmark", "humaneval",
         "--name", "fw-run",
         "--agent-provider", "fireworks_ai",
@@ -279,7 +279,7 @@ def test_run_unknown_provider_returns_1(
         "eval", "run",
         "--provider", "nope",
         "--model", "gpt-4o",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--task", "t",
     ])
     assert rc == 1
@@ -333,7 +333,7 @@ def test_batch_create_with_benchmark_shortcut(
         "eval", "batch", "create",
         "--provider", "openai-prod",
         "--model", "gpt-4o",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--benchmark", "humaneval",
         "--name", "smoke-run",
     ])
@@ -344,7 +344,7 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["name"] == "smoke-run"
     assert body["task_filter"] == {"benchmark_id": "humaneval"}
     assert body["trial_config"] == {
-        "agent_name": "claude-code",
+        "agent_name": "litellm",
         "agent_model": {
             "provider": "openai", "name": "gpt-4o", "source": "api",
         },
@@ -425,7 +425,7 @@ def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
         "eval", "batch", "create",
         "--provider", "openai-prod",
         "--model", "gpt-4o",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--benchmark", "humaneval",
         "--name", "smoke-run",
     ])
@@ -450,7 +450,7 @@ def test_batch_create_task_filter_json(
     rc = main([
         "eval", "batch", "create",
         "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "claude-code", "--task-filter", filt,
+        "--agent", "litellm", "--task-filter", filt,
         "--name", "first3",
     ])
     assert rc == 0
@@ -478,7 +478,7 @@ def test_batch_create_task_filter_at_path(
     rc = main([
         "eval", "batch", "create",
         "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "claude-code", "--task-filter", f"@{f}",
+        "--agent", "litellm", "--task-filter", f"@{f}",
         "--name", "n",
     ])
     assert rc == 0
@@ -493,7 +493,7 @@ def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
     rc = main([
         "eval", "batch", "create",
         "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "claude-code",
+        "--agent", "litellm",
         "--benchmark", "humaneval",
         "--task-filter", '{"benchmark_id":"humaneval"}',
         "--name", "n",
@@ -512,7 +512,7 @@ def test_batch_create_requires_benchmark_or_filter(
     rc = main([
         "eval", "batch", "create",
         "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "claude-code", "--name", "n",
+        "--agent", "litellm", "--name", "n",
     ])
     assert rc == 2
     assert "one of --benchmark or --task-filter" in capsys.readouterr().err
@@ -525,7 +525,7 @@ def test_batch_create_invalid_task_filter_json_rejected_at_argparse(
         main([
             "eval", "batch", "create",
             "--provider", "openai-prod", "--model", "gpt-4o",
-            "--agent", "claude-code",
+            "--agent", "litellm",
             "--task-filter", "{not json",
             "--name", "n",
         ])
@@ -546,7 +546,7 @@ def test_batch_create_forwards_optional_fields(
     rc = main([
         "eval", "batch", "create",
         "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "claude-code", "--benchmark", "humaneval",
+        "--agent", "litellm", "--benchmark", "humaneval",
         "--name", "n", "--description", "smoke",
         "--n-per-task", "2", "--backend", "fake",
     ])
@@ -654,7 +654,7 @@ def test_trial_list_warns_on_truncation(
             "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
             "finished_at": None, "attempt_count": 1,
             "aggregate_reward": 0.5, "cost_usd": 0.01,
-            "agent_name": "claude-code", "model": None,
+            "agent_name": "litellm", "model": None,
         }], "next_cursor": "opaque-cursor-token"},
     )
     rc = main(["eval", "trial", "list"])
@@ -746,7 +746,7 @@ def test_trial_list_with_task_id_filter(
             "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
             "finished_at": None, "attempt_count": 1,
             "aggregate_reward": 0.875, "cost_usd": 0.0123,
-            "agent_name": "claude-code",
+            "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
         }], "next_cursor": None},
     )
@@ -761,7 +761,7 @@ def test_trial_list_with_task_id_filter(
     assert mock_server[0].url.params.get("task_id") == "humaneval/HumanEval/0"
 
 
-def test_trial_show_renders_presigned_urls_when_ready(
+def test_trial_show_renders_public_download_commands_when_ready(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
@@ -772,20 +772,80 @@ def test_trial_show_renders_presigned_urls_when_ready(
             "started_at": "2026-06-16T00:01:00Z",
             "finished_at": "2026-06-16T00:02:00Z",
             "attempt_count": 1, "aggregate_reward": 1.0,
-            "cost_usd": 0.05, "agent_name": "claude-code",
+            "cost_usd": 0.05, "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
-            "atif_url": "https://minio.test/atif?sig=abc",
-            "trajectory_url": "https://minio.test/traj?sig=abc",
+            "atif_url": f"https://loom.test/api/v1/trials/{_TRIAL_ID}/atif",
+            "trajectory_url": (
+                f"https://loom.test/api/v1/trials/{_TRIAL_ID}"
+                "/trajectory/download"
+            ),
             "atif_ready": True,
             "trajectory_ready": True,
-            "artifacts": [],
+            "artifacts": [{
+                "path": "result.txt",
+                "key": f"team/{_TRIAL_ID}/artifacts/result.txt",
+                "download_url": (
+                    f"https://loom.test/api/v1/trials/{_TRIAL_ID}"
+                    "/artifacts/download?key=team/result.txt"
+                ),
+                "share_status": "shared",
+                "blocked_reason": None,
+            }],
         },
     )
     rc = main(["eval", "trial", "show", _TRIAL_ID])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "atif_url:" in out
-    assert "trajectory_url:" in out
+    assert "downloads:" in out
+    assert f"loom eval trial download {_TRIAL_ID} --kind atif" in out
+    assert f"loom eval trial download {_TRIAL_ID} --kind trajectory" in out
+    assert "--kind artifact" in out
+    assert "--artifact-key" in out
+
+
+def test_trial_show_redacts_legacy_signed_urls_in_text_output(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
+        200, json={
+            "id": _TRIAL_ID, "task_id": "t", "team_id": "x",
+            "state": "succeeded", "failure_reason": None,
+            "submitted_at": "2026-06-16T00:00:00Z",
+            "started_at": "2026-06-16T00:01:00Z",
+            "finished_at": "2026-06-16T00:02:00Z",
+            "attempt_count": 1, "aggregate_reward": 1.0,
+            "cost_usd": 0.05, "agent_name": "litellm",
+            "model": {"provider": "openai", "name": "gpt-4o"},
+            "atif_url": (
+                "https://minio.internal/atif.json?"
+                "X-Amz-Signature=secret-sig"
+            ),
+            "trajectory_url": (
+                "https://minio.internal/events.jsonl?"
+                "X-Amz-Signature=secret-sig"
+            ),
+            "atif_ready": True,
+            "trajectory_ready": True,
+            "artifacts": [{
+                "path": "secret.txt",
+                "key": "team/trial/artifacts/secret.txt",
+                "download_url": (
+                    "https://minio.internal/secret.txt?"
+                    "X-Amz-Signature=secret-sig"
+                ),
+                "share_status": "shared",
+                "blocked_reason": None,
+            }],
+        },
+    )
+
+    rc = main(["eval", "trial", "show", _TRIAL_ID])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "minio.internal" not in out
+    assert "X-Amz-Signature=secret-sig" not in out
+    assert "loom eval trial download" in out
 
 
 def test_trial_show_json_format(
@@ -798,8 +858,8 @@ def test_trial_show_json_format(
         "started_at": None, "finished_at": None,
         "attempt_count": 0, "aggregate_reward": None, "cost_usd": 0.0,
         "agent_name": None, "model": None,
-        "atif_url": "https://minio.test/atif?sig=abc",
-        "trajectory_url": "https://minio.test/traj?sig=abc",
+        "atif_url": "https://minio.internal/atif?X-Amz-Signature=abc",
+        "trajectory_url": "https://minio.internal/traj?X-Amz-Signature=abc",
         "atif_ready": False, "trajectory_ready": False, "artifacts": [],
     }
     mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
@@ -808,7 +868,115 @@ def test_trial_show_json_format(
     rc = main(["eval", "trial", "show", _TRIAL_ID, "--format", "json"])
     assert rc == 0
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed == payload
+    assert parsed["atif_url"] == "[REDACTED:signed-url]"
+    assert parsed["trajectory_url"] == "[REDACTED:signed-url]"
+
+
+def test_trial_download_atif_writes_public_route_response(
+    mock_server: MockServer, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[
+        ("GET", f"/api/v1/trials/{_TRIAL_ID}/atif")
+    ] = httpx.Response(200, content=b'{"atif":"ok"}')
+    output = tmp_path / "atif.json"
+
+    rc = main([
+        "eval", "trial", "download", _TRIAL_ID,
+        "--kind", "atif",
+        "--output", str(output),
+    ])
+
+    assert rc == 0
+    assert output.read_bytes() == b'{"atif":"ok"}'
+    assert mock_server[0].method == "GET"
+    assert mock_server[0].url.path == f"/api/v1/trials/{_TRIAL_ID}/atif"
+    out = capsys.readouterr().out
+    assert "Downloaded atif" in out
+    assert "minio" not in out
+
+
+def test_trial_download_artifact_requires_key_and_uses_proxy_route(
+    mock_server: MockServer, tmp_path: Path,
+) -> None:
+    mock_server.canned[
+        ("GET", f"/api/v1/trials/{_TRIAL_ID}/artifacts/download")
+    ] = httpx.Response(200, content=b"artifact-bytes")
+    output = tmp_path / "result.txt"
+
+    rc = main([
+        "eval", "trial", "download", _TRIAL_ID,
+        "--kind", "artifact",
+        "--artifact-key", "team/trial/artifacts/result.txt",
+        "--output", str(output),
+    ])
+
+    assert rc == 0
+    assert output.read_bytes() == b"artifact-bytes"
+    assert mock_server[0].method == "GET"
+    assert mock_server[0].url.path == (
+        f"/api/v1/trials/{_TRIAL_ID}/artifacts/download"
+    )
+    assert mock_server[0].url.params.get("key") == (
+        "team/trial/artifacts/result.txt"
+    )
+
+
+def test_trial_download_artifact_without_key_errors_before_http(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main([
+        "eval", "trial", "download", _TRIAL_ID,
+        "--kind", "artifact",
+    ])
+
+    assert rc == 2
+    assert "requires --artifact-key" in capsys.readouterr().err
+    assert len(mock_server.requests) == 0
+
+
+def test_eval_usage_calls_public_usage_route(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/usage")] = httpx.Response(
+        200,
+        json={
+            "degraded": False,
+            "buckets": [{
+                "start_at": "2026-06-01T00:00:00+00:00",
+                "end_at": None,
+                "trial_count": 2,
+                "trials_currently_succeeded": 1,
+                "trials_currently_failed": 1,
+                "succeeded_count": 1,
+                "failed_count": 1,
+                "total_cost_usd": 0.125,
+                "llm_input_tokens": 100,
+                "llm_output_tokens": 50,
+                "daytona_compute_seconds": 0.0,
+                "daytona_cost_usd": 0.0,
+                "modal_compute_seconds": 0.0,
+                "modal_cost_usd": 0.0,
+                "cloud_compute_seconds": 0.0,
+                "cloud_cost_usd": 0.0,
+            }],
+        },
+    )
+
+    rc = main([
+        "eval", "usage",
+        "--start", "2026-06-01",
+        "--end", "2026-06-02",
+        "--group-by", "day",
+    ])
+
+    assert rc == 0
+    assert mock_server[0].method == "GET"
+    assert mock_server[0].url.path == "/api/v1/usage"
+    assert mock_server[0].url.params.get("start") == "2026-06-01"
+    assert mock_server[0].url.params.get("end") == "2026-06-02"
+    out = capsys.readouterr().out
+    assert "2026-06-01" in out
+    assert "0.125" in out
 
 
 # ──────────────────────────────────────────────────────────────────────

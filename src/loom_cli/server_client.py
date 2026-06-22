@@ -16,7 +16,14 @@ from typing import Any
 
 import httpx
 
+from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.config import LoomConfig, load_config
+
+LOGIN_HINT = (
+    "Create a team API token in the web UI, then run "
+    "`export LOOM_API_TOKEN=loom_api_...` and "
+    "`loom auth login --server URL --token env:LOOM_API_TOKEN`."
+)
 
 
 class NotLoggedInError(Exception):
@@ -32,8 +39,7 @@ def require_logged_in() -> LoomConfig:
     cfg = load_config()
     if cfg.server_url is None or cfg.auth_token is None:
         raise NotLoggedInError(
-            "not logged in. Run `loom auth login --server URL "
-            "--token env:LOOM_TOKEN` first.",
+            f"not logged in. {LOGIN_HINT}",
         )
     return cfg
 
@@ -70,23 +76,38 @@ def assert_2xx(
     """If response is 2xx, return the parsed JSON. Otherwise raise
     HttpStatusError with a printable message naming the action. The
     handler's outer try/except prints to stderr + returns 1."""
+    assert_2xx_response(response, action=action)
+    if response.status_code == 204:  # no content
+        return {}
+    return response.json()  # type: ignore[no-any-return]
+
+
+def assert_2xx_response(
+    response: httpx.Response, *, action: str,
+) -> httpx.Response:
+    """Return a successful response, otherwise raise a redacted CLI error."""
     if response.status_code // 100 != 2:
-        try:
-            body = response.json()
-            detail = body.get("detail") if isinstance(body, dict) else body
-        except Exception:
-            detail = response.text or "(no body)"
+        detail = _response_detail(response)
         if response.status_code in {401, 403}:
             raise HttpStatusError(
                 f"token rejected by server while trying to {action}: "
-                "revoked, expired, or missing scope. Run `loom auth "
-                "login --server URL --token env:LOOM_TOKEN` first.\n"
+                "revoked, expired, or missing scope. "
+                f"{LOGIN_HINT}\n"
                 f"  {detail}",
             )
         raise HttpStatusError(
             f"failed to {action}: HTTP {response.status_code}\n"
             f"  {detail}",
         )
-    if response.status_code == 204:  # no content
-        return {}
-    return response.json()  # type: ignore[no-any-return]
+    return response
+
+
+def _response_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+        detail = body.get("detail") if isinstance(body, dict) else body
+    except Exception:
+        detail = response.text or "(no body)"
+    if isinstance(detail, str):
+        return redact_text(detail)
+    return str(redact_mapping(detail))

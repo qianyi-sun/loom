@@ -279,11 +279,17 @@ loom eval batch create --agent oracle --name N [--benchmark B | --task-filter JS
 loom eval batch create --provider N --model M --agent A --name N
     [--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]
 loom eval batch {list,show,cancel}
+loom eval usage --start YYYY-MM-DD --end YYYY-MM-DD [--group-by day|week|month]
 loom eval trial {list,show}
-loom eval trial show TRIAL_ID     # includes service atif_url + trajectory_url when ready
+loom eval trial show TRIAL_ID
+loom eval trial download TRIAL_ID --kind atif --output atif.json
+loom eval trial download TRIAL_ID --kind trajectory --output events.jsonl
+loom eval trial download TRIAL_ID --kind artifact --artifact-key KEY --output artifact.bin
 ```
 
 Argv hygiene: every secret-bearing flag accepts only `env:VAR`, `file:PATH`, or `-` (stdin). Literals are rejected at argparse-time.
+CLI text/JSON output redacts raw bearer tokens, provider keys, internal service
+hostnames, and raw signed object-store URLs.
 
 `loom run` (existing, local-stateless) stays. The distinction: `loom run` runs one trial on your machine with no server; `loom eval` submits to a deployed Loom (batches, persistence, sharing).
 

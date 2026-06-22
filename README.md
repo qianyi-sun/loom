@@ -224,7 +224,7 @@ URLs printed at the end of `loom service up`:
 Dev artifact, ATIF, and trajectory downloads are proxied through
 `loom_service`. Links returned by `GET /api/v1/trials/{id}` stay on the API
 host, so browser and host CLI users do not need direct access to the MinIO S3
-port.
+port. The CLI prints download commands instead of raw signed URLs.
 
 Submit a trial directly via the REST surface:
 
@@ -232,6 +232,8 @@ Submit a trial directly via the REST surface:
 export LOOM_API_TOKEN=loom_api_...   # create in Team access → API tokens
 loom auth login --server http://localhost:8090 --token env:LOOM_API_TOKEN
 loom auth whoami
+loom eval usage --start 2026-06-01 --end 2026-06-30
+loom eval trial download <trial-id> --kind atif --output atif.json
 
 curl -X POST http://localhost:8090/api/v1/trials \
   -H "Authorization: Bearer $LOOM_API_TOKEN" \
