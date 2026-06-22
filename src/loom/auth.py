@@ -31,6 +31,31 @@ from loom.db.schema import Token
 
 _STEP_JWT_PREFIX = "loom_step_"
 
+_ROLE_SCOPES: dict[str, list[str]] = {
+    "viewer": ["read:own"],
+    "member": ["read:own", "submit"],
+    "owner": [
+        "read:own",
+        "submit",
+        "tokens:manage",
+        "providers:manage",
+        "team:manage",
+    ],
+    "platform_admin": ["admin:platform"],
+}
+
+
+def role_scopes(role: str) -> list[str]:
+    """Return the service scopes granted by a browser user role."""
+    try:
+        return list(_ROLE_SCOPES[role])
+    except KeyError as exc:
+        raise ValueError(f"unknown user role: {role}") from exc
+
+
+def is_platform_admin_role(role: str | None) -> bool:
+    return role == "platform_admin"
+
 
 @dataclass(frozen=True)
 class AuthContext:
@@ -52,6 +77,13 @@ class AuthContext:
     # - Trials whose Trial.provider_connection_id is NULL (e.g. local
     #   adapters that don't route through the gateway facade)
     provider_connection_id: UUID | None = None
+    # Browser-session principal fields (#326). They stay None for
+    # bearer/worker/step auth so the existing token path remains stable.
+    user_id: UUID | None = None
+    role: str | None = None
+    session_hash: bytes | None = None
+    csrf_hash: bytes | None = None
+    auth_kind: str = "bearer"
 
 
 def mint_step_jwt(

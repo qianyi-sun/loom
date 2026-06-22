@@ -109,6 +109,16 @@
     "default": "0",
     "required": false
   },
+  "task_image_build_max_bytes": {
+    "annotation": "<class 'int'>",
+    "default": "536870912",
+    "required": false
+  },
+  "task_image_build_max_files": {
+    "annotation": "<class 'int'>",
+    "default": "2000",
+    "required": false
+  },
   "token": {
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",

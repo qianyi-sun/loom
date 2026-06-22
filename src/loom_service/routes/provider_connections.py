@@ -40,7 +40,7 @@ from loom.security.secret_store import (
     SecretStore,
     SecretStoreError,
 )
-from loom_service.auth_guards import is_admin
+from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.provider_connections_service import (
     InvalidBaseUrlError,
@@ -315,6 +315,18 @@ async def _get_active_connection(
     return row
 
 
+def _require_browser_user_provider_management(ctx: AuthContext) -> None:
+    """Owner-gate provider credential/catalog mutations for sessions.
+
+    Legacy bearer team tokens keep their pre-#326 behavior until scoped CLI/API
+    tokens land in #328. Browser users must carry owner-derived
+    `providers:manage` before they can create, rotate, test, refresh, hide, or
+    delete provider connections and model catalog entries.
+    """
+    if ctx.type == "user":
+        require_scope(ctx, "providers:manage")
+
+
 async def _team_allows_private(session: AsyncSession, team_id: UUID) -> bool:
     """Read the team's allow_private_endpoints flag. Missing TeamQuota
     row = strict default (False). Routes that haven't seen the team
@@ -341,6 +353,7 @@ async def create_connection(
     payload: ProviderConnectionCreate, sc: SessionAndCtx,
 ) -> ProviderConnectionResponse:
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     if ctx.team_id is None:
         raise HTTPException(
             status_code=400,
@@ -482,6 +495,7 @@ async def update_connection(
     sc: SessionAndCtx,
 ) -> ProviderConnectionResponse:
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     if ctx.team_id is None and not is_admin(ctx):
         raise HTTPException(
             status_code=400,
@@ -575,6 +589,7 @@ async def test_connection(
     and passed only in the probe request's headers.
     """
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
 
     api_key = await _get_provider_api_key(session, row)
@@ -645,6 +660,7 @@ async def create_manual_model(
     upstream refresh does not return the id.
     """
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
     now = datetime.now(UTC)
     capabilities = dict(payload.capabilities)
@@ -711,6 +727,7 @@ async def refresh_models(
     the cache is left untouched (no partial commits).
     """
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
 
     api_key = await _get_provider_api_key(session, row)
@@ -858,6 +875,7 @@ async def hide_model(
     hints to run /refresh first when this happens.
     """
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
     cache_row = (await session.execute(
         select(ProviderModelCache).where(
@@ -897,6 +915,7 @@ async def unhide_model(
     404 if the model isn't in the cache.
     """
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
     cache_row = (await session.execute(
         select(ProviderModelCache).where(
@@ -939,6 +958,7 @@ async def delete_connection(
     refs whose owning connection has been deleted for > cache TTL.
     """
     session, ctx = sc
+    _require_browser_user_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
     await session.execute(
         update(ProviderConnection)

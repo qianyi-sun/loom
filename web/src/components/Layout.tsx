@@ -1,7 +1,7 @@
 /**
  * App shell. Sidebar on the left, scrollable main content area on the
  * right. Unauthenticated visitors are redirected to /settings (the
- * token-paste page); they see a centered card without the sidebar so
+ * sign-in page); they see a centered card without the sidebar so
  * the blank state isn't confusing.
  */
 import { Navigate, Outlet, useLocation } from "react-router-dom";
@@ -10,15 +10,19 @@ import { useAuth } from "../auth/useAuth";
 import NavBar from "./NavBar";
 
 export default function Layout(): JSX.Element {
-  const { token, isAdmin } = useAuth();
+  const { isAuthenticated, isLoading, isAdmin } = useAuth();
   const loc = useLocation();
   const isSettings = loc.pathname.startsWith("/settings");
 
-  if (!token && !isSettings) {
+  if (isLoading) {
+    return <div className="min-h-screen bg-slate-50" />;
+  }
+
+  if (!isAuthenticated && !isSettings) {
     return <Navigate to="/settings" replace />;
   }
 
-  if (!token) {
+  if (!isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-md">

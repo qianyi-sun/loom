@@ -1,14 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, apiFetch, setUnauthorizedHandler } from "../api/client";
+import { api, apiFetch, setCsrfToken, setUnauthorizedHandler } from "../api/client";
 
 describe("apiFetch", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    setCsrfToken(null);
     vi.restoreAllMocks();
   });
 
-  it("attaches bearer token from localStorage", async () => {
+  it("uses cookie credentials and ignores localStorage bearer tokens", async () => {
     window.localStorage.setItem("loom_token", "abc");
     const spy = vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), {
@@ -19,21 +20,23 @@ describe("apiFetch", () => {
     await apiFetch("/api/v1/health");
     expect(spy).toHaveBeenCalled();
     const init = spy.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer abc",
-    );
+    expect("Authorization" in (init.headers as object)).toBe(false);
+    expect(init.credentials).toBe("include");
   });
 
-  it("does NOT attach Authorization header when no token", async () => {
+  it("attaches CSRF header on unsafe requests from the in-memory token", async () => {
+    setCsrfToken("csrf-123");
     const spy = vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response("{}", {
+      new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
     );
-    await apiFetch("/api/v1/health");
+    await apiFetch("/api/v1/tokens", { method: "POST", body: "{}" });
     const init = spy.mock.calls[0][1] as RequestInit;
-    expect("Authorization" in (init.headers as object)).toBe(false);
+    expect((init.headers as Record<string, string>)["X-Loom-CSRF"]).toBe(
+      "csrf-123",
+    );
   });
 
   it("calls unauthorized handler on 401", async () => {
@@ -70,7 +73,6 @@ describe("apiFetch", () => {
   });
 
   it("sends admin actor header when approving a team registration", async () => {
-    window.localStorage.setItem("loom_token", "loom_admin_secret");
     const spy = vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ registration: { id: "reg-1" } }), {
         status: 200,
@@ -93,7 +95,7 @@ describe("apiFetch", () => {
 
 describe("provider connection management endpoints", () => {
   beforeEach(() => {
-    window.localStorage.setItem("loom_token", "t");
+    setCsrfToken("csrf-xyz");
     vi.stubGlobal("fetch", vi.fn());
   });
 

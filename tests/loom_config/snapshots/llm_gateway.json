@@ -44,6 +44,31 @@
     "default": "None",
     "required": false
   },
+  "llm_retry_base_backoff_sec": {
+    "annotation": "<class 'float'>",
+    "default": "0.5",
+    "required": false
+  },
+  "llm_retry_budget_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "llm_retry_jitter_sec": {
+    "annotation": "<class 'float'>",
+    "default": "0.25",
+    "required": false
+  },
+  "llm_retry_max_attempts": {
+    "annotation": "<class 'int'>",
+    "default": "3",
+    "required": false
+  },
+  "llm_retry_max_backoff_sec": {
+    "annotation": "<class 'float'>",
+    "default": "4.0",
+    "required": false
+  },
   "log_level": {
     "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
     "default": "'info'",

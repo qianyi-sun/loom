@@ -91,6 +91,31 @@ Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
 `docker compose version` before `loom service up`.
 
+## Web sessions and teams
+
+When Loom is served as a web platform, the SPA uses browser user sessions.
+Users sign in from Settings with an email/login challenge flow; the service sets
+an HttpOnly session cookie. Auth responses return a CSRF token that the SPA
+keeps in memory; the browser sends cookies automatically, and mutating requests
+include the CSRF header. You should not paste a raw bearer token into the
+production SPA.
+
+Your current team controls execution, cost, provider credentials, quotas,
+members, and team API tokens. Roles are enforced by the API:
+
+- `viewer` can read the current team's batches, trials, provider summaries, and
+  usage.
+- `member` can also submit work for the current team.
+- `owner` can manage team API tokens and provider connections.
+- `platform_admin` is an operator role with cross-team inspection/admin access.
+
+The existing CLI still uses team bearer tokens for service workflows until the
+scoped public CLI token flow lands. Create or revoke those tokens from Settings
+only as a team owner. Completed run metadata and safe artifacts will become
+organization-visible through the separate Run Library work; ordinary
+batch/trial/detail/download routes remain current-team scoped until that feature
+adds explicit share-state checks.
+
 ## Default views and diagnostics
 
 The SPA defaults to readable summaries instead of raw API payloads.

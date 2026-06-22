@@ -31,6 +31,11 @@ def test_env_vars_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     # Forward-compat defaults are stable.
     assert s.signed_url_expiry_sec == 3600
     assert s.batch_runner_batch_size == 50
+    assert s.auth_session_cookie_name == "loom_session"
+    assert s.auth_csrf_header_name == "X-Loom-CSRF"
+    assert s.auth_session_ttl_sec == 604800
+    assert s.auth_login_challenge_ttl_sec == 900
+    assert s.auth_return_login_token is False
     # Dev-reload defaults off so production never accidentally
     # ships with a file-watcher in each container.
     assert s.dev_reload is False

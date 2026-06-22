@@ -77,6 +77,8 @@ class _SessionContext:
 async def test_authed_session_passes_app_admin_verifier() -> None:
     verifier = AdminSecretVerifier.from_token(RAW_ADMIN_TOKEN)
     request = SimpleNamespace(
+        method="GET",
+        cookies={},
         app=SimpleNamespace(
             state=SimpleNamespace(
                 admin_secret_verifier=verifier,

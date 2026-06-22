@@ -1,11 +1,12 @@
 # Auth And Team Registration Implementation Spec
 
 This spec turns the [auth threat model](auth-threat-model.md) into the shipped
-implementation for issue #10. Singleton admin secret verification now covers
-`loom_service`, the Control Plane, and the LLM Gateway admin rate-card surface;
-team registration APIs, admin approval/rejection, backend audit events, SPA
-registration review, operator secret commands, and DB-admin removal are in
-place.
+implementation baseline. The original issue #10 scope added singleton admin
+secret verification, default-closed team registration, admin review, audit
+events, operator secret commands, and DB-admin removal. Issue #326 extends that
+baseline with browser users, team memberships, role-derived permissions,
+current-team context, HttpOnly session cookies, and CSRF protection for the
+invite-only public platform track.
 
 ## Goals
 
@@ -14,6 +15,11 @@ place.
 - Keep team and worker tokens database-backed, but prevent team tokens from
   creating admin credentials or escaping their team scope.
 - Add a default-closed team registration path with admin approval.
+- Add persisted browser users, team memberships, session rows, and current-team
+  context for the SPA.
+- Enforce viewer/member/owner/platform-admin semantics server-side while
+  preserving existing team bearer tokens for CLI/backward compatibility.
+- Protect browser-session mutations with CSRF validation.
 - Record durable audit events for admin mutations before returning success.
 - Provide first-run and rotation operator commands that do not print secrets by
   default.
@@ -22,9 +28,14 @@ place.
 
 ## Non-Goals
 
-- SSO, SAML, OIDC, or per-user RBAC inside a team.
-- Production cookie migration for the SPA. Token-in-localStorage remains a
-  known development-mode risk and must be handled by a sibling issue.
+- SSO, SAML, or OIDC.
+- Invite acceptance and access-request workflows; those belong to #327 and will
+  create users/memberships against this schema.
+- Scoped public CLI/API tokens; those belong to #328. Legacy team bearer tokens
+  stay supported until that replacement lands.
+- Org-wide completed-result sharing and artifact reuse; those belong to #336 and
+  must use explicit Run Library/share-state checks instead of weakening existing
+  team-scoped execution/control routes.
 - Automated email delivery for team credentials.
 - Changing step-scoped sandbox JWTs or gateway provider egress controls.
 
@@ -50,13 +61,30 @@ flowchart TD
 | Principal | Auth source | Scope | Notes |
 | --- | --- | --- | --- |
 | Admin | File-backed singleton secret | Global administration | Compared in memory with `hmac.compare_digest`; not stored in `tokens`. |
+| Browser user | `user_sessions` row plus `loom_session` cookie | Current team role | Normal SPA identity. The raw session secret is HttpOnly; unsafe requests must send the CSRF header. |
 | Team | `tokens` row with `type='team'` | One team | Can submit and read own resources according to scopes. |
 | Worker | `tokens` row with `type='worker'` | Internal worker APIs | Not accepted by `loom_service` user/admin routes. |
 | Step session | `loom_step_<jwt>` | One trial step | Gateway-only runtime token, out of scope for #10. |
 
 `AuthContext.type == "admin"` continues to represent admin authority for route
 code, but the admin branch is derived from the singleton secret rather than a
-database `Token` row.
+database `Token` row. Browser users use `AuthContext.type == "user"`; a
+`platform_admin` user role gets the same cross-team inspection/admin wildcard
+without making the singleton admin secret a browser identity.
+
+### Browser User Roles
+
+| Role | Scopes | Intended use |
+| --- | --- | --- |
+| `viewer` | `read:own` | Read-only access to the current team's execution/control resources. |
+| `member` | `read:own`, `submit` | Submit team work without managing credentials or tokens. |
+| `owner` | `read:own`, `submit`, `tokens:manage`, `providers:manage`, `team:manage` | Manage team API tokens, provider connections, and team-admin surfaces exposed by the service. |
+| `platform_admin` | `admin:platform` | Global operator/admin user for inspection and incident response. |
+
+The team boundary remains the execution, cost, credential, quota, member, and
+API-token boundary. Completed run metadata and safe artifacts are planned to be
+organization-visible through #336's Run Library only after explicit
+redaction/share-state checks pass.
 
 ## Admin Secret File
 
@@ -149,6 +177,62 @@ Admin mutations must write the audit row in the same database transaction as the
 mutation when both rows live in the same database. If the audit write fails, the
 mutation fails.
 
+Issue #326 adds the browser identity tables:
+
+### `users`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Stable user id. |
+| `email` | text | Unique case-insensitive identity key. |
+| `display_name` | text nullable | UI label when available. |
+| `is_platform_admin` | bool | Grants platform-admin session semantics. |
+| `created_at`, `updated_at` | timestamptz | Server timestamps. |
+
+### `team_memberships`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `team_id` | UUID | Team boundary for execution/cost/credentials/quota/tokens. |
+| `user_id` | UUID | User assigned to the team. |
+| `role` | text | `owner`, `member`, or `viewer`. |
+| `created_at`, `updated_at` | timestamptz | Server timestamps. |
+
+The primary key is `(team_id, user_id)`. Normal users must have a membership
+before selecting a current team. Platform-admin users can inspect across teams
+but should still choose a current team for ordinary submission flows.
+
+### `user_sessions`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Session row id. |
+| `user_id` | UUID | Browser user. |
+| `session_hash` | bytea | SHA-256 of the raw `loom_session` value. |
+| `csrf_hash` | bytea | SHA-256 of the current CSRF token. |
+| `current_team_id` | UUID nullable | Active team context. |
+| `expires_at`, `revoked_at` | timestamptz | Expiry and logout state. |
+| `created_at`, `updated_at` | timestamptz | Server timestamps. |
+
+Only hashed session and CSRF secrets are persisted. The raw session secret is
+returned only as an HttpOnly cookie; the raw CSRF secret is returned in auth
+JSON responses and kept in SPA memory so same-site JavaScript can prove
+mutation intent without storing that secret in a browser-readable cookie.
+
+### `login_challenges`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Challenge row id. |
+| `user_id` | UUID | Existing user. |
+| `challenge_hash` | bytea | SHA-256 of the one-time login token. |
+| `expires_at`, `consumed_at` | timestamptz | Challenge validity. |
+| `created_at` | timestamptz | Server timestamp. |
+
+Unknown-email login starts return the same public response as known-email starts
+and do not reveal whether a user exists. Until email delivery lands, development
+and tests may enable a setting that returns the raw login token in the response.
+
 ## API Contract
 
 ### Public Registration
@@ -200,6 +284,43 @@ the last event id as the next cursor. Team users never see this endpoint. Raw
 tokens, provider secrets, request bodies, and artifact paths must not appear in
 audit metadata.
 
+### Browser Session Auth
+
+`POST /api/v1/auth/login/start`
+
+Accepts `{ "email": "user@example.com" }` and always returns
+`{ "status": "sent" }`. When `LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN=true`, the
+response also includes `login_token` for local development and automated tests.
+
+`POST /api/v1/auth/login/complete`
+
+Accepts `{ "token": "loom_login_..." }`, consumes the one-time challenge, sets
+the HttpOnly `loom_session` cookie, and returns the same shape as `/auth/me`
+plus `csrf_token`.
+
+`GET /api/v1/auth/me`
+
+Returns the browser user, available teams, current team, current role, scopes,
+platform-admin flag, and a freshly rotated `csrf_token`. Bearer tokens are not
+accepted as browser identity for this route.
+
+`POST /api/v1/auth/team`
+
+Switches the current team when the user is a member of the target team. This is
+a mutating browser-session route and must include the configured CSRF header.
+The response includes a freshly rotated `csrf_token`.
+
+`POST /api/v1/auth/refresh` and `POST /api/v1/auth/logout`
+
+Refresh extends the session, rotates both the session cookie and CSRF state,
+and returns a fresh `csrf_token`. Logout revokes the session row and clears the
+session cookie.
+
+Every unsafe method authenticated by a browser session requires the configured
+CSRF header to match the server-side CSRF hash for that session. Bearer token
+requests keep their existing Authorization-header behavior and are not subject
+to browser CSRF.
+
 ## Token Route Changes
 
 `POST /api/v1/tokens` rejects `type='admin'` and any requested `admin:*` scope
@@ -210,10 +331,17 @@ Team-token behavior stays database-backed:
 
 - team callers can mint only same-team `read:own` and `submit` tokens;
 - admin callers can mint team tokens for approved teams;
+- browser users must have the owner-derived `tokens:manage` scope before they
+  can mint or revoke team tokens through the SPA/API;
 - admin callers must send `X-Loom-Admin-Actor` for token mint/revoke so the
   action can be written to `admin_audit_events`;
 - token responses reveal raw token values only on creation;
 - token list/detail responses reveal only hash prefixes.
+
+Provider connection creation, key rotation, provider tests, model refresh,
+manual model insertion, hide/unhide, and delete are similarly owner-gated for
+browser users through `providers:manage`. Legacy bearer team tokens retain their
+pre-#326 behavior until scoped CLI/API tokens land in #328.
 
 Migration `0024_revoke_db_admin_tokens` revokes active legacy
 `Token.type='admin'` rows and any DB token carrying `admin:*` scopes. The auth
@@ -240,15 +368,24 @@ verify old tokens fail.
 
 ## SPA Contract
 
-The first implementation can keep bearer-token login. The admin SPA needs only
-three additions for #10:
+The production SPA uses browser user sessions, not pasted bearer tokens in
+localStorage. On load, the SPA calls `/api/v1/auth/me`; a `401` means signed
+out, and any later `401` clears cached user/team data. The shared API client
+always sends `credentials: "include"` and copies the in-memory CSRF token from
+auth responses into the configured header for unsafe methods.
 
-- a pending team registration table;
-- approve/reject actions that require an admin actor string;
-- a one-time token reveal state after approval, with clear copy/download affordance.
+Settings is the session surface:
 
-HttpOnly cookie auth, CSRF protection, and per-user admin identity are separate
-production UX/security issues and must not block the singleton-admin backend.
+- signed-out users enter an email and then a login token/link;
+- signed-in users see their user, current team, role, platform-admin flag, and
+  team list;
+- team switching clears cached queries because the current-team context changes
+  authorization and result scope;
+- owner users can manage team API tokens/provider credentials surfaced in this
+  PR; member/viewer users see server-side 403s for those mutations.
+
+The legacy Admin Access page and singleton admin secret remain operator tools.
+They are not normal browser identity for public users.
 
 ## Delivery Slices
 
@@ -267,6 +404,9 @@ production UX/security issues and must not block the singleton-admin backend.
 6. **DB-admin removal:** reject admin token/admin-scope creation, revoke
    existing DB admin rows in migration, remove the fallback, and keep seed data
    on team/worker tokens only.
+7. **User sessions/RBAC:** `users`, `team_memberships`, `user_sessions`, and
+   `login_challenges`, plus `/auth/*` routes, CSRF checks, current-team context,
+   SPA session UX, and route-level owner gates for token/provider management.
 
 ## Test Requirements
 
@@ -276,6 +416,9 @@ production UX/security issues and must not block the singleton-admin backend.
   is missing, malformed, or permission-unsafe.
 - Auth tests proving singleton admin succeeds, wrong admin token fails, team
   tokens still work, and DB admin rows are rejected.
+- User-session tests for login start/complete, `/auth/me`, logout, refresh,
+  team switch, unknown-email non-disclosure, CSRF denial, role-derived scopes,
+  and cross-team denial.
 - API tests for closed-mode registration, duplicate pending names, approve,
   reject, one-time token reveal, and team-token usability after approval.
 - Audit tests proving admin mutations fail if audit insertion fails, team users
@@ -293,3 +436,8 @@ production UX/security issues and must not block the singleton-admin backend.
 - Backend audit is present for #10 registration review and service token admin
   mutations; broader admin mutation coverage should be handled by follow-up
   issues instead of silently claiming complete platform-wide audit.
+- Browser sessions must set HttpOnly, SameSite cookies. Production deployments
+  must use Secure cookies by running with `LOOM_ENV=production` behind HTTPS.
+- Until #336 lands, existing batch/trial/artifact execution and control routes
+  remain owner-team scoped. Org-wide completed-result sharing must be added as
+  explicit Run Library behavior with redaction/share-state enforcement.

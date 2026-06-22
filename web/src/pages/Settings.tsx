@@ -1,12 +1,4 @@
-/**
- * Settings page = login (when signed-out) + token paste + token list.
- * The page renders inside the `Layout` shell — when there's no token,
- * the layout switches into the centered card mode so this page reads
- * as a focused sign-in screen rather than a sidebar app shell.
- *
- * The Plan 21 read API only exposes list and revoke; mint goes into
- * Plan 22 (writes).
- */
+/** Session sign-in and team token management. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -17,29 +9,52 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
-import { Textarea } from "../components/Input";
+import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 
 export default function Settings(): JSX.Element {
-  const { token, setToken, clearToken, isAdmin, tokenError } = useAuth();
-  const [pasted, setPasted] = useState("");
+  const {
+    me,
+    isAuthenticated,
+    isAdmin,
+    authError,
+    currentTeamId,
+    teams,
+    loginStart,
+    loginComplete,
+    logout,
+  } = useAuth();
+  const [email, setEmail] = useState("");
+  const [loginToken, setLoginToken] = useState("");
+  const [loginStarted, setLoginStarted] = useState(false);
 
   const queryClient = useQueryClient();
   const tokens = useQuery({
     queryKey: ["tokens"],
     queryFn: () => api.listTokens(),
-    enabled: !!token,
+    enabled: isAuthenticated,
     retry: false,
+  });
+
+  const start = useMutation({
+    mutationFn: (value: string) => loginStart(value),
+    onSuccess: (result) => {
+      setLoginStarted(true);
+      if (result.login_token) setLoginToken(result.login_token);
+    },
+  });
+
+  const complete = useMutation({
+    mutationFn: (value: string) => loginComplete(value),
   });
 
   const revoke = useMutation({
     mutationFn: (prefix: string) => api.revokeToken(prefix),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["tokens"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tokens"] }),
   });
 
-  if (!token) {
+  if (!isAuthenticated) {
     return (
       <Card>
         <Card.Body className="space-y-4">
@@ -51,69 +66,82 @@ export default function Settings(): JSX.Element {
               Sign in
             </h1>
             <p className="mt-2 text-sm text-slate-500">
-              Paste a Loom bearer token to continue. Tokens stay in
-              this browser's <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">localStorage</code>;
-              we never send them anywhere except in API requests.
+              Use your invited email address. Browser sessions use HttpOnly
+              cookies; raw bearer tokens are not stored in this browser.
             </p>
           </div>
-          <Textarea
-            placeholder="loom_team_… or loom_admin_…"
-            value={pasted}
-            onChange={(e) => setPasted(e.target.value)}
-            rows={3}
-            aria-label="bearer token"
-            title="Paste a Loom team or admin bearer token."
+          <Input
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            aria-label="email"
+            title="Email address associated with your Loom invite."
           />
-          {tokenError && (
+          <Button
+            variant="primary"
+            className="w-full"
+            onClick={() => start.mutate(email.trim())}
+            disabled={!email.trim() || start.isPending}
+            title="Request a one-time login link."
+          >
+            Continue
+          </Button>
+          {loginStarted ? (
+            <div className="space-y-3 border-t border-slate-100 pt-4">
+              <Input
+                placeholder="One-time login token"
+                value={loginToken}
+                onChange={(e) => setLoginToken(e.target.value)}
+                aria-label="login token"
+                title="Paste the one-time login token from your email or local dev response."
+              />
+              <Button
+                variant="secondary"
+                className="w-full"
+                onClick={() => complete.mutate(loginToken.trim())}
+                disabled={!loginToken.trim() || complete.isPending}
+                title="Complete sign-in and create a browser session."
+              >
+                Sign in
+              </Button>
+            </div>
+          ) : null}
+          {authError || start.isError || complete.isError ? (
             <p
               role="alert"
               className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
             >
-              {tokenError}
+              {authError ??
+                (start.error instanceof Error ? start.error.message : null) ??
+                (complete.error instanceof Error ? complete.error.message : null) ??
+                "Sign-in failed."}
             </p>
-          )}
-          <Button
-            variant="primary"
-            className="w-full"
-            onClick={() => {
-              const t = pasted.trim();
-              if (t) setToken(t);
-            }}
-            disabled={!pasted.trim()}
-            title="Use this token for API requests from this browser."
-          >
-            Sign in
-          </Button>
-          <p className="text-xs text-slate-400">
-            Need a token? Run{" "}
-            <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">
-              loom service up
-            </code>{" "}
-            — both team and dev-only admin tokens are printed at the end.
-          </p>
+          ) : null}
         </Card.Body>
       </Card>
     );
   }
+
+  const currentTeam = teams.find((team) => team.id === currentTeamId) ?? null;
 
   return (
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Manage the bearer token in use by this browser session.
+          Manage your browser session and team API tokens.
         </p>
       </header>
 
       <Card>
         <Card.Header
-          title="Bearer token"
-          description="Team tokens can submit and monitor runs. Admin tokens also unlock admin-only pages and rate-card publishing."
+          title="Browser session"
+          description="Session cookies are HttpOnly; unsafe requests use CSRF protection."
           actions={
             <Button
               variant="secondary"
-              onClick={clearToken}
-              title="Remove this browser's saved token and return to sign in."
+              onClick={() => void logout()}
+              title="End this browser session."
             >
               Sign out
             </Button>
@@ -122,19 +150,22 @@ export default function Settings(): JSX.Element {
         <Card.Body>
           <div className="flex flex-wrap items-center gap-3">
             <StatusPill variant={isAdmin ? "info" : "success"}>
-              {isAdmin ? "Admin" : "Team"}
+              {isAdmin ? "Platform admin" : currentTeam?.role ?? "User"}
             </StatusPill>
-            <code className="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700">
-              {token.slice(0, 16)}…
-            </code>
+            <span className="text-sm text-slate-700">{me?.user.email}</span>
+            {currentTeam ? (
+              <span className="text-sm text-slate-500">
+                {currentTeam.name}
+              </span>
+            ) : null}
           </div>
         </Card.Body>
       </Card>
 
       <Card>
         <Card.Header
-          title="Active tokens"
-          description="Token prefixes identify credentials without exposing secrets. Revoked tokens can no longer call the API."
+          title="Team API tokens"
+          description="Prefixes identify credentials without exposing secrets. Scoped CLI tokens will replace normal bearer-token workflows in the public track."
         />
         <Card.Body className="p-0">
           {tokens.isPending ? <LoadingState /> : null}
@@ -151,43 +182,23 @@ export default function Settings(): JSX.Element {
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead>
                     <tr className="bg-slate-50/50">
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Prefix
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Token type
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Scopes
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Issued
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Expires
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
-                        Status
-                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Prefix</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Scopes</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Issued</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Expires</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Status</th>
                       <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {tokens.data.items.map((t) => (
                       <tr key={t.token_hash_prefix} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                          {t.token_hash_prefix}
-                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-700">{t.token_hash_prefix}</td>
                         <td className="px-4 py-3 text-slate-700">{t.type}</td>
-                        <td className="px-4 py-3 text-slate-600">
-                          {t.scopes.join(", ")}
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-500">
-                          {t.issued_at.slice(0, 10)}
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-500">
-                          {t.expires_at?.slice(0, 10) ?? "—"}
-                        </td>
+                        <td className="px-4 py-3 text-slate-600">{t.scopes.join(", ")}</td>
+                        <td className="px-4 py-3 text-xs text-slate-500">{t.issued_at.slice(0, 10)}</td>
+                        <td className="px-4 py-3 text-xs text-slate-500">{t.expires_at?.slice(0, 10) ?? "-"}</td>
                         <td className="px-4 py-3">
                           {t.revoked_at ? (
                             <StatusPill variant="cancelled">Revoked</StatusPill>

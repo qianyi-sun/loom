@@ -17,7 +17,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
-from loom.auth import AuthContext
+from loom.auth import AuthContext, is_platform_admin_role
 
 
 def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
@@ -36,7 +36,7 @@ def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
             status_code=403,
             detail="step session tokens cannot use the service layer",
         )
-    if ctx.type not in {"team", "admin"}:
+    if ctx.type not in {"team", "admin", "user"}:
         raise HTTPException(
             status_code=403,
             detail=f"unsupported token type: {ctx.type}",
@@ -45,7 +45,7 @@ def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
 
 
 def is_admin(ctx: AuthContext) -> bool:
-    return ctx.type == "admin" or any(
+    return is_platform_admin_role(ctx.role) or ctx.type == "admin" or any(
         s.startswith("admin:") for s in ctx.scopes
     )
 

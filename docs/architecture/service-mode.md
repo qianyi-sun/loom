@@ -393,14 +393,20 @@ Migrations: `migrations/versions/0001_initial_schema.py` through
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — token paste/login and local client settings
+- **Settings** — browser session state, current team/role, team-token
+  management, and local client settings
 - **Admin access** — pending team registrations, one-time approved team-token
   reveal, and admin audit event review
 - **NotFound**
 
-Auth model: token-paste into the SPA login form, stored in
-`localStorage`. The API client surfaces 401s via a callback that
-auto-clears the token and bounces back to the login form.
+Auth model: browser users sign in through `/api/v1/auth/*`. The service sets an
+HttpOnly session cookie; auth responses return a CSRF token that the API client
+keeps in memory, sends with `credentials: "include"`, and attaches to unsafe
+methods through the configured CSRF header. A 401 from `/auth/me` means signed
+out, and later 401s clear session state/query cache before returning the user
+to Settings. Legacy bearer tokens remain supported for CLI/backward
+compatibility, but the production SPA no longer stores normal bearer-token
+login state in `localStorage`.
 
 **Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
 node-slim builds the Vite bundle, nginx-alpine serves it.

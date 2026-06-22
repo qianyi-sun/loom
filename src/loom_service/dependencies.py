@@ -43,6 +43,9 @@ from loom_service.auth_guards import (
     require_human_or_admin,
     require_team_or_admin,
 )
+from loom_service.session_auth import verify_csrf, verify_session_cookie
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 async def authed_session(
@@ -60,11 +63,23 @@ async def authed_session(
             request.app.state, "admin_secret_verifier", None,
         )
         ctx_optional = await verify_bearer_token(
-            session,
-            authorization,
-            admin_verifier=admin_verifier,
-        )
+            session, authorization, admin_verifier=admin_verifier,
+        ) if authorization else None
+        if ctx_optional is None and not authorization:
+            settings = getattr(request.app.state, "settings", None)
+            if settings is not None:
+                ctx_optional = await verify_session_cookie(
+                    session,
+                    request.cookies.get(settings.auth_session_cookie_name),
+                )
         ctx = require_human_or_admin(ctx_optional)
+        if request.method.upper() not in _SAFE_METHODS:
+            settings = getattr(request.app.state, "settings", None)
+            header_name = (
+                settings.auth_csrf_header_name
+                if settings is not None else "X-Loom-CSRF"
+            )
+            verify_csrf(ctx, request.headers.get(header_name))
         yield session, ctx
 
 

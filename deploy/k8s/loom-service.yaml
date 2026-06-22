@@ -16,6 +16,16 @@ spec:
           env:
             - name: LOOM_SVC_ARTIFACTS_BUCKET
               value: "artifacts"
+            - name: LOOM_SVC_AUTH_CSRF_HEADER_NAME
+              value: "X-Loom-CSRF"
+            - name: LOOM_SVC_AUTH_LOGIN_CHALLENGE_TTL_SEC
+              value: "900"
+            - name: LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN
+              value: "False"
+            - name: LOOM_SVC_AUTH_SESSION_COOKIE_NAME
+              value: "loom_session"
+            - name: LOOM_SVC_AUTH_SESSION_TTL_SEC
+              value: "604800"
             - name: LOOM_SVC_BATCH_RUNNER_BATCH_SIZE
               value: "50"
             - name: LOOM_SVC_BATCH_RUNNER_CP_TOKEN

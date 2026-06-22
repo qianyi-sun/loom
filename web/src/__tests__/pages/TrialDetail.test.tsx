@@ -45,6 +45,18 @@ const TRIAL_BODY: components["schemas"]["TrialDetail"] = {
   artifacts: [],
 };
 
+function expectSessionDownloadCall(
+  fetchMock: ReturnType<typeof vi.fn> | ReturnType<typeof vi.spyOn>,
+  url: string,
+): void {
+  const call = fetchMock.mock.calls.find(([input]) => String(input) === url);
+  expect(call).toBeTruthy();
+  const init = call?.[1] as RequestInit | undefined;
+  expect(init).toMatchObject({ credentials: "include" });
+  expect((init?.headers as Record<string, string> | undefined) ?? {})
+    .not.toHaveProperty("Authorization");
+}
+
 function fetchSpy(
   trajectory:
     | { ok: true; body: unknown }
@@ -159,16 +171,16 @@ describe("TrialDetail trajectory section", () => {
       name: /Download artifact main\/result\.txt/i,
     }));
 
-    await waitFor(() =>
+    await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         `/api/v1/trials/${TRIAL_ID}/artifacts/download?key=main%2Fresult.txt`,
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: "Bearer test-token",
-          }),
-        }),
-      ),
-    );
+        expect.objectContaining({ credentials: "include" }),
+      );
+      expectSessionDownloadCall(
+        fetchMock,
+        `/api/v1/trials/${TRIAL_ID}/artifacts/download?key=main%2Fresult.txt`,
+      );
+    });
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:artifact");
     expect(screen.getByText("701 B")).toBeInTheDocument();
@@ -198,9 +210,9 @@ describe("TrialDetail trajectory section", () => {
           );
         }
         if (url.endsWith(`/trials/${TRIAL_ID}/trajectory/download`)) {
-          expect(init?.headers).toMatchObject({
-            Authorization: "Bearer test-token",
-          });
+          expect(init).toMatchObject({ credentials: "include" });
+          expect((init?.headers as Record<string, string> | undefined) ?? {})
+            .not.toHaveProperty("Authorization");
           return Promise.resolve(
             new Response("{}", {
               status: 200,
@@ -235,16 +247,16 @@ describe("TrialDetail trajectory section", () => {
       name: /Download trajectory/i,
     }));
 
-    await waitFor(() =>
+    await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         `/api/v1/trials/${TRIAL_ID}/trajectory/download`,
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: "Bearer test-token",
-          }),
-        }),
-      ),
-    );
+        expect.objectContaining({ credentials: "include" }),
+      );
+      expectSessionDownloadCall(
+        fetchMock,
+        `/api/v1/trials/${TRIAL_ID}/trajectory/download`,
+      );
+    });
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:trajectory");
   });

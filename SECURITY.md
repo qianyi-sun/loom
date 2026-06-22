@@ -41,16 +41,48 @@ For public repository operation:
 - Keep external pull request workflows untrusted: no deployment, publishing,
   model-provider, or infrastructure secrets may be exposed to PR code.
 
+## Public Platform Auth Model
+
+- Browser users authenticate through HttpOnly SameSite session cookies backed by
+  hashed `user_sessions` rows. In production, those cookies must be Secure by
+  running the service with `LOOM_ENV=production` behind HTTPS.
+- Unsafe browser-session requests must include the configured CSRF header. The
+  CSRF token is returned by auth responses and held in frontend memory, but
+  only its hash is stored server-side; the session cookie itself is never
+  readable by frontend JavaScript.
+- The singleton admin secret is an operator/bootstrap credential, not a normal
+  browser identity. Public users use persisted user sessions and team
+  memberships.
+- Legacy team bearer tokens remain supported for CLI/backward compatibility
+  until scoped public CLI/API tokens replace normal CLI auth.
+- Team is the execution, cost, provider credential, quota, member, and API-token
+  boundary. Browser `viewer`, `member`, and `owner` roles are enforced
+  server-side, with owner-only management of team API tokens and provider
+  connections.
+
+## Shared Artifact Boundary
+
+- Existing batch, trial, trajectory, ATIF, and artifact routes remain scoped to
+  the owner team unless the caller has platform-admin authority.
+- Org-wide completed-result sharing must go through explicit Run Library
+  visibility/share-state checks. Do not implement cross-team downloads by
+  weakening `require_team_or_admin()` on execution/control routes.
+- Safe shared artifacts must download through authenticated service-proxied
+  routes, never raw object-store URLs.
+- Unsafe, secret-like, or policy-blocked artifacts must be denied to other teams
+  and surfaced only with a safe blocked reason. Redaction/leak tests for shared
+  artifacts are part of the public-beta security gate.
+
 ## Platform Security Topics To Resolve
 
 - Team and project-level access model; see
   [`docs/architecture/auth-threat-model.md`](docs/architecture/auth-threat-model.md)
   for the #10 admin/team-registration baseline and
   [`docs/architecture/auth-registration-spec.md`](docs/architecture/auth-registration-spec.md)
-  for the target implementation contract.
+  for the user-session, membership, role, and CSRF contract.
 - Secret injection into sandboxed jobs.
 - Network egress policy for execution environments.
-- Artifact retention and deletion rules.
+- Artifact retention, deletion, and org-wide Run Library share-state rules.
 - Audit log requirements for PM, infra, and research users. The first #10
   backend audit surface now covers team-registration approve/reject and
   `loom_service` token admin mint/revoke, with a SPA audit review table for

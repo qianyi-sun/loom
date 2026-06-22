@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     ARRAY,
     Boolean,
+    CheckConstraint,
     Float,
     ForeignKey,
     Integer,
@@ -69,6 +70,71 @@ class TeamQuota(Base):
     allow_private_endpoints: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"),
     )
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_platform_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+
+
+class TeamMembership(Base):
+    __tablename__ = "team_memberships"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('owner', 'member', 'viewer')",
+            name="team_memberships_role_check",
+        ),
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    session_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    current_team_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True,
+    )
+    csrf_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class LoginChallenge(Base):
+    __tablename__ = "login_challenges"
+    challenge_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    source_ip_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PendingTeamRegistration(Base):

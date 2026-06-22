@@ -67,7 +67,7 @@ Out of scope for this document:
 | One team token leaked | That team's runs, artifacts, provider connections, usage, and submissions | Other teams' data, admin actions, provider secrets in plaintext |
 | Admin secret leaked | Full platform administration until rotation | Silent persistence without audit trail after rotation |
 | Provider API key leaked | The connected upstream provider account until provider-side revocation | Leakage through sandbox env, logs, artifacts, or normal API responses |
-| SPA XSS | Current dev mode may expose pasted token; production cookie mode is a follow-up | Admin secret file access or server-side provider secret exfiltration |
+| SPA XSS | Can read the in-memory CSRF token and make in-origin requests as the signed-in user until session expiry/logout | HttpOnly session-cookie theft, admin secret file access, cross-team access outside the user's role, or server-side provider secret exfiltration |
 | CI workflow compromise | Read-only repo data for ordinary PRs | Deployment/provider secrets or package publishing credentials |
 | Database read compromise | Token hashes, metadata, run/artifact rows | Admin plaintext secret or provider plaintext API keys |
 
@@ -87,6 +87,11 @@ Out of scope for this document:
   rate limiting and a challenge before a token is issued.
 - **Team-scoped tokens:** approved teams receive high-entropy tokens scoped to
   one team. Team tokens cannot mint admin credentials or read other teams.
+- **Browser sessions:** public SPA users authenticate with HttpOnly SameSite
+  cookies backed by hashed `user_sessions` rows. Unsafe browser-session
+  mutations require a CSRF header matching the server-side session CSRF hash.
+  The SPA receives CSRF tokens from auth responses, keeps them in memory, and
+  no longer stores normal bearer-token login state in `localStorage`.
 - **Hard admin rotation:** rotation invalidates the old admin secret immediately
   after the service reload/restart boundary. Operators must not rely on a long
   deprecation window.

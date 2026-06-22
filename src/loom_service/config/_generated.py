@@ -19,6 +19,11 @@ class LoomServiceSettings(BaseSettings):
 
     admin_secret_file: Path | None = None
     artifacts_bucket: str = "artifacts"
+    auth_csrf_header_name: str = "X-Loom-CSRF"
+    auth_login_challenge_ttl_sec: int = 900
+    auth_return_login_token: bool = False
+    auth_session_cookie_name: str = "loom_session"
+    auth_session_ttl_sec: int = 604800
     batch_runner_batch_size: int = 50
     batch_runner_cp_token: SecretStr | None = None
     batch_runner_poll_interval_sec: int = 5

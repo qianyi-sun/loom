@@ -1,143 +1,153 @@
-/**
- * Token-paste auth.
- *
- * - The bearer token is stored in `localStorage` under `loom_token`.
- * - On `setToken(t)`: clear React Query cache (no stale data from a
- *   previous team leaks into the new session) AND kick off a probe
- *   against the authenticated `/api/v1/tokens` endpoint. On 401, the
- *   global unauthorized handler clears the token and keeps the probe's
- *   `tokenError` visible even if another in-flight authenticated query
- *   also returns 401. On any other error, set `tokenError` to a short
- *   descriptive string.
- * - `clearToken()` also clears the cache so post-sign-out state is
- *   clean for the next sign-in.
- * - `tokenError` is cleared automatically on a successful sign-in or
- *   when the user explicitly retypes a token.
- * - `isAdmin` is derived from the token prefix; the backend enforces
- *   scopes on every request — the client check is convenience, not
- *   security.
- */
+/** Browser-session auth state backed by `/api/v1/auth/*`. */
 
 import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
+  useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
 
-import { apiFetch, setUnauthorizedHandler } from "../api/client";
+import {
+  api,
+  setCsrfToken,
+  setUnauthorizedHandler,
+  type AuthMe,
+  type AuthTeam,
+} from "../api/client";
 
 export type AuthCtx = {
-  token: string | null;
+  me: AuthMe | null;
+  teams: AuthTeam[];
+  currentTeamId: string | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
   isAdmin: boolean;
-  /** Populated when the most recent sign-in probe failed; null otherwise. */
-  tokenError: string | null;
-  setToken: (t: string) => void;
-  clearToken: () => void;
+  authError: string | null;
+  loginStart: (email: string) => Promise<{ status: "sent"; login_token?: string }>;
+  loginComplete: (token: string) => Promise<void>;
+  switchTeam: (teamId: string) => Promise<void>;
+  logout: () => Promise<void>;
+  refreshMe: () => Promise<void>;
 };
 
 export const AuthContext = createContext<AuthCtx | null>(null);
 
-const STORAGE_KEY = "loom_token";
-
-export function isAdminToken(token: string | null): boolean {
-  return typeof token === "string" && token.startsWith("loom_admin_");
+function isUnauthorized(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "status" in err &&
+    (err as { status: number }).status === 401
+  );
 }
 
-export function AuthProvider({
-  children,
-}: {
-  children: ReactNode;
-}): JSX.Element {
+function errorDetail(err: unknown): string {
+  if (typeof err === "object" && err !== null && "detail" in err) {
+    const detail = (err as { detail: unknown }).detail;
+    return typeof detail === "string" ? detail : JSON.stringify(detail);
+  }
+  return err instanceof Error ? err.message : "unknown error";
+}
+
+export function AuthProvider({ children }: { children: ReactNode }): JSX.Element {
   const queryClient = useQueryClient();
-  const [token, setTokenState] = useState<string | null>(() => {
+  const [me, setMe] = useState<AuthMe | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const clearSessionState = useCallback((): void => {
+    setCsrfToken(null);
+    setMe(null);
+    queryClient.clear();
+  }, [queryClient]);
+
+  const refreshMe = useCallback(async (): Promise<void> => {
+    setIsLoading(true);
     try {
-      return window.localStorage.getItem(STORAGE_KEY);
-    } catch {
-      return null;
+      const next = await api.authMe();
+      setCsrfToken(next.csrf_token ?? null);
+      setMe(next);
+      setAuthError(null);
+    } catch (err) {
+      setCsrfToken(null);
+      setMe(null);
+      if (isUnauthorized(err)) {
+        queryClient.clear();
+      } else {
+        setAuthError(`Could not load session: ${errorDetail(err)}`);
+      }
+    } finally {
+      setIsLoading(false);
     }
-  });
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  // Track whether the latest setToken initiated a probe; used by the
-  // unauthorized-handler callback to know it should set tokenError
-  // (vs background-request 401s, which just sign the user out silently).
-  const probeInFlight = useRef(false);
-  const probeErrorVisible = useRef(false);
-
-  const clearToken = (): void => {
-    window.localStorage.removeItem(STORAGE_KEY);
-    setTokenState(null);
-    probeErrorVisible.current = false;
-    setTokenError(null);
-    queryClient.clear();
-  };
-
-  const setToken = (t: string): void => {
-    probeErrorVisible.current = false;
-    setTokenError(null);
-    queryClient.clear();
-    window.localStorage.setItem(STORAGE_KEY, t);
-    setTokenState(t);
-    probeInFlight.current = true;
-    // Fire-and-forget probe. apiFetch routes 401 through the global
-    // unauthorized handler (set in the useEffect below), which calls
-    // clearToken + sets tokenError. Other errors are caught here so
-    // a network blip becomes a visible inline message.
-    apiFetch<unknown>("/api/v1/tokens")
-      .then(() => {
-        probeInFlight.current = false;
-        probeErrorVisible.current = false;
-      })
-      .catch((err) => {
-        probeInFlight.current = false;
-        const status =
-          typeof err === "object" && err !== null && "status" in err
-            ? (err as { status: number }).status
-            : 0;
-        if (status === 401) {
-          // unauthorized handler already cleared token + set tokenError
-          return;
-        }
-        const detail =
-          typeof err === "object" && err !== null && "detail" in err
-            ? (err as { detail: string }).detail
-            : "unknown error";
-        setTokenError(`Could not verify token: ${detail}`);
-      });
-  };
+  }, [queryClient]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      const wasProbe = probeInFlight.current;
-      probeInFlight.current = false;
-      window.localStorage.removeItem(STORAGE_KEY);
-      setTokenState(null);
-      queryClient.clear();
-      if (wasProbe || probeErrorVisible.current) {
-        probeErrorVisible.current = true;
-        setTokenError("Token is invalid or has been revoked.");
-      } else {
-        probeErrorVisible.current = false;
-        setTokenError(null);
-      }
+      clearSessionState();
+      setIsLoading(false);
     });
+  }, [clearSessionState]);
+
+  useEffect(() => {
+    void refreshMe();
+  }, [refreshMe]);
+
+  const loginStart = useCallback(
+    (email: string) => api.loginStart(email),
+    [],
+  );
+
+  const loginComplete = useCallback(async (token: string): Promise<void> => {
+    const next = await api.loginComplete(token);
+    setCsrfToken(next.csrf_token ?? null);
+    queryClient.clear();
+    setMe(next);
+    setAuthError(null);
   }, [queryClient]);
 
-  const value = useMemo(
-    () => ({
-      token,
-      isAdmin: isAdminToken(token),
-      tokenError,
-      setToken,
-      clearToken,
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [token, tokenError],
-  );
-  return (
-    <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-  );
+  const switchTeam = useCallback(async (teamId: string): Promise<void> => {
+    const next = await api.switchTeam(teamId);
+    setCsrfToken(next.csrf_token ?? null);
+    queryClient.clear();
+    setMe(next);
+    setAuthError(null);
+  }, [queryClient]);
+
+  const logout = useCallback(async (): Promise<void> => {
+    try {
+      await api.logout();
+    } finally {
+      clearSessionState();
+      setAuthError(null);
+    }
+  }, [clearSessionState]);
+
+  const value = useMemo<AuthCtx>(() => ({
+    me,
+    teams: me?.teams ?? [],
+    currentTeamId: me?.current_team?.id ?? null,
+    isAuthenticated: me !== null,
+    isLoading,
+    isAdmin: me?.is_platform_admin ?? false,
+    authError,
+    loginStart,
+    loginComplete,
+    switchTeam,
+    logout,
+    refreshMe,
+  }), [
+    authError,
+    isLoading,
+    loginComplete,
+    loginStart,
+    logout,
+    me,
+    refreshMe,
+    switchTeam,
+  ]);
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

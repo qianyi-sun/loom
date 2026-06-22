@@ -33,6 +33,7 @@ from loom_service.routes import (
     admin_audit,
     agents,
     atif,
+    auth,
     backends,
     batches,
     benchmarks,
@@ -176,6 +177,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         }
 
     app.include_router(health.router, prefix="/api/v1")
+    app.include_router(auth.router, prefix="/api/v1")
     app.include_router(tokens.router, prefix="/api/v1")
     app.include_router(trials.router, prefix="/api/v1")
     app.include_router(trajectory.router, prefix="/api/v1")

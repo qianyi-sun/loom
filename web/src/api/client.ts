@@ -1,10 +1,9 @@
 /**
  * `apiFetch` is the single point of entry for all `loom_service`
- * calls. It pulls the bearer token from `localStorage`, attaches
- * `Content-Type: application/json` + `Authorization`, and surfaces
- * non-2xx responses as a typed `ApiError`. A 401 from the service
- * fires the registered `setUnauthorizedHandler` callback (used by
- * `AuthContext` to clear the stored token and redirect to /settings).
+ * calls. Browser auth uses HttpOnly session cookies, so requests always
+ * include credentials. Unsafe methods copy the in-memory CSRF token from
+ * `/auth/*` responses into `X-Loom-CSRF`; non-2xx responses surface as
+ * typed `ApiError`s.
  */
 
 import type { paths } from "./schema";
@@ -16,12 +15,9 @@ export function setUnauthorizedHandler(cb: () => void): void {
   _onUnauthorized = cb;
 }
 
-function getToken(): string | null {
-  try {
-    return window.localStorage.getItem("loom_token");
-  } catch {
-    return null;
-  }
+let _csrfToken: string | null = null;
+export function setCsrfToken(token: string | null): void {
+  _csrfToken = token;
 }
 
 function apiBase(): string {
@@ -31,14 +27,21 @@ function apiBase(): string {
   return env.VITE_API_BASE ?? "";
 }
 
+function isUnsafeMethod(method?: string): boolean {
+  const m = (method ?? "GET").toUpperCase();
+  return !["GET", "HEAD", "OPTIONS"].includes(m);
+}
+
 function authHeaders(
   initHeaders?: RequestInit["headers"],
+  method?: string,
 ): Record<string, string> {
-  const token = getToken();
   const headers: Record<string, string> = {
     ...(initHeaders as Record<string, string> | undefined),
   };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (isUnsafeMethod(method) && !("X-Loom-CSRF" in headers)) {
+    if (_csrfToken) headers["X-Loom-CSRF"] = _csrfToken;
+  }
   return headers;
 }
 
@@ -73,10 +76,14 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...authHeaders(init.headers),
+    ...authHeaders(init.headers, init.method),
   };
 
-  const resp = await fetch(`${apiBase()}${path}`, { ...init, headers });
+  const resp = await fetch(`${apiBase()}${path}`, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
 
   await throwIfApiError(resp);
   if (resp.status === 204) return undefined as T;
@@ -89,6 +96,7 @@ export async function apiDownload(
 ): Promise<void> {
   const resp = await fetch(`${apiBase()}${path}`, {
     headers: authHeaders(),
+    credentials: "include",
   });
 
   await throwIfApiError(resp);
@@ -257,6 +265,27 @@ export interface ProviderConnectionModelsRefreshResult {
   items: ProviderConnectionModelEntry[];
 }
 
+export interface AuthTeam {
+  id: string;
+  name: string;
+  role: string;
+}
+
+export interface AuthMe {
+  user: {
+    id: string;
+    email: string;
+    display_name: string | null;
+    is_platform_admin: boolean;
+  };
+  teams: AuthTeam[];
+  current_team: AuthTeam | null;
+  role: string | null;
+  scopes: string[];
+  is_platform_admin: boolean;
+  csrf_token?: string;
+}
+
 export interface TeamRegistrationEntry {
   id: string;
   name: string;
@@ -299,6 +328,23 @@ function qs(params: Record<string, string | number | undefined>): string {
 }
 
 export const api = {
+  authMe: () => apiFetch<AuthMe>("/api/v1/auth/me"),
+  loginStart: (email: string) =>
+    apiFetch<{ status: "sent"; login_token?: string }>(
+      "/api/v1/auth/login/start",
+      { method: "POST", body: JSON.stringify({ email }) },
+    ),
+  loginComplete: (token: string) =>
+    apiFetch<AuthMe>("/api/v1/auth/login/complete", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  switchTeam: (teamId: string) =>
+    apiFetch<AuthMe>("/api/v1/auth/team", {
+      method: "POST",
+      body: JSON.stringify({ team_id: teamId }),
+    }),
+  logout: () => apiFetch<void>("/api/v1/auth/logout", { method: "POST" }),
   listTrials: (q: Record<string, string | undefined> = {}) =>
     apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
   getTrial: (id: string) =>

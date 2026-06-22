@@ -193,6 +193,36 @@ used_by     = ["loom-service"]
 python_type = "bool"
 default     = false
 
+[service_config.auth_session_cookie_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom_session"
+description = "Browser auth HttpOnly session cookie name for invite-only public Loom (#326)."
+
+[service_config.auth_csrf_header_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "X-Loom-CSRF"
+description = "Header required on unsafe browser session requests. The SPA gets this token from auth JSON responses and keeps it in memory; bearer-token service/CLI requests are not CSRF-gated (#326)."
+
+[service_config.auth_session_ttl_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 604800
+description = "Browser session lifetime in seconds. Default is 7 days (#326)."
+
+[service_config.auth_login_challenge_ttl_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 900
+description = "Existing-user login challenge lifetime in seconds. Default is 15 minutes (#326)."
+
+[service_config.auth_return_login_token]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+description = "When true, POST /auth/login/start includes the raw login token for local/dev/testing. Keep false in production (#326)."
+
 [service_config.trajectories_bucket]
 used_by     = ["loom-service"]
 python_type = "str"

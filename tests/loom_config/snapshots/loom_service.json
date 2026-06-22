@@ -9,6 +9,36 @@
     "default": "'artifacts'",
     "required": false
   },
+  "auth_csrf_cookie_name": {
+    "annotation": "<class 'str'>",
+    "default": "'loom_csrf'",
+    "required": false
+  },
+  "auth_csrf_header_name": {
+    "annotation": "<class 'str'>",
+    "default": "'X-Loom-CSRF'",
+    "required": false
+  },
+  "auth_login_challenge_ttl_sec": {
+    "annotation": "<class 'int'>",
+    "default": "900",
+    "required": false
+  },
+  "auth_return_login_token": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "auth_session_cookie_name": {
+    "annotation": "<class 'str'>",
+    "default": "'loom_session'",
+    "required": false
+  },
+  "auth_session_ttl_sec": {
+    "annotation": "<class 'int'>",
+    "default": "604800",
+    "required": false
+  },
   "batch_runner_batch_size": {
     "annotation": "<class 'int'>",
     "default": "50",

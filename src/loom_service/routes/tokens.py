@@ -30,6 +30,7 @@ from loom.db.schema import Token
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import (
     is_admin,
+    require_scope,
 )
 from loom_service.dependencies import SessionAndCtx
 
@@ -80,6 +81,17 @@ def _serialize(row: Token) -> dict[str, Any]:
             row.revoked_at.isoformat() if row.revoked_at else None
         ),
     }
+
+
+def _require_browser_user_token_management(ctx: Any) -> None:
+    """Owner-gate token management for browser sessions.
+
+    Legacy bearer team tokens keep their pre-#326 behavior until scoped CLI/API
+    tokens replace them in #328. Browser users must carry owner-derived
+    `tokens:manage` so members can submit work without managing API tokens.
+    """
+    if ctx.type == "user":
+        require_scope(ctx, "tokens:manage")
 
 
 @router.get("/tokens")
@@ -136,6 +148,7 @@ async def create_token(
     admin = is_admin(ctx)
     admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
     if not admin:
+        _require_browser_user_token_management(ctx)
         if payload.type != "team":
             raise HTTPException(
                 status_code=403,
@@ -215,6 +228,8 @@ async def revoke_token(
     s, ctx = sc
     admin = is_admin(ctx)
     admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
+    if not admin:
+        _require_browser_user_token_management(ctx)
 
     # Scope the lookup to what the caller is allowed to see: team
     # callers can only revoke their own team's tokens, so include

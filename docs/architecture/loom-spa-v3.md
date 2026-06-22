@@ -247,6 +247,28 @@ information hierarchy: normal users should understand the workflow
 without reading backend fields, while operators can still inspect the
 exact payloads needed for support and reproducibility.
 
+## Session Auth And Team Scope
+
+The public SPA auth model is a browser session, not a pasted bearer token. On
+startup the app calls `/api/v1/auth/me`, stores the returned user/current-team
+view in memory, and sends API requests with cookies (`credentials: "include"`).
+Unsafe requests also include the configured CSRF header copied from the
+in-memory token returned by auth responses. The session cookie itself is
+HttpOnly and never readable by frontend JavaScript.
+
+All existing execution/control views are scoped to the selected current team.
+Viewer users can read same-team resources, member users can submit work, and
+owner users can manage team API tokens/provider connections. Switching teams
+clears query cache so Monitor, Batch Detail, Trial Detail, Providers, Usage,
+and Settings reload against the new team context.
+
+Issue #336 will add the separate org-wide Run Library. That future view can
+show completed run metadata and safe shared artifacts across teams, with owner
+team labels and explicit share states. It must not reuse current-team execution
+routes as a cross-team bypass: running/submitted work, provider secrets, quota,
+member management, cancellation, reruns, private artifacts, and blocked
+artifacts remain controlled by the owner team.
+
 ## Surfaces
 
 ### Top-level navigation
@@ -265,7 +287,9 @@ The SPA reduces from 7 nav entries to 3:
   layout under both. Harbor's pattern: route is
   `/monitor?view=batches|trials` and switching the toggle
   preserves filters.
-- **Settings** — tokens, rate cards, profile (existing pages).
+- **Settings** — browser session, current team, role, team tokens, rate cards,
+  and profile. Token-paste login is no longer the normal production SPA auth
+  path.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy
