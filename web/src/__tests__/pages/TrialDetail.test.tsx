@@ -186,6 +186,43 @@ describe("TrialDetail trajectory section", () => {
     expect(screen.getByText("701 B")).toBeInTheDocument();
   });
 
+  it("labels artifacts blocked from org-wide sharing", async () => {
+    fetchSpy(
+      { ok: true, body: { events: [], next_cursor: null } },
+      {
+        ...TRIAL_BODY,
+        state: "succeeded",
+        finished_at: "2026-06-11T00:05:00Z",
+        artifacts: [
+          {
+            step_name: "main",
+            key: "main/debug.log",
+            size: 141,
+            download_url: (
+              `http://svc/api/v1/trials/${TRIAL_ID}/artifacts/download`
+              + "?key=main%2Fdebug.log"
+            ),
+            share_status: "blocked",
+            blocked_reason: "secret-like content detected",
+          },
+        ],
+      },
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    expect(await screen.findByText("Sharing blocked")).toBeInTheDocument();
+    expect(screen.getByText("secret-like content detected")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Download artifact main\/debug\.log/i }),
+    ).toBeInTheDocument();
+  });
+
   it("downloads trajectory through the authenticated service endpoint", async () => {
     const fetchMock = vi
       .fn()

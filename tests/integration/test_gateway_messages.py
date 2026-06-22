@@ -192,6 +192,48 @@ async def test_messages_rejects_non_step_token(  # type: ignore[no-untyped-def]
         assert r.status_code in (401, 403)
 
 
+async def test_messages_redacts_upstream_error_detail(gateway_setup):  # type: ignore[no-untyped-def]
+    app, step_jwt, _team_id, _trial_id = gateway_setup
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            text=(
+                "bad x-api-key=test-anthropic-key "
+                "trace=http://minio.internal/a?X-Amz-Signature=abc "
+                "via http://loom-llm-gateway:9100"
+            ),
+        )
+
+    await app.state.upstream_client.aclose()
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        timeout=app.state.settings.upstream_timeout_sec,
+    )
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/v1/messages",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={
+                "model": "claude-opus-4-7",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert "test-anthropic-key" not in detail
+    assert "minio.internal" not in detail
+    assert "X-Amz-Signature=abc" not in detail
+    assert "loom-llm-gateway" not in detail
+    assert "[REDACTED" in detail
+
+
 async def test_messages_rejects_missing_model(gateway_setup):  # type: ignore[no-untyped-def]
     app, step_jwt, _team_id, _trial_id = gateway_setup
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]

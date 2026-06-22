@@ -168,7 +168,8 @@ path:
   `aggregate_reward` for list and batch rollups.
 - `trials.trajectory_index` stores `trajectory_uri`, `atif_uri`,
   `atif_schema_version`, and an `artifacts` array containing each
-  uploaded artifact's `step_name`, bucket, object key, and size.
+  uploaded artifact's `step_name`, bucket, object key, size, `share_status`,
+  and optional safe `blocked_reason`.
 
 `GET /api/v1/trials/{id}` reads this projection to return ready flags
 and authenticated service download URLs for ATIF, trajectory, and artifacts.
@@ -176,6 +177,19 @@ and authenticated service download URLs for ATIF, trajectory, and artifacts.
 to the caller, so browser and laptop clients do not need direct object-store
 network access. A succeeded trial should not require clients to scan object
 storage, guess artifact keys, or open a separate MinIO tunnel.
+
+Artifact share states are security metadata, not download URLs:
+
+- `pending_scan`: legacy or not-yet-classified artifact. Treat as owner-team
+  only for org-wide sharing decisions.
+- `shared`: conservative scan found no secret-like content. Future Run Library
+  download/reuse may expose it across teams through authenticated service
+  routes.
+- `blocked`: scan matched token, provider key, secret-ref, signed URL,
+  internal endpoint, cookie, CSRF, or similar secret-like material. The raw
+  object remains available to the owner team for diagnostics through normal
+  trial detail routes, but org-wide Run Library download/reuse must deny it and
+  show only the safe `blocked_reason`.
 
 ## Trajectory ↔ ATIF in code
 

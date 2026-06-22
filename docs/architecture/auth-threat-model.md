@@ -12,7 +12,7 @@ In scope:
 - Admin authentication and admin action attribution.
 - Team registration, approval, token issuance, disablement, and rotation.
 - Team-scoped access to provider connections, model credentials, runs,
-  trajectories, evaluator feedback, artifacts, usage, and quotas.
+  trajectories, evaluator feedback, artifacts, and usage.
 - Service, control-plane, gateway, SPA, and CLI paths that accept long-lived
   user or operator credentials.
 
@@ -29,7 +29,7 @@ Out of scope for this document:
 | Attacker | Capabilities | Primary concern |
 | --- | --- | --- |
 | Curious tenant | Has a valid team token and normal platform access | Cross-team run, artifact, provider, usage, and progress visibility |
-| Malicious tenant | Has a valid team token and intentionally submits adversarial payloads | Privilege escalation, endpoint probing, quota abuse, artifact poisoning |
+| Malicious tenant | Has a valid team token and intentionally submits adversarial payloads | Privilege escalation, endpoint probing, resource abuse, artifact poisoning |
 | Drive-by external | No valid token; can reach public SPA/API endpoints | Token guessing, registration spam, brute force, unauthenticated metadata leaks |
 | Targeted external | Can phish, scrape logs, exploit web/API bugs, and replay leaked tokens | Admin takeover, provider-secret theft, durable data exfiltration |
 | Supply-chain or CI attacker | Can influence dependency, workflow, image, or PR code paths | Secret exfiltration from CI/deploy, malicious release artifacts |
@@ -38,7 +38,8 @@ Out of scope for this document:
 ## Assets
 
 - Admin authority: the ability to approve teams, mint/revoke tokens, rotate
-  provider secrets, change quotas, and see cross-team operational state.
+  provider secrets, manage execution policy, and see cross-team operational
+  state.
 - Team tokens and future one-time team credential delivery links.
 - Provider API keys, base URLs, private endpoint decisions, and model lists.
 - Run inputs, trajectories, evaluator feedback, final workspaces, artifacts,
@@ -98,9 +99,19 @@ Out of scope for this document:
 - **Production startup guard:** production service startup fails if the admin
   secret file is absent, unreadable, world-readable, or configured through an
   unsafe broad environment injection path.
-- **Provider error redaction:** gateway upstream-error handling must redact
-  provider API keys and `Authorization: Bearer` values before writing logs or
-  returning diagnostics to callers.
+- **Provider error redaction:** gateway and provider-connection upstream-error
+  handling must redact provider API keys, `Authorization: Bearer` values,
+  signed object-store URLs, secret refs, cookies, CSRF values, invite/API token
+  shapes, and internal service URLs before writing logs or returning
+  diagnostics to callers.
+- **Audit and frontend redaction:** admin audit metadata rejects secret-like
+  values before persistence. SPA error states and raw diagnostics panels render
+  redacted copies of JSON/text payloads instead of raw provider keys, signed
+  URLs, tokens, or internal endpoints.
+- **Artifact share-state scanning:** collected artifacts receive a conservative
+  `share_status` decision. `shared` artifacts can become eligible for org-wide
+  Run Library download/reuse; `blocked` artifacts retain owner-team diagnostics
+  but expose only a safe `blocked_reason` outside the owner boundary.
 - **Public repo safety:** external PRs and ordinary CI runs stay read-only and
   do not receive deployment, provider, object-store, or publishing secrets.
 
@@ -123,6 +134,9 @@ Out of scope for this document:
 Admin authority is now file-backed rather than DB-backed, and the development
 stack uses the same singleton-admin path as production. Browser users now use
 HttpOnly session cookies, CSRF protection, invite acceptance, and persisted
-team memberships instead of pasted bearer tokens. Remaining public-beta auth
-risk is concentrated in completing scoped CLI/API tokens, quota/rate limiting,
-and broader audit/incident controls before broad external exposure.
+team memberships instead of pasted bearer tokens. Scoped CLI/API tokens are
+hash-only at rest with one-time raw reveal. Remaining public-beta auth risk is
+concentrated in completing the Run Library sharing surface and broader
+audit/incident controls before broad external exposure. Quota/rate-limit
+enforcement is intentionally outside the current public-beta gate until a
+concrete operating policy exists.

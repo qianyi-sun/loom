@@ -256,6 +256,18 @@ def _projected_artifacts(
                 ).include_query_params(key=key),
             ),
         }
+        share_status = item.get("share_status")
+        if share_status in {"pending_scan", "shared", "blocked"}:
+            entry["share_status"] = share_status
+        else:
+            entry["share_status"] = "pending_scan"
+        blocked_reason = item.get("blocked_reason")
+        if isinstance(blocked_reason, str):
+            entry["blocked_reason"] = blocked_reason
+        elif entry["share_status"] == "blocked":
+            entry["blocked_reason"] = "blocked by artifact sharing policy"
+        else:
+            entry["blocked_reason"] = None
         step_name = item.get("step_name")
         if isinstance(step_name, str):
             entry["step_name"] = step_name

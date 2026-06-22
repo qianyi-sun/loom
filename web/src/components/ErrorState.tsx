@@ -1,4 +1,5 @@
 import type { ApiError } from "../api/client";
+import { redactText } from "../lib/redaction";
 
 export default function ErrorState({
   error,
@@ -21,7 +22,7 @@ export default function ErrorState({
       <p className="font-semibold text-red-800">{title}</p>
       {detail ? (
         <p className="mt-1 font-mono text-xs leading-relaxed text-red-700">
-          {detail}
+          {redactText(detail)}
         </p>
       ) : null}
     </div>

@@ -41,6 +41,28 @@ function artifactDownloadName(artifact: TrialArtifact): string {
   return label.split("/").pop() || "artifact";
 }
 
+function artifactShareLabel(artifact: TrialArtifact): {
+  label: string;
+  className: string;
+} {
+  if (artifact.share_status === "blocked") {
+    return {
+      label: "Sharing blocked",
+      className: "border-amber-200 bg-amber-50 text-amber-800",
+    };
+  }
+  if (artifact.share_status === "shared") {
+    return {
+      label: "Shared",
+      className: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    };
+  }
+  return {
+    label: "Share scan pending",
+    className: "border-slate-200 bg-slate-50 text-slate-600",
+  };
+}
+
 function formatBytes(size: number): string {
   if (!Number.isFinite(size) || size <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -227,27 +249,44 @@ function TrialHeader({
             <div className="space-y-2">
               {trial.artifacts.map((artifact, index) => {
                 const label = artifactLabel(artifact);
+                const share = artifactShareLabel(artifact);
                 return (
-                  <button
+                  <div
                     key={`${artifact.key}-${index}`}
-                    title={`Download artifact ${label}.`}
-                    type="button"
-                    onClick={() =>
-                      void api.downloadArtifact(
-                        trial.id,
-                        artifact.key,
-                        artifactDownloadName(artifact),
-                      )
-                    }
-                    className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm transition-colors hover:border-slate-300 hover:bg-slate-50"
+                    className="rounded-md border border-slate-200 bg-white px-3 py-2"
                   >
-                    <span className="min-w-0 truncate font-medium text-slate-700">
-                      Download artifact {label}
-                    </span>
-                    <span className="shrink-0 font-mono text-xs text-slate-400">
-                      {formatBytes(artifact.size)}
-                    </span>
-                  </button>
+                    <button
+                      title={`Download artifact ${label}.`}
+                      type="button"
+                      onClick={() =>
+                        void api.downloadArtifact(
+                          trial.id,
+                          artifact.key,
+                          artifactDownloadName(artifact),
+                        )
+                      }
+                      className="flex w-full items-center justify-between gap-3 text-sm"
+                    >
+                      <span className="min-w-0 truncate font-medium text-slate-700">
+                        Download artifact {label}
+                      </span>
+                      <span className="shrink-0 font-mono text-xs text-slate-400">
+                        {formatBytes(artifact.size)}
+                      </span>
+                    </button>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      <span
+                        className={`rounded-md border px-1.5 py-0.5 font-medium ${share.className}`}
+                      >
+                        {share.label}
+                      </span>
+                      {artifact.blocked_reason ? (
+                        <span className="text-slate-500">
+                          {artifact.blocked_reason}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
                 );
               })}
             </div>

@@ -724,6 +724,30 @@ async def test_probe_redacts_api_key_when_echoed_in_url() -> None:
     assert "[REDACTED]" in result.error
 
 
+async def test_probe_redacts_signed_urls_and_internal_endpoints() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            text=(
+                "debug artifact=http://minio.internal:9000/a/b?"
+                "X-Amz-Signature=abc123 via "
+                "http://loom-control-plane:8080/trials"
+            ),
+        )
+
+    result = await probe_connection(
+        "openai-compatible", "https://api.openai.com/v1", "sk-test-key",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+
+    assert result.status == "invalid"
+    assert result.error is not None
+    assert "minio.internal" not in result.error
+    assert "X-Amz-Signature=abc123" not in result.error
+    assert "loom-control-plane" not in result.error
+    assert "[REDACTED" in result.error
+
+
 async def test_fetch_upstream_models_redacts_api_key_in_502_detail() -> None:
     """The 502 raised on non-2xx surfaces via the route's HTTPException
     detail to operators — same redaction requirement as probe."""
@@ -742,6 +766,29 @@ async def test_fetch_upstream_models_redacts_api_key_in_502_detail() -> None:
     msg = str(exc.value)
     assert real_key not in msg
     assert "[REDACTED]" in msg
+
+
+async def test_fetch_upstream_models_redacts_signed_urls_and_internal_endpoints() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            502,
+            text=(
+                "cache=http://minio:9000/models?"
+                "X-Amz-Credential=minio via http://llm-gateway:9100"
+            ),
+        )
+
+    with pytest.raises(UpstreamModelFetchError) as exc:
+        await fetch_upstream_models(
+            "openai-compatible", "https://api.openai.com/v1", "sk-test-key",
+            _client_factory=_client_factory(httpx.MockTransport(_handler)),
+        )
+
+    msg = str(exc.value)
+    assert "minio:9000" not in msg
+    assert "X-Amz-Credential=minio" not in msg
+    assert "llm-gateway" not in msg
+    assert "[REDACTED" in msg
 
 
 def test_redact_secret_helper_minimum_length_guard() -> None:

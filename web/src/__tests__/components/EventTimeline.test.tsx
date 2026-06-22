@@ -151,4 +151,31 @@ describe("EventTimeline", () => {
       screen.getByText(/worker-only diagnostic detail/i),
     ).toBeInTheDocument();
   });
+
+  it("redacts secret-like values inside raw event diagnostics", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <EventTimeline
+        events={[
+          {
+            kind: "env_exec",
+            seq: 1,
+            step_id: "main",
+            command: "pytest",
+            authorization: "Bearer loom_api_abcdefghijklmnopqrstuvwxyz012345",
+            artifact_url:
+              "http://minio.internal/a?X-Amz-Signature=abc123",
+            emitted_at: "2026-06-08T12:00:00Z",
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByText("Raw event data"));
+
+    expect(container.textContent).not.toContain("loom_api_");
+    expect(container.textContent).not.toContain("minio.internal");
+    expect(container.textContent).not.toContain("X-Amz-Signature=abc123");
+    expect(container.textContent).toContain("[REDACTED]");
+  });
 });

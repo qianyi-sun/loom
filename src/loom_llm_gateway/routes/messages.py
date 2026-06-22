@@ -24,6 +24,7 @@ from loom_llm_gateway.rate_card import (
     lookup_entry,
 )
 from loom_llm_gateway.retry import send_with_retry
+from loom_llm_gateway.routes._facade_common import redact_api_key
 
 router = APIRouter()
 
@@ -56,6 +57,7 @@ async def messages(
             status_code=503,
             detail="anthropic_api_key not configured on Gateway",
         )
+    api_key = settings.anthropic_api_key.get_secret_value()
     model_name = payload.get("model")
     if not isinstance(model_name, str) or not model_name:
         raise HTTPException(status_code=400, detail="`model` is required")
@@ -78,7 +80,7 @@ async def messages(
             f"{ANTHROPIC_BASE_URL}/v1/messages",
             json=payload,
             headers={
-                "x-api-key": settings.anthropic_api_key.get_secret_value(),
+                "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
@@ -88,10 +90,11 @@ async def messages(
     )
     upstream_response = outcome.response
     if upstream_response.status_code >= 400:
+        excerpt = redact_api_key(upstream_response.text, api_key)
         raise HTTPException(
             status_code=upstream_response.status_code,
             detail=f"anthropic upstream returned {upstream_response.status_code}: "
-                   f"{upstream_response.text[:500]}",
+                   f"{excerpt}",
         )
     body: dict[str, Any] = upstream_response.json()
 

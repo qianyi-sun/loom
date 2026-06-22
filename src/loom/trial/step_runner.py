@@ -94,6 +94,8 @@ async def run_step(
                 bucket=artifact.bucket,
                 key=artifact.key,
                 size=artifact.size,
+                share_status=artifact.share_status,
+                blocked_reason=artifact.blocked_reason,
             )
             for artifact in collection.artifacts
         ]

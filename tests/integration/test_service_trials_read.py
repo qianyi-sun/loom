@@ -388,6 +388,8 @@ async def test_trial_detail_exposes_projected_artifacts(
                             "bucket": "artifacts",
                             "key": artifact_key,
                             "size": 5,
+                            "share_status": "blocked",
+                            "blocked_reason": "secret-like content detected",
                         }
                     ],
                 }
@@ -412,6 +414,8 @@ async def test_trial_detail_exposes_projected_artifacts(
             "step_name": "main",
             "key": artifact_key,
             "size": 5,
+            "share_status": "blocked",
+            "blocked_reason": "secret-like content detected",
             "download_url": body["artifacts"][0]["download_url"],
         }
     ]
@@ -576,6 +580,86 @@ async def test_artifact_download_proxies_via_service_without_presigned_redirect(
     assert r.status_code == 200
     assert "location" not in r.headers
     assert r.content == b"hello artifact"
+
+
+async def test_artifact_download_cross_team_forbidden(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    """A team-B caller cannot use a team-A artifact proxy URL."""
+
+    app, _raw_a, team_a, trial_ids_a = trials_setup
+    artifact_key = f"{team_a}/{trial_ids_a[0]}/main/result.txt"
+    other_team = uuid4()
+    other_raw = f"loom_team_{uuid4().hex}"
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids_a[0])
+            .values(
+                trajectory_index={
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": "artifacts",
+                            "key": artifact_key,
+                            "size": 14,
+                            "share_status": "blocked",
+                            "blocked_reason": "secret-like content detected",
+                        }
+                    ],
+                },
+            ),
+        )
+        s.execute(insert(Team).values(id=other_team, name=f"o-{other_team}"))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(other_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=other_team,
+                issued_at=datetime.now(UTC),
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://svc",
+            follow_redirects=False,
+        ) as ac:
+            r = await ac.get(
+                f"/api/v1/trials/{trial_ids_a[0]}/artifacts/download",
+                params={"key": artifact_key},
+                headers={"Authorization": f"Bearer {other_raw}"},
+            )
+        assert r.status_code == 403
+        assert "secret-like content detected" not in r.text
+    finally:
+        sync_engine = create_engine(postgres_url)
+        sl = sessionmaker(sync_engine)
+        with sl() as s:
+            from loom.db.schema import Token as TokenModel
+
+            s.execute(
+                delete(TokenModel).where(
+                    TokenModel.team_id == other_team,
+                )
+            )
+            s.execute(
+                delete(TeamQuota).where(
+                    TeamQuota.team_id == other_team,
+                )
+            )
+            s.execute(delete(Team).where(Team.id == other_team))
+            s.commit()
+        sync_engine.dispose()
 
 
 async def test_trial_detail_not_found(

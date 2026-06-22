@@ -14,6 +14,7 @@ import { useState } from "react";
 import type { components } from "../api/schema";
 import { cn } from "../lib/cn";
 import { modelLabel } from "../lib/modelLabel";
+import { redactValue } from "../lib/redaction";
 import EmptyState from "./EmptyState";
 import JsonViewer from "./JsonViewer";
 
@@ -127,7 +128,7 @@ function Row({ event }: { event: Event }): JSX.Element {
         </summary>
         {open ? (
           <div className="px-3 pb-3">
-            <JsonViewer data={event} expanded />
+            <JsonViewer data={redactValue(event)} expanded />
           </div>
         ) : null}
       </details>

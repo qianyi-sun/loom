@@ -11,15 +11,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import AdminAuditEvent
-
-_SECRET_MARKERS = (
-    "loom_admin_",
-    "loom_api_",
-    "loom_invite_",
-    "loom_team_",
-    "loom_w_",
-    "sk-",
-)
+from loom.security.redaction import redact_text
 
 
 def hash_optional(value: str | None) -> str | None:
@@ -45,7 +37,7 @@ def require_admin_actor(actor: str | None) -> str:
 
 def _metadata_contains_secret(value: object) -> bool:
     if isinstance(value, str):
-        return any(marker in value for marker in _SECRET_MARKERS)
+        return redact_text(value) != value
     if isinstance(value, Mapping):
         return any(_metadata_contains_secret(v) for v in value.values())
     if isinstance(value, list | tuple):

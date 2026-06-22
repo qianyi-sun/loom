@@ -882,14 +882,19 @@ concrete command or UI action.
    with a sensible reason). `GET /api/v1/trials/{id}` carries
    `aggregate_reward`, `cost_usd`, and `failure_reason` (when
    applicable), plus `atif_url`, `trajectory_url`, `atif_ready`,
-   `trajectory_ready`, and `artifacts` for download.
+   `trajectory_ready`, and `artifacts` for download. Artifact rows include
+   `share_status` and a safe `blocked_reason` when org-wide sharing is blocked.
 10. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
-    artifact `download_url` entries from trial detail return object bodies.
+    artifact `download_url` entries from trial detail return object bodies. The
+    URLs must stay on `/api/v1/trials/...`, not raw MinIO/S3 signed URLs, and
+    cross-team callers must not be able to use owner-team artifact proxy URLs.
 11. **Provider error surfaces.** Temporarily rotate the provider key
     to an invalid value, re-run a trial, and confirm the SPA + API
-    surface a clear `provider_error` reason rather than a generic 500.
+    surface a clear `provider_error` reason rather than a generic 500. Confirm
+    diagnostic text does not contain raw provider keys, bearer tokens, signed
+    URL query parameters, or internal service hostnames.
 12. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). Pass
     `--with-volumes` only when wiping staging state intentionally.

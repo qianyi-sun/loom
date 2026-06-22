@@ -62,6 +62,8 @@ class ArtifactRef(BaseModel):
     bucket: str
     key: str
     size: int = Field(ge=0)
+    share_status: Literal["pending_scan", "shared", "blocked"] = "pending_scan"
+    blocked_reason: str | None = None
 
 
 class StepResult(BaseModel):

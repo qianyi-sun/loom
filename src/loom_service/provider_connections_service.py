@@ -23,6 +23,8 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from loom.security.redaction import redact_text
+
 # Public IP classifications that are always SSRF targets — rejected
 # even when team.allow_private_endpoints=True. These are network
 # constructs that are never legitimate provider hosts on any topology.
@@ -288,7 +290,7 @@ def _redact_secret(s: str, *secrets: str) -> str:
     for secret in secrets:
         if secret and len(secret) >= 4:
             out = out.replace(secret, "[REDACTED]")
-    return out
+    return redact_text(out)
 
 
 @dataclass(frozen=True)

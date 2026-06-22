@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from loom.driver.base import Driver
+from loom.security.redaction import ShareStatus, contains_secret_like_content
 from loom.trajectory.storage import ObjectStore
 
 
@@ -20,6 +21,8 @@ class CollectedArtifact:
     bucket: str
     key: str
     size: int
+    share_status: ShareStatus
+    blocked_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ class ArtifactCollector:
                     f"{rel.as_posix()}"
                 )
                 body = local_target.read_bytes()
+                share_decision = contains_secret_like_content(body)
                 await self.store.put_object(
                     bucket=self.bucket, key=key, body=body,
                 )
@@ -79,6 +83,8 @@ class ArtifactCollector:
                         bucket=self.bucket,
                         key=key,
                         size=len(body),
+                        share_status=share_decision.status,
+                        blocked_reason=share_decision.reason,
                     ),
                 )
         return ArtifactCollection(prefix=self.prefix, artifacts=artifacts)

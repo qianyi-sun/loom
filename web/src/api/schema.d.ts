@@ -354,6 +354,8 @@ export interface components {
         key: string;
         size: number;
         download_url: string;
+        share_status?: "pending_scan" | "shared" | "blocked";
+        blocked_reason?: string | null;
       }[];
     };
     TrajectoryEvent: {

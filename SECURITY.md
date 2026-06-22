@@ -61,10 +61,11 @@ For public repository operation:
 - CLI and automation use named, scoped team API tokens with raw `loom_api_...`
   values revealed only on mint/rotate. Token lists, logs, audit metadata, and
   diagnostics must show only safe names, scopes, and hash prefixes.
-- Team is the execution, cost, provider credential, quota, member, and API-token
-  boundary. Browser `viewer`, `member`, and `owner` roles are enforced
-  server-side, with owner-only management of team API tokens and provider
-  connections.
+- Team is the execution, cost, provider credential, member, and API-token
+  boundary. Future quota/rate-limit enforcement, if added, must use an explicit
+  product policy rather than implicit beta defaults. Browser `viewer`, `member`,
+  and `owner` roles are enforced server-side, with owner-only management of team
+  API tokens and provider connections.
 
 ## Shared Artifact Boundary
 

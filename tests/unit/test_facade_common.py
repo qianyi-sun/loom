@@ -63,6 +63,20 @@ def test_redact_api_key_strips_bearer_header_value_without_known_secret() -> Non
     assert "Bearer [REDACTED]" in out
 
 
+def test_redact_api_key_strips_signed_urls_and_internal_endpoints() -> None:
+    out = redact_api_key(
+        "provider failed via http://loom-llm-gateway:9100/v1/chat; "
+        "artifact=https://minio.internal:9000/artifacts/a/b?"
+        "X-Amz-Signature=abcdef&X-Amz-Credential=minio",
+        "",
+    )
+
+    assert "loom-llm-gateway" not in out
+    assert "minio.internal" not in out
+    assert "X-Amz-Signature=abcdef" not in out
+    assert "provider failed via" in out
+
+
 def test_redact_api_key_truncates_to_limit() -> None:
     """500-char default truncation matches the facade routes' behavior."""
     long_body = "x" * 2000

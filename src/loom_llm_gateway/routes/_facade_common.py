@@ -27,6 +27,7 @@ from sqlalchemy import select
 from loom.auth import AuthContext, verify_bearer_token
 from loom.db.schema import ProviderConnection
 from loom.models.types import ModelSpec
+from loom.security.redaction import redact_text
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.rate_card import (
@@ -254,10 +255,11 @@ def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:
     a user-visible error string. Same 4-char minimum as
     `provider_connections_service._redact_secret` to avoid
     over-redaction on degenerate inputs (1-3 char secrets would
-    obliterate common substrings).
+    obliterate common substrings). The central redactor also removes
+    signed URLs, secret refs, and internal-only endpoints.
     """
     excerpt = (text or "")[:limit]
     if api_key and len(api_key) >= 4:
         excerpt = excerpt.replace(api_key, "[REDACTED]")
     excerpt = _BEARER_VALUE_RE.sub(r"\1[REDACTED]", excerpt)
-    return excerpt
+    return redact_text(excerpt)

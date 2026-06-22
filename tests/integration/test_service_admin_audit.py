@@ -210,6 +210,7 @@ async def test_admin_token_mutations_require_actor_and_write_audit(
             "/api/v1/tokens",
             headers=_admin_headers(actor=None),
             json={
+                "name": "missing-actor-token",
                 "type": "team",
                 "team_id": str(team_id),
                 "scopes": ["read:own"],
@@ -220,6 +221,7 @@ async def test_admin_token_mutations_require_actor_and_write_audit(
             "/api/v1/tokens",
             headers=_admin_headers("ops-admin"),
             json={
+                "name": "audited-token",
                 "type": "team",
                 "team_id": str(team_id),
                 "scopes": ["read:own"],
@@ -276,6 +278,7 @@ async def test_admin_audit_endpoint_rejects_team_tokens(
             "/api/v1/tokens",
             headers=_admin_headers("qianyi"),
             json={
+                "name": "team-reader",
                 "type": "team",
                 "scopes": ["read:own"],
                 "team_id": approved.json()["team"]["id"],
