@@ -344,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "admin":
         from loom_cli.admin_cmd import dispatch as admin_dispatch
         return admin_dispatch(raw[1:])
+    if raw and raw[0] == "worker":
+        from loom_cli.worker_cmd import dispatch as worker_dispatch
+        return worker_dispatch(raw[1:])
     parser = _build_parser()
     args = parser.parse_args(raw)
     return cast(int, args.handler(args))

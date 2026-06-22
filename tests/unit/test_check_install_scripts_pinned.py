@@ -15,6 +15,8 @@ _spec.loader.exec_module(_lint_mod)
 
 _scan = _lint_mod._scan_install_script
 _extract = _lint_mod._extract_install_script_from_module
+_extract_catalog = _lint_mod._extract_required_packages_from_catalog
+_check_drift = _lint_mod._check_catalog_drift
 
 
 def test_pinned_npm_install_passes() -> None:
@@ -73,6 +75,91 @@ def test_line_continuations_collapsed() -> None:
         '  "loom-launcher==0.1.0"'
     )
     assert _scan(script) == []
+
+
+def test_extract_required_packages_from_catalog() -> None:
+    """The catalog parser should pick up `_ADAPTER_REQUIRED_PACKAGES`
+    as a `dict[str, tuple[str, ...]]` mapping."""
+    src = """
+_ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
+    "alpha": ("alpha-pkg",),
+    "beta": ("beta-pkg", "beta-cli"),
+}
+"""
+    out = _extract_catalog(src)
+    assert out == {
+        "alpha": ("alpha-pkg",),
+        "beta": ("beta-pkg", "beta-cli"),
+    }
+
+
+def test_extract_required_packages_returns_empty_when_missing() -> None:
+    """If the catalog file doesn't declare the constant, return {}
+    so cross-check is a no-op rather than a false-positive fail."""
+    out = _extract_catalog("# empty module")
+    assert out == {}
+
+
+def test_check_drift_passes_when_install_script_matches_catalog(
+    tmp_path,
+) -> None:
+    """The drift check should pass when every catalog package is a
+    substring of the corresponding adapter's install_script."""
+    pkg = "fakepkg"
+    adapters = tmp_path / "adapters"
+    adapters.mkdir()
+    (adapters / "alpha.py").write_text(
+        f'_INSTALL_SCRIPT = "npm install -g {pkg}@1.0.0"\n',
+    )
+    required = {"alpha": (pkg,)}
+    slug_to_filename = {"alpha": "alpha.py"}
+    # Patch the module's ADAPTERS_DIR for this call
+    orig = _lint_mod.ADAPTERS_DIR
+    _lint_mod.ADAPTERS_DIR = adapters
+    try:
+        violations = _check_drift(required, slug_to_filename)
+    finally:
+        _lint_mod.ADAPTERS_DIR = orig
+    assert violations == []
+
+
+def test_check_drift_fails_when_install_script_diverges(tmp_path) -> None:
+    """Catalog says pkgA but install_script installs pkgB → violation.
+    Real Phase 1 openhands bug the check is designed to catch."""
+    installed_pkg = "actually-installed"
+    declared_pkg = "declared-but-missing"
+    adapters = tmp_path / "adapters"
+    adapters.mkdir()
+    (adapters / "alpha.py").write_text(
+        f'_INSTALL_SCRIPT = "pip install {installed_pkg}==1.0.0"\n',
+    )
+    required = {"alpha": (declared_pkg,)}
+    slug_to_filename = {"alpha": "alpha.py"}
+    orig = _lint_mod.ADAPTERS_DIR
+    _lint_mod.ADAPTERS_DIR = adapters
+    try:
+        violations = _check_drift(required, slug_to_filename)
+    finally:
+        _lint_mod.ADAPTERS_DIR = orig
+    assert len(violations) == 1
+    assert declared_pkg in violations[0][1]
+
+
+def test_check_drift_flags_orphan_catalog_entries(tmp_path) -> None:
+    """Catalog mentions an adapter slug that has no matching source
+    file → violation (probably a stale entry after adapter removal)."""
+    adapters = tmp_path / "adapters"
+    adapters.mkdir()
+    required = {"ghost": ("ghost-pkg",)}
+    slug_to_filename: dict[str, str] = {}  # no ghost.py
+    orig = _lint_mod.ADAPTERS_DIR
+    _lint_mod.ADAPTERS_DIR = adapters
+    try:
+        violations = _check_drift(required, slug_to_filename)
+    finally:
+        _lint_mod.ADAPTERS_DIR = orig
+    assert len(violations) == 1
+    assert "ghost" in violations[0][1]
 
 
 def test_extract_from_module_handles_fstring_with_constants(tmp_path) -> None:

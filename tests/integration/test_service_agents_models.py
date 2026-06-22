@@ -214,10 +214,14 @@ async def test_agents_includes_builtins_and_adapters(
 
     # #289 runtime readiness metadata: displayed agents must say whether
     # service-mode can run them before users submit a doomed batch.
+    # #317 Phase 3c: install_script-equipped adapters now surface
+    # an on-demand-install message rather than implying pre-baked binaries.
     opencode = by_name["opencode"]
     assert opencode["service_mode_ready"] is True
     assert opencode["readiness_status"] == "ready"
-    assert opencode["readiness_message"] is None
+    assert "installs into the trial sandbox on demand" in (
+        opencode["readiness_message"] or ""
+    )
     assert opencode["runtime_contract"]["required_executables"] == ["opencode"]
     assert opencode["runtime_contract"]["required_packages"] == ["opencode-ai"]
     assert opencode["runtime_contract"]["capture"] == "stdout_jsonl"

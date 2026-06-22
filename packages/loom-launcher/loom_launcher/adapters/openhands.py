@@ -13,12 +13,13 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 1: install openhands-ai into the system Python (matches
-# deploy/agent-sandbox/python-requirements.txt). The adapter invokes
-# `python -m loom_launcher.openhands_sdk_runner` so we also install
-# loom-launcher itself (in editable form would require a local sdist;
-# instead install the pinned PyPI release).
-_OPENHANDS_AI_VERSION = "1.8.0"
+# #317 Phase 1: this "openhands" name is the legacy adapter slug, but
+# its build_invocation runs `python -m loom_launcher.openhands_sdk_runner`
+# which imports `openhands.sdk` from the `openhands-sdk` package (NOT
+# the older `openhands-ai` package, which provides `openhands.server`
+# and is unused by the SDK-style one-shot runner). Pinned to match
+# deploy/agent-sandbox/python-requirements.txt.
+_OPENHANDS_SDK_VERSION = "1.27.0"
 _LOOM_LAUNCHER_VERSION = "0.1.0"
 _OPENHANDS_INSTALL_SCRIPT = f"""\
 set -euo pipefail
@@ -34,9 +35,9 @@ else
 fi
 # PEP 668 (system Python) requires --break-system-packages on modern distros.
 pip install --no-cache-dir --break-system-packages \\
-  "openhands-ai=={_OPENHANDS_AI_VERSION}" \\
+  "openhands-sdk=={_OPENHANDS_SDK_VERSION}" \\
   "loom-launcher=={_LOOM_LAUNCHER_VERSION}"
-python -c "import openhands"
+python -c "import openhands.sdk"
 """
 
 

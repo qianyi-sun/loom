@@ -329,6 +329,20 @@ def _adapter_readiness(adapter: Any) -> tuple[bool, ReadinessStatus, str | None]
     name = str(adapter.name)
     ready = _ADAPTER_RUNTIME_READY.get(name, False)
     if ready:
+        # #317 Phase 3c: adapters with install_script are installed
+        # into the trial sandbox on demand via the trial-cache layered
+        # image; surface that in the readiness message so the SPA
+        # doesn't imply the CLI is pre-baked into the task image.
+        install_script = getattr(adapter, "install_script", None)
+        if install_script:
+            return (
+                True, "ready",
+                (
+                    "installs into the trial sandbox on demand "
+                    "(layered on top of the task image; cached after "
+                    "the first trial of each (image, agent) pair)"
+                ),
+            )
         return True, "ready", None
     contract = _adapter_runtime_contract(adapter)
     missing = [
