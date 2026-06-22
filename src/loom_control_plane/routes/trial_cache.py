@@ -44,7 +44,15 @@ async def claim_builder_slot(
     """Atomic claim with TTL-based expired-slot stealing.
 
     Returns True if this worker is now the builder. False if another
-    worker holds a non-expired slot. One short transaction."""
+    worker holds a non-expired slot. One short transaction.
+
+    Invariant: a worker calling claim() on its own live slot also
+    returns False. This is intentional — the `WHERE expires_at < now()`
+    clause blocks the conflict UPDATE for non-expired rows, so the
+    RETURNING is empty. Holders should never re-claim; use
+    refresh_builder_slot() to extend the TTL. Adding an "or builder_id
+    matches" branch here would let a re-claiming holder reset its
+    own started_at and break crash-recovery latency measurements."""
     expires = datetime.now(UTC) + timedelta(seconds=ttl_sec)
     result = await session.execute(text("""
         INSERT INTO active_trial_cache_builds
@@ -188,14 +196,18 @@ async def exists_route(
 async def release_route(
     request: Request,
     cache_key: str,
-    payload: dict[str, Any],
+    worker_id: UUID,
     authorization: str | None = Header(default=None),
 ) -> None:
-    """Delete the slot if we still own it."""
+    """Delete the slot if we still own it.
+
+    `worker_id` is a query parameter (NOT a request body) — some HTTP
+    intermediaries (envoy, nginx, certain k8s ingresses, AWS ALB
+    layer-7) strip bodies on `DELETE` requests, which would leave the
+    server unable to verify ownership and refuse every release."""
     await _verify_worker_request(request, authorization)
     if not cache_key:
         raise HTTPException(status_code=400, detail="cache_key required")
-    worker_id = _parse_uuid(payload, "worker_id")
     async with request.app.state.session_factory() as session:
         await release_builder_slot(
             session, cache_key=cache_key, worker_id=worker_id,

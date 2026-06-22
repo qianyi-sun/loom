@@ -251,9 +251,10 @@ async def resolve_trial_image(
          the next worker from rebuilding).
     6. Return the layered image tag.
     """
-    # Phase 1 adapters (aider, claude-code, openhands) declare
-    # install_script; the 9 legacy adapters don't yet — treat the
-    # missing attribute as "no install needed" until Phase 2 lands.
+    # Adapters without an install_script (oracle, in-box agents, the
+    # `hello` test fixture) bypass the layered-image cache entirely
+    # and run directly on the task's base image. `getattr` guards
+    # against any future adapter whose Protocol conformance lags.
     install_script = _normalize_install_script(
         getattr(adapter, "install_script", None),
     )

@@ -397,3 +397,71 @@ async def test_resolve_trial_image_waiter_path_polls_cheaply() -> None:
     assert out == layered_tag
     # We never became the builder
     assert cp.release_calls == []
+
+
+# ─── B2: heartbeat refreshes slot TTL ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_builder_heartbeat_refreshes_slot() -> None:
+    """The heartbeat task must call refresh_trial_cache_slot every
+    `interval_sec` seconds while the context is open. This is the
+    central crash-safety invariant — without it, a long build's slot
+    expires mid-build and another worker steals it."""
+    import asyncio
+    cp = _StubCPClient()
+    cache_key = "hb-key"
+    worker_id = uuid4()
+    cp.slots[cache_key] = worker_id  # we hold it
+
+    async with trial_cache._builder_with_heartbeat(
+        cp, cache_key, worker_id,
+        ttl_sec=10.0, interval_sec=0.05,  # 50ms heartbeat
+    ):
+        await asyncio.sleep(0.28)  # expect ~5 refreshes
+
+    # At least 3 refreshes, at most ~7 (loose bounds for scheduler jitter)
+    assert 3 <= len(cp.refresh_calls) <= 7, cp.refresh_calls
+    assert all(call == (cache_key, worker_id) for call in cp.refresh_calls)
+
+
+@pytest.mark.asyncio
+async def test_builder_heartbeat_stops_on_context_exit() -> None:
+    """Exiting the context must drain the heartbeat task — no calls
+    after the `async with` block returns."""
+    import asyncio
+    cp = _StubCPClient()
+    cache_key, worker_id = "hb-exit", uuid4()
+    cp.slots[cache_key] = worker_id
+
+    async with trial_cache._builder_with_heartbeat(
+        cp, cache_key, worker_id,
+        ttl_sec=10.0, interval_sec=0.05,
+    ):
+        await asyncio.sleep(0.12)
+
+    calls_at_exit = len(cp.refresh_calls)
+    await asyncio.sleep(0.2)  # would be 4+ more refreshes if not stopped
+    assert len(cp.refresh_calls) == calls_at_exit
+
+
+# ─── B4: BuildError regression ──────────────────────────────────────
+
+
+def test_build_layered_image_wraps_build_error() -> None:
+    """docker.errors.BuildError (failed RUN in install.sh — the most
+    common failure mode) must be caught and re-raised as
+    TrialCacheError. Was escaping the narrow APIError filter before."""
+    from docker.errors import BuildError
+    client = MagicMock()
+    client.images.build.side_effect = BuildError(
+        reason="step 2 failed: exit code 1", build_log=[],
+    )
+    with pytest.raises(trial_cache.TrialCacheError) as exc:
+        trial_cache._build_layered_image_sync(
+            client=client,
+            tag="loom-trial-cache:abc",
+            base_digest="sha256:base",
+            install_script="echo will fail && false",
+        )
+    assert "failed to build layered image" in str(exc.value)

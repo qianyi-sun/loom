@@ -291,11 +291,10 @@ class HttpControlPlaneClient:
         """Release our slot. Idempotent: a stolen-by-TTL slot deletes nothing."""
         client, owned = self._http()
         try:
-            r = await client.request(
-                "DELETE",
+            r = await client.delete(
                 f"/api/v1/internal/trial-cache/{cache_key}",
                 headers=self._headers,
-                json={"worker_id": str(worker_id)},
+                params={"worker_id": str(worker_id)},
             )
             r.raise_for_status()
         finally:

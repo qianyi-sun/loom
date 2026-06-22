@@ -13,6 +13,33 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import tail_pty
 from loom_launcher.registry import register_adapter
 
+# #317 Phase 2: install kimi CLI. Version pinned to
+# deploy/agent-sandbox/npm-packages.txt.
+_KIMI_PKG = "@moonshot-ai/kimi-code"
+_KIMI_VERSION = "0.18.0"
+_KIMI_INSTALL_SCRIPT = f"""\
+set -euo pipefail
+if command -v apk >/dev/null 2>&1; then
+  apk add --no-cache curl bash nodejs npm
+elif command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends curl ca-certificates gnupg
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \\
+    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \\
+    > /etc/apt/sources.list.d/nodesource.list
+  apt-get update
+  apt-get install -y --no-install-recommends nodejs
+else
+  echo "no supported package manager (apk/apt-get); cannot install node" >&2
+  exit 1
+fi
+npm install -g "{_KIMI_PKG}@{_KIMI_VERSION}"
+kimi --version
+"""
+
 
 @dataclass(frozen=True)
 class KimiCliAdapter:
@@ -24,6 +51,7 @@ class KimiCliAdapter:
     model_name_template: str = "openai/{model_id}"
     supports_multi_turn: bool = False
     additional_egress: frozenset[str] = frozenset()
+    install_script: str | None = _KIMI_INSTALL_SCRIPT
 
     def build_invocation(
         self,
