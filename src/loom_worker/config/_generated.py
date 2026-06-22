@@ -43,6 +43,12 @@ class WorkerSettings(BaseSettings):
     task_image_build_max_files: int = 2000
     token: SecretStr
     trajectory_cache_dir: Path = Path("/var/lib/loom/trajectories")
+    trial_cache_base_image_pull_timeout_sec: float = 1800.0
+    trial_cache_build_lock_timeout_sec: float = 1800.0
+    trial_cache_min_free_gb: int = 20
+    trial_cache_registry_pull_timeout_sec: float = 15.0
+    trial_cache_registry_repo: str = ""
+    trial_cache_ttl_hours: int = 168
     vllm_gpu_memory_utilization: float = 0.9
     vllm_tensor_parallel_size: int = 1
 

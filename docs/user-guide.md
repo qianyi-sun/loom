@@ -610,6 +610,14 @@ errors such as an unknown agent name. A passing audit proves dependency
 presence; close the loop with `smoke-runtime` or a normal trial/batch
 smoke before treating the agent as fully supported.
 
+In service mode, workers install the chosen adapter's CLI into the
+trial sandbox at spawn time on top of the benchmark's `task_image`.
+The first trial of a new `(task_image, agent)` combination takes a
+few extra minutes (package installs); subsequent trials hit the
+content-addressed cache and start instantly. See
+[`docs/operator-runbook.md#trial-cache-per-trial-agent-install`](operator-runbook.md#trial-cache-per-trial-agent-install)
+for the operator-side knobs.
+
 ## Rate cards
 
 Rate cards live at `~/.config/loom/rate-cards.toml`, seeded on first

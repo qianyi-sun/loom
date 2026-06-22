@@ -111,6 +111,21 @@ class AgentAdapter(Protocol):
     supports_multi_turn: bool  # metadata only in v1
     additional_egress: frozenset[str]  # hostnames beyond Gateway
 
+    # #317 Phase 1: single multi-line shell script the worker runs
+    # inside the trial sandbox BEFORE the agent starts, to install the
+    # adapter's CLI. None = adapter assumes pre-installed binaries
+    # (e.g. oracle, in-box agents — they're added in a different image).
+    # Mounted as /tmp/install.sh and executed via `bash /tmp/install.sh`
+    # so authors can rely on bashisms. Empty/whitespace-only strings
+    # are normalized to None by the resolver.
+    #
+    # Pinned-version mandate enforced by
+    # scripts/check_install_scripts_pinned.py (CI):
+    #   - `npm install -g <pkg>@<version>`  (NOT `@latest`)
+    #   - `pip install <pkg>==<version>`
+    #   - `uv tool install <pkg>==<version>`
+    install_script: str | None
+
     def build_invocation(
         self,
         *,

@@ -325,6 +325,82 @@ The public request is authenticated by `loom_service` and forwarded to the
 internal Gateway admin route. The Gateway's in-memory cache invalidates
 immediately; in-flight requests use whatever card was active when they started.
 
+## Trial-cache (per-trial agent install)
+
+Workers install each adapter's CLI into the trial sandbox at spawn
+time via a content-addressed layered image (`task_image` +
+`install_script` → `loom-trial-cache:<sha256>`). First trial of a
+new `(task_image, agent)` pair takes a few minutes (network +
+package installs); subsequent trials reuse the layered image.
+
+See `docs/architecture/agent-adapter.md` for the architecture.
+
+### Config knobs (`config/loom-schema.toml`, `[service_config]`)
+
+| Key | Default | What it does |
+|---|---|---|
+| `trial_cache_registry_repo` | `""` (unset) | Registry path to share layered images across workers (Docker Hub / GHCR / ECR / self-hosted). When unset, each worker caches locally. |
+| `trial_cache_registry_pull_timeout_sec` | `15.0` | Per-attempt timeout for the registry pull. |
+| `trial_cache_base_image_pull_timeout_sec` | `1800.0` | Per-attempt timeout for the underlying task-image pull (SWE-Bench instance images are 1–2 GB). |
+| `trial_cache_ttl_hours` | `168` (7d) | Layered images older than this are pruned on the next eviction sweep. |
+| `trial_cache_min_free_gb` | `20` | Capacity backstop — when free disk drops below this, oldest-by-creation entries are evicted first. |
+| `trial_cache_build_lock_timeout_sec` | `1800.0` | Cluster-wide builder-slot TTL. The slot's owner refreshes every 60 s while building. |
+
+### Setting up the optional shared registry (Docker Hub example)
+
+1. Create a Docker Hub team (or pick an existing organization) and a
+   private repository — e.g. `loomops/trial-cache`.
+2. Create a robot account / access token with `read+write` to that
+   repo.
+3. Mount a `docker-config` Secret on each worker with the credentials
+   the docker daemon expects:
+   ```bash
+   kubectl -n loom create secret docker-registry docker-config \
+     --docker-server=https://index.docker.io/v1/ \
+     --docker-username=<robot-user> \
+     --docker-password=<robot-token>
+   ```
+   (`loom cluster render` wires the Secret in already — see the
+   workers' StatefulSet manifest.)
+4. Set the config:
+   ```bash
+   loom admin config set trial_cache_registry_repo loomops/trial-cache
+   ```
+5. Roll workers. The first trial of each `(task_image, agent)` pair
+   pushes; every subsequent trial pulls.
+
+Any registry that `docker pull` / `docker push` understands works —
+GHCR, ECR, Harbor, self-hosted Distribution. Push failures degrade
+silently to local-only caching.
+
+### Disabling the shared cache
+
+`loom admin config set trial_cache_registry_repo ""` → workers fall
+back to per-worker local cache (still hot for the worker's own retry,
+but each worker pays the build cost once).
+
+### Troubleshooting
+
+- **Trial fails with `TrialCacheError: timed out pulling task image`**
+  → bump `trial_cache_base_image_pull_timeout_sec`; the benchmark's
+  task image is bigger than the default 30 min budget can handle on
+  the worker's link.
+- **Trial fails with `TrialCacheError: failed to acquire build slot`**
+  → check the `active_trial_cache_builds` table for a stuck row past
+  its `expires_at`; the next claimant will steal it on its own, but
+  if the table grows unboundedly the heartbeat thread on workers is
+  not refreshing. Inspect worker logs for the cache_key.
+- **Cache filling disk** → lower `trial_cache_ttl_hours`, raise
+  `trial_cache_min_free_gb`, or run a manual sweep on the host:
+  ```bash
+  docker images --filter "label=loom.trial-cache.created-at" --format json
+  docker image prune --filter "label=loom.trial-cache.created-at"
+  ```
+- **Adapter unchanged but cache misses every trial** →
+  `install_script` text differs across releases (e.g. you bumped a
+  pinned version). Expected — that's the whole point of content
+  addressing.
+
 ## Token rotation
 
 ### Worker tokens — `loom admin tokens worker`

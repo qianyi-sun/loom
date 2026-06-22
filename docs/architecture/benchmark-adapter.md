@@ -470,6 +470,10 @@ under a deterministic `loom-task:<hash>` tag. Worker operators bound cache-miss
 build contexts with `LOOM_TASK_IMAGE_BUILD_MAX_FILES` (default 2000) and
 `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` (default 536870912).
 
+The resolved `task_image` is then layered with the chosen adapter's
+`install_script` at trial spawn — see
+[`agent-adapter.md#per-trial-agent-installation`](agent-adapter.md#per-trial-agent-installation).
+
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
 - Automatically on `loom service up` after seed, when

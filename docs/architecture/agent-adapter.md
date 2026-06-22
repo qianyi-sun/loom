@@ -37,6 +37,9 @@ class AgentAdapter(Protocol):
     model_name_template: str                   # "{model_id}" | "openai/{model_id}"
     supports_multi_turn: bool                  # metadata only in v1
     additional_egress: frozenset[str]          # extra hostnames beyond Gateway
+    install_script: str | None                 # shell script that installs the
+                                               # CLI into the trial sandbox; see
+                                               # "Per-trial agent installation"
 
     def build_invocation(
         self, *,
@@ -111,13 +114,14 @@ import time. `loom_cli/__init__.py` eager-imports
 3. Drains `adapter.capture_events(...)` into the trajectory writer
 4. On step end, kills the subprocess via the ExecHandle
 
-`SubprocessAgent` does **not** install external CLIs into the trial
-sandbox. The adapter package supplies metadata, argv construction,
-and capture logic; the sandbox image/provisioning path must already
-contain the required executable or Python module. In service mode the
-API catalog exposes this as `runtime_contract` and `service_mode_ready`
-metadata from `GET /api/v1/agents`, and submit routes reject agents
-whose default service-mode sandbox runtime is not provisioned yet.
+The adapter package supplies metadata, argv construction, and capture
+logic. CLI installation into the trial sandbox is handled at trial
+spawn time via the adapter's `install_script` (see [Per-trial agent
+installation](#per-trial-agent-installation)). In service mode the API
+catalog exposes the adapter's runtime contract as `runtime_contract`
+and `service_mode_ready` metadata from `GET /api/v1/agents`, and submit
+routes reject agents whose default service-mode sandbox runtime
+contract cannot be satisfied.
 
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client
@@ -125,7 +129,83 @@ dependency since there's no Control Plane to record llm_calls to.
 The launched CLI talks to the upstream provider directly using the
 env-var API key the CLI puts in the sandbox.
 
-## Service-mode readiness contract
+## Per-trial agent installation
+
+(See `src/loom_worker/trial_cache.py` and `docs/operator-runbook.md`
+for the operator-facing knobs.)
+
+`AgentAdapter.install_script` is a multi-line shell script that
+installs the adapter's CLI into the trial sandbox. The worker runs it
+inside a layered image built on top of the benchmark's `task_image`
+before the trial starts. Each adapter is responsible for installing
+exactly the runtime it needs (`apk add` / `apt-get install` + a pinned
+`npm install -g pkg@version` / `pip install pkg==version`). Versions
+MUST be pinned — CI runs `scripts/check_install_scripts_pinned.py`
+which AST-parses every adapter module and rejects floating tags.
+
+### Cache key + sharing
+
+```
+cache_key = sha256(task_image_digest + install_script_text)[:32]
+layered_tag = loom-trial-cache:<cache_key>
+```
+
+The key is **content-addressed**: the same `(task_image, adapter)`
+pair across teams and workers always produces the same key. The cache
+is shared cluster-wide and across users by construction.
+
+The worker's `resolve_trial_image()` runs this flow:
+
+1. Local hit → return `layered_tag` immediately.
+2. Otherwise, claim a cluster-wide builder slot from the Control
+   Plane (`POST /api/v1/internal/trial-cache/claim`). Non-claimants
+   poll `GET /api/v1/internal/trial-cache/{cache_key}` until the slot
+   is released, then try local + registry again.
+3. With the slot held, try the optional shared registry
+   (`{trial_cache_registry_repo}:<cache_key>`). On hit, pull, tag
+   locally, release the slot, done.
+4. On miss, synthesize a tiny Dockerfile:
+   ```dockerfile
+   FROM <task_image>
+   COPY install.sh /tmp/install.sh
+   RUN bash /tmp/install.sh
+   ```
+   Build with `loom.trial-cache.created-at` label, push to the registry
+   if configured (best-effort), release the slot.
+
+The slot has a TTL (`trial_cache_build_lock_timeout_sec`, default 30
+min) refreshed every 60 s by an async heartbeat; if the building
+worker crashes, the slot expires and any subsequent claimant takes
+over. The CP route uses `INSERT ... ON CONFLICT` against the
+`active_trial_cache_builds` table — no Postgres advisory locks (which
+would tie up CP connection-pool slots for the whole build).
+
+### Optional shared registry
+
+Set `service_config.trial_cache_registry_repo` to a registry path
+your workers can pull from and push to (Docker Hub, GHCR, ECR,
+self-hosted — anything `docker pull`/`docker push` can reach). When
+set, the first worker to build a `(task_image, adapter)` pair pushes
+the layered image, and every other worker (across teams) pulls the
+hot layer instead of rebuilding. When unset, each worker builds
+locally and caches in its own daemon.
+
+The registry path is treated as untrusted on read: pulled images are
+validated by tag (`<cache_key>`) and only used after a successful
+local `docker image inspect`. Push failures degrade silently — the
+local layered image is still produced and used for the current trial.
+
+### Eviction
+
+Docker labels are immutable post-build, so the worker can't do
+classical LRU. It uses a TTL prune (`trial_cache_ttl_hours`, default
+168 h = 7 days) filtered by the `loom.trial-cache=true` label, with
+age determined by Docker's native image-creation timestamp, plus a
+capacity backstop (`trial_cache_min_free_gb`, default 20 GB) that
+evicts oldest-by-creation entries until disk frees up. Eviction is
+local only — registry retention is the registry operator's concern.
+
+
 
 Every displayed service-mode agent entry includes runtime metadata:
 

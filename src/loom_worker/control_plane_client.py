@@ -247,3 +247,77 @@ class HttpControlPlaneClient:
             worker_id=worker_id,
             fields={"result": result, **trajectory_index},
         )
+
+    # ─── #317 trial-cache build coordination ────────────────────────
+
+    async def claim_trial_cache_slot(
+        self, cache_key: str, worker_id: UUID, *, ttl_sec: float,
+    ) -> bool:
+        """Atomic claim. Returns True if THIS worker is now the builder."""
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                "/api/v1/internal/trial-cache/claim",
+                headers=self._headers,
+                json={
+                    "cache_key": cache_key,
+                    "worker_id": str(worker_id),
+                    "ttl_sec": ttl_sec,
+                },
+            )
+            r.raise_for_status()
+            return bool(r.json().get("i_am_builder"))
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def trial_cache_slot_exists(self, cache_key: str) -> bool:
+        """Cheap probe for the waiter loop. True iff a non-expired slot exists."""
+        client, owned = self._http()
+        try:
+            r = await client.get(
+                f"/api/v1/internal/trial-cache/{cache_key}",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return bool(r.json().get("exists"))
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def release_trial_cache_slot(
+        self, cache_key: str, worker_id: UUID,
+    ) -> None:
+        """Release our slot. Idempotent: a stolen-by-TTL slot deletes nothing."""
+        client, owned = self._http()
+        try:
+            r = await client.request(
+                "DELETE",
+                f"/api/v1/internal/trial-cache/{cache_key}",
+                headers=self._headers,
+                json={"worker_id": str(worker_id)},
+            )
+            r.raise_for_status()
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def refresh_trial_cache_slot(
+        self, cache_key: str, worker_id: UUID, *, ttl_sec: float,
+    ) -> bool:
+        """Heartbeat: extend our slot TTL. False = we no longer own the slot."""
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                f"/api/v1/internal/trial-cache/{cache_key}/refresh",
+                headers=self._headers,
+                json={
+                    "worker_id": str(worker_id),
+                    "ttl_sec": ttl_sec,
+                },
+            )
+            r.raise_for_status()
+            return bool(r.json().get("refreshed"))
+        finally:
+            if owned:
+                await client.aclose()

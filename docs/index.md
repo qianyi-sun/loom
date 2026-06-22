@@ -46,7 +46,8 @@ Start with the overview, drill into the area you care about:
   readiness states, and user-owned benchmark onboarding
 - **[architecture/agent-adapter.md](architecture/agent-adapter.md)**
   — `loom-launcher` framework; the 11 shipped CLI adapters;
-  `SubprocessAgent`; how to add an agent
+  `SubprocessAgent`; per-trial install + content-addressed image
+  cache; how to add an agent
 - **[architecture/verifier-protocol.md](architecture/verifier-protocol.md)**
   — typed `VerifierResult`; the 5 shipped verifiers (pytest,
   script, structured, llm_judge, composite); how to add one

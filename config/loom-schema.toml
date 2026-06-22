@@ -403,6 +403,49 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 1
 
+# ─── Per-trial agent install + cache (#317 Phase 1) ────────────────
+# Worker builds a content-addressed image per (task_image_digest,
+# install_script) combo the first time it's encountered. Cluster-wide
+# coordination via the active_trial_cache_builds table (CP-owned;
+# workers reach it via /api/v1/internal/trial-cache/*). Optional
+# shared registry sharing for cross-worker cache hits.
+
+[service_config.trial_cache_registry_repo]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Full repo path for the shared trial-image cache (#317). Works with any registry the worker can authenticate to: Docker Hub (`docker.io/<org>/<repo>`), GHCR (`ghcr.io/<org>/<repo>`), ECR (`<acct>.dkr.ecr.<region>.amazonaws.com/<repo>`), or self-hosted (`registry.cluster.local:5000/<repo>`). Empty = per-worker local cache only. Workers need pull+push perms via mounted docker-config Secret. Cached images are tagged as `<this>:<cache_key>`."
+
+[service_config.trial_cache_registry_pull_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 15.0
+description = "Max wait for shared-registry pull of a cached agent-installed image before falling back to local build. Keeps registry outage from slowing trial start. Distinct from `trial_cache_base_image_pull_timeout_sec` which controls the slower task-base-image pull."
+
+[service_config.trial_cache_base_image_pull_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 1800.0
+description = "Max wait for the task base image pull (e.g. `python:3.11-slim`, `swebench/sweb.eval...`). SWE-Bench instance images are 1-2GB; on slow networks the pull can take 10-20 min. 30-min default."
+
+[service_config.trial_cache_ttl_hours]
+used_by     = ["worker"]
+python_type = "int"
+default     = 168
+description = "TTL on cached trial images before `docker image prune --filter until=<ttl>h` evicts them. 7 days default. Docker tracks creation age, not last-access — operators size for cache-warmth horizon."
+
+[service_config.trial_cache_min_free_gb]
+used_by     = ["worker"]
+python_type = "int"
+default     = 20
+description = "Capacity-pressure backstop: when worker disk free drops below this, delete oldest-by-creation trial-cache images regardless of TTL."
+
+[service_config.trial_cache_build_lock_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 1800.0
+description = "TTL on the builder slot in active_trial_cache_builds (30-min default). Sized for worst-case base-image-pull + install + push budget. Builder refreshes TTL every 60s during long operations; on crash, the heartbeat dies and the slot expires within ~60s."
+
 # ─── infra_secrets: Secret keys used by 3rd-party containers (postgres) ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
 # but no codegen Settings field is emitted.

@@ -71,6 +71,18 @@ spec:
               key: worker-token
         - name: LOOM_WORKER_TRAJECTORY_CACHE_DIR
           value: /var/lib/loom/trajectories
+        - name: LOOM_WORKER_TRIAL_CACHE_BASE_IMAGE_PULL_TIMEOUT_SEC
+          value: '1800.0'
+        - name: LOOM_WORKER_TRIAL_CACHE_BUILD_LOCK_TIMEOUT_SEC
+          value: '1800.0'
+        - name: LOOM_WORKER_TRIAL_CACHE_MIN_FREE_GB
+          value: '20'
+        - name: LOOM_WORKER_TRIAL_CACHE_REGISTRY_PULL_TIMEOUT_SEC
+          value: '15.0'
+        - name: LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO
+          value: ''
+        - name: LOOM_WORKER_TRIAL_CACHE_TTL_HOURS
+          value: '168'
         - name: LOOM_WORKER_VLLM_GPU_MEMORY_UTILIZATION
           value: '0.9'
         - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE

@@ -13,6 +13,32 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
+# #317 Phase 1: install openhands-ai into the system Python (matches
+# deploy/agent-sandbox/python-requirements.txt). The adapter invokes
+# `python -m loom_launcher.openhands_sdk_runner` so we also install
+# loom-launcher itself (in editable form would require a local sdist;
+# instead install the pinned PyPI release).
+_OPENHANDS_AI_VERSION = "1.8.0"
+_LOOM_LAUNCHER_VERSION = "0.1.0"
+_OPENHANDS_INSTALL_SCRIPT = f"""\
+set -euo pipefail
+if command -v apk >/dev/null 2>&1; then
+  apk add --no-cache python3 py3-pip git
+elif command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends python3 python3-pip git
+else
+  echo "no supported package manager (apk/apt-get); cannot install openhands" >&2
+  exit 1
+fi
+# PEP 668 (system Python) requires --break-system-packages on modern distros.
+pip install --no-cache-dir --break-system-packages \\
+  "openhands-ai=={_OPENHANDS_AI_VERSION}" \\
+  "loom-launcher=={_LOOM_LAUNCHER_VERSION}"
+python -c "import openhands"
+"""
+
 
 @dataclass(frozen=True)
 class OpenHandsAdapter:
@@ -24,6 +50,7 @@ class OpenHandsAdapter:
     model_name_template: str = "openai/{model_id}"
     supports_multi_turn: bool = False
     additional_egress: frozenset[str] = frozenset()
+    install_script: str | None = _OPENHANDS_INSTALL_SCRIPT
 
     def build_invocation(
         self,
