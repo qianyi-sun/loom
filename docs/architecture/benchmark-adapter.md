@@ -474,6 +474,41 @@ The resolved `task_image` is then layered with the chosen adapter's
 `install_script` at trial spawn — see
 [`agent-adapter.md#per-trial-agent-installation`](agent-adapter.md#per-trial-agent-installation).
 
+### Task Dockerfile build contract (#319)
+
+When a task declares `environment.dockerfile`, the worker runs
+`docker build` against the materialized bundle directory. Authors of
+benchmark Dockerfiles should know:
+
+- **Network access during build is not guaranteed.** Some worker
+  deployments build behind a restrictive egress policy; benchmark
+  Dockerfiles that need to `pip install` / `npm install` from the
+  public Internet should either declare an `environment.docker_image`
+  pre-built off-cluster (the fast path) or document the egress
+  requirement in the bundle's README.
+- **PEP 668 base images** (modern `python:3.x-bookworm`, etc.) require
+  `pip install --break-system-packages` for system-wide installs, OR
+  install into a virtualenv. Benchmarks that hit "externally-managed
+  environment" errors should switch to one of those patterns.
+- **Pin every package version**. Floating versions (`pip install
+  pytest` instead of `pip install pytest==N.M.K`) make builds
+  non-reproducible — a working benchmark today silently breaks
+  tomorrow when an upstream releases an incompatible major.
+- **Test the package name**. Common typos like `pytest-jsonreport`
+  (canonical: `pytest-json-report`) surface only at build time. Run
+  `docker build` locally against the bundle before publishing.
+- **Build cost is content-addressed** under
+  `loom-task:<sha256(task_id + checksum + Dockerfile + ctx)[:32]>`.
+  Bumping the Dockerfile invalidates the cache cluster-wide; do it
+  intentionally, not as a side effect of unrelated bundle edits.
+
+When a build fails, the worker raises `TaskImageBuildError` and
+surfaces the failing RUN command **plus the last 40 lines of the
+build log** (pip's stderr, apt's error, etc.) in the trial's
+`failure_message`. That is usually enough to diagnose the failure
+without ssh access to the worker; check `/api/v1/trials/{id}` or the
+SPA's trial-detail view.
+
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
 - Automatically on `loom service up` after seed, when

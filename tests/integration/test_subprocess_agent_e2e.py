@@ -165,3 +165,231 @@ async def test_subprocess_agent_raises_on_agent_exit_nonzero(
         await driver.stop()
     finally:
         await http.aclose()
+
+
+async def test_subprocess_agent_raises_when_all_output_malformed(
+    tmp_path: Path,
+    mocked_cp_client,
+) -> None:
+    """#321: bfcl/hello reproduction. Process exits rc=0 but every
+    line on stdout is unparseable JSONL — previously the trial would
+    end up failed with empty failure_message. Now SubprocessAgent
+    raises AgentError with the skipped-line summary so the worker can
+    persist an actionable failure_message."""
+    cp, http = mocked_cp_client
+    try:
+        streaming = scripted_streaming_handler(
+            stdout_chunks=[
+                b'this is not json\n',
+                b'neither is this { unbalanced\n',
+            ],
+            stderr_chunks=[],
+            return_code=0,
+        )
+        driver = FakeDriver(streaming_handler=streaming)
+        await driver.start()
+        hello = get_adapter("hello")
+        assert hello is not None
+        agent = SubprocessAgent(
+            adapter=hello,
+            model=ModelSpec(provider="openai", name="gpt-5"),
+            cp_client=cp,
+            gateway_url="http://gw",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+        from loom.errors import AgentError
+
+        async with TrajectoryWriter(
+            local_path=tmp_path / "trajectory.jsonl",
+            store=store,
+            bucket="trajectories",
+            key="t/t/events.jsonl",
+            min_part_bytes=0,
+        ) as trajectory:
+            with pytest.raises(
+                AgentError, match=r"emitted no parseable events.*malformed",
+            ):
+                await agent.run(
+                    instruction="x",
+                    env=driver,
+                    trajectory=trajectory,
+                    mcp=[],
+                    skills_dir=None,
+                    step_id="main",
+                )
+        await driver.stop()
+    finally:
+        await http.aclose()
+
+
+async def test_subprocess_agent_redacts_secrets_from_capture_sample(
+    tmp_path: Path,
+    mocked_cp_client,
+) -> None:
+    """#321: last_skip_sample may contain an env-leaked provider API
+    key or bearer token if the agent's stdout accidentally echoed one.
+    SubprocessAgent must redact via loom.security.redaction before
+    the bytes hit AgentError.message → persisted failure_message."""
+    cp, http = mocked_cp_client
+    try:
+        # Malformed JSON line that *would* contain a real-looking
+        # OpenAI-style key if not redacted.
+        streaming = scripted_streaming_handler(
+            stdout_chunks=[
+                b'oops not json: api_key=sk-DEADBEEF12345abc\n',
+            ],
+            stderr_chunks=[],
+            return_code=0,
+        )
+        driver = FakeDriver(streaming_handler=streaming)
+        await driver.start()
+        hello = get_adapter("hello")
+        assert hello is not None
+        agent = SubprocessAgent(
+            adapter=hello,
+            model=ModelSpec(provider="openai", name="gpt-5"),
+            cp_client=cp,
+            gateway_url="http://gw",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+        from loom.errors import AgentError
+
+        async with TrajectoryWriter(
+            local_path=tmp_path / "trajectory.jsonl",
+            store=store,
+            bucket="trajectories",
+            key="t/t/events.jsonl",
+            min_part_bytes=0,
+        ) as trajectory:
+            with pytest.raises(AgentError) as exc:
+                await agent.run(
+                    instruction="x",
+                    env=driver,
+                    trajectory=trajectory,
+                    mcp=[],
+                    skills_dir=None,
+                    step_id="main",
+                )
+        msg = str(exc.value)
+        # The bad line should be surfaced
+        assert "first bad line" in msg
+        # But the API-key-shaped secret must not leak verbatim
+        assert "sk-DEADBEEF12345abc" not in msg
+        assert "[REDACTED:api-key]" in msg
+        await driver.stop()
+    finally:
+        await http.aclose()
+
+
+async def test_subprocess_agent_redacts_secrets_from_stderr_tail(
+    tmp_path: Path,
+    mocked_cp_client,
+) -> None:
+    """#321: stderr_tail from a failed agent may also carry the
+    LOOM_STEP_TOKEN that the worker put in env. Redact before AgentError."""
+    cp, http = mocked_cp_client
+    try:
+        streaming = scripted_streaming_handler(
+            stdout_chunks=[b'{"line": "ok"}\n'],
+            stderr_chunks=[
+                b'Traceback ... Authorization: Bearer loom_step_RAW-SECRET-XYZ\n',
+            ],
+            return_code=2,
+        )
+        driver = FakeDriver(streaming_handler=streaming)
+        await driver.start()
+        hello = get_adapter("hello")
+        assert hello is not None
+        agent = SubprocessAgent(
+            adapter=hello,
+            model=ModelSpec(provider="openai", name="gpt-5"),
+            cp_client=cp,
+            gateway_url="http://gw",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+        from loom.errors import AgentError
+
+        async with TrajectoryWriter(
+            local_path=tmp_path / "trajectory.jsonl",
+            store=store,
+            bucket="trajectories",
+            key="t/t/events.jsonl",
+            min_part_bytes=0,
+        ) as trajectory:
+            with pytest.raises(AgentError) as exc:
+                await agent.run(
+                    instruction="x",
+                    env=driver,
+                    trajectory=trajectory,
+                    mcp=[],
+                    skills_dir=None,
+                    step_id="main",
+                )
+        msg = str(exc.value)
+        assert "exited rc=2" in msg
+        assert "loom_step_RAW-SECRET-XYZ" not in msg
+        # Bearer regex captures both the Bearer prefix and the loom_token form
+        assert "[REDACTED" in msg
+        await driver.stop()
+    finally:
+        await http.aclose()
+
+
+async def test_subprocess_agent_includes_capture_warning_in_rc_nonzero(
+    tmp_path: Path,
+    mocked_cp_client,
+) -> None:
+    """#321: when both rc!=0 AND there were malformed lines, the
+    AgentError message includes both the rc/stderr AND the capture
+    warning summary so operators see the full picture."""
+    cp, http = mocked_cp_client
+    try:
+        streaming = scripted_streaming_handler(
+            stdout_chunks=[b'garbage line\n'],
+            stderr_chunks=[b"crashed\n"],
+            return_code=1,
+        )
+        driver = FakeDriver(streaming_handler=streaming)
+        await driver.start()
+        hello = get_adapter("hello")
+        assert hello is not None
+        agent = SubprocessAgent(
+            adapter=hello,
+            model=ModelSpec(provider="openai", name="gpt-5"),
+            cp_client=cp,
+            gateway_url="http://gw",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+        from loom.errors import AgentError
+
+        async with TrajectoryWriter(
+            local_path=tmp_path / "trajectory.jsonl",
+            store=store,
+            bucket="trajectories",
+            key="t/t/events.jsonl",
+            min_part_bytes=0,
+        ) as trajectory:
+            with pytest.raises(AgentError) as exc:
+                await agent.run(
+                    instruction="x",
+                    env=driver,
+                    trajectory=trajectory,
+                    mcp=[],
+                    skills_dir=None,
+                    step_id="main",
+                )
+        msg = str(exc.value)
+        assert "exited rc=1" in msg
+        assert "crashed" in msg
+        assert "capture:" in msg and "malformed" in msg
+        await driver.stop()
+    finally:
+        await http.aclose()

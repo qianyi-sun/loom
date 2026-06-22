@@ -16,11 +16,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import docker
-from docker.errors import ImageNotFound
+from docker.errors import BuildError, ImageNotFound
 
 from loom.models.task import TaskConfig
 
 DEFAULT_TASK_IMAGE = "alpine"
+# Maximum trailing build-log lines (stdout+stderr from inside the
+# Docker build) included in TaskImageBuildError messages when a
+# Dockerfile build fails. Enough to show pip's actual error output
+# while staying well under typical DB/JSON field limits.
+_BUILD_LOG_TAIL_LINES = 40
 DEFAULT_BUILD_CONTEXT_MAX_FILES = 2_000
 DEFAULT_BUILD_CONTEXT_MAX_BYTES = 512 * 1024 * 1024
 ENV_BUILD_CONTEXT_MAX_FILES = "LOOM_TASK_IMAGE_BUILD_MAX_FILES"
@@ -185,6 +190,21 @@ def _ensure_dockerfile_image(
         )
     except TaskImageBuildError:
         raise
+    except BuildError as exc:
+        # docker-py's BuildError stringifies to only the failing RUN
+        # command (e.g. "The command '/bin/sh -c pip install foo'
+        # returned a non-zero code: 1") — useless for diagnosing WHY
+        # the command failed. Walk the build_log iterator and surface
+        # the tail of the captured stdout/stderr so operators can see
+        # pip's actual error output (e.g. "ERROR: No matching
+        # distribution found for pytest-jsonreport"). #319.
+        tail = _format_build_log_tail(exc.build_log)
+        raise TaskImageBuildError(
+            f"failed to build Docker image {tag!r} from "
+            f"{configured_dockerfile.as_posix()!r}: {exc}"
+            + (f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}"
+               if tail else ""),
+        ) from exc
     except Exception as exc:
         raise TaskImageBuildError(
             f"failed to build Docker image {tag!r} from "
@@ -193,6 +213,41 @@ def _ensure_dockerfile_image(
     finally:
         with contextlib.suppress(Exception):
             client.close()
+
+
+def _format_build_log_tail(build_log: Any) -> str:
+    """Walk docker-py's build_log iterator and return the last
+    `_BUILD_LOG_TAIL_LINES` lines of stdout/stderr from the build,
+    joined with newlines. Returns empty string if the log is missing
+    or empty (e.g. the build never started — caller's outer message
+    is enough on its own)."""
+    if build_log is None:
+        return ""
+    lines: list[str] = []
+    try:
+        for chunk in build_log:
+            # Each chunk is a dict like {"stream": "Step 2/4 : RUN ...\n"}
+            # or {"error": "..."} or {"errorDetail": {...}}.
+            if isinstance(chunk, dict):
+                text = chunk.get("stream") or chunk.get("error") or ""
+            else:
+                text = str(chunk)
+            if not text:
+                continue
+            # Split multi-line chunks so the tail-N is line-accurate,
+            # not chunk-accurate.
+            for line in text.splitlines():
+                stripped = line.rstrip()
+                if stripped:
+                    lines.append(stripped)
+    except Exception:
+        # build_log iteration is best-effort. If iterating itself
+        # raises (rare — docker-py may surface a partial stream), we
+        # still want the outer error message to surface.
+        pass
+    if not lines:
+        return ""
+    return "\n".join(lines[-_BUILD_LOG_TAIL_LINES:])
 
 
 def _enforce_build_context_limits(task_dir: Path) -> None:

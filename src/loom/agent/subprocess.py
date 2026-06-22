@@ -33,6 +33,7 @@ from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import AgentThoughtEvent, EventKind
 from loom.models.types import OS, ModelSpec
+from loom.security.redaction import redact_text
 from loom.trajectory.writer import TrajectoryWriter
 from loom_worker.control_plane_client import StepTokenClient
 
@@ -203,6 +204,8 @@ class SubprocessAgent:
 
         # 5. Forward adapter events into the trajectory.
         event_seq = 0
+        useful_events = 0
+        capture_warning: dict[str, object] | None = None
         async for event in self.adapter.capture_events(
             exec_handle=launcher_handle,
             step_id=step_id,
@@ -213,8 +216,16 @@ class SubprocessAgent:
             # by Plan 11 task 4) or pre-validates against the event union.
             # For v1 we use write_raw_dict to stay decoupled.
             payload = event.model_dump()
+            # #321: capture helpers emit a synthetic terminal event
+            # `{"kind": "stream_capture_warning", ...}` when they
+            # silently dropped malformed lines. Hold onto the last one
+            # so we can include it in the AgentError when the process
+            # finishes without any usable events.
+            if payload.get("kind") == "stream_capture_warning":
+                capture_warning = payload
             if _is_complete_loom_event_payload(payload):
                 await trajectory.write_raw_dict(payload)
+                useful_events += 1
             else:
                 await trajectory.append(
                     AgentThoughtEvent(
@@ -226,15 +237,52 @@ class SubprocessAgent:
                     )
                 )
                 event_seq += 1
+                # Plain AgentThoughtEvents are "useful" too (claude-code,
+                # codex, etc. fall through to this branch). Only the
+                # synthetic stream_capture_warning is excluded.
+                if payload.get("kind") != "stream_capture_warning":
+                    useful_events += 1
 
         rc = await driver_handle.wait()
         stderr_tail = await _finish_tail_task(stderr_task)
         if rc != 0:
             detail = f"{self.adapter.name} exited rc={rc} on step {step_id}"
             if stderr_tail:
-                detail = f"{detail}; stderr: {stderr_tail}"
+                # Redact provider keys / bearer tokens / signed URLs
+                # from the captured stderr before it lands in the
+                # persisted failure_message (#321).
+                detail = f"{detail}; stderr: {redact_text(stderr_tail)}"
+            if capture_warning is not None:
+                detail = (
+                    f"{detail}; capture: skipped "
+                    f"{capture_warning.get('skipped_lines')} malformed "
+                    f"output line(s), last reason: "
+                    f"{capture_warning.get('last_skip_reason')!r}"
+                )
             raise AgentError(
                 detail,
+            )
+        # #321: rc==0 BUT zero usable events captured. The agent process
+        # finished cleanly but its output was unparseable (the bfcl/hello
+        # symptom from #316). Surface the capture warning explicitly so
+        # the trial gets a real failure_message instead of a downstream
+        # empty INTERNAL_ERROR.
+        if useful_events == 0 and capture_warning is not None:
+            raw_sample = str(capture_warning.get("last_skip_sample", ""))
+            # last_skip_sample is the first bytes of an unparseable
+            # stdout line — could carry an env-leaked API key or other
+            # secret. Redact before it lands in failure_message.
+            sample = redact_text(raw_sample) if raw_sample else ""
+            sample_text = (
+                f"; first bad line: {sample!r}" if sample else ""
+            )
+            raise AgentError(
+                f"{self.adapter.name} emitted no parseable events on "
+                f"step {step_id} (rc=0, but "
+                f"{capture_warning.get('skipped_lines')} output line(s) "
+                f"were malformed JSONL; "
+                f"last reason: {capture_warning.get('last_skip_reason')!r}"
+                f"{sample_text})",
             )
 
 

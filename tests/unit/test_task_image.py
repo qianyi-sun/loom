@@ -245,3 +245,124 @@ async def test_resolve_task_image_rejects_dockerfile_path_traversal(tmp_path) ->
             task_dir=task_dir,
             task_checksum="abc123",
         )
+
+
+class _BuildErrorImages:
+    """Docker images namespace whose .build() raises BuildError with
+    a populated build_log (Phase 3a #319 — tail surfaces in error)."""
+
+    def __init__(self, *, log_lines: list[dict[str, Any]],
+                 reason: str = "RUN failed") -> None:
+        self._log = log_lines
+        self._reason = reason
+
+    def get(self, image: str) -> object:
+        raise ImageNotFound("missing")
+
+    def build(self, **kwargs: Any) -> tuple[object, list[object]]:
+        from docker.errors import BuildError
+        raise BuildError(reason=self._reason, build_log=iter(self._log))
+
+
+async def test_resolve_task_image_surfaces_build_log_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """When `docker build` fails, the TaskImageBuildError must include
+    the tail of the build_log so operators see WHY the RUN failed
+    (e.g. pip's actual stderr), not just the failing command. Real
+    motivating case from #316: `pip install pytest-jsonreport` failed
+    because the canonical package name is `pytest-json-report`."""
+    task_dir = tmp_path / "task"
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "environment" / "Dockerfile").write_text(
+        "FROM python:3.11-slim\nRUN pip install pytest-jsonreport\n",
+    )
+
+    log_lines = [
+        {"stream": "Step 1/2 : FROM python:3.11-slim\n"},
+        {"stream": "Step 2/2 : RUN pip install pytest-jsonreport\n"},
+        {"stream": "ERROR: Could not find a version that satisfies the "
+                   "requirement pytest-jsonreport\n"},
+        {"stream": "ERROR: No matching distribution found for "
+                   "pytest-jsonreport\n"},
+    ]
+    fake_images = _BuildErrorImages(log_lines=log_lines)
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env",
+                        lambda: fake_client)
+
+    with pytest.raises(TaskImageBuildError) as exc:
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+        )
+
+    msg = str(exc.value)
+    assert "failed to build Docker image" in msg
+    assert "build log" in msg.lower()
+    assert "No matching distribution" in msg
+    assert "pytest-jsonreport" in msg
+    assert fake_client.closed is True
+
+
+async def test_resolve_task_image_truncates_build_log_to_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Build logs from real Dockerfiles can be hundreds of lines;
+    only the trailing _BUILD_LOG_TAIL_LINES are surfaced so the
+    error message fits in API/SPA fields."""
+    task_dir = tmp_path / "task"
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "environment" / "Dockerfile").write_text(
+        "FROM scratch\n",
+    )
+
+    # 200 lines of noise, then the actual error
+    noise = [{"stream": f"noise line {i}\n"} for i in range(200)]
+    error = [{"stream": "FINAL_ERROR: this should appear\n"}]
+    fake_images = _BuildErrorImages(log_lines=noise + error)
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env",
+                        lambda: fake_client)
+
+    with pytest.raises(TaskImageBuildError) as exc:
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+        )
+
+    msg = str(exc.value)
+    assert "FINAL_ERROR" in msg
+    # Early noise shouldn't survive truncation
+    assert "noise line 0" not in msg
+    assert "noise line 50" not in msg
+
+
+async def test_resolve_task_image_empty_build_log_still_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """If BuildError has no log (rare — happens when docker daemon
+    rejects the build before starting), we still raise TaskImageBuildError
+    with the docker-py reason and don't append an empty 'build log:' section."""
+    task_dir = tmp_path / "task"
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "environment" / "Dockerfile").write_text("FROM scratch\n")
+
+    fake_images = _BuildErrorImages(log_lines=[],
+                                    reason="daemon rejected build")
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env",
+                        lambda: fake_client)
+
+    with pytest.raises(TaskImageBuildError) as exc:
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+        )
+
+    msg = str(exc.value)
+    assert "daemon rejected build" in msg
+    assert "build log" not in msg.lower()
