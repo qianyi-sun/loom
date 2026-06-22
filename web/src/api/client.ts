@@ -136,7 +136,6 @@ type Usage =
   paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
 type Team =
   paths["/api/v1/teams/{team_id}"]["get"]["responses"][200]["content"]["application/json"];
-type TokenList = paths["/api/v1/tokens"]["get"]["responses"][200]["content"]["application/json"];
 
 /** Plan 28 PR-3: backend catalog entry returned by GET /api/v1/backends.
  * Driven by the union of `capabilities.backend` reported by active workers. */
@@ -367,6 +366,31 @@ export interface InviteLookup {
   code_prefix: string;
 }
 
+export interface ApiTokenEntry {
+  name: string | null;
+  token_hash_prefix: string;
+  type: string;
+  scopes: string[];
+  team_id: string | null;
+  issued_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at?: string | null;
+  created_by_actor?: string | null;
+  created_by_user_id?: string | null;
+}
+
+export interface ApiTokenList {
+  items: ApiTokenEntry[];
+}
+
+export interface ApiTokenReveal {
+  token: string;
+  token_hash_prefix: string;
+  expires_at: string | null;
+  item?: ApiTokenEntry;
+}
+
 function qs(params: Record<string, string | number | undefined>): string {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
@@ -544,19 +568,28 @@ export const api = {
       `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/unhide`,
       { method: "POST" },
     ),
-  listTokens: () => apiFetch<TokenList>("/api/v1/tokens"),
+  listTokens: () => apiFetch<ApiTokenList>("/api/v1/tokens"),
   createToken: (body: {
+    name: string;
     type: string;
     scopes: string[];
     expires_in_days: number;
     team_id?: string;
   }) =>
-    apiFetch<{ token: string; token_hash_prefix: string; expires_at: string }>(
+    apiFetch<ApiTokenReveal>(
       "/api/v1/tokens",
       { method: "POST", body: JSON.stringify(body) },
     ),
+  rotateToken: (prefix: string) =>
+    apiFetch<ApiTokenReveal>(
+      `/api/v1/tokens/${encodeURIComponent(prefix)}/rotate`,
+      { method: "POST" },
+    ),
   revokeToken: (prefix: string) =>
-    apiFetch<void>(`/api/v1/tokens/${prefix}`, { method: "DELETE" }),
+    apiFetch<void>(
+      `/api/v1/tokens/${encodeURIComponent(prefix)}`,
+      { method: "DELETE" },
+    ),
   requestTeamRegistration: (body: TeamRegistrationRequestBody) =>
     apiFetch<TeamRegistrationEntry>("/api/v1/teams/register", {
       method: "POST",

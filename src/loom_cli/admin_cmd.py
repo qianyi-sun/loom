@@ -186,7 +186,12 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
     return 0
 
 
-_KNOWN_TEAM_SCOPES = ("read:own", "submit")
+_KNOWN_TEAM_SCOPES = (
+    "read:own",
+    "submit",
+    "providers:manage",
+    "tokens:manage",
+)
 _KNOWN_TOKEN_TYPES = ("team",)
 _HEX_8_PREFIX_RE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_TEAM_SCOPES = ("read:own", "submit")
@@ -202,6 +207,7 @@ def _mint_team_token(args: argparse.Namespace) -> int:
         return 2
 
     body: dict[str, object] = {
+        "name": args.name,
         "type": args.type,
         "scopes": list(args.scopes),
         "expires_in_days": args.expires_in_days,
@@ -234,6 +240,7 @@ def _mint_team_token(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(
             f"New {args.type} token minted.\n"
+            f"  name:       {args.name}\n"
             f"  prefix:     {data['token_hash_prefix']}\n"
             f"  token:      {data['token']}\n"
             f"  expires_at: {data['expires_at']}\n",
@@ -318,6 +325,10 @@ def _scopes_argparse_type(value: str) -> list[str]:
 
 
 def _add_team_mint_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--name", required=True,
+        help="Human-readable token name shown in token lists and audit logs.",
+    )
     p.add_argument(
         "--type", choices=_KNOWN_TOKEN_TYPES, default="team",
         help=(

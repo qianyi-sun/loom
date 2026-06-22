@@ -112,6 +112,9 @@ describe("AdminAccess", () => {
             ],
           });
         }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
         return jsonResponse({ detail: `unhandled ${url}` }, 404);
       },
     );
@@ -139,6 +142,127 @@ describe("AdminAccess", () => {
       expect((init.headers as Record<string, string>)["X-Loom-Admin-Actor"]).toBe(
         "qianyi",
       );
+    });
+  });
+
+  it("manages named API tokens without exposing stored raw secrets", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens") && (!init?.method || init.method === "GET")) {
+          return jsonResponse({
+            items: [
+              {
+                name: "CLI submit",
+                token_hash_prefix: "abc12345",
+                type: "team",
+                scopes: ["read:own", "submit"],
+                team_id: "team-1",
+                issued_at: "2026-06-22T00:00:00Z",
+                expires_at: "2026-07-22T00:00:00Z",
+                revoked_at: null,
+                last_used_at: null,
+                created_by_actor: "user:owner@example.com",
+                created_by_user_id: "user-1",
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/tokens") && init?.method === "POST") {
+          return jsonResponse({
+            token: "loom_api_revealed_create_secret",
+            token_hash_prefix: "new12345",
+            expires_at: "2026-07-22T00:00:00Z",
+            item: {
+              name: "Nightly CLI",
+              token_hash_prefix: "new12345",
+              type: "team",
+              scopes: ["read:own", "submit", "providers:manage"],
+              team_id: "team-1",
+              issued_at: "2026-06-22T00:01:00Z",
+              expires_at: "2026-07-22T00:00:00Z",
+              revoked_at: null,
+              last_used_at: null,
+              created_by_actor: "user:owner@example.com",
+              created_by_user_id: "user-1",
+            },
+          }, 201);
+        }
+        if (url.endsWith("/api/v1/tokens/abc12345/rotate")) {
+          return jsonResponse({
+            token: "loom_api_revealed_rotate_secret",
+            token_hash_prefix: "rot12345",
+            expires_at: "2026-07-22T00:00:00Z",
+            item: {
+              name: "CLI submit",
+              token_hash_prefix: "rot12345",
+              type: "team",
+              scopes: ["read:own", "submit"],
+              team_id: "team-1",
+              issued_at: "2026-06-22T00:02:00Z",
+              expires_at: "2026-07-22T00:00:00Z",
+              revoked_at: null,
+              last_used_at: null,
+              created_by_actor: "user:owner@example.com",
+              created_by_user_id: "user-1",
+            },
+          }, 201);
+        }
+        if (url.endsWith("/api/v1/tokens/abc12345") && init?.method === "DELETE") {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<AdminAccess />);
+
+    expect(await screen.findByText("API tokens")).toBeInTheDocument();
+    expect(await screen.findByText("CLI submit")).toBeInTheDocument();
+    expect(screen.getByText("abc12345")).toBeInTheDocument();
+    expect(screen.queryByText("loom_api_revealed_create_secret")).not.toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("Token name"), "Nightly CLI");
+    await userEvent.click(screen.getByLabelText("Manage provider connections"));
+    await userEvent.click(screen.getByRole("button", { name: "Create API token" }));
+
+    expect(await screen.findByText("loom_api_revealed_create_secret")).toBeInTheDocument();
+    await waitFor(() => {
+      const createCall = fetchSpy.mock.calls.find(([input, init]) =>
+        String(input).endsWith("/api/v1/tokens") && init?.method === "POST",
+      );
+      expect(createCall).toBeTruthy();
+      const body = JSON.parse(String(createCall?.[1]?.body));
+      expect(body).toEqual({
+        name: "Nightly CLI",
+        type: "team",
+        scopes: ["read:own", "submit", "providers:manage"],
+        expires_in_days: 30,
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Rotate CLI submit" }));
+    expect(await screen.findByText("loom_api_revealed_rotate_secret")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Revoke CLI submit" }));
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).endsWith("/api/v1/tokens/abc12345/rotate") &&
+        init?.method === "POST",
+      )).toBe(true);
+      expect(fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).endsWith("/api/v1/tokens/abc12345") &&
+        init?.method === "DELETE",
+      )).toBe(true);
     });
   });
 });

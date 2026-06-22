@@ -339,20 +339,22 @@ curl -X DELETE http://localhost:8080/admin/worker-tokens/$OLD_PREFIX \
   -H "Authorization: Bearer $LOOM_ADMIN_TOKEN"
 ```
 
-### Team tokens — `loom admin tokens team`
+### Team API tokens — `loom admin tokens team`
 
-Team-token rotation hits `loom_service`'s public `/api/v1/tokens`
+Team API-token rotation hits `loom_service`'s public `/api/v1/tokens`
 route, so it uses the bearer + server URL from `loom auth login`
-(no port-forward). Admin callers must supply `--admin-actor NAME`
-which the server records in `admin_audit_events`.
+(no port-forward). Tokens are named, scoped, hash-stored, and reveal the raw
+`loom_api_...` value only on mint/rotate. Admin callers must supply
+`--admin-actor NAME`, which the server records in `admin_audit_events`.
 
 ```bash
 loom auth login --server https://loom.example.com --token env:LOOM_ADMIN_TOKEN
 
 # Mint a fresh team token + print the rollout checklist.
 loom admin tokens team rotate \
+  --name nightly-cli \
   --team-id <UUID> \
-  --scopes read:own,submit \
+  --scopes read:own,submit,providers:manage \
   --expires-in-days 90 \
   --admin-actor qianyi
 
@@ -363,13 +365,18 @@ loom admin tokens team revoke <OLD_PREFIX> --admin-actor qianyi
 One-off mint / revoke without the rollout reminder:
 
 ```bash
-loom admin tokens team mint --team-id <UUID> --admin-actor qianyi
+loom admin tokens team mint \
+  --name support-cli \
+  --team-id <UUID> \
+  --scopes read:own,submit \
+  --admin-actor qianyi
 loom admin tokens team revoke 01234567 --admin-actor qianyi
 ```
 
-`--scopes` accepts a comma-separated list. Known team scopes: `read:own` and
-`submit`; anything else is rejected client-side before the round-trip. `--type`
-defaults to `team`, and admin credentials are managed only by
+`--scopes` accepts a comma-separated list. Known team scopes: `read:own`,
+`submit`, `providers:manage`, and `tokens:manage`; anything else is rejected
+client-side before the round-trip. `--type` defaults to `team`, and admin
+credentials are managed only by
 `loom service init-admin`, `loom service reveal-admin`, and
 `loom service rotate-admin`. Default lifetime is 90 days.
 
@@ -378,7 +385,7 @@ Raw curl is still supported for scripted automation:
 curl -X POST https://loom.example.com/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "X-Loom-Admin-Actor: qianyi" \
-  -d '{"type": "team", "team_id": "...",
+  -d '{"name": "support-cli", "type": "team", "team_id": "...",
        "scopes": ["submit"], "expires_in_days": 90}'
 ```
 `type` is required and must be `team`. The service rejects DB-backed admin
@@ -710,14 +717,17 @@ concrete command or UI action.
    shows no `LoadBalancer` / `NodePort` services. `kubectl get ingress -n loom`
    shows backends only for `loom-service` and `loom-web` (plus
    `loom-llm-gateway` when `gateway_public_host` is configured).
-4. **API token issuance.** Mint a team token and verify a 401 turns
-   into a 200:
+4. **API token issuance.** Mint a named team API token and verify it can read
+   the team surface:
    ```bash
-   curl -X POST https://loom.example.com/api/v1/tokens \
+   TEAM_TOKEN=$(curl -sf -X POST https://loom.example.com/api/v1/tokens \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
      -H "X-Loom-Admin-Actor: smoke-operator" \
-     -d '{"type":"team","team_id":"'$TEAM_ID'",
-          "scopes":["read:own","submit"],"expires_in_days":7}'
+     -H "Content-Type: application/json" \
+     -d '{"name":"public-smoke","type":"team","team_id":"'$TEAM_ID'",
+          "scopes":["read:own","submit"],"expires_in_days":7}' | jq -r .token)
+   curl -sf -H "Authorization: Bearer $TEAM_TOKEN" \
+     https://loom.example.com/api/v1/auth/whoami
    curl -sf -H "Authorization: Bearer $TEAM_TOKEN" \
      https://loom.example.com/api/v1/trials
    ```

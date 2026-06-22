@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
 from loom_cli.__main__ import main
@@ -209,3 +211,123 @@ def test_logout_when_already_logged_out_is_idempotent(
     rc = main(["auth", "logout"])
     assert rc == 0
     assert "Already logged out" in capsys.readouterr().out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# whoami
+# ──────────────────────────────────────────────────────────────────────
+
+
+class MockAuthServer:
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.canned: dict[tuple[str, str], httpx.Response] = {}
+
+
+@pytest.fixture
+def mock_auth_server(monkeypatch: pytest.MonkeyPatch) -> MockAuthServer:
+    server = MockAuthServer()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        server.requests.append(request)
+        key = (request.method, request.url.path)
+        if key in server.canned:
+            return server.canned[key]
+        return httpx.Response(404, json={"detail": f"no mock for {key}"})
+
+    transport = httpx.MockTransport(_handler)
+
+    def _patched_authed_client(cfg: Any, *, timeout: float = 30.0) -> httpx.Client:
+        return httpx.Client(
+            base_url=cfg.server_url,
+            headers={"Authorization": f"Bearer {cfg.auth_token}"},
+            transport=transport,
+            timeout=timeout,
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.auth_cmd.authed_client", _patched_authed_client,
+        raising=False,
+    )
+    return server
+
+
+def test_whoami_when_not_logged_in_returns_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(["auth", "whoami"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "not logged in" in err
+    assert "loom auth login --server URL --token env:LOOM_TOKEN" in err
+
+
+def test_whoami_prints_server_principal_team_scopes_and_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_token = "loom_api_plain_secret_abcdef123456"
+    monkeypatch.setenv("TOK", raw_token)
+    assert main([
+        "auth", "login",
+        "--server", "https://loom.test",
+        "--token", "env:TOK",
+    ]) == 0
+    capsys.readouterr()
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        json={
+            "auth_kind": "bearer",
+            "principal_type": "team",
+            "team_id": "00000000-0000-0000-0000-000000000001",
+            "team_name": "Team Alpha",
+            "role": "owner",
+            "scopes": ["read:own", "submit", "providers:manage"],
+            "token_prefix": "loom_api_abcd1234",
+            "expires_at": "2026-07-22T00:00:00Z",
+        },
+    )
+
+    rc = main(["auth", "whoami"])
+
+    assert rc == 0
+    assert mock_auth_server.requests[0].method == "GET"
+    assert mock_auth_server.requests[0].url.path == "/api/v1/auth/whoami"
+    assert mock_auth_server.requests[0].headers["authorization"] == (
+        f"Bearer {raw_token}"
+    )
+    out = capsys.readouterr().out
+    assert "Server:    https://loom.test" in out
+    assert "Principal: team token" in out
+    assert "Team:      Team Alpha (owner)" in out
+    assert "Scopes:    providers:manage, read:own, submit" in out
+    assert "Token:     loom_api_abcd1234" in out
+    assert raw_token not in out
+
+
+def test_whoami_rejected_token_returns_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_token = "loom_api_revoked_or_expired_secret"
+    monkeypatch.setenv("TOK", raw_token)
+    assert main([
+        "auth", "login",
+        "--server", "https://loom.test",
+        "--token", "env:TOK",
+    ]) == 0
+    capsys.readouterr()
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        401, json={"detail": "token expired"},
+    )
+
+    rc = main(["auth", "whoami"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "token rejected by server" in err
+    assert "revoked, expired, or missing scope" in err
+    assert "loom auth login --server URL --token env:LOOM_TOKEN" in err
+    assert raw_token not in err

@@ -118,6 +118,7 @@ async def app_setup(
     team_b = uuid4()
     raw_a = f"loom_team_{uuid4().hex}"
     raw_b = f"loom_team_{uuid4().hex}"
+    raw_a_limited = f"loom_team_{uuid4().hex}"
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -128,19 +129,30 @@ async def app_setup(
         s.execute(insert(TeamQuota).values(team_id=team_b))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_a.encode()).digest(),
-            type="team", scopes=["read:own", "write:own"],
+            type="team", scopes=["read:own", "write:own", "providers:manage"],
             team_id=team_a,
             issued_at=datetime.now(UTC),
         ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw_b.encode()).digest(),
-            type="team", scopes=["read:own", "write:own"],
+            type="team", scopes=["read:own", "write:own", "providers:manage"],
             team_id=team_b,
+            issued_at=datetime.now(UTC),
+        ))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw_a_limited.encode()).digest(),
+            type="team", scopes=["read:own", "submit"],
+            team_id=team_a,
             issued_at=datetime.now(UTC),
         ))
         s.commit()
 
-    tokens = {"team_a": raw_a, "team_b": raw_b, "admin": RAW_ADMIN_TOKEN}
+    tokens = {
+        "team_a": raw_a,
+        "team_a_limited": raw_a_limited,
+        "team_b": raw_b,
+        "admin": RAW_ADMIN_TOKEN,
+    }
     team_ids = {"a": team_a, "b": team_b}
     try:
         yield app, tokens, team_ids
@@ -403,6 +415,20 @@ def test_create_requires_team_scoped_token(app_setup) -> None:
                })
     assert r.status_code == 400
     assert "team-scoped" in r.json()["detail"]
+
+
+def test_create_requires_provider_management_scope(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    r = c.post("/api/v1/provider-connections",
+               headers=_auth(tokens["team_a_limited"]),
+               json={
+                   "name": "n", "type": "openai-compatible",
+                   "base_url": "https://api.openai.com/",
+                   "api_key": "k",
+               })
+    assert r.status_code == 403
+    assert "providers:manage" in r.json()["detail"]
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -179,6 +179,33 @@ async def me(sc: SessionAndCtx) -> dict[str, Any]:
     return await _serialize_me(session, ctx, csrf_token=csrf_token)
 
 
+@router.get("/whoami")
+async def whoami(sc: SessionAndCtx) -> dict[str, Any]:
+    session, ctx = sc
+    team_name = None
+    if ctx.team_id is not None:
+        team = (await session.execute(
+            select(Team).where(Team.id == ctx.team_id),
+        )).scalar_one_or_none()
+        team_name = team.name if team is not None else None
+
+    await session.commit()
+    return {
+        "auth_kind": ctx.auth_kind,
+        "principal_type": ctx.type,
+        "team_id": str(ctx.team_id) if ctx.team_id else None,
+        "team_name": team_name,
+        "role": ctx.role,
+        "scopes": list(ctx.scopes),
+        "token_prefix": (
+            ctx.token_hash.hex()[:8] if ctx.token_hash else None
+        ),
+        "expires_at": (
+            ctx.expires_at.isoformat() if ctx.expires_at else None
+        ),
+    }
+
+
 @router.post("/team")
 async def switch_team(
     request: Request, payload: _SwitchTeamReq, sc: SessionAndCtx,

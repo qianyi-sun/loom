@@ -58,8 +58,9 @@ For public repository operation:
   logs, and audit metadata must never include raw invite codes. Accepting an
   invite creates or reuses the browser user, creates the team membership, and
   sets the HttpOnly session cookie.
-- Legacy team bearer tokens remain supported for CLI/backward compatibility
-  until scoped public CLI/API tokens replace normal CLI auth.
+- CLI and automation use named, scoped team API tokens with raw `loom_api_...`
+  values revealed only on mint/rotate. Token lists, logs, audit metadata, and
+  diagnostics must show only safe names, scopes, and hash prefixes.
 - Team is the execution, cost, provider credential, quota, member, and API-token
   boundary. Browser `viewer`, `member`, and `owner` roles are enforced
   server-side, with owner-only management of team API tokens and provider

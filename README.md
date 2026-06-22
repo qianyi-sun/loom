@@ -225,10 +225,12 @@ port.
 Submit a trial directly via the REST surface:
 
 ```bash
-TEAM_TOKEN=$(loom service up | grep loom_team_ | tr -d ' ')   # or copy from output
+export LOOM_API_TOKEN=loom_api_...   # create in Team access → API tokens
+loom auth login --server http://localhost:8090 --token env:LOOM_API_TOKEN
+loom auth whoami
 
 curl -X POST http://localhost:8090/api/v1/trials \
-  -H "Authorization: Bearer $TEAM_TOKEN" \
+  -H "Authorization: Bearer $LOOM_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"task_id":"hello-world","config":{"agent_name":"oracle","agent_model":null}}'
 ```

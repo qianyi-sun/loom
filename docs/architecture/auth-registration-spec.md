@@ -386,21 +386,25 @@ to browser CSRF.
 for every caller. Admin credentials are created and rotated only by local
 operator commands and mounted secret files.
 
-Team-token behavior stays database-backed:
+Team API-token behavior stays database-backed:
 
-- team callers can mint only same-team `read:own` and `submit` tokens;
+- tokens are named and reveal a raw `loom_api_...` value only at creation or
+  rotation time;
+- team callers can mint only same-team tokens and cannot grant scopes they do
+  not hold;
+- supported public team scopes include `read:own`, `submit`,
+  `providers:manage`, and `tokens:manage`;
 - admin callers can mint team tokens for approved teams;
 - browser users must have the owner-derived `tokens:manage` scope before they
-  can mint or revoke team tokens through the SPA/API;
-- admin callers must send `X-Loom-Admin-Actor` for token mint/revoke so the
-  action can be written to `admin_audit_events`;
-- token responses reveal raw token values only on creation;
-- token list/detail responses reveal only hash prefixes.
+  can mint, rotate, revoke, or list team API tokens through the SPA/API;
+- admin callers must send `X-Loom-Admin-Actor` for token mint/rotate/revoke so
+  the action can be written to `admin_audit_events`;
+- token list/detail responses reveal only names, scopes, metadata, last-used
+  timestamps, and hash prefixes.
 
 Provider connection creation, key rotation, provider tests, model refresh,
 manual model insertion, hide/unhide, and delete are similarly owner-gated for
-browser users through `providers:manage`. Legacy bearer team tokens retain their
-pre-#326 behavior until scoped CLI/API tokens land in #328.
+browser users and bearer API tokens through `providers:manage`.
 
 Migration `0024_revoke_db_admin_tokens` revokes active legacy
 `Token.type='admin'` rows and any DB token carrying `admin:*` scopes. The auth

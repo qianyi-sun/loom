@@ -103,6 +103,7 @@ export interface paths {
       requestBody: {
         content: {
           "application/json": {
+            name: string;
             type: string;
             scopes: string[];
             expires_in_days: number;
@@ -116,7 +117,8 @@ export interface paths {
             "application/json": {
               token: string;
               token_hash_prefix: string;
-              expires_at: string;
+              expires_at: string | null;
+              item: components["schemas"]["Token"];
             };
           };
         };
@@ -127,6 +129,23 @@ export interface paths {
     delete: {
       parameters: { path: { prefix: string } };
       responses: { 204: { content: never } };
+    };
+  };
+  "/api/v1/tokens/{prefix}/rotate": {
+    post: {
+      parameters: { path: { prefix: string } };
+      responses: {
+        201: {
+          content: {
+            "application/json": {
+              token: string;
+              token_hash_prefix: string;
+              expires_at: string | null;
+              item: components["schemas"]["Token"];
+            };
+          };
+        };
+      };
     };
   };
   "/api/v1/batches": {
@@ -393,6 +412,7 @@ export interface components {
       next_cursor: string | null;
     };
     Token: {
+      name: string | null;
       token_hash_prefix: string;
       type: string;
       scopes: string[];
@@ -400,6 +420,9 @@ export interface components {
       issued_at: string;
       expires_at: string | null;
       revoked_at: string | null;
+      last_used_at: string | null;
+      created_by_actor: string | null;
+      created_by_user_id: string | null;
     };
     TokenList: { items: components["schemas"]["Token"][] };
     Batch: {

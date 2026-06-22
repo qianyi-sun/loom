@@ -297,7 +297,12 @@ async def test_viewer_and_member_cannot_mint_token_but_owner_can(
 
         viewer_post = await ac.post(
             "/api/v1/tokens",
-            json={"type": "team", "scopes": ["read:own"], "expires_in_days": 1},
+            json={
+                "name": "viewer-token",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+            },
             headers={"X-Loom-CSRF": csrf},
         )
         assert viewer_post.status_code == 403
@@ -311,7 +316,12 @@ async def test_viewer_and_member_cannot_mint_token_but_owner_can(
         csrf = str(switched.json()["csrf_token"])
         member_post = await ac.post(
             "/api/v1/tokens",
-            json={"type": "team", "scopes": ["read:own"], "expires_in_days": 1},
+            json={
+                "name": "member-token",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+            },
             headers={"X-Loom-CSRF": csrf},
         )
         assert member_post.status_code == 403, member_post.text
@@ -326,11 +336,16 @@ async def test_viewer_and_member_cannot_mint_token_but_owner_can(
         csrf = str(owner_switch.json()["csrf_token"])
         owner_post = await ac.post(
             "/api/v1/tokens",
-            json={"type": "team", "scopes": ["read:own"], "expires_in_days": 1},
+            json={
+                "name": "owner-token",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+            },
             headers={"X-Loom-CSRF": csrf},
         )
         assert owner_post.status_code == 201, owner_post.text
-        assert owner_post.json()["token"].startswith("loom_team_")
+        assert owner_post.json()["token"].startswith("loom_api_")
 
 
 async def test_viewer_cannot_submit_trial_but_member_can(

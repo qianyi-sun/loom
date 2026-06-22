@@ -4,6 +4,8 @@ import { useState } from "react";
 import {
   api,
   type AdminAuditEvent,
+  type ApiTokenEntry,
+  type ApiTokenReveal,
   type InviteEntry,
   type InviteReveal,
   type InviteRole,
@@ -75,6 +77,61 @@ function statusClass(status: InviteStatus): string {
   }
 }
 
+const TOKEN_SCOPE_OPTIONS = [
+  {
+    value: "read:own",
+    label: "Read own runs",
+    description: "Read this team's runs, batches, artifacts, and metadata.",
+  },
+  {
+    value: "submit",
+    label: "Submit evaluations",
+    description: "Create trials and batches for the current team.",
+  },
+  {
+    value: "providers:manage",
+    label: "Manage provider connections",
+    description: "Create, update, test, and remove model provider credentials.",
+  },
+  {
+    value: "tokens:manage",
+    label: "Manage API tokens",
+    description: "Create, rotate, revoke, and list team API tokens.",
+  },
+] as const;
+
+const TOKEN_SCOPE_LABELS = new Map(
+  TOKEN_SCOPE_OPTIONS.map((option) => [option.value, option.label]),
+);
+
+function formatTokenScopes(scopes: string[]): string {
+  if (scopes.length === 0) return "No scopes";
+  return scopes
+    .map((scope) => TOKEN_SCOPE_LABELS.get(scope) ?? scope)
+    .sort()
+    .join(", ");
+}
+
+function tokenName(token: ApiTokenEntry): string {
+  return token.name?.trim() || token.token_hash_prefix;
+}
+
+function tokenStatus(token: ApiTokenEntry): { label: string; className: string } {
+  if (token.revoked_at) {
+    return { label: "Revoked", className: "text-red-700" };
+  }
+  if (token.expires_at && Date.parse(token.expires_at) <= Date.now()) {
+    return { label: "Expired", className: "text-slate-600" };
+  }
+  return { label: "Active", className: "text-emerald-700" };
+}
+
+function tokenLifetimeDays(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return 30;
+  return Math.floor(parsed);
+}
+
 type RevealedInvite = TeamRegistrationApproval | InviteReveal;
 
 export default function AdminAccess(): JSX.Element {
@@ -87,6 +144,10 @@ export default function AdminAccess(): JSX.Element {
   const [inviteRole, setInviteRole] = useState<InviteRole>("member");
   const [inviteMaxUses, setInviteMaxUses] = useState("1");
   const [inviteDomain, setInviteDomain] = useState("");
+  const [tokenNameInput, setTokenNameInput] = useState("");
+  const [tokenExpiresDays, setTokenExpiresDays] = useState("30");
+  const [tokenScopes, setTokenScopes] = useState<string[]>(["read:own", "submit"]);
+  const [revealedToken, setRevealedToken] = useState<ApiTokenReveal | null>(null);
   const queryClient = useQueryClient();
 
   const registrations = useQuery({
@@ -100,6 +161,10 @@ export default function AdminAccess(): JSX.Element {
   const invites = useQuery({
     queryKey: ["invites", inviteStatus],
     queryFn: () => api.listInvites({ status: inviteStatus }),
+  });
+  const tokens = useQuery({
+    queryKey: ["api-tokens"],
+    queryFn: () => api.listTokens(),
   });
 
   const approve = useMutation({
@@ -154,8 +219,49 @@ export default function AdminAccess(): JSX.Element {
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
   });
+  const createToken = useMutation({
+    mutationFn: () =>
+      api.createToken({
+        name: tokenNameInput.trim(),
+        type: "team",
+        scopes: tokenScopes,
+        expires_in_days: tokenLifetimeDays(tokenExpiresDays),
+      }),
+    onSuccess: (data) => {
+      setRevealedToken(data);
+      setTokenNameInput("");
+      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const rotateToken = useMutation({
+    mutationFn: (token: ApiTokenEntry) => api.rotateToken(token.token_hash_prefix),
+    onSuccess: (data) => {
+      setRevealedToken(data);
+      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const revokeToken = useMutation({
+    mutationFn: (token: ApiTokenEntry) => api.revokeToken(token.token_hash_prefix),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
 
   const actorMissing = actor.trim().length === 0;
+  const tokenCreateDisabled =
+    tokenNameInput.trim().length === 0 ||
+    tokenScopes.length === 0 ||
+    createToken.isPending;
+
+  function toggleTokenScope(scope: string, checked: boolean): void {
+    setTokenScopes((current) => {
+      if (checked) return current.includes(scope) ? current : [...current, scope];
+      return current.filter((item) => item !== scope);
+    });
+  }
 
   return (
     <div className="space-y-6">
@@ -214,6 +320,182 @@ export default function AdminAccess(): JSX.Element {
           </Card.Body>
         </Card>
       ) : null}
+
+      {revealedToken ? (
+        <Card className="border-emerald-200">
+          <Card.Header
+            title="New API token"
+            description="Shown once; store it in your password manager or CLI secret store before leaving this page."
+          />
+          <Card.Body className="space-y-3">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm text-emerald-900">
+              {revealedToken.token}
+            </div>
+            <div className="flex flex-wrap gap-2 text-sm text-emerald-900">
+              <span>Prefix: {revealedToken.token_hash_prefix}</span>
+              <span>Expires: {formatDate(revealedToken.expires_at)}</span>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => navigator.clipboard.writeText(revealedToken.token)}
+            >
+              Copy token
+            </Button>
+          </Card.Body>
+        </Card>
+      ) : null}
+
+      <Card>
+        <Card.Header
+          title="API tokens"
+          description="Create scoped tokens for CLI and automation. Raw token values are shown only once after create or rotate."
+        />
+        <Card.Body className="space-y-5">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_9rem_auto]">
+            <div>
+              <label className="block text-sm font-medium text-slate-700" htmlFor="api-token-name">
+                Token name
+              </label>
+              <Input
+                id="api-token-name"
+                className="mt-2"
+                value={tokenNameInput}
+                onChange={(event) => setTokenNameInput(event.target.value)}
+                placeholder="Nightly CLI"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700" htmlFor="api-token-expires">
+                Lifetime days
+              </label>
+              <Input
+                id="api-token-expires"
+                className="mt-2"
+                type="number"
+                min={1}
+                value={tokenExpiresDays}
+                onChange={(event) => setTokenExpiresDays(event.target.value)}
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                variant="primary"
+                disabled={tokenCreateDisabled}
+                onClick={() => createToken.mutate()}
+              >
+                Create API token
+              </Button>
+            </div>
+          </div>
+
+          <fieldset className="grid gap-2 md:grid-cols-2">
+            <legend className="mb-1 text-sm font-medium text-slate-700">
+              Token scopes
+            </legend>
+            {TOKEN_SCOPE_OPTIONS.map((option) => (
+              <label
+                key={option.value}
+                className="flex gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm"
+              >
+                <input
+                  aria-label={option.label}
+                  type="checkbox"
+                  className="mt-1"
+                  checked={tokenScopes.includes(option.value)}
+                  onChange={(event) =>
+                    toggleTokenScope(option.value, event.currentTarget.checked)
+                  }
+                />
+                <span>
+                  <span className="block font-medium text-slate-800">
+                    {option.label}
+                  </span>
+                  <span className="block text-xs text-slate-500">
+                    {option.description}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+
+          {tokens.isPending ? <LoadingState /> : null}
+          {tokens.isError ? <ErrorState error={tokens.error} /> : null}
+          {tokens.data ? (
+            tokens.data.items.length === 0 ? (
+              <EmptyState label="No API tokens." />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2 font-semibold">Name</th>
+                      <th className="px-3 py-2 font-semibold">Prefix</th>
+                      <th className="px-3 py-2 font-semibold">Scopes</th>
+                      <th className="px-3 py-2 font-semibold">Last used</th>
+                      <th className="px-3 py-2 font-semibold">Expires</th>
+                      <th className="px-3 py-2 font-semibold">Status</th>
+                      <th className="px-3 py-2 font-semibold">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {tokens.data.items.map((token) => {
+                      const status = tokenStatus(token);
+                      const label = tokenName(token);
+                      const inactive = token.revoked_at !== null;
+                      return (
+                        <tr key={token.token_hash_prefix}>
+                          <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
+                            {label}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
+                            {token.token_hash_prefix}
+                          </td>
+                          <td className="max-w-sm px-3 py-2 text-slate-600">
+                            {formatTokenScopes(token.scopes)}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                            {token.last_used_at ? formatDate(token.last_used_at) : "Never"}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                            {formatDate(token.expires_at)}
+                          </td>
+                          <td className={`whitespace-nowrap px-3 py-2 font-medium ${status.className}`}>
+                            {status.label}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                aria-label={`Rotate ${label}`}
+                                disabled={inactive || rotateToken.isPending}
+                                onClick={() => rotateToken.mutate(token)}
+                              >
+                                Rotate
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                aria-label={`Revoke ${label}`}
+                                disabled={inactive || revokeToken.isPending}
+                                onClick={() => revokeToken.mutate(token)}
+                              >
+                                Revoke
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : null}
+          {createToken.isError ? <ErrorState error={createToken.error} /> : null}
+          {rotateToken.isError ? <ErrorState error={rotateToken.error} /> : null}
+          {revokeToken.isError ? <ErrorState error={revokeToken.error} /> : null}
+        </Card.Body>
+      </Card>
 
       <Card>
         <Card.Header

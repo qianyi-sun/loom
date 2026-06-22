@@ -76,6 +76,13 @@ def assert_2xx(
             detail = body.get("detail") if isinstance(body, dict) else body
         except Exception:
             detail = response.text or "(no body)"
+        if response.status_code in {401, 403}:
+            raise HttpStatusError(
+                f"token rejected by server while trying to {action}: "
+                "revoked, expired, or missing scope. Run `loom auth "
+                "login --server URL --token env:LOOM_TOKEN` first.\n"
+                f"  {detail}",
+            )
         raise HttpStatusError(
             f"failed to {action}: HTTP {response.status_code}\n"
             f"  {detail}",

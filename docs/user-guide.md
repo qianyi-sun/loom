@@ -109,12 +109,14 @@ members, and team API tokens. Roles are enforced by the API:
 - `owner` can manage team API tokens and provider connections.
 - `platform_admin` is an operator role with cross-team inspection/admin access.
 
-The existing CLI still uses team bearer tokens for service workflows until the
-scoped public CLI token flow lands. Create or revoke those tokens from Settings
-only as a team owner. Completed run metadata and safe artifacts will become
-organization-visible through the separate Run Library work; ordinary
-batch/trial/detail/download routes remain current-team scoped until that feature
-adds explicit share-state checks.
+The CLI uses named team API tokens for service workflows. Create, rotate, or
+revoke those tokens from Team access only as a team owner, then authenticate
+with `loom auth login --server URL --token env:LOOM_API_TOKEN`. Use
+`loom auth whoami` to verify the active server, team, scopes, and token prefix
+without printing the raw token. Completed run metadata and safe artifacts will
+become organization-visible through the separate Run Library work; ordinary
+batch/trial/detail/download routes remain current-team scoped until that
+feature adds explicit share-state checks.
 
 ## Default views and diagnostics
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import boto3
@@ -12,7 +12,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -20,6 +20,10 @@ from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import Team, Token
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.test_service_auth_sessions import (
+    _login,
+    auth_setup,  # noqa: F401 - imported so pytest exposes the fixture here.
+)
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "S" * 43
 
@@ -110,16 +114,21 @@ async def test_list_own_tokens(
 async def test_mint_and_revoke(
     svc_setup: tuple[FastAPI, str, UUID],
 ) -> None:
-    app, raw, _team_id = svc_setup
+    app, raw, team_id = svc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
         post = await ac.post(
             "/api/v1/tokens",
-            headers={"Authorization": f"Bearer {raw}"},
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "ops-owner",
+            },
             json={
+                "name": "smoke cli",
                 "type": "team",
+                "team_id": str(team_id),
                 "scopes": ["read:own"],
                 "expires_in_days": 30,
             },
@@ -127,7 +136,7 @@ async def test_mint_and_revoke(
         assert post.status_code == 201, post.text
         new_token = post.json()["token"]
         new_prefix = post.json()["token_hash_prefix"]
-        assert new_token.startswith("loom_team_")
+        assert new_token.startswith("loom_api_")
         assert len(new_prefix) == 8
 
         listed = await ac.get(
@@ -140,7 +149,10 @@ async def test_mint_and_revoke(
 
         revoke = await ac.delete(
             f"/api/v1/tokens/{new_prefix}",
-            headers={"Authorization": f"Bearer {raw}"},
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "ops-owner",
+            },
         )
         assert revoke.status_code == 204
 
@@ -153,6 +165,235 @@ async def test_mint_and_revoke(
         ]
         assert revoked_items
         assert revoked_items[0]["revoked_at"] is not None
+
+
+async def test_owner_creates_named_api_token_and_whoami_updates_last_used(
+    auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],  # noqa: F811
+) -> None:
+    app, _team_a, _team_b, team_c, _team_d = auth_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        body, _cookies = await _login(ac)
+        csrf = str(body["csrf_token"])
+        switched = await ac.post(
+            "/api/v1/auth/team",
+            json={"team_id": str(team_c)},
+            headers={"X-Loom-CSRF": csrf},
+        )
+        assert switched.status_code == 200, switched.text
+        csrf = str(switched.json()["csrf_token"])
+
+        created = await ac.post(
+            "/api/v1/tokens",
+            json={
+                "name": "Laptop CLI",
+                "type": "team",
+                "scopes": ["read:own", "submit"],
+                "expires_in_days": 30,
+            },
+            headers={"X-Loom-CSRF": csrf},
+        )
+        assert created.status_code == 201, created.text
+        created_body = created.json()
+        raw_token = created_body["token"]
+        prefix = created_body["token_hash_prefix"]
+        assert raw_token.startswith("loom_api_")
+        assert created_body["item"]["name"] == "Laptop CLI"
+        assert created_body["item"]["token_hash_prefix"] == prefix
+        assert created_body["item"]["last_used_at"] is None
+
+        listed = await ac.get("/api/v1/tokens")
+        assert listed.status_code == 200, listed.text
+        listed_text = listed.text
+        assert raw_token not in listed_text
+        item = next(
+            entry for entry in listed.json()["items"]
+            if entry["token_hash_prefix"] == prefix
+        )
+        assert item["name"] == "Laptop CLI"
+        assert item["scopes"] == ["read:own", "submit"]
+        assert item["last_used_at"] is None
+
+        whoami = await ac.get(
+            "/api/v1/auth/whoami",
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+        assert whoami.status_code == 200, whoami.text
+        assert whoami.json() == {
+            "auth_kind": "bearer",
+            "principal_type": "team",
+            "team_id": str(team_c),
+            "team_name": "Gamma-" + str(team_c),
+            "role": None,
+            "scopes": ["read:own", "submit"],
+            "token_prefix": prefix,
+            "expires_at": created_body["expires_at"],
+        }
+
+        after_use = await ac.get("/api/v1/tokens")
+        used_item = next(
+            entry for entry in after_use.json()["items"]
+            if entry["token_hash_prefix"] == prefix
+        )
+        assert used_item["last_used_at"] is not None
+
+
+async def test_owner_rotates_token_revoking_old_secret(
+    auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],  # noqa: F811
+) -> None:
+    app, _team_a, _team_b, team_c, _team_d = auth_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        body, _cookies = await _login(ac)
+        csrf = str(body["csrf_token"])
+        switched = await ac.post(
+            "/api/v1/auth/team",
+            json={"team_id": str(team_c)},
+            headers={"X-Loom-CSRF": csrf},
+        )
+        assert switched.status_code == 200, switched.text
+        csrf = str(switched.json()["csrf_token"])
+        created = await ac.post(
+            "/api/v1/tokens",
+            json={
+                "name": "rotating cli",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 7,
+            },
+            headers={"X-Loom-CSRF": csrf},
+        )
+        assert created.status_code == 201, created.text
+        old_raw = created.json()["token"]
+        old_prefix = created.json()["token_hash_prefix"]
+
+        rotated = await ac.post(
+            f"/api/v1/tokens/{old_prefix}/rotate",
+            headers={"X-Loom-CSRF": csrf},
+        )
+        assert rotated.status_code == 200, rotated.text
+        new_raw = rotated.json()["token"]
+        new_prefix = rotated.json()["token_hash_prefix"]
+        assert new_raw.startswith("loom_api_")
+        assert new_raw != old_raw
+        assert new_prefix != old_prefix
+        assert rotated.json()["item"]["name"] == "rotating cli"
+
+        old_whoami = await ac.get(
+            "/api/v1/auth/whoami",
+            headers={"Authorization": f"Bearer {old_raw}"},
+        )
+        assert old_whoami.status_code == 401
+        new_whoami = await ac.get(
+            "/api/v1/auth/whoami",
+            headers={"Authorization": f"Bearer {new_raw}"},
+        )
+        assert new_whoami.status_code == 200
+        assert new_whoami.json()["token_prefix"] == new_prefix
+
+
+async def test_plain_submit_token_cannot_manage_tokens(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, _team_id = svc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        create = await ac.post(
+            "/api/v1/tokens",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "illegal escalation",
+                "type": "team",
+                "scopes": ["read:own"],
+                "expires_in_days": 1,
+            },
+        )
+        revoke = await ac.delete(
+            "/api/v1/tokens/deadbeef",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert create.status_code == 403
+    assert "tokens:manage" in create.json()["detail"]
+    assert revoke.status_code == 403
+    assert "tokens:manage" in revoke.json()["detail"]
+
+
+async def test_expired_api_token_fails_whoami(
+    svc_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = svc_setup
+    expired_raw = f"loom_api_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(expired_raw.encode()).digest(),
+            type="team",
+            name="expired",
+            scopes=["read:own"],
+            team_id=team_id,
+            issued_at=datetime.now(UTC) - timedelta(days=8),
+            expires_at=datetime.now(UTC) - timedelta(days=1),
+        ))
+        s.commit()
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://svc",
+        ) as ac:
+            whoami = await ac.get(
+                "/api/v1/auth/whoami",
+                headers={"Authorization": f"Bearer {expired_raw}"},
+            )
+    finally:
+        sync_engine.dispose()
+    assert whoami.status_code == 401
+
+
+async def test_admin_audit_redacts_raw_api_token(
+    svc_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, _raw, team_id = svc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        created = await ac.post(
+            "/api/v1/tokens",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "ops-owner",
+            },
+            json={
+                "name": "ops issued cli",
+                "type": "team",
+                "team_id": str(team_id),
+                "scopes": ["read:own", "submit"],
+                "expires_in_days": 7,
+            },
+        )
+        assert created.status_code == 201, created.text
+        raw_token = created.json()["token"]
+        prefix = created.json()["token_hash_prefix"]
+        audit = await ac.get(
+            "/api/v1/admin/audit-events",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+    assert raw_token not in audit.text
+    matching = [
+        item for item in audit.json()["items"]
+        if item["action"] == "token.create" and item["target_id"] == prefix
+    ]
+    assert matching
+    assert matching[0]["metadata"]["token_hash_prefix"] == prefix
+    assert matching[0]["metadata"]["token_name"] == "ops issued cli"
 
 
 async def test_post_rejects_admin_scope_from_team_caller(
@@ -168,6 +409,7 @@ async def test_post_rejects_admin_scope_from_team_caller(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "type": "team",
+                "name": "bad admin scope",
                 "scopes": ["admin:tokens"],
                 "expires_in_days": 1,
             },
@@ -189,6 +431,7 @@ async def test_post_rejects_admin_type_from_team_caller(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "type": "admin",
+                "name": "bad admin type",
                 "scopes": ["read:own"],
                 "expires_in_days": 1,
             },
@@ -213,6 +456,7 @@ async def test_post_rejects_admin_type_from_singleton_admin(
             },
             json={
                 "type": "admin",
+                "name": "bad admin type",
                 "scopes": ["admin:tokens"],
                 "expires_in_days": 1,
             },
@@ -237,6 +481,7 @@ async def test_post_rejects_admin_scopes_from_singleton_admin(
             },
             json={
                 "type": "team",
+                "name": "bad admin scope",
                 "team_id": str(team_id),
                 "scopes": ["admin:tokens"],
                 "expires_in_days": 1,
@@ -308,14 +553,17 @@ async def test_revoke_invalid_prefix_400(
 async def test_revoke_unknown_prefix_404(
     svc_setup: tuple[FastAPI, str, UUID],
 ) -> None:
-    app, raw, _t = svc_setup
+    app, _raw, _t = svc_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
     ) as ac:
         r = await ac.delete(
             "/api/v1/tokens/deadbeef",
-            headers={"Authorization": f"Bearer {raw}"},
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "ops-owner",
+            },
         )
     assert r.status_code == 404
 
@@ -351,6 +599,7 @@ async def test_post_rejects_unknown_scope(
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "type": "team",
+                "name": "bad unknown scope",
                 "scopes": ["bogus:typo"],
                 "expires_in_days": 1,
             },
@@ -374,11 +623,24 @@ async def test_revoke_other_team_token_returns_404(
     other_team = uuid4()
     other_raw = f"loom_team_{uuid4().hex}"
     other_hash = hashlib.sha256(other_raw.encode()).digest()
+    manager_raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(
             id=other_team, name=f"other-{other_team}",
+        ))
+        own_team = (s.execute(
+            select(Team.id).join(Token, Token.team_id == Team.id)
+            .where(Token.token_hash == hashlib.sha256(raw.encode()).digest()),
+        )).scalar_one()
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(manager_raw.encode()).digest(),
+            type="team",
+            scopes=["read:own", "tokens:manage"],
+            team_id=own_team,
+            issued_at=datetime.now(UTC),
+            expires_at=None,
         ))
         s.execute(insert(Token).values(
             token_hash=other_hash, type="team",
@@ -394,7 +656,7 @@ async def test_revoke_other_team_token_returns_404(
         ) as ac:
             r = await ac.delete(
                 f"/api/v1/tokens/{other_prefix}",
-                headers={"Authorization": f"Bearer {raw}"},
+                headers={"Authorization": f"Bearer {manager_raw}"},
             )
         # The other team's token is invisible to this caller; 404
         # rather than 403 (which would have leaked existence).
@@ -408,6 +670,9 @@ async def test_revoke_other_team_token_returns_404(
         assert still.revoked_at is None
     finally:
         with sl() as s:
+            s.execute(delete(Token).where(
+                Token.token_hash == hashlib.sha256(manager_raw.encode()).digest(),
+            ))
             s.execute(delete(Token).where(Token.token_hash == other_hash))
             from loom.db.schema import TeamQuota
             s.execute(delete(TeamQuota).where(TeamQuota.team_id == other_team))

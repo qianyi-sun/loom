@@ -328,17 +328,20 @@ Four token kinds, all bearer-format:
 
 | Prefix | Issued by | Scope |
 |---|---|---|
-| `team:*` | Operator (`POST /tokens` with `admin:tokens`) | Long-lived; submit trials, view results |
+| `loom_api_...` | Team owner or operator (`POST /api/v1/tokens`) | Named, scoped team API token; submit trials, view results, optionally manage providers/tokens |
 | `worker:*` | Auto-issued at worker `POST /workers/register` | Long-lived; claim trials, PATCH state |
 | `step:*` | Worker mints per-step JWT (`mint_step_token`) | Short-lived (per-step); CLI agent calls Gateway with bounded scope |
 | `admin:*` | Operator secret file (`loom service init-admin`) | Manage tokens, rate-cards, teams |
 
-Admin callers to `POST /api/v1/tokens` and `DELETE /api/v1/tokens/{prefix}`
-must send `X-Loom-Admin-Actor`; those service-token mutations are recorded in
-`admin_audit_events` with safe metadata such as token hash prefixes. Team
-callers minting or revoking their own team tokens do not need an admin actor.
+Admin callers to `POST /api/v1/tokens`, `POST /api/v1/tokens/{prefix}/rotate`,
+and `DELETE /api/v1/tokens/{prefix}` must send `X-Loom-Admin-Actor`; those
+service-token mutations are recorded in `admin_audit_events` with safe metadata
+such as names and token hash prefixes. Team callers minting, rotating, or
+revoking their own team API tokens do not need an admin actor, but they must
+hold `tokens:manage`.
 
-`tokens` table tracks `last_seen_at` per token for rotation hygiene. The
+`tokens` table tracks `last_seen_at` and `last_used_at` per token for rotation
+hygiene. The
 `admin_audit_events` table records the first #10 backend audit surface: team
 registration approve/reject and service-token admin mint/revoke. Wider admin
 mutation audit coverage should be added deliberately as follow-up work.

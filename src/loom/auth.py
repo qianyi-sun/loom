@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import jwt
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.admin_secret import AdminSecretVerifier
@@ -204,10 +204,23 @@ async def verify_bearer_token(
     if row.expires_at is not None and row.expires_at < datetime.now(UTC):
         return None
 
+    token_hash = row.token_hash
+    token_type = row.type
+    scopes = list(row.scopes)
+    team_id = row.team_id
+    expires_at = row.expires_at
+    now = datetime.now(UTC)
+    await session.execute(
+        update(Token)
+        .where(Token.token_hash == token_hash)
+        .values(last_used_at=now, last_seen_at=now),
+    )
+    await session.commit()
+
     return AuthContext(
-        token_hash=row.token_hash,
-        type=row.type,
-        scopes=list(row.scopes),
-        team_id=row.team_id,
-        expires_at=row.expires_at,
+        token_hash=token_hash,
+        type=token_type,
+        scopes=scopes,
+        team_id=team_id,
+        expires_at=expires_at,
     )

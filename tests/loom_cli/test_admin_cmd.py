@@ -427,8 +427,9 @@ def test_team_mint_posts_payload(
     )
     rc = main([
         "admin", "tokens", "team", "mint",
+        "--name", "ci-submit-token",
         "--team-id", _TEAM_ID,
-        "--scopes", "read:own,submit",
+        "--scopes", "read:own,submit,providers:manage",
         "--expires-in-days", "30",
         "--admin-actor", "qianyi",
     ])
@@ -436,9 +437,10 @@ def test_team_mint_posts_payload(
     req = mock_server.requests[0]
     body = json.loads(req.content)
     assert body == {
+        "name": "ci-submit-token",
         "type": "team",
         "team_id": _TEAM_ID,
-        "scopes": ["read:own", "submit"],
+        "scopes": ["read:own", "submit", "providers:manage"],
         "expires_in_days": 30,
     }
     assert req.headers["X-Loom-Admin-Actor"] == "qianyi"
@@ -493,7 +495,9 @@ def test_team_mint_default_scopes(
         },
     )
     rc = main([
-        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+        "admin", "tokens", "team", "mint",
+        "--name", "default-submit-token",
+        "--team-id", _TEAM_ID,
     ])
     assert rc == 0
     body = json.loads(mock_server.requests[0].content)
@@ -511,7 +515,9 @@ def test_team_mint_no_admin_actor_omits_header(
         },
     )
     main([
-        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+        "admin", "tokens", "team", "mint",
+        "--name", "no-admin-actor-token",
+        "--team-id", _TEAM_ID,
     ])
     assert "X-Loom-Admin-Actor" not in mock_server.requests[0].headers
 
@@ -523,7 +529,9 @@ def test_team_mint_not_logged_in_returns_2(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     # No `auth login` — config is empty.
     rc = main([
-        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+        "admin", "tokens", "team", "mint",
+        "--name", "not-logged-in-token",
+        "--team-id", _TEAM_ID,
     ])
     assert rc == 2
     assert "not logged in" in capsys.readouterr().err.lower()
@@ -536,10 +544,14 @@ def test_team_mint_server_403_returns_1(
         403, json={"detail": "X-Loom-Admin-Actor required"},
     )
     rc = main([
-        "admin", "tokens", "team", "mint", "--team-id", _TEAM_ID,
+        "admin", "tokens", "team", "mint",
+        "--name", "forbidden-token",
+        "--team-id", _TEAM_ID,
     ])
     assert rc == 1
-    assert "403" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "token rejected by server" in err
+    assert "X-Loom-Admin-Actor required" in err
 
 
 def test_team_mint_json_format(
@@ -553,6 +565,7 @@ def test_team_mint_json_format(
     )
     main([
         "admin", "tokens", "team", "mint",
+        "--name", "json-token",
         "--team-id", _TEAM_ID, "--format", "json",
     ])
     out = capsys.readouterr().out
@@ -639,6 +652,7 @@ def test_team_rotate_mints_then_prints_checklist(
     )
     rc = main([
         "admin", "tokens", "team", "rotate",
+        "--name", "rotated-token",
         "--team-id", _TEAM_ID,
     ])
     assert rc == 0
@@ -659,6 +673,7 @@ def test_team_rotate_mint_failure_propagates(
     )
     rc = main([
         "admin", "tokens", "team", "rotate",
+        "--name", "blocked-rotate-token",
         "--team-id", _TEAM_ID,
     ])
     assert rc == 1
@@ -677,6 +692,7 @@ def test_team_rotate_json_skips_checklist(
     )
     rc = main([
         "admin", "tokens", "team", "rotate",
+        "--name", "json-rotate-token",
         "--team-id", _TEAM_ID, "--format", "json",
     ])
     assert rc == 0

@@ -253,7 +253,7 @@ loom cluster {render,preflight,up,down} --nodes HOSTFILE
 
 ```
 loom auth login --server URL --token {env:VAR | file:PATH | -}    # --token required; no interactive paste
-loom auth {status,logout}
+loom auth {status,whoami,logout}
 
 loom providers create --name N --type {openai-compatible,anthropic,google,custom} \
     --base-url URL --api-key {env:VAR | file:PATH | -}

@@ -1,13 +1,12 @@
-"""GET/POST/DELETE /api/v1/tokens (spec §5.5).
+"""GET/POST/DELETE /api/v1/tokens (spec §5.5 / issue #328).
 
 Routes:
-- GET    /tokens          — list tokens (team scopes to own team; admin sees all)
-- POST   /tokens          — mint a new token (team callers limited to team-typed
-                            tokens with scopes ⊆ {read:own, submit}; admin
-                            may mint anything including cross-team)
-- DELETE /tokens/{prefix} — revoke a token by its 8-char hex prefix; team
-                            callers may only revoke tokens belonging to
-                            their own team.
+- GET    /tokens                 — list token metadata; never raw secrets.
+- POST   /tokens                 — mint one scoped API token and reveal the raw
+                                   secret exactly once.
+- POST   /tokens/{prefix}/rotate — revoke one visible token and reveal a fresh
+                                   replacement exactly once.
+- DELETE /tokens/{prefix}        — revoke a token by its 8-char hash prefix.
 
 The hex-prefix lookup is O(N) over all tokens — fine for the v1 scale
 (low thousands at most). A composite index would let us do an indexed
@@ -25,7 +24,9 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.auth import AuthContext
 from loom.db.schema import Token
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import (
@@ -38,14 +39,12 @@ router = APIRouter()
 
 
 class _CreateTokenReq(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
     type: str = Field(pattern=r"^(team|admin)$")
     scopes: list[str] = Field(min_length=1)
     expires_in_days: int = Field(gt=0, le=365)
     team_id: UUID | None = None  # admin-only cross-team mint
 
-
-# Scopes a non-admin team caller may grant via POST /tokens.
-_TEAM_ALLOWED_SCOPES = frozenset({"read:own", "submit"})
 
 # Every recognized scope across the whole product. Updates here are deliberate:
 # a caller minting a token with a never-defined scope is almost certainly a
@@ -55,11 +54,23 @@ _TEAM_ALLOWED_SCOPES = frozenset({"read:own", "submit"})
 _KNOWN_SCOPES = frozenset({
     "read:own",
     "submit",
+    "providers:manage",
+    "tokens:manage",
+    "team:manage",
     "submit:batch",
+    "admin:platform",
     "admin:tokens",
     "admin:rate_cards",
     "worker:claim",
     "worker:report",
+    "worker:index",
+})
+
+_INTERNAL_SCOPES = frozenset({
+    "submit:batch",
+    "worker:claim",
+    "worker:report",
+    "worker:index",
 })
 
 
@@ -67,12 +78,21 @@ def _hash_prefix(token_hash: bytes) -> str:
     return token_hash.hex()[:8]
 
 
+def _raw_api_token() -> str:
+    return f"loom_api_{secrets.token_urlsafe(32)}"
+
+
 def _serialize(row: Token) -> dict[str, Any]:
     return {
         "token_hash_prefix": _hash_prefix(row.token_hash),
+        "name": row.name or "Unnamed token",
         "type": row.type,
         "scopes": list(row.scopes),
         "team_id": str(row.team_id) if row.team_id else None,
+        "created_by_actor": row.created_by_actor,
+        "created_by_user_id": (
+            str(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         "issued_at": row.issued_at.isoformat(),
         "expires_at": (
             row.expires_at.isoformat() if row.expires_at else None
@@ -80,18 +100,86 @@ def _serialize(row: Token) -> dict[str, Any]:
         "revoked_at": (
             row.revoked_at.isoformat() if row.revoked_at else None
         ),
+        "last_used_at": (
+            row.last_used_at.isoformat() if row.last_used_at else None
+        ),
     }
 
 
-def _require_browser_user_token_management(ctx: Any) -> None:
-    """Owner-gate token management for browser sessions.
+def _validate_prefix(prefix: str) -> None:
+    if len(prefix) != 8 or not all(c in "0123456789abcdef" for c in prefix):
+        raise HTTPException(
+            status_code=400, detail="prefix must be 8 lowercase hex chars",
+        )
 
-    Legacy bearer team tokens keep their pre-#326 behavior until scoped CLI/API
-    tokens replace them in #328. Browser users must carry owner-derived
-    `tokens:manage` so members can submit work without managing API tokens.
-    """
-    if ctx.type == "user":
+
+def _require_token_management(ctx: Any) -> None:
+    if not is_admin(ctx):
         require_scope(ctx, "tokens:manage")
+
+
+def _validate_requested_scopes(ctx: Any, scopes: list[str], *, admin: bool) -> None:
+    unknown = [scope for scope in scopes if scope not in _KNOWN_SCOPES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unrecognized scopes: {sorted(unknown)}",
+        )
+
+    if any(scope.startswith("admin:") for scope in scopes):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "database-backed admin scopes are disabled; admin "
+                "authority must come from the singleton admin secret file"
+            ),
+        )
+
+    if not admin:
+        internal = sorted(set(scopes).intersection(_INTERNAL_SCOPES))
+        if internal:
+            raise HTTPException(
+                status_code=403,
+                detail=f"internal scopes require admin:tokens: {internal}",
+            )
+        missing = sorted(scope for scope in scopes if scope not in ctx.scopes)
+        if missing:
+            raise HTTPException(
+                status_code=403,
+                detail=f"cannot grant scopes not held by caller: {missing}",
+            )
+
+
+async def _find_visible_token(
+    s: AsyncSession, ctx: AuthContext, prefix: str,
+) -> Token:
+    _validate_prefix(prefix)
+    stmt = select(Token).where(Token.revoked_at.is_(None))
+    if not is_admin(ctx):
+        stmt = stmt.where(Token.team_id == ctx.team_id)
+    rows = (await s.execute(stmt)).scalars().all()
+    matches = [
+        row for row in rows if row.token_hash.hex().startswith(prefix)
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="token not found")
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"prefix {prefix!r} matches {len(matches)} tokens; "
+                "ambiguous"
+            ),
+        )
+    return matches[0]
+
+
+def _created_by_actor(ctx: AuthContext, admin_actor: str | None) -> str | None:
+    if admin_actor is not None:
+        return f"admin:{admin_actor}"
+    if ctx.user_id is not None:
+        return f"user:{ctx.user_id}"
+    return f"{ctx.type}:{ctx.token_hash.hex()[:8]}"
 
 
 @router.get("/tokens")
@@ -113,19 +201,8 @@ async def create_token(
     sc: SessionAndCtx,
     payload: _CreateTokenReq,
     x_loom_admin_actor: str | None = Header(default=None),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     s, ctx = sc
-
-    # Reject unrecognized scopes up front (audit M2). Catches
-    # typos before they reach the DB; downstream guards only check
-    # known scopes, so an unknown scope is dead weight at best,
-    # confusing at worst.
-    unknown = [sc for sc in payload.scopes if sc not in _KNOWN_SCOPES]
-    if unknown:
-        raise HTTPException(
-            status_code=400,
-            detail=f"unrecognized scopes: {sorted(unknown)}",
-        )
 
     if payload.type == "admin":
         raise HTTPException(
@@ -136,19 +213,12 @@ async def create_token(
                 "init-admin` or `loom service rotate-admin`"
             ),
         )
-    if any(scope.startswith("admin:") for scope in payload.scopes):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "database-backed admin scopes are disabled; admin "
-                "authority must come from the singleton admin secret file"
-            ),
-        )
 
     admin = is_admin(ctx)
     admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
+    _validate_requested_scopes(ctx, payload.scopes, admin=admin)
     if not admin:
-        _require_browser_user_token_management(ctx)
+        _require_token_management(ctx)
         if payload.type != "team":
             raise HTTPException(
                 status_code=403,
@@ -159,12 +229,6 @@ async def create_token(
                 status_code=403,
                 detail="cannot mint into another team",
             )
-        for scope in payload.scopes:
-            if scope not in _TEAM_ALLOWED_SCOPES:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"scope {scope!r} requires admin:tokens",
-                )
 
     target_team = (
         payload.team_id if payload.team_id else ctx.team_id
@@ -174,21 +238,24 @@ async def create_token(
             status_code=400, detail="team_id required for team token",
         )
 
-    raw = f"loom_team_{secrets.token_urlsafe(32)}"
+    raw = _raw_api_token()
     token_hash = hashlib.sha256(raw.encode()).digest()
+    token_hash_prefix = _hash_prefix(token_hash)
     expires_at = datetime.now(UTC) + timedelta(
         days=payload.expires_in_days,
     )
 
     await s.execute(insert(Token).values(
         token_hash=token_hash,
+        name=payload.name.strip(),
         type=payload.type,
         scopes=list(payload.scopes),
         team_id=target_team if payload.type == "team" else None,
+        created_by_user_id=ctx.user_id,
+        created_by_actor=_created_by_actor(ctx, admin_actor),
         issued_at=datetime.now(UTC),
         expires_at=expires_at,
     ))
-    token_hash_prefix = token_hash.hex()[:8]
     if admin_actor is not None:
         await write_admin_audit_event(
             s,
@@ -199,18 +266,23 @@ async def create_token(
             request=request,
             metadata={
                 "token_hash_prefix": token_hash_prefix,
+                "token_name": payload.name.strip(),
                 "token_type": payload.type,
                 "team_id": str(target_team) if target_team else None,
                 "scopes": list(payload.scopes),
                 "expires_at": expires_at.isoformat(),
             },
         )
+    row = (await s.execute(
+        select(Token).where(Token.token_hash == token_hash),
+    )).scalar_one()
     await s.commit()
 
     return {
         "token": raw,
         "token_hash_prefix": token_hash_prefix,
         "expires_at": expires_at.isoformat(),
+        "item": _serialize(row),
     }
 
 
@@ -221,45 +293,14 @@ async def revoke_token(
     prefix: str,
     x_loom_admin_actor: str | None = Header(default=None),
 ) -> None:
-    if len(prefix) != 8 or not all(c in "0123456789abcdef" for c in prefix):
-        raise HTTPException(
-            status_code=400, detail="prefix must be 8 lowercase hex chars",
-        )
+    _validate_prefix(prefix)
     s, ctx = sc
     admin = is_admin(ctx)
     admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
     if not admin:
-        _require_browser_user_token_management(ctx)
+        _require_token_management(ctx)
 
-    # Scope the lookup to what the caller is allowed to see: team
-    # callers can only revoke their own team's tokens, so include
-    # the team_id predicate BEFORE the prefix scan. This both
-    # closes a non-deterministic cross-team-collision window
-    # (audit H1) and avoids loading every row into Python
-    # (audit M1). Admins still get the full table.
-    stmt = select(Token).where(Token.revoked_at.is_(None))
-    if not is_admin(ctx):
-        stmt = stmt.where(Token.team_id == ctx.team_id)
-    rows = (await s.execute(stmt)).scalars().all()
-    matches = [
-        r for r in rows if r.token_hash.hex().startswith(prefix)
-    ]
-    if not matches:
-        raise HTTPException(status_code=404, detail="token not found")
-    if len(matches) > 1:
-        # 8-hex-char prefix collisions are rare but possible (32
-        # bits, birthday ≈ 77k tokens). When they happen, refuse
-        # rather than silently picking one — the caller can supply
-        # more hex digits in a future API revision (currently
-        # 8 is hard-coded by spec §5.5).
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"prefix {prefix!r} matches {len(matches)} tokens; "
-                f"ambiguous"
-            ),
-        )
-    target = matches[0]
+    target = await _find_visible_token(s, ctx, prefix)
     if target.team_id is None and not is_admin(ctx):
         # Defense-in-depth: a non-admin shouldn't have reached the
         # prefix-scan over a global-admin token (team_id filter
@@ -283,9 +324,76 @@ async def revoke_token(
             request=request,
             metadata={
                 "token_hash_prefix": prefix,
+                "token_name": target.name,
                 "token_type": target.type,
                 "team_id": str(target.team_id) if target.team_id else None,
                 "scopes": list(target.scopes),
             },
         )
     await s.commit()
+
+
+@router.post("/tokens/{prefix}/rotate")
+async def rotate_token(
+    request: Request,
+    sc: SessionAndCtx,
+    prefix: str,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> dict[str, Any]:
+    s, ctx = sc
+    admin = is_admin(ctx)
+    admin_actor = require_admin_actor(x_loom_admin_actor) if admin else None
+    if not admin:
+        _require_token_management(ctx)
+
+    target = await _find_visible_token(s, ctx, prefix)
+    if target.team_id is None and not is_admin(ctx):
+        raise HTTPException(status_code=403, detail="admin scope required")
+
+    raw = _raw_api_token()
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    token_hash_prefix = _hash_prefix(token_hash)
+    now = datetime.now(UTC)
+    await s.execute(
+        update(Token)
+        .where(Token.token_hash == target.token_hash)
+        .values(revoked_at=now),
+    )
+    await s.execute(insert(Token).values(
+        token_hash=token_hash,
+        name=target.name,
+        type=target.type,
+        scopes=list(target.scopes),
+        team_id=target.team_id,
+        created_by_user_id=ctx.user_id,
+        created_by_actor=_created_by_actor(ctx, admin_actor),
+        issued_at=now,
+        expires_at=target.expires_at,
+    ))
+    if admin_actor is not None:
+        await write_admin_audit_event(
+            s,
+            actor=admin_actor,
+            action="token.rotate",
+            target_type="token",
+            target_id=prefix,
+            request=request,
+            metadata={
+                "old_token_hash_prefix": prefix,
+                "new_token_hash_prefix": token_hash_prefix,
+                "token_name": target.name,
+                "token_type": target.type,
+                "team_id": str(target.team_id) if target.team_id else None,
+                "scopes": list(target.scopes),
+            },
+        )
+    row = (await s.execute(
+        select(Token).where(Token.token_hash == token_hash),
+    )).scalar_one()
+    await s.commit()
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash_prefix,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "item": _serialize(row),
+    }

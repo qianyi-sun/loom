@@ -497,11 +497,16 @@ class Trial(Base):
 class Token(Base):
     __tablename__ = "tokens"
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
     type: Mapped[str] = mapped_column(String, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     team_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=True,
     )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    created_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
     issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
