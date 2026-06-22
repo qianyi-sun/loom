@@ -209,6 +209,13 @@ class LLMCallEvent(_EventBase):
     gateway_request_id: str
     cache_keys: list[str] = []
 
+    # #298 Slice B: gateway-internal retry attempt count. 1 = first
+    # try succeeded (the historical default). > 1 = the gateway
+    # retried N-1 transient upstream failures before this attempt
+    # produced the response. Surfaces in ATIF for retry-rate
+    # analysis without parsing logs.
+    attempt: int = Field(default=1, ge=1)
+
 
 # Agent (continued) + verifier + network + sys ────────────────────────────────
 

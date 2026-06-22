@@ -73,7 +73,7 @@ async def messages(
 
     # 1. Forward to Anthropic native endpoint.
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    upstream_response = await send_with_retry(
+    outcome = await send_with_retry(
         lambda: upstream.post(
             f"{ANTHROPIC_BASE_URL}/v1/messages",
             json=payload,
@@ -86,6 +86,7 @@ async def messages(
         ),
         settings=settings, dialect="anthropic",
     )
+    upstream_response = outcome.response
     if upstream_response.status_code >= 400:
         raise HTTPException(
             status_code=upstream_response.status_code,
@@ -125,5 +126,6 @@ async def messages(
             usage=usage,
             cost_usd=cost,
             rate_card_hash=hash_table(table),
+            attempt=outcome.attempt,
         )
     return body

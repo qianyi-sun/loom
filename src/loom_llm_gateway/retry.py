@@ -16,6 +16,7 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx
@@ -34,6 +35,21 @@ from loom_llm_gateway.metrics import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RetryOutcome:
+    """The result of one `send_with_retry` call.
+
+    `response` is the final httpx.Response (the caller still does the
+    `if status >= 400: raise HTTPException(...)` check). `attempt` is
+    the 1-indexed attempt number that produced this response — passed
+    to `record_call(attempt=...)` so the llm_calls row reflects how
+    many retries were needed (#298 Slice B).
+    """
+
+    response: httpx.Response
+    attempt: int
+
+
 async def send_with_retry(
     send: Callable[[], Awaitable[httpx.Response]],
     *,
@@ -41,14 +57,19 @@ async def send_with_retry(
     dialect: str,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], float] = time.monotonic,
-) -> httpx.Response:
+) -> RetryOutcome:
     """Run `send()` with retry on transient failures.
 
-    Returns the final `httpx.Response` (which may itself be a 4xx/5xx
-    if exhausted — the caller's downstream `if status >= 400: raise`
-    handles that as it does today). Raises `httpx` transport errors
-    only when every attempt raised and retry was exhausted; the
-    caller's try/except shape sees the same exception as today.
+    Returns a `RetryOutcome(response, attempt)` carrying both the
+    final response (which may itself be a 4xx/5xx if exhausted — the
+    caller's downstream `if status >= 400: raise` handles that as it
+    does today) AND the 1-indexed attempt that produced it (#298
+    Slice B; callers thread this into `record_call(attempt=...)` so
+    the llm_calls row captures retry depth).
+
+    Raises `httpx` transport errors only when every attempt raised
+    and retry was exhausted; the caller's try/except shape sees the
+    same exception as today.
 
     `sleep` + `now` are injected for testability.
     """
@@ -97,7 +118,7 @@ async def send_with_retry(
             RETRY_TOTAL.labels(
                 dialect=dialect, outcome=outcome, status=str(status),
             ).inc()
-            return response
+            return RetryOutcome(response=response, attempt=attempt)
 
         # Retryable status (5xx / 408 / 429). Decide attempt vs give-up.
         if status == 504:
@@ -105,14 +126,16 @@ async def send_with_retry(
 
         if attempt >= max_attempts:
             _record_exhaustion(dialect, attempt, status)
-            return response  # caller's `if status >= 400` will raise
+            # Caller's `if status >= 400` will raise. record_call won't
+            # be invoked because the route bails before reaching it.
+            return RetryOutcome(response=response, attempt=attempt)
 
         wait_for = _next_backoff(
             attempt=attempt, base=base_backoff, jitter=jitter, cap=max_backoff,
         )
         if (now() - started) + wait_for > budget:
             _record_budget_exceeded(dialect, attempt, status)
-            return response
+            return RetryOutcome(response=response, attempt=attempt)
 
         logger.info(
             "gateway_retry dialect=%s attempt=%d status=%d wait=%.2fs",
@@ -125,7 +148,7 @@ async def send_with_retry(
     if last_exc is not None:  # pragma: no cover
         raise last_exc
     assert last_response is not None  # nosec - last_response set on every iter
-    return last_response
+    return RetryOutcome(response=last_response, attempt=max_attempts)
 
 
 def _status_retryable(status: int) -> bool:

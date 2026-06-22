@@ -443,6 +443,10 @@ class Trial:
                 streamed=False,
                 time_to_first_token_sec=None,
                 gateway_request_id=str(row.get("id") or ""),
+                # #298 Slice B: surface retry count from llm_calls row.
+                # Defaults to 1 when the CP payload lacks the field
+                # (pre-Slice B services).
+                attempt=int(row.get("attempt") or 1),
             )
             await writer.append(event)
 

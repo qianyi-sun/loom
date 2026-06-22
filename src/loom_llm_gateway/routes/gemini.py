@@ -78,7 +78,7 @@ async def gemini_generate_content(
         )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    upstream_response = await send_with_retry(
+    outcome = await send_with_retry(
         lambda: upstream.post(
             f"{GEMINI_BASE_URL}/v1beta/models/{model_path}",
             json=payload,
@@ -88,6 +88,7 @@ async def gemini_generate_content(
         ),
         settings=settings, dialect="gemini",
     )
+    upstream_response = outcome.response
     if upstream_response.status_code >= 400:
         raise HTTPException(
             status_code=upstream_response.status_code,
@@ -133,5 +134,6 @@ async def gemini_generate_content(
             usage=usage,
             cost_usd=cost,
             rate_card_hash=hash_table(table),
+            attempt=outcome.attempt,
         )
     return body

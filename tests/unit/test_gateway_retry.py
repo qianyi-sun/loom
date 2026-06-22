@@ -21,7 +21,7 @@ import httpx
 import pytest
 
 from loom.errors import is_retryable
-from loom_llm_gateway.retry import send_with_retry
+from loom_llm_gateway.retry import RetryOutcome, send_with_retry
 
 
 @dataclass
@@ -108,10 +108,10 @@ async def test_send_with_retry_success_first_attempt() -> None:
     async def sleep(_s: float) -> None:
         sleeps.append(_s)
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep,
     )
-    assert resp.status_code == 200
+    assert outcome.response.status_code == 200
     assert call_count == 1
     assert sleeps == []
 
@@ -129,10 +129,10 @@ async def test_send_with_retry_retries_5xx_then_succeeds() -> None:
     async def sleep(s: float) -> None:
         sleeps.append(s)
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep,
     )
-    assert resp.status_code == 200
+    assert outcome.response.status_code == 200
     # 3 retries → 3 sleeps
     assert len(sleeps) == 3
 
@@ -151,10 +151,10 @@ async def test_send_with_retry_exhausts_returns_last_5xx() -> None:
     async def sleep(_s: float) -> None:
         pass
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep,
     )
-    assert resp.status_code == 503
+    assert outcome.response.status_code == 503
     assert attempts == 3
 
 
@@ -173,10 +173,10 @@ async def test_send_with_retry_non_retryable_4xx_immediate() -> None:
     async def sleep(s: float) -> None:
         sleeps.append(s)
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep,
     )
-    assert resp.status_code == 401
+    assert outcome.response.status_code == 401
     assert attempts == 1
     assert sleeps == []
 
@@ -253,10 +253,10 @@ async def test_send_with_retry_budget_exceeded_stops_early() -> None:
     def now() -> float:
         return clock[0]
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep, now=now,
     )
-    assert resp.status_code == 503
+    assert outcome.response.status_code == 503
     # Attempt 1 happens; first backoff (0.5s) would exceed 0.4s budget
     # → exit before sleeping. Should have made exactly 1 attempt.
     assert attempts == 1
@@ -278,10 +278,10 @@ async def test_send_with_retry_single_attempt_setting_disables_retry() -> None:
     async def sleep(s: float) -> None:
         sleeps.append(s)
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep,
     )
-    assert resp.status_code == 503
+    assert outcome.response.status_code == 503
     assert attempts == 1
     assert sleeps == []
 
@@ -304,10 +304,92 @@ async def test_send_with_retry_504_increments_ambiguous_counter(
     async def sleep(_s: float) -> None:
         pass
 
-    resp = await send_with_retry(
+    outcome = await send_with_retry(
         send, settings=settings, dialect="test", sleep=sleep,
     )
-    assert resp.status_code == 200
+    assert outcome.response.status_code == 200
     # Two 504s were retried (the third response was 200 — not counted)
     final = metrics.RETRY_AMBIGUOUS_504_TOTAL.labels(dialect="test")._value.get()  # type: ignore[attr-defined]
     assert final - initial == 2.0
+
+
+# ─── #298 Slice B: attempt counter on the return value ──────────────
+
+
+@pytest.mark.asyncio
+async def test_outcome_attempt_is_one_on_first_try_success() -> None:
+    """First attempt succeeds → outcome.attempt == 1."""
+    settings = _StubSettings()
+
+    async def send() -> httpx.Response:
+        return _resp(200)
+
+    async def sleep(_s: float) -> None:
+        pass
+
+    outcome = await send_with_retry(
+        send, settings=settings, dialect="test", sleep=sleep,
+    )
+    assert outcome.attempt == 1
+    assert isinstance(outcome, RetryOutcome)
+
+
+@pytest.mark.asyncio
+async def test_outcome_attempt_counts_retries() -> None:
+    """503, 503, 200 → outcome.attempt == 3 (the successful try)."""
+    settings = _StubSettings(llm_retry_max_attempts=4)
+    statuses = [503, 503, 200]
+
+    async def send() -> httpx.Response:
+        return _resp(statuses.pop(0))
+
+    async def sleep(_s: float) -> None:
+        pass
+
+    outcome = await send_with_retry(
+        send, settings=settings, dialect="test", sleep=sleep,
+    )
+    assert outcome.response.status_code == 200
+    assert outcome.attempt == 3
+
+
+@pytest.mark.asyncio
+async def test_outcome_attempt_on_exhaustion() -> None:
+    """Persistent 503 → outcome.attempt == max_attempts (the last try)."""
+    settings = _StubSettings(llm_retry_max_attempts=3)
+
+    async def send() -> httpx.Response:
+        return _resp(503)
+
+    async def sleep(_s: float) -> None:
+        pass
+
+    outcome = await send_with_retry(
+        send, settings=settings, dialect="test", sleep=sleep,
+    )
+    assert outcome.response.status_code == 503
+    assert outcome.attempt == 3
+
+
+@pytest.mark.asyncio
+async def test_outcome_attempt_on_budget_short_circuit() -> None:
+    """Budget exits at attempt 1 → outcome.attempt == 1."""
+    settings = _StubSettings(
+        llm_retry_max_attempts=5,
+        llm_retry_base_backoff_sec=5.0,
+        llm_retry_jitter_sec=0.0,
+        llm_retry_max_backoff_sec=10.0,
+        llm_retry_budget_sec=0.1,
+    )
+
+    async def send() -> httpx.Response:
+        return _resp(503)
+
+    async def sleep(_s: float) -> None:
+        pass
+
+    outcome = await send_with_retry(
+        send, settings=settings, dialect="test", sleep=sleep,
+    )
+    assert outcome.response.status_code == 503
+    assert outcome.attempt == 1

@@ -25,6 +25,7 @@ async def record_call(
     cost_usd: float,
     rate_card_hash: str,
     provider: str | None = None,
+    attempt: int = 1,
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
     (chat / messages / responses / gemini) AFTER the upstream provider
@@ -36,7 +37,12 @@ async def record_call(
     `loom_gateway_cost_usd_total`. `provider` is the connection's
     `provider_type` (openai, anthropic, google, openai-compatible,
     custom) — defaults to `dialect` if not supplied for backwards
-    compatibility with callers that haven't been updated."""
+    compatibility with callers that haven't been updated.
+
+    `attempt` is the gateway-internal attempt number that produced
+    this successful row (#298 Slice B). Defaults to 1 so callers that
+    don't go through the retry helper keep the historical semantics.
+    """
     await session.execute(insert(LlmCall).values(
         team_id=team_id,
         trial_id=trial_id,
@@ -48,6 +54,7 @@ async def record_call(
         provider_extras=usage.provider_extras,
         cost_usd=cost_usd,
         rate_card_hash=rate_card_hash,
+        attempt=attempt,
     ))
     await session.commit()
     provider_label = provider if provider is not None else dialect

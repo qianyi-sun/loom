@@ -352,8 +352,9 @@ async def chat_completions(
     extra_kwargs = {k: v for k, v in raw_body.items() if k not in _RESERVED_BODY_KEYS}
     chat_messages = _omit_none_chat_message_fields(req.messages)
     started = time.monotonic()
+    attempt = 1
     if byo_row is not None and byo_row.provider_type in ("openai-compatible", "custom"):
-        raw = await _forward_openai_compatible_byo_chat(
+        raw, attempt = await _forward_openai_compatible_byo_chat(
             egress_client_pool=request.app.state.egress_client_pool,
             connection_id=byo_row.id,
             base_url=byo_row.base_url,
@@ -461,6 +462,7 @@ async def chat_completions(
             cost_usd=cost,
             rate_card_hash=rate_card_hash,
             provider=byo_row.provider_type if byo_row is not None else provider,
+            attempt=attempt,
         )
     response = dict(parsed.raw_response)
     response["loom"] = loom_block
@@ -502,13 +504,17 @@ async def _forward_openai_compatible_byo_chat(
     extra_kwargs: dict[str, Any],
     timeout: float,
     settings: Any,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     """Forward BYO OpenAI-compatible chat through the egress client pool.
 
     LiteLLM cannot reliably inject the CONNECT-level
     ``x-loom-connection-id`` proxy header Envoy matches on. For
     OpenAI-compatible BYO endpoints we own the wire shape, so the chat
     route sends the request directly through ``EgressClientPool``.
+
+    Returns `(body, attempt)` — attempt is the 1-indexed gateway-
+    internal try that produced the body (#298 Slice B). Caller threads
+    it into `record_call(attempt=...)` for the llm_calls row.
     """
     upstream_url = f"{base_url.rstrip('/')}/chat/completions"
     payload = {
@@ -522,7 +528,7 @@ async def _forward_openai_compatible_byo_chat(
     }
     upstream: httpx.AsyncClient = await egress_client_pool.get(connection_id)
     try:
-        upstream_response = await send_with_retry(
+        outcome = await send_with_retry(
             lambda: upstream.post(
                 upstream_url,
                 json=payload,
@@ -546,6 +552,7 @@ async def _forward_openai_compatible_byo_chat(
             ),
         ) from exc
 
+    upstream_response = outcome.response
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
         raise HTTPException(
@@ -565,4 +572,4 @@ async def _forward_openai_compatible_byo_chat(
             status_code=502,
             detail="upstream returned a non-object JSON body",
         )
-    return body
+    return body, outcome.attempt

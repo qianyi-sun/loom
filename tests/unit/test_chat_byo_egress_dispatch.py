@@ -60,7 +60,7 @@ async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
     connection_id = uuid4()
 
     try:
-        body = await _forward_openai_compatible_byo_chat(
+        body, attempt = await _forward_openai_compatible_byo_chat(
             egress_client_pool=pool,
             connection_id=connection_id,
             base_url="https://byo.example.com/v1/",
@@ -75,6 +75,8 @@ async def test_openai_compatible_byo_chat_uses_egress_pool() -> None:
         await pool.client.aclose()
 
     assert body["choices"][0]["message"]["content"] == "ok"
+    # First-attempt success on a single 200 response.
+    assert attempt == 1
     assert pool.connection_ids == [connection_id]
     assert len(pool.requests) == 1
     upstream = pool.requests[0]

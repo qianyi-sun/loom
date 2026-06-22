@@ -62,7 +62,7 @@ async def responses(
         )
 
     upstream: httpx.AsyncClient = request.app.state.upstream_client
-    upstream_response = await send_with_retry(
+    outcome = await send_with_retry(
         lambda: upstream.post(
             f"{OPENAI_BASE_URL}/v1/responses",
             json=payload,
@@ -74,6 +74,7 @@ async def responses(
         ),
         settings=settings, dialect="responses",
     )
+    upstream_response = outcome.response
     if upstream_response.status_code >= 400:
         raise HTTPException(
             status_code=upstream_response.status_code,
@@ -110,5 +111,6 @@ async def responses(
             usage=usage,
             cost_usd=cost,
             rate_card_hash=hash_table(table),
+            attempt=outcome.attempt,
         )
     return body

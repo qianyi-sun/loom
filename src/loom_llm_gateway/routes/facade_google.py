@@ -127,7 +127,7 @@ async def google_generate_content_facade(
         request.app.state.egress_client_pool.get(connection_id)
     )
     try:
-        upstream_response = await send_with_retry(
+        outcome = await send_with_retry(
             lambda: upstream.post(
                 upstream_url,
                 json=payload,
@@ -141,6 +141,7 @@ async def google_generate_content_facade(
             ),
             settings=settings, dialect="facade_google",
         )
+        upstream_response = outcome.response
     except httpx.TimeoutException as e:
         raise HTTPException(
             status_code=504,
@@ -210,6 +211,7 @@ async def google_generate_content_facade(
             cost_usd=cost_usd,
             rate_card_hash=rate_card_hash,
             provider=row.provider_type,
+            attempt=outcome.attempt,
         )
 
     return body

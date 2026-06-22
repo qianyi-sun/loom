@@ -399,6 +399,9 @@ async def get_trial_llm_calls(
                 "cost_usd": float(r.cost_usd),
                 "rate_card_hash": r.rate_card_hash,
                 "captured_at": r.captured_at.isoformat(),
+                # #298 Slice B: gateway-internal retry attempt that
+                # produced this row. Defaults to 1 for pre-#298 rows.
+                "attempt": r.attempt,
             }
             for r in rows
         ],

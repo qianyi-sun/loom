@@ -423,6 +423,15 @@ class LlmCall(Base):
     captured_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
     )
+    # #298 Slice B (migration 0029): which gateway-internal attempt
+    # produced this successful row. 1 = first try (the historical
+    # case and the server default). > 1 = the gateway retried N-1
+    # transient failures before this attempt succeeded. Operators
+    # query `MAX(attempt) GROUP BY trial_id` to find trials that
+    # suffered retries without parsing logs.
+    attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1"), default=1,
+    )
 
 
 class Secret(Base):
