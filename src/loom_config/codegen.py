@@ -8,6 +8,7 @@ Invoked by `loom config codegen` and `loom config codegen --check` (CI).
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,12 @@ def _literal(value: Any, py: str) -> str:
         return "True" if value else "False"
     if py in ("int", "float"):
         return repr(value)
+    if py == "str_list":
+        if value is None:
+            return "[]"
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"expected list[str] default, got {value!r}")
+        return json.dumps(value)
     raise ValueError(f"don't know how to literal {py} value {value!r}")
 
 
@@ -80,10 +87,13 @@ def _field_line(entry: ServiceConfigEntry, service: str) -> str:
             f"valid in render_config"
         )
     rendered_default = _format_default(entry, service, py)
+    annotation = "list[str]" if py == "str_list" else py
     if rendered_default == "<required>":
-        return f"    {entry.name}: {py}"
+        return f"    {entry.name}: {annotation}"
     if rendered_default == "<optional>":
-        return f"    {entry.name}: {py} | None = None"
+        return f"    {entry.name}: {annotation} | None = None"
+    if py == "str_list":
+        return f"    {entry.name}: list[str] = {rendered_default}"
     if py in ("HttpUrl", "PostgresDsn"):
         return f"    {entry.name}: {py} = cast({py}, {rendered_default})"
     return f"    {entry.name}: {py} = {rendered_default}"
@@ -125,6 +135,8 @@ def _guess_py(value: Any) -> str:
         return "int"
     if isinstance(value, float):
         return "float"
+    if isinstance(value, list):
+        return "str_list"
     return "str"
 
 

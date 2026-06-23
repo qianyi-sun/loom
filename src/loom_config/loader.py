@@ -17,7 +17,7 @@ from typing import Any
 _PYTHON_TYPES = frozenset({
     "str", "int", "bool", "float", "Path",
     "SecretStr", "PostgresDsn", "HttpUrl", "LogLevel",
-    "table",
+    "table", "str_list",
 })
 
 

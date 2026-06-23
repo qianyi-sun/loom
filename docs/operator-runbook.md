@@ -828,6 +828,65 @@ HTTP reachability to the registered `/v1` endpoint. SSH, Slurm credentials, or
 cluster-specific submit rights are only needed when a user or future Loom
 automation is launching or restarting the inference service.
 
+## BYO provider egress allowlist
+
+Cluster NetworkPolicies keep `loom-service`, `loom-llm-gateway`, and the
+optional `loom-egress-proxy` on a default-deny boundary. Hosted providers on
+public `443` or `80` work with the default gateway policy, but GPU-cluster
+bastion forwards often use ports such as `18001`. Approve those endpoints in
+`cluster-config.toml`; do not patch live NetworkPolicies by hand.
+
+Use IP/CIDR entries, not DNS names. Kubernetes NetworkPolicy enforces CIDRs,
+so the operator must resolve and approve the exact address or CIDR before
+rendering:
+
+```toml
+# cluster-config.toml
+provider_egress_allowlist = [
+  "202.78.161.51:18001",
+]
+```
+
+Then render, audit, and redeploy from the same config:
+
+```bash
+loom cluster render --config cluster-config.toml > /tmp/loom-rendered.yaml
+grep -n "202.78.161.51/32" /tmp/loom-rendered.yaml
+loom cluster audit --config cluster-config.toml
+loom cluster up --config cluster-config.toml
+```
+
+The render adds exact `ipBlock + TCP port` rules to:
+
+- `loom-service`, so `loom providers test NAME` and model discovery can probe
+  the connection.
+- `loom-llm-gateway`, so runtime model calls can reach the approved endpoint.
+- `loom-egress-proxy`, so the same endpoint works when Envoy egress proxy mode
+  is enabled.
+
+Do not allow `0.0.0.0/0`, loopback, link-local, metadata, multicast, or empty
+entries. The renderer rejects those ranges and rejects hostnames with a clear
+error. Private RFC1918 ranges are allowed only when an operator deliberately
+lists them, which keeps the approval decision visible in config review.
+
+Smoke after deploy with the team that owns the provider connection:
+
+```bash
+loom providers test lux-qwen25-coder-7b
+loom providers models lux-qwen25-coder-7b --refresh
+loom providers models lux-qwen25-coder-7b
+```
+
+Then submit one small model-backed batch through the SPA or CLI. If provider
+test still times out, check both sides of the path: the bastion/forwarding
+process and the rendered NetworkPolicy in the live cluster:
+
+```bash
+kubectl get networkpolicy -n loom loom-service loom-llm-gateway loom-egress-proxy -o yaml
+kubectl logs -n loom -l app=loom-service --since=10m
+kubectl logs -n loom -l app=loom-llm-gateway --since=10m
+```
+
 ## Observability: dashboards
 
 Five Grafana dashboards ship in `deploy/grafana/dashboards/`. When you run

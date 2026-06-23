@@ -39,6 +39,9 @@ def _build_cluster_config_cls() -> type:
         if entry.python_type == "table":
             sub_cls = _make_table_dataclass(entry)
             spec.append((name, sub_cls, field(default_factory=sub_cls)))
+        elif entry.python_type == "str_list":
+            default = tuple(entry.default or ())
+            spec.append((name, tuple[str, ...], field(default=default)))
         else:
             py_type = {"str": str, "int": int, "bool": bool, "float": float}[entry.python_type]
             spec.append((name, py_type, field(default=entry.default)))
@@ -87,6 +90,7 @@ if TYPE_CHECKING:
         namespace: str = "loom"
         postgres_image: str = "postgres:16"
         postgres_storage_gi: int = 50
+        provider_egress_allowlist: tuple[str, ...] = ()
         replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
         worker_trajectory_storage_gi: int = 100
 
@@ -143,5 +147,10 @@ def load_cluster_config(path: Path | None) -> ClusterConfig:
             coerced = {k: type(getattr(default_instance, k))(v) for k, v in val.items()}
             kwargs[name] = sub_cls(**coerced)
         else:
-            kwargs[name] = val
+            if entry_field.type == tuple[str, ...]:
+                if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                    raise ValueError(f"{name} must be a TOML array of strings")
+                kwargs[name] = tuple(val)
+            else:
+                kwargs[name] = val
     return ClusterConfig(**kwargs)

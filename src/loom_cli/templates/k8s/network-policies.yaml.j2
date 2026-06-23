@@ -162,6 +162,15 @@ spec:
       ports:
         - { port: 443, protocol: TCP }
         - { port: 80, protocol: TCP }
+{% for target in provider_egress_rules %}
+    # Operator-approved BYO provider endpoint from
+    # render_config.provider_egress_allowlist.
+    - to:
+        - ipBlock:
+            cidr: {{ target.cidr }}
+      ports:
+        - { port: {{ target.port }}, protocol: TCP }
+{% endfor %}
 
 ---
 apiVersion: networking.k8s.io/v1
@@ -244,6 +253,15 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+{% for target in provider_egress_rules %}
+    # Operator-approved BYO provider endpoint from
+    # render_config.provider_egress_allowlist.
+    - to:
+        - ipBlock:
+            cidr: {{ target.cidr }}
+      ports:
+        - { port: {{ target.port }}, protocol: TCP }
+{% endfor %}
 
 ---
 apiVersion: networking.k8s.io/v1
@@ -341,3 +359,12 @@ spec:
     # IP allowlist (CDS endpoints) gates the actual destination.
     - ports:
         - { port: 443, protocol: TCP }
+{% for target in provider_egress_rules %}
+    # Operator-approved BYO provider endpoint from
+    # render_config.provider_egress_allowlist.
+    - to:
+        - ipBlock:
+            cidr: {{ target.cidr }}
+      ports:
+        - { port: {{ target.port }}, protocol: TCP }
+{% endfor %}

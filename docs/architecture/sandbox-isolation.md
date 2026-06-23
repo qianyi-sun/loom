@@ -91,19 +91,26 @@ allowlist do the work.
 
 ### Cluster-level: k8s NetworkPolicy on Loom components (#78 slice C, shipped)
 
-`loom cluster render` emits seven `NetworkPolicy` resources, one per
-required component, restricting ingress/egress to only what each
-component needs:
+`loom cluster render` emits NetworkPolicy resources for every in-cluster Loom
+component, restricting ingress/egress to only what each component needs:
 
 | Component | Ingress allowed from | Egress allowed to |
 |---|---|---|
 | `loom-postgres` | `loom-control-plane`, `loom-llm-gateway`, `loom-service` | kube-dns |
 | `loom-minio` | `loom-service`, `loom-worker`, `loom-llm-gateway` | kube-dns |
 | `loom-control-plane` | `loom-worker`, `loom-service` | `loom-postgres`, kube-dns |
-| `loom-llm-gateway` | `loom-worker`, `loom-service` | `loom-postgres`, `loom-minio`, kube-dns, public 80/443 (egress-proxy slice E will narrow this) |
+| `loom-llm-gateway` | `loom-worker`, `loom-service` | `loom-postgres`, `loom-minio`, kube-dns, public 80/443, plus explicit `provider_egress_allowlist` IP/CIDR:port entries |
 | `loom-worker` | (none — workers only initiate) | `loom-control-plane`, `loom-llm-gateway`, `loom-minio`, kube-dns |
-| `loom-service` | any (public REST surface) | `loom-control-plane`, `loom-llm-gateway`, `loom-postgres`, `loom-minio`, kube-dns |
+| `loom-service` | any (public REST surface) | `loom-control-plane`, `loom-llm-gateway`, `loom-postgres`, `loom-minio`, kube-dns, plus explicit `provider_egress_allowlist` IP/CIDR:port entries for provider validation |
 | `loom-web` | any (public SPA) | kube-dns |
+| `loom-egress-xds` | `loom-egress-proxy` | `loom-postgres`, kube-dns |
+| `loom-egress-proxy` | `loom-llm-gateway` | `loom-egress-xds`, kube-dns, public 443, plus explicit `provider_egress_allowlist` IP/CIDR:port entries |
+
+`provider_egress_allowlist` lives in cluster render config, for example
+`provider_egress_allowlist = ["202.78.161.51:18001"]`. It is an operator
+approval surface for BYO providers on non-standard ports; the renderer accepts
+IP/CIDR entries only because Kubernetes NetworkPolicy cannot enforce DNS
+hostnames deterministically.
 
 `loom cluster audit` enforces presence: any required component without
 a selecting NetworkPolicy fails with `missing-network-policy`. The

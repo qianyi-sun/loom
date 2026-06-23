@@ -69,7 +69,9 @@ Common failures:
 - Invalid base URL: use the API root, not a provider dashboard URL. For
   OpenAI-compatible services the root should end in `/v1`.
 - SSRF or private endpoint denial: expose the service through an approved
-  public/tunnel path or ask an admin to enable an explicit team policy.
+  public/tunnel path. If the endpoint uses a non-standard port such as a GPU
+  cluster bastion forward, ask an operator to add a
+  `provider_egress_allowlist` entry before testing the connection.
 - Empty model list: run `loom providers models NAME --refresh`; if the endpoint
   does not implement useful discovery, add model ids manually from the web
   Models tab or the provider model API.
@@ -146,6 +148,13 @@ URL registered in Loom must be the public/tunnel URL ending in `/v1`, not the
 private compute-node address unless the Loom server is allowed to reach that
 private network.
 
+If the final URL uses a non-standard port, such as
+`http://202.78.161.51:18001/v1`, the Loom Kubernetes deployment also needs an
+operator-approved egress rule before provider validation and Gateway calls can
+reach it. Send the operator the non-secret endpoint IP/CIDR and TCP port, not
+the provider API key. The operator flow is documented in
+[`operator-runbook.md`](operator-runbook.md#byo-provider-egress-allowlist).
+
 When you generated the bundle with `--expose bastion-forward`, run the forward
 helper on the bastion after Slurm assigns a compute node:
 
@@ -197,7 +206,9 @@ running `./healthcheck.sh` again.
 - Loom stores only the provider connection secret reference and redacted
   validation errors. Use `loom providers rotate-key` if the key is exposed.
 - Private endpoints remain blocked by Loom's SSRF protections unless an admin
-  explicitly allows the team/network path.
+  explicitly allows the team/network path. Kubernetes NetworkPolicy allowlist
+  entries are IP/CIDR based; hostnames must be resolved by the operator before
+  rendering cluster manifests.
 
 ### Operator Smoke
 

@@ -511,6 +511,11 @@ default     = "minio/minio"
 python_type = "int"
 default     = 500
 
+[render_config.provider_egress_allowlist]
+python_type = "str_list"
+default     = []
+description = "Approved BYO provider egress targets as IP-or-CIDR:TCP-port entries, e.g. [\"202.78.161.51:18001\"]. Hostnames must be resolved by the operator before rendering because Kubernetes NetworkPolicy enforces CIDRs, not DNS names."
+
 [render_config.worker_trajectory_storage_gi]
 python_type = "int"
 default     = 100

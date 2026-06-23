@@ -471,6 +471,107 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class ProviderEgressRule:
+    cidr: str
+    port: int
+
+
+_BLOCKED_PROVIDER_EGRESS_CIDRS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
+def _parse_provider_egress_target(raw: str) -> ProviderEgressRule:
+    target = raw.strip()
+    if not target:
+        raise ValueError("provider_egress_allowlist entries must not be empty")
+
+    if target.startswith("["):
+        host_end = target.find("]")
+        if host_end == -1 or len(target) <= host_end + 2 or target[host_end + 1] != ":":
+            raise ValueError(
+                f"provider_egress_allowlist entry {raw!r} must be "
+                "IP-or-CIDR:TCP-port"
+            )
+        host = target[1:host_end]
+        port_text = target[host_end + 2:]
+    else:
+        host, sep, port_text = target.rpartition(":")
+        if not sep or not host:
+            raise ValueError(
+                f"provider_egress_allowlist entry {raw!r} must be "
+                "IP-or-CIDR:TCP-port"
+            )
+        if ":" in host:
+            raise ValueError(
+                f"provider_egress_allowlist entry {raw!r} uses IPv6; wrap IPv6 "
+                "CIDRs in brackets, for example [2001:db8::1/128]:8443"
+            )
+
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError(
+            f"provider_egress_allowlist entry {raw!r} has invalid TCP port "
+            f"{port_text!r}; expected 1-65535"
+        ) from exc
+    if port < 1 or port > 65535:
+        raise ValueError(
+            f"provider_egress_allowlist entry {raw!r} has invalid TCP port "
+            f"{port}; expected 1-65535"
+        )
+
+    try:
+        network = ipaddress.ip_network(host, strict=False)
+    except ValueError as exc:
+        raise ValueError(
+            f"provider_egress_allowlist entry {raw!r}: target must be an "
+            "IP address or CIDR; Kubernetes NetworkPolicy cannot enforce "
+            "DNS hostnames, so resolve the provider host first"
+        ) from exc
+
+    if network.prefixlen == 0:
+        raise ValueError(
+            f"provider_egress_allowlist entry {raw!r} is too broad; "
+            "approve a specific provider IP or CIDR instead"
+        )
+    for blocked in _BLOCKED_PROVIDER_EGRESS_CIDRS:
+        if blocked.version != network.version:
+            continue
+        if network.overlaps(blocked):
+            raise ValueError(
+                f"provider_egress_allowlist entry {raw!r} overlaps reserved "
+                f"range {blocked}; refusing to render provider egress policy"
+            )
+
+    return ProviderEgressRule(cidr=str(network), port=port)
+
+
+def _provider_egress_rules(config: ClusterConfig) -> list[dict[str, int | str]]:
+    rules = {
+        _parse_provider_egress_target(target)
+        for target in config.provider_egress_allowlist
+    }
+    return [
+        {"cidr": rule.cidr, "port": rule.port}
+        for rule in sorted(
+            rules,
+            key=lambda item: (
+                ipaddress.ip_network(item.cidr, strict=False).version,
+                int(ipaddress.ip_network(item.cidr, strict=False).network_address),
+                ipaddress.ip_network(item.cidr, strict=False).prefixlen,
+                item.port,
+            ),
+        )
+    ]
+
+
 def render_manifests(config: ClusterConfig) -> str:
     """Render every template and join with `---` separators. Output is
     valid YAML that can be piped directly into `kubectl apply -f -`.
@@ -514,6 +615,7 @@ def render_manifests(config: ClusterConfig) -> str:
         lstrip_blocks=True,
     )
     ctx = config.to_render_context()
+    ctx["provider_egress_rules"] = _provider_egress_rules(config)
     try:
         ipaddress.ip_address(config.ingress_host)
         ctx["ingress_host_is_ip"] = True
@@ -558,7 +660,7 @@ def _render(args: argparse.Namespace) -> int:
 
     try:
         manifests = render_manifests(config)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
     sys.stdout.write(manifests)
@@ -581,7 +683,7 @@ def _audit(args: argparse.Namespace) -> int:
 
     try:
         manifests = render_manifests(config)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
 

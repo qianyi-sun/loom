@@ -129,6 +129,36 @@
     "default": "PosixPath('/var/lib/loom/trajectories')",
     "required": false
   },
+  "trial_cache_base_image_pull_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "1800.0",
+    "required": false
+  },
+  "trial_cache_build_lock_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "1800.0",
+    "required": false
+  },
+  "trial_cache_min_free_gb": {
+    "annotation": "<class 'int'>",
+    "default": "20",
+    "required": false
+  },
+  "trial_cache_registry_pull_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "15.0",
+    "required": false
+  },
+  "trial_cache_registry_repo": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "trial_cache_ttl_hours": {
+    "annotation": "<class 'int'>",
+    "default": "168",
+    "required": false
+  },
   "vllm_gpu_memory_utilization": {
     "annotation": "<class 'float'>",
     "default": "0.9",

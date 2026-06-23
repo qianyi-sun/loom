@@ -48,6 +48,10 @@ default_per_service = { control-plane = 8080, llm-gateway = 9100 }
 [render_config.image_tag]
 python_type = "str"
 default     = "0.7"
+
+[render_config.provider_egress_allowlist]
+python_type = "str_list"
+default     = []
 """,
         encoding="utf-8",
     )
@@ -63,6 +67,7 @@ def test_loads_valid_schema(tmp_path: Path) -> None:
         "bind_port", "db_url", "minio_endpoint", "step_jwt_signing_key",
     ]
     assert "image_tag" in schema.render_config
+    assert schema.render_config["provider_egress_allowlist"].default == []
 
 
 def test_service_config_for_filters_by_used_by(tmp_path: Path) -> None:

@@ -77,6 +77,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
         'ingress_class_name = "public-nginx"\n'
         'ingress_tls_secret_name = "loom-acme-tls"\n'
         'ingress_cert_manager_cluster_issuer = "letsencrypt-prod"\n'
+        'provider_egress_allowlist = ["202.78.161.51:18001"]\n'
         '[replicas]\n'
         'service = 5\n'
         'worker = 10\n',
@@ -88,6 +89,7 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     assert cfg.ingress_class_name == "public-nginx"
     assert cfg.ingress_tls_secret_name == "loom-acme-tls"
     assert cfg.ingress_cert_manager_cluster_issuer == "letsencrypt-prod"
+    assert cfg.provider_egress_allowlist == ("202.78.161.51:18001",)
     assert cfg.replicas.service == 5
     assert cfg.replicas.worker == 10
     # Unspecified fields keep their defaults.
@@ -123,6 +125,18 @@ def test_load_config_rejects_unknown_replicas_key(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=r"unknown keys under \[replicas\]"):
+        load_cluster_config(cfg_path)
+
+
+def test_load_config_rejects_non_string_provider_egress_allowlist(
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text(
+        'provider_egress_allowlist = ["202.78.161.51:18001", 18001]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="array of strings"):
         load_cluster_config(cfg_path)
 
 
@@ -238,6 +252,78 @@ def test_render_injects_secret_store_master_key_for_provider_paths() -> None:
                 },
             },
         } in env
+
+
+def _network_policy_named(docs: list[dict], name: str) -> dict:
+    return next(
+        d for d in docs
+        if d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == name
+    )
+
+
+def _ipblock_ports(policy: dict) -> set[tuple[str, int]]:
+    out: set[tuple[str, int]] = set()
+    for rule in policy["spec"].get("egress", []):
+        ports = [
+            p["port"]
+            for p in rule.get("ports", [])
+            if p.get("protocol", "TCP") == "TCP"
+        ]
+        for target in rule.get("to", []):
+            ip_block = target.get("ipBlock")
+            if ip_block is None:
+                continue
+            for port in ports:
+                out.add((ip_block["cidr"], int(port)))
+    return out
+
+
+def test_render_provider_egress_allowlist_adds_service_and_gateway_rules() -> None:
+    """Operators can approve a non-standard BYO provider endpoint once
+    in cluster-config.toml; render must preserve that policy for both
+    provider validation in loom-service and runtime calls in gateway.
+    """
+    cfg = ClusterConfig(
+        provider_egress_allowlist=(
+            "202.78.161.51:18001",
+            "203.0.113.0/24:8443",
+        ),
+    )
+    docs = _load_docs(render_manifests(cfg))
+
+    expected = {
+        ("202.78.161.51/32", 18001),
+        ("203.0.113.0/24", 8443),
+    }
+    for policy_name in ("loom-service", "loom-llm-gateway", "loom-egress-proxy"):
+        assert expected <= _ipblock_ports(_network_policy_named(docs, policy_name))
+    assert not _ipblock_ports(_network_policy_named(docs, "loom-worker"))
+
+
+def test_render_provider_egress_allowlist_rejects_hostname_targets() -> None:
+    """Kubernetes NetworkPolicy can only enforce CIDRs. Hostnames
+    must be resolved by the operator and listed as IP/CIDR entries so
+    `loom cluster render` stays deterministic and auditable.
+    """
+    cfg = ClusterConfig(provider_egress_allowlist=("lux.example.com:18001",))
+    with pytest.raises(ValueError, match="IP address or CIDR"):
+        render_manifests(cfg)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "0.0.0.0/0:18001",
+        "127.0.0.1:18001",
+        "169.254.169.254:80",
+    ],
+)
+def test_render_provider_egress_allowlist_rejects_unsafe_targets(
+    target: str,
+) -> None:
+    cfg = ClusterConfig(provider_egress_allowlist=(target,))
+    with pytest.raises(ValueError, match=r"too broad|reserved"):
+        render_manifests(cfg)
 
 
 def test_render_default_ingress_uses_tls_secret_and_class() -> None:
@@ -414,3 +500,19 @@ def test_cli_render_invalid_config_exits_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "unknown keys" in err
+
+
+def test_cli_render_invalid_provider_egress_allowlist_exits_2(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "bad-provider-egress.toml"
+    cfg.write_text(
+        'provider_egress_allowlist = ["lux.example.com:18001"]\n',
+        encoding="utf-8",
+    )
+    rc = main(["cluster", "render", "--config", str(cfg)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "provider_egress_allowlist" in err
+    assert "IP address or CIDR" in err
