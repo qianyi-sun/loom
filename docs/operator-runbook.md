@@ -415,6 +415,15 @@ time via a content-addressed layered image (`task_image` +
 new `(task_image, agent)` pair takes a few minutes (network +
 package installs); subsequent trials reuse the layered image.
 
+Subprocess agents call the LLM Gateway from inside the trial sandbox,
+not from the worker process. Keep `LOOM_WORKER_GATEWAY_URL` pointed at
+the worker-reachable gateway URL, and set
+`LOOM_WORKER_SUBPROCESS_GATEWAY_URL` when the sandbox needs a different
+OpenAI-compatible facade URL. The k8s manifest uses
+`http://host.docker.internal:30443/openai/v1` so Docker sandboxes reach
+the node-local gateway-router hostPort; `DockerDriver` injects the
+Linux host-gateway alias for that hostname.
+
 See `docs/architecture/agent-adapter.md` for the architecture.
 
 ### Config knobs (`config/loom-schema.toml`, `[service_config]`)
@@ -427,6 +436,7 @@ See `docs/architecture/agent-adapter.md` for the architecture.
 | `trial_cache_ttl_hours` | `168` (7d) | Layered images older than this are pruned on the next eviction sweep. |
 | `trial_cache_min_free_gb` | `20` | Capacity backstop — when free disk drops below this, oldest-by-creation entries are evicted first. |
 | `trial_cache_build_lock_timeout_sec` | `1800.0` | Cluster-wide builder-slot TTL. The slot's owner refreshes every 60 s while building. |
+| `subprocess_gateway_url` | unset; k8s manifest sets `http://host.docker.internal:30443/openai/v1` | Sandbox-facing OpenAI-compatible gateway facade URL for subprocess agents. |
 
 ### Setting up the optional shared registry (Docker Hub example)
 

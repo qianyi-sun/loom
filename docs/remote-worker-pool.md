@@ -32,6 +32,8 @@ Remote workers connect to the control node through these URLs:
 
 - `LOOM_WORKER_CONTROL_PLANE_URL`
 - `LOOM_WORKER_GATEWAY_URL`
+- `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` when subprocess agents need a
+  different gateway URL from inside Docker sandboxes
 - `LOOM_WORKER_MINIO_ENDPOINT`
 
 Do not expose those worker-facing endpoints to the public internet. Use
@@ -67,6 +69,9 @@ can SSH to the candidates:
 ```bash
 export LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:8080
 export LOOM_WORKER_GATEWAY_URL=http://control-node:9100
+# Optional when the sandbox's network view differs from the worker process.
+# For example, use a node-local router or host-gateway URL.
+# export LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
 export LOOM_WORKER_MINIO_ENDPOINT=http://control-node:9000
 
 scripts/ops/worker_pool_inventory.sh worker-hosts.txt
@@ -100,6 +105,10 @@ Edit `.env.remote-worker`:
 LOOM_IMAGE_TAG=dev
 LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:8080
 LOOM_WORKER_GATEWAY_URL=http://control-node:9100
+# Leave unset when the sandbox can use the same gateway URL. Set when
+# subprocess agents run in Docker sandboxes that need a host-gateway or
+# node-local router endpoint.
+# LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
 LOOM_WORKER_MINIO_ENDPOINT=http://control-node:9000
 LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...

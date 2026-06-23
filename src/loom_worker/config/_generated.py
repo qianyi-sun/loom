@@ -39,6 +39,7 @@ class WorkerSettings(BaseSettings):
     sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"
     sandbox_step_jwt_ttl_sec: int = 600
     sandbox_worker_index: int = 0
+    subprocess_gateway_url: HttpUrl | None = None
     task_image_build_max_bytes: int = 536870912
     task_image_build_max_files: int = 2000
     token: SecretStr

@@ -88,6 +88,10 @@ class TrialContext:
     # jwt_dir here mounted at `/run/loom/`. Empty tuple → no mounts
     # (unchanged behavior).
     sandbox_volumes: tuple[tuple[str, str, str], ...] = ()
+    # Optional sandbox host aliases. Used for sandbox-facing gateway
+    # endpoints on Linux Docker, where `host.docker.internal` is not
+    # present unless the container is started with host-gateway mapping.
+    sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
 
     @property
     def task_id(self) -> str:
@@ -176,6 +180,7 @@ class Trial:
                             environment=tuple(sorted(
                                 self.ctx.task_config.environment.environment.items(),
                             )),
+                            extra_hosts=self.ctx.sandbox_extra_hosts,
                         )
                     )
                     driver_started = True

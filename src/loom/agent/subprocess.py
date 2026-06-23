@@ -133,6 +133,7 @@ class SubprocessAgent:
     gateway_url: str
     team_id: UUID
     trial_id: UUID
+    agent_gateway_url: str | None = None
     # Standard AgentRuntime Protocol fields:
     mode: Literal["out-of-box", "in-box"] = "out-of-box"
     name: str = field(init=False)
@@ -178,9 +179,10 @@ class SubprocessAgent:
             ) from exc
 
         # 2. Build env + argv via the adapter.
+        base_url = self.agent_gateway_url or self.gateway_url
         env_vars: dict[str, str] = {
             self.adapter.api_key_env: step_token,
-            self.adapter.base_url_env: self.gateway_url,
+            self.adapter.base_url_env: base_url,
         }
         cwd = self.workdir
         argv = self.adapter.build_invocation(

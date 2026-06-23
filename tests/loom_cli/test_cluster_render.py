@@ -179,6 +179,20 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     assert kinds.count("ConfigMap") == 2
 
 
+def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    worker = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+    )
+    env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    by_name = {entry["name"]: entry for entry in env}
+    assert by_name["LOOM_WORKER_SUBPROCESS_GATEWAY_URL"]["value"] == (
+        "http://host.docker.internal:30443/openai/v1"
+    )
+
+
 def test_render_default_matches_deploy_k8s_yamls() -> None:
     """Golden test: rendering with default config produces the same
     set of k8s objects as the canonical `deploy/k8s/*.yaml` files.

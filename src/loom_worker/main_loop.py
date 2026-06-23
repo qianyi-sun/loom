@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -68,6 +69,10 @@ from loom_worker.trial_cache import (
 )
 from loom_worker.trial_runner import AgentFactory, LocalTrialRunner
 from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+_DOCKER_HOST_GATEWAY_EXTRA_HOSTS: tuple[tuple[str, str], ...] = (
+    ("host.docker.internal", "host-gateway"),
+)
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +473,13 @@ async def _spawn_trial(
                 trajectory_index=trajectory_index,
             )
 
+        subprocess_gateway_url = getattr(settings, "subprocess_gateway_url", None)
+        subprocess_gateway_url_str = (
+            str(subprocess_gateway_url)
+            if subprocess_gateway_url is not None
+            else None
+        )
+
         runner = LocalTrialRunner(
             trial_id=trial_id,
             team_id=team_id,
@@ -484,6 +496,7 @@ async def _spawn_trial(
                 trial_id,
                 cp_client=cp_client,
                 gateway_url=str(settings.gateway_url),
+                agent_gateway_url=subprocess_gateway_url_str,
                 provider_connection_id=payload.get("provider_connection_id"),
             ),
             verifier_factory=_verifier_factory(task_config),
@@ -520,6 +533,7 @@ async def _spawn_trial(
                 else None
             ),
             sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
+            sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
         )
 
         try:
@@ -639,6 +653,7 @@ def _default_agent_factory(
     *,
     cp_client: StepTokenClient,
     gateway_url: str,
+    agent_gateway_url: str | None = None,
     provider_connection_id: str | None = None,
 ) -> AgentFactory:
     """Build the agent factory used by LocalTrialRunner. Routes by
@@ -704,9 +719,18 @@ def _default_agent_factory(
                 model=model,
                 cp_client=cp_client,
                 gateway_url=gateway_url,
+                agent_gateway_url=agent_gateway_url,
                 team_id=team_id,
                 trial_id=trial_id,
             )
         return agent
 
     return make
+
+
+def _sandbox_extra_hosts_for_url(url: str | None) -> tuple[tuple[str, str], ...]:
+    if not url:
+        return ()
+    if urlparse(url).hostname == "host.docker.internal":
+        return _DOCKER_HOST_GATEWAY_EXTRA_HOSTS
+    return ()

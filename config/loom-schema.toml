@@ -60,6 +60,11 @@ used_by     = ["loom-service", "worker"]
 python_type = "HttpUrl"
 default     = "http://loom-llm-gateway:9100"
 
+[service_config.subprocess_gateway_url]
+used_by     = ["worker"]
+python_type = "HttpUrl"
+description = "Optional OpenAI-compatible facade base URL as seen from trial sandbox subprocess agents. Use when the worker's own gateway_url is not resolvable from Docker sandboxes, e.g. http://host.docker.internal:30443/openai/v1 on k8s nodes with gateway-router hostPort."
+
 [service_config.admin_secret_file]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "Path"

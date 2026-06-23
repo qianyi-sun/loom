@@ -45,6 +45,11 @@ class StartOptions:
     # Environment variables to set on the primary sandbox container at
     # create time. Tuple form preserves StartOptions' frozen/hashable shape.
     environment: tuple[tuple[str, str], ...] = ()
+    # Hostname mappings to inject at container creation. DockerDriver
+    # passes this through to docker-py's `extra_hosts`; workers use it
+    # to make sandbox-facing gateway URLs such as `host.docker.internal`
+    # resolve on Linux Docker.
+    extra_hosts: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass

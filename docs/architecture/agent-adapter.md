@@ -127,6 +127,19 @@ and `service_mode_ready` metadata from `GET /api/v1/agents`, and submit
 routes reject agents whose default service-mode sandbox runtime
 contract cannot be satisfied.
 
+Service-mode workers expose two gateway URLs because they live in
+different network namespaces:
+
+- `LOOM_WORKER_GATEWAY_URL` is the worker process's URL for
+  worker-side clients such as `LiteLLMAgent`.
+- `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is optional and is the
+  OpenAI-compatible facade base URL as seen from the trial sandbox
+  subprocess. Use it when Docker sandboxes cannot resolve the worker
+  pod/container's service DNS. The k8s manifest sets it to
+  `http://host.docker.internal:30443/openai/v1`, and `DockerDriver`
+  injects `host.docker.internal -> host-gateway` when that hostname is
+  used.
+
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client
 dependency since there's no Control Plane to record llm_calls to.

@@ -15,6 +15,7 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_MAX_CONCURRENT",
     "LOOM_WORKER_BLOCKING_IO_MAX_WORKERS",
     "LOOM_WORKER_TRAJECTORY_CACHE_DIR",
+    "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
 ]
 
 
@@ -39,6 +40,10 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
     monkeypatch.setenv("LOOM_WORKER_BLOCKING_IO_MAX_WORKERS", "40")
     monkeypatch.setenv("LOOM_WORKER_TRAJECTORY_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
+        "http://host.docker.internal:30443/openai/v1",
+    )
     s = WorkerSettings(_env_file=None)
     assert s.max_concurrent == 10
     assert s.blocking_io_max_workers == 40
@@ -46,6 +51,9 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert s.claim_poll_interval_sec == 1.0
     assert s.heartbeat_interval_sec == 5.0
     assert s.trajectory_cache_dir == tmp_path
+    assert str(s.subprocess_gateway_url) == (
+        "http://host.docker.internal:30443/openai/v1"
+    )
     assert s.token.get_secret_value() == "loom_w_test"
 
 

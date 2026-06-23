@@ -15,6 +15,11 @@ spec:
         - name: worker
           image: loom-worker:{{ image_tag }}
           {{ env_macros.env_block("worker", schema) | indent(10) }}
+            # Subprocess agents run inside Docker sandboxes, not the worker pod.
+            # They cannot resolve k8s Service DNS, so use the node-local
+            # gateway-router hostPort plus Docker's host-gateway alias.
+            - name: LOOM_WORKER_SUBPROCESS_GATEWAY_URL
+              value: http://host.docker.internal:30443/openai/v1
           volumeMounts:
             - name: trajectories
               mountPath: /var/lib/loom/trajectories

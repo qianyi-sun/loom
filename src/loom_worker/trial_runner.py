@@ -111,6 +111,7 @@ class LocalTrialRunner:
     ) = None
     sandbox_secrets_root: Path | None = None
     sandbox_step_jwt_ttl_sec: int = 600
+    sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
     sidecar_runtime_factory: TaskSidecarRuntimeFactory | None = None
 
     async def run(self) -> TrialResult:
@@ -235,6 +236,7 @@ class LocalTrialRunner:
             sandbox_network=(sandbox_bridge.name if sandbox_bridge is not None else None),
             on_driver_started=on_driver_started_cb,
             sandbox_volumes=sandbox_volumes,
+            sandbox_extra_hosts=self.sandbox_extra_hosts,
         )
 
         async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:

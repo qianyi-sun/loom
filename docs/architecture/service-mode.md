@@ -21,14 +21,15 @@ CLI with the Compose plugin before running `loom service up`, `down`, or
 |---|---|---|
 | `loom_service` | `/api/v1/*` | External (SPA, `curl`, customer scripts) |
 | Control Plane | root (`/trials`, `/workers/...`, `/admin/worker-tokens`, etc.) | Workers + `loom_service` (cluster-internal only) |
-| LLM Gateway | `/v1/*` (OpenAI dialect), `/v1beta/*` (Gemini dialect), `/admin/*` | Agents from inside sandboxes |
+| LLM Gateway | `/v1/*` (Loom-attributed dialects), `/openai/v1/*` (provider facade for stock SDKs), `/v1beta/*` (Gemini dialect), `/admin/*` | Agents from inside sandboxes |
 
 Layering: SPA / external curl → `loom_service` (`/api/v1/*`) → CP
 over cluster DNS. `deploy/k8s/ingress.yaml` exposes only
 `loom_service` under `/api/v1` and `loom-web` at `/` on the configured
 public host. The Control Plane and LLM Gateway are reachable only inside the
-cluster; sandbox traffic reaches the Gateway through the singleton /
-gateway-router path, not public Ingress. For operator-side admin curls,
+cluster; sandbox traffic reaches the Gateway through the worker's
+subprocess gateway URL, singleton/gateway-router path, or another
+sandbox-facing internal route, not public Ingress. For operator-side admin curls,
 port-forward CP:
 `kubectl port-forward deploy/loom-control-plane 8080:8080`.
 
@@ -315,13 +316,14 @@ configurations.
 - Per-call attribution via `(team_id, trial_id, step_id)` fields on
   the `llm_calls` row
 
-Routes (mounted at the Gateway service root — agents inside
-sandboxes hit them directly):
+Routes (mounted at the Gateway service root — agents inside sandboxes
+hit them through a sandbox-facing Gateway URL):
 
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/v1/messages` | Anthropic dialect |
 | POST | `/v1/chat/completions` | OpenAI dialect |
+| POST | `/openai/v1/chat/completions` | OpenAI-compatible provider facade for stock SDKs |
 | POST | `/v1/responses` | OpenAI Responses dialect |
 | POST | `/v1beta/models/{model_path}` | Gemini dialect (Google's `v1beta` namespace) |
 | POST | `/admin/rate-cards` | Upsert rate card (gated on `admin:rate_cards` scope) |

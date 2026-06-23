@@ -91,6 +91,16 @@ The security pivot. Trial sandbox containers are spawned by the worker via `dock
             OpenAI / Anthropic / Google
 ```
 
+The worker process and the subprocess agent do not share a network
+view. `LOOM_WORKER_GATEWAY_URL` remains the worker-pod URL for
+worker-side gateway clients. Subprocess agents launched inside Docker
+sandboxes use `LOOM_WORKER_SUBPROCESS_GATEWAY_URL`; the default k8s
+manifest sets it to
+`http://host.docker.internal:30443/openai/v1`, which reaches the
+node-local `loom-gateway-router` hostPort and then the in-cluster
+gateway facade. `DockerDriver` adds the Linux Docker host-gateway
+mapping when that hostname is used.
+
 ### Network isolation
 
 Per-trial bridges are `--internal` (Docker primitive — no host route). At trial start the worker:

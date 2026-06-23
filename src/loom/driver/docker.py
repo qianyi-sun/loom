@@ -115,6 +115,8 @@ class DockerDriver:
                 }
             if opts.environment:
                 run_kwargs["environment"] = dict(opts.environment)
+            if opts.extra_hosts:
+                run_kwargs["extra_hosts"] = dict(opts.extra_hosts)
             # to_thread can't unify the **kwargs overloads of
             # docker-py's containers.run, so wrap the call in a
             # closure whose signature is unambiguous to mypy.

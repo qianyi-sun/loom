@@ -109,6 +109,11 @@
     "default": "0",
     "required": false
   },
+  "subprocess_gateway_url": {
+    "annotation": "pydantic.networks.HttpUrl | None",
+    "default": "None",
+    "required": false
+  },
   "task_image_build_max_bytes": {
     "annotation": "<class 'int'>",
     "default": "536870912",
