@@ -875,19 +875,44 @@ workload shape. Halve the `for:` durations for staging.
 
 ## Staging smoke gate
 
-Before promoting a release from `dev` → `main`, exercise each user-facing
-flow on a staging cluster. The gate is a manual checklist today
-(automation tracked in a follow-up); every item below maps to a
-concrete command or UI action.
+Before promoting a release from `dev` to `main`, exercise the invite-only
+public beta on a staging cluster and attach the evidence to the release issue or
+PR. The gate has two parts:
+
+- **Operator/browser evidence** for DNS/TLS, invite acceptance, SPA submission,
+  and visual checks that require a real browser session.
+- **Repeatable API evidence** from `scripts/public_beta_smoke_gate.py`, which
+  verifies public API auth, provider discovery, service-proxied downloads, Run
+  Library sharing, cross-team denials, provenance, and leak scanning.
+
+Quota and rate-limit enforcement are intentionally not part of this beta gate.
+Team remains the execution, cost, provider credential, member, and API-token
+boundary; spend response is handled through alerts and operator controls until a
+separate product policy exists.
 
 ### Prereqs
 
 - A staging cluster deployed via `loom cluster up` against the
   candidate image tag.
-- A real provider key for at least one provider (OpenAI works for the
-  default benchmark sweep).
-- One of the canonical task fixtures registered: `hello-world` is
-  enough.
+- A public host with TLS enabled, for example `https://loom.example.com`.
+- Access to an operator/admin browser session that can create two teams and
+  invite users.
+- Two disposable staging teams:
+  - **Team A** owns the source provider connection and completed smoke run.
+  - **Team B** validates org-wide Run Library read/reuse without gaining Team A
+    execution control.
+- A real or mock OpenAI-compatible provider key for Team A. Use an environment
+  reference such as `env:OPENAI_API_KEY`; do not paste raw provider keys into
+  issue comments, shell history, or committed files.
+- One canonical task fixture registered. `hello-world` is enough for the gate;
+  another tiny task is fine if it produces ATIF, trajectory, and at least one
+  safe artifact.
+- One seeded blocked artifact on the source trial, marked
+  `share_status=blocked`, whose raw object body contains a fake secret such as
+  `seeded-public-beta-secret`. The release evidence should prove Team B cannot
+  download it and that the fake secret does not appear in API responses.
+- One private source trial or batch with a safe artifact that Team A can read
+  and Team B cannot read through Run Library.
 
 ### Checklist
 
@@ -902,21 +927,22 @@ concrete command or UI action.
    `loom-web` at `/`. `loom-llm-gateway`, Control Plane, Postgres, MinIO,
    workers, worker-token admin routes, and batch-runner bootstrap routes stay
    internal-only.
-4. **API token issuance.** Mint a named team API token and verify it can read
-   the team surface:
+4. **Invite-only onboarding.** From the operator/admin browser session, create
+   an invite for a new Team A owner. Open the invite link in a fresh browser
+   profile, accept it, and confirm the user lands in Team A without seeing a raw
+   team token. Repeat for Team B. Capture the invite id/prefix only; do not
+   capture raw invite codes.
+5. **Scoped CLI tokens.** In Team Settings -> Team access, each team owner
+   creates a named API token with `read:own` and `submit`; Team A also needs
+   `providers:manage` for provider setup. In a fresh shell:
    ```bash
-   TEAM_TOKEN=$(curl -sf -X POST https://loom.example.com/api/v1/tokens \
-     -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Loom-Admin-Actor: smoke-operator" \
-     -H "Content-Type: application/json" \
-     -d '{"name":"public-smoke","type":"team","team_id":"'$TEAM_ID'",
-          "scopes":["read:own","submit"],"expires_in_days":7}' | jq -r .token)
-   curl -sf -H "Authorization: Bearer $TEAM_TOKEN" \
-     https://loom.example.com/api/v1/auth/whoami
-   curl -sf -H "Authorization: Bearer $TEAM_TOKEN" \
-     https://loom.example.com/api/v1/trials
+   export LOOM_API_TOKEN=$TEAM_A_TOKEN
+   loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN
+   loom auth whoami
    ```
-5. **Provider connection create + test.** Create a connection through
+   Repeat with Team B's token. Evidence should show token names/scopes/prefixes,
+   never raw token values.
+6. **Provider connection create + test.** As Team A, create a connection through
    the CLI (or `POST /api/v1/provider-connections`), then probe:
    ```bash
    loom providers create --name smoke-openai --type openai-compatible \
@@ -925,12 +951,14 @@ concrete command or UI action.
    ```
    `test` must return `status=valid`; `http_status` shows the upstream
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
-6. **Model discovery.** `loom providers models smoke-openai --refresh`
+7. **Model discovery.** `loom providers models smoke-openai --refresh`
    followed by `loom providers models smoke-openai` returns a
    non-empty catalog. `curl /api/v1/models` from a team token shows
    the agent-capable view.
-7. **Submit a small batch.** Pick `hello-world` (or another canonical
-   fixture) and submit:
+8. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
+   canonical fixture). Submit once from the SPA New Batch page and once from the
+   CLI. The CLI commands below keep the no-model canary separate from the
+   provider-backed path:
    ```bash
    # No-model oracle canary; no provider/model flags are needed.
    loom eval batch create \
@@ -949,16 +977,16 @@ concrete command or UI action.
    loom eval batch show <batch-id>
    ```
    Re-run `batch show` until `state` reaches a terminal value.
-8. **Live progress visibility.** While the batch runs, the SPA Tasks
-   page shows the trial advancing through `queued → claimed → running`,
-   and `GET /api/v1/trials/{id}` echoes the same state.
-9. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
+9. **Live progress visibility.** While the batch runs, the SPA Monitor page
+   shows planned trials and current state transitions, and
+   `GET /api/v1/trials/{id}` echoes the same state.
+10. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
    with a sensible reason). `GET /api/v1/trials/{id}` carries
    `aggregate_reward`, `cost_usd`, and `failure_reason` (when
    applicable), plus `atif_url`, `trajectory_url`, `atif_ready`,
    `trajectory_ready`, and `artifacts` for download. Artifact rows include
    `share_status` and a safe `blocked_reason` when org-wide sharing is blocked.
-10. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
+11. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
     artifact `download_url` entries from trial detail return object bodies. The
@@ -966,12 +994,56 @@ concrete command or UI action.
     cross-team callers must not be able to use owner-team artifact proxy URLs.
     Verify the public CLI path with `loom eval trial download ...`; it should
     write the object body locally without printing internal object-store URLs.
-11. **Provider error surfaces.** Temporarily rotate the provider key
+12. **Run Library sharing.** Confirm the completed source run appears in Run
+    Library -> My team for Team A and Run Library -> All teams for Team B.
+    Evidence must include the owner-team label, completed state, score/cost
+    summary, task/agent/model summary, and artifact groups. Team B must be able
+    to download a safe artifact only through the Run Library service URL.
+13. **Clone and reuse.** From Team B, clone config from Team A's completed run.
+    If the source run used a provider connection, select a Team B-owned
+    provider connection before cloning. Then reuse a safe artifact from the
+    source trial. Both created records must belong to Team B and show
+    `source_provenance` with the source batch/trial/artifact key.
+14. **Blocked and private access denied.** Team B must be denied when trying to:
+    download the seeded blocked artifact through Run Library; download Team A's
+    artifact through the normal owner-team trial route; mutate Team A's original
+    batch, such as cancelling it; or inspect/download private or blocked source
+    artifacts. Denials should include safe reasons only.
+15. **Provider error surfaces.** Temporarily rotate the provider key
     to an invalid value, re-run a trial, and confirm the SPA + API
     surface a clear `provider_error` reason rather than a generic 500. Confirm
     diagnostic text does not contain raw provider keys, bearer tokens, signed
     URL query parameters, or internal service hostnames.
-12. **Teardown clean.** `loom cluster down --yes` removes every applied
+16. **Automated evidence script.** After steps 4-14, run the repeatable API
+    gate. Use disposable staging data because clone/reuse checks create Team B
+    records:
+    ```bash
+    python scripts/public_beta_smoke_gate.py \
+      --server-url https://loom.example.com \
+      --team-a-token "$TEAM_A_TOKEN" \
+      --team-b-token "$TEAM_B_TOKEN" \
+      --provider-connection-name smoke-openai \
+      --batch-id "$TEAM_A_BATCH_ID" \
+      --trial-id "$TEAM_A_TRIAL_ID" \
+      --safe-artifact-key "$SAFE_ARTIFACT_KEY" \
+      --blocked-artifact-key "$BLOCKED_ARTIFACT_KEY" \
+      --private-trial-id "$PRIVATE_TRIAL_ID" \
+      --private-artifact-key "$PRIVATE_ARTIFACT_KEY" \
+      --clone-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
+      --reuse-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
+      --secret-needle seeded-public-beta-secret \
+      --internal-url-needle loom-minio.loom.svc.cluster.local \
+      --allow-mutating-checks \
+      --fail-on-skip \
+      --markdown-output public-beta-smoke.md \
+      --json-output public-beta-smoke.json
+    ```
+    Attach `public-beta-smoke.md` or paste its table into the release comment.
+    Store `public-beta-smoke.json` with release artifacts if the environment has
+    a private artifact store. The script redacts raw API tokens, seeded fake
+    secrets, provider-key-like values, signed object-store URLs, and internal
+    service URLs before writing evidence.
+17. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). Pass
     `--with-volumes` only when wiping staging state intentionally.
 
@@ -981,21 +1053,27 @@ Capture artifact links + a brief note for each pass in the
 
 ### Automation status
 
-Two CI workflows automate parts of this checklist:
+Two CI workflows plus the public-beta smoke script automate parts of this
+checklist:
 
 - **`cluster-smoke`** (kind, label-gated `cluster-smoke`) — covers
-  steps 1, 3, 12. Uses placeholder images, `--no-wait` apply, schema
+  steps 1, 3, 17. Uses placeholder images, `--no-wait` apply, schema
   + boundary + apply + status + down round-trip. Fast (~1 min).
 - **`staging-smoke`** (kind, label-gated `staging-smoke`) — builds
   REAL images, applies them, waits for every pod to reach Ready,
   probes `/healthz` + `/metrics` on every component. Closes the
   cold-start regression gap (~15-20 min).
+- **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
+  reachability, two-team API-token auth, provider/model discovery, batch/trial
+  detail, service-proxied ATIF/trajectory downloads, My team and All teams Run
+  Library visibility, owner-team label, cross-team safe artifact download,
+  direct-route denial, clone config, reuse artifact, provenance, blocked
+  artifact denial, private artifact denial, cross-team mutation denial, and
+  response leak scanning.
 
-Steps 4-11 (provider connection create + test, model discovery,
-batch submission, trajectory + ATIF download, provider error
-visibility) still require either a real provider key in CI secrets
-or a mock OpenAI server in the staging cluster — tracked as a
-follow-up to #111.
+Browser-only invite acceptance, SPA visual submission, and provider-error UI
+screenshots remain manual release evidence unless the staging environment adds a
+mock provider and browser automation job.
 
 ## Capacity planning
 

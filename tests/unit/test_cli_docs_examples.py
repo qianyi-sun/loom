@@ -27,6 +27,25 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
     assert "--provider smoke-openai --model gpt-4o-mini --agent litellm" in runbook
 
 
+def test_operator_runbook_public_beta_gate_matches_current_launch_scope() -> None:
+    runbook = _read("docs/operator-runbook.md")
+    gate_section = runbook.split("## Staging smoke gate", maxsplit=1)[1].split(
+        "## Capacity planning", maxsplit=1,
+    )[0]
+
+    assert "scripts/public_beta_smoke_gate.py" in gate_section
+    assert "SPA Tasks page" not in gate_section
+    assert "quota rejection" not in gate_section.lower()
+    assert "rate-limit rejection" not in gate_section.lower()
+    assert "My team" in gate_section
+    assert "All teams" in gate_section
+    assert "owner-team label" in gate_section
+    assert "clone config" in gate_section
+    assert "reuse artifact" in gate_section
+    assert "provenance" in gate_section
+    assert "blocked artifact" in gate_section
+
+
 def test_cluster_deploy_docs_do_not_advertise_missing_trial_download_commands() -> None:
     cluster_deploy = _read("docs/architecture/cluster-deploy.md")
 
