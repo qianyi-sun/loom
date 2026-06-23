@@ -76,10 +76,10 @@ class CodexAdapter:
         )
         script = (
             'mkdir -p "$CODEX_HOME" && '
-            "exec codex exec --ignore-user-config --json "
+            "printf '%s' \"$4\" | exec codex exec --ignore-user-config --json "
             '--model "$1" --cd "$2" --skip-git-repo-check '
             "--sandbox danger-full-access --ignore-rules "
-            '-c \'model_provider="loom"\' -c "$3" "$4" </dev/null'
+            '-c \'model_provider="loom"\' -c "$3" -'
         )
         return [
             "sh",

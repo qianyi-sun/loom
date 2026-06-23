@@ -24,7 +24,9 @@ def test_build_invocation_argv() -> None:
     )
     assert argv[:3] == ["sh", "-c", argv[2]]
     assert "codex exec --ignore-user-config --json" in argv[2]
-    assert "</dev/null" in argv[2]
+    assert "printf '%s' \"$4\" | exec codex exec" in argv[2]
+    assert ' "$4" </dev/null' not in argv[2]
+    assert argv[2].endswith(' -')
     assert argv[3:] == [
         "loom-codex",
         "gpt-5",
