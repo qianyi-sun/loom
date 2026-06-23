@@ -14,6 +14,7 @@ import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { cn } from "../lib/cn";
+import { currentServerOrigin } from "../lib/serverOrigin";
 
 type TeamDetail = Awaited<ReturnType<typeof api.getTeam>>;
 type TeamUserMember = NonNullable<TeamDetail["user_members"]>[number];
@@ -109,6 +110,8 @@ export default function Settings(): JSX.Element {
   const [loginStarted, setLoginStarted] = useState(false);
   const [requestTeamName, setRequestTeamName] = useState("");
   const [requestEmail, setRequestEmail] = useState("");
+  const serverOrigin = currentServerOrigin();
+  const cliLoginCommand = `loom auth login --server ${serverOrigin} --token env:LOOM_API_TOKEN`;
 
   const queryClient = useQueryClient();
   const currentTeam = teams.find((team) => team.id === currentTeamId) ?? null;
@@ -165,142 +168,161 @@ export default function Settings(): JSX.Element {
 
   if (!isAuthenticated) {
     return (
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <Card.Body className="space-y-4">
-            <div>
-              <p className="text-xs uppercase tracking-wider text-slate-400">
-                loom
-              </p>
-              <h1 className="mt-1 text-2xl font-bold text-slate-900">
-                Sign in
-              </h1>
-              <p className="mt-2 text-sm text-slate-500">
-                Use your invited email address. Browser sessions use HttpOnly
-                cookies; raw bearer tokens are not stored in this browser.
-              </p>
-            </div>
-            <Input
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              aria-label="email"
-              title="Email address associated with your Loom invite."
-            />
-            <Button
-              variant="primary"
-              className="w-full"
-              onClick={() => start.mutate(email.trim())}
-              disabled={!email.trim() || start.isPending}
-              title="Request a one-time login link."
-            >
-              Continue
-            </Button>
-            {loginStarted ? (
-              <div className="space-y-3 border-t border-slate-100 pt-4">
-                <p className="text-sm text-slate-600">
-                  Check your email for the one-time sign-in link. Local dev
-                  servers may also return the code inline.
+      <div className="space-y-8">
+        <header className="max-w-3xl">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Loom public beta
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-slate-950">
+            Sign in to run and review evaluations
+          </h1>
+          <p className="mt-3 text-base text-slate-600">
+            Use an invited email address, an invite link, or a requested team
+            access approval. Browser sessions use HttpOnly cookies; CLI access
+            uses scoped API tokens created by a team owner.
+          </p>
+        </header>
+
+        <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,26rem)]">
+          <Card>
+            <Card.Body className="space-y-5 p-6 sm:p-7">
+              <div>
+                <h2 className="text-xl font-semibold text-slate-900">
+                  Sign in
+                </h2>
+                <p className="mt-2 text-sm text-slate-500">
+                  Enter the email address attached to your Loom invite. We will
+                  send a one-time sign-in link for this browser session.
                 </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
                 <Input
-                  placeholder="One-time login code"
-                  value={loginToken}
-                  onChange={(e) => setLoginToken(e.target.value)}
-                  aria-label="login token"
-                  title="Paste the one-time login code from your email or local dev response."
+                  type="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  aria-label="email"
+                  title="Email address associated with your Loom invite."
+                />
+                <Button
+                  variant="primary"
+                  className="w-full"
+                  onClick={() => start.mutate(email.trim())}
+                  disabled={!email.trim() || start.isPending}
+                  title="Request a one-time login link."
+                >
+                  Continue
+                </Button>
+              </div>
+              {loginStarted ? (
+                <div className="space-y-3 border-t border-slate-100 pt-5">
+                  <p className="text-sm text-slate-600">
+                    Check your email for the one-time sign-in link. Local dev
+                    servers may also return the code inline.
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                    <Input
+                      placeholder="One-time login code"
+                      value={loginToken}
+                      onChange={(e) => setLoginToken(e.target.value)}
+                      aria-label="login token"
+                      title="Paste the one-time login code from your email or local dev response."
+                    />
+                    <Button
+                      variant="secondary"
+                      className="w-full"
+                      onClick={() => complete.mutate(loginToken.trim())}
+                      disabled={!loginToken.trim() || complete.isPending}
+                      title="Complete sign-in and create a browser session."
+                    >
+                      Sign in
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {authError || start.isError || complete.isError ? (
+                <p
+                  role="alert"
+                  className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+                >
+                  {authError ??
+                    (start.error instanceof Error ? start.error.message : null) ??
+                    (complete.error instanceof Error ? complete.error.message : null) ??
+                    "Sign-in failed."}
+                </p>
+              ) : null}
+            </Card.Body>
+          </Card>
+
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-1">
+            <Card>
+              <Card.Header
+                title="Have an invite"
+                description="Open an invite link to join a team."
+              />
+              <Card.Body>
+                <Link
+                  to="/invites/accept"
+                  className={cn(
+                    LINK_BUTTON,
+                    "w-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                  )}
+                >
+                  Open invite page
+                </Link>
+              </Card.Body>
+            </Card>
+
+            <Card>
+              <Card.Header
+                title="Request access"
+                description="Submit a team request for admin review."
+              />
+              <Card.Body className="space-y-3">
+                <Input
+                  aria-label="Requested team name"
+                  value={requestTeamName}
+                  onChange={(event) => setRequestTeamName(event.target.value)}
+                  placeholder="Team name"
+                />
+                <Input
+                  type="email"
+                  aria-label="Request contact email"
+                  value={requestEmail}
+                  onChange={(event) => setRequestEmail(event.target.value)}
+                  placeholder="you@example.com"
                 />
                 <Button
                   variant="secondary"
                   className="w-full"
-                  onClick={() => complete.mutate(loginToken.trim())}
-                  disabled={!loginToken.trim() || complete.isPending}
-                  title="Complete sign-in and create a browser session."
+                  disabled={
+                    !requestTeamName.trim() ||
+                    !requestEmail.trim() ||
+                    requestAccess.isPending
+                  }
+                  onClick={() => requestAccess.mutate()}
                 >
-                  Sign in
+                  Request access
                 </Button>
-              </div>
-            ) : null}
-            {authError || start.isError || complete.isError ? (
-              <p
-                role="alert"
-                className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
-              >
-                {authError ??
-                  (start.error instanceof Error ? start.error.message : null) ??
-                  (complete.error instanceof Error ? complete.error.message : null) ??
-                  "Sign-in failed."}
-              </p>
-            ) : null}
-          </Card.Body>
-        </Card>
+                {requestAccess.isSuccess ? (
+                  <p className="text-sm text-emerald-700">Request submitted.</p>
+                ) : null}
+                {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
+              </Card.Body>
+            </Card>
 
-        <div className="space-y-4">
-          <Card>
-            <Card.Header
-              title="Have an invite"
-              description="Open an invite link to join a team."
-            />
-            <Card.Body>
-              <Link
-                to="/invites/accept"
-                className={cn(
-                  LINK_BUTTON,
-                  "w-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-                )}
-              >
-                Open invite page
-              </Link>
-            </Card.Body>
-          </Card>
-
-          <Card>
-            <Card.Header
-              title="Request access"
-              description="Submit a team request for admin review."
-            />
-            <Card.Body className="space-y-3">
-              <Input
-                aria-label="Requested team name"
-                value={requestTeamName}
-                onChange={(event) => setRequestTeamName(event.target.value)}
-                placeholder="Team name"
+            <Card className="md:col-span-2 lg:col-span-1">
+              <Card.Header
+                title="CLI setup"
+                description="After an owner creates a scoped API token, point the CLI at this server."
               />
-              <Input
-                aria-label="Request contact email"
-                value={requestEmail}
-                onChange={(event) => setRequestEmail(event.target.value)}
-                placeholder="you@example.com"
-              />
-              <Button
-                variant="secondary"
-                className="w-full"
-                disabled={
-                  !requestTeamName.trim() ||
-                  !requestEmail.trim() ||
-                  requestAccess.isPending
-                }
-                onClick={() => requestAccess.mutate()}
-              >
-                Request access
-              </Button>
-              {requestAccess.isSuccess ? (
-                <p className="text-sm text-emerald-700">Request submitted.</p>
-              ) : null}
-              {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
-            </Card.Body>
-          </Card>
-
-          <Card>
-            <Card.Header
-              title="CLI setup"
-              description="After an owner creates a scoped API token, point the CLI at this server."
-            />
-            <Card.Body>
-              <pre className="overflow-x-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-50">
-                <code>loom auth login --server &lt;server-url&gt; --token env:LOOM_API_TOKEN</code>
-              </pre>
-            </Card.Body>
-          </Card>
+              <Card.Body>
+                <pre className="whitespace-pre-wrap break-words rounded-lg bg-slate-900 p-3 text-xs leading-relaxed text-slate-50">
+                  <code>{cliLoginCommand}</code>
+                </pre>
+              </Card.Body>
+            </Card>
+          </div>
         </div>
       </div>
     );

@@ -82,7 +82,10 @@ describe("Settings", () => {
     expect(screen.getByText("Have an invite")).toBeInTheDocument();
     expect(screen.getAllByText("Request access").length).toBeGreaterThan(0);
     expect(screen.getByText("CLI setup")).toBeInTheDocument();
-    expect(screen.getByText(/loom auth login --server/i)).toBeInTheDocument();
+    const cliCommand = screen.getByText(/loom auth login --server/i);
+    expect(cliCommand).toHaveTextContent(window.location.origin);
+    expect(cliCommand).not.toHaveTextContent("<server-url>");
+    expect(cliCommand.closest("pre")).toHaveClass("whitespace-pre-wrap");
   });
 
   it("summarizes the current team, members, and owner setup actions", async () => {

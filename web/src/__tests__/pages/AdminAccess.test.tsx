@@ -278,7 +278,14 @@ describe("AdminAccess", () => {
     expect(await screen.findByText("loom_api_revealed_create_secret")).toBeInTheDocument();
     expect(screen.getByText("CLI setup commands")).toBeInTheDocument();
     expect(screen.getByText("export LOOM_API_TOKEN=loom_api_revealed_create_secret")).toBeInTheDocument();
-    expect(screen.getByText("loom auth login --server <server-url> --token env:LOOM_API_TOKEN")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `loom auth login --server ${window.location.origin} --token env:LOOM_API_TOKEN`,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("loom auth login --server <server-url> --token env:LOOM_API_TOKEN"),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("loom auth whoami")).toBeInTheDocument();
     await waitFor(() => {
       const createCall = fetchSpy.mock.calls.find(([input, init]) =>

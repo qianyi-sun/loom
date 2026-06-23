@@ -20,6 +20,15 @@ describe("NavBar", () => {
     expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
   });
 
+  it("uses a responsive shell that becomes a sidebar only on large screens", () => {
+    renderNav(false);
+    expect(screen.getByRole("navigation", { name: "Primary" })).toHaveClass(
+      "w-full",
+      "lg:w-56",
+      "lg:flex-col",
+    );
+  });
+
   it("hides admin-only links from a team user", () => {
     renderNav(false, "member");
     expect(

@@ -19,6 +19,7 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
+import { currentServerOrigin } from "../lib/serverOrigin";
 
 function formatDate(value: string | null): string {
   if (!value) return "—";
@@ -136,7 +137,7 @@ function tokenLifetimeDays(value: string): number {
 function CliSetupCommands({ token }: { token: string }): JSX.Element {
   const commands = [
     `export LOOM_API_TOKEN=${token}`,
-    "loom auth login --server <server-url> --token env:LOOM_API_TOKEN",
+    `loom auth login --server ${currentServerOrigin()} --token env:LOOM_API_TOKEN`,
     "loom auth whoami",
   ];
   return (
@@ -146,7 +147,7 @@ function CliSetupCommands({ token }: { token: string }): JSX.Element {
         {commands.map((command) => (
           <code
             key={command}
-            className="block overflow-x-auto whitespace-nowrap font-mono text-xs text-slate-800"
+            className="block whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-slate-800"
           >
             {command}
           </code>
