@@ -17,6 +17,11 @@ spec:
           {{ env_macros.env_block("loom-service", schema) | indent(10) }}
             - name: LOOM_SVC_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"
+            - name: LOOM_SECRET_STORE_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: secret-store-master-key
             - name: LOOM_ENV
               value: "production"
           volumeMounts:

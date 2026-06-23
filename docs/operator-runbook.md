@@ -77,9 +77,10 @@ knob you need.
    loom cluster bootstrap-secrets --rotate
    ```
 
-   `--rotate` mints fresh values for entries that carry a `generate:` command
-   (currently `step-jwt-signing-key`). For other required secrets (DB URLs,
-   MinIO credentials, provider API keys) the placeholder `<EDIT_ME>` appears —
+   `--rotate` mints fresh values for entries that carry a `generate:` command,
+   including `step-jwt-signing-key`, `postgres-password`, and
+   `secret-store-master-key`. For other required secrets (DB URLs, MinIO
+   credentials, provider API keys) the placeholder `<EDIT_ME>` appears —
    replace with your values before piping to kubectl.
 
    To preview and edit before applying:
@@ -113,7 +114,11 @@ knob you need.
      whose Subject Alternative Name includes the IP address. Kubernetes rejects
      IP literals in `Ingress.spec.rules[].host`, so `loom cluster render`
      emits a hostless ingress rule for IP entrypoints while keeping TLS
-     enabled through `ingress_tls_secret_name`.
+     enabled through `ingress_tls_secret_name`. With ingress-nginx, also set
+     the controller's default certificate to that Secret, for example
+     `--default-ssl-certificate=<namespace>/<ingress_tls_secret_name>`,
+     because hostless rules do not give the controller a DNS host to use for
+     SNI certificate selection.
    - Install an ingress controller matching `ingress_class_name` (default
      `nginx`).
    - Either pre-create the TLS Secret named by `ingress_tls_secret_name`, or
@@ -337,7 +342,7 @@ knob you need.
 
    Or run `loom cluster doctor` after the upgrade — it reports any orphan keys (no schema entry references them) and any missing keys (declared in schema, absent from Secret).
 
-3. **New Secret keys required.** `postgres-user` and `postgres-password` are now declared in `[infra_secrets]` and must exist in `loom-secrets` (previously the postgres template assumed they existed but nothing checked). If they're already populated, no action. If not, add them — `loom cluster bootstrap-secrets --rotate` mints fresh postgres-password and emits `<EDIT_ME>` for postgres-user.
+3. **New Secret keys required.** `postgres-user`, `postgres-password`, and `secret-store-master-key` are now declared in `[infra_secrets]` and must exist in `loom-secrets` (previously templates assumed some of these values existed but nothing checked). If they're already populated, no action. If not, add them — `loom cluster bootstrap-secrets --rotate` mints fresh `postgres-password` and `secret-store-master-key`, and emits `<EDIT_ME>` for `postgres-user`.
 
 ### Image upgrade
 

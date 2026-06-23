@@ -371,7 +371,7 @@ class SecretStore(Protocol):
     async def rewrap(self, ref: str, *, new_master_key: bytes) -> str: ...
 ```
 
-Two impls ship: `local-encrypted` (AES-GCM, `LOOM_SECRET_STORE_MASTER_KEY`; ciphertext in `secrets` table) for user-API-key data path, and `k8s-secret` (one k8s Secret per ref) for bootstrap-supplied infra credentials. Both impls live in both deployment modes.
+Two impls ship: `local-encrypted` (AES-GCM, `LOOM_SECRET_STORE_MASTER_KEY`; ciphertext in `secrets` table) for user-API-key data path, and `k8s-secret` (one k8s Secret per ref) for bootstrap-supplied infra credentials. Both impls live in both deployment modes. In cluster mode, `loom-service` and `loom-llm-gateway` read `LOOM_SECRET_STORE_MASTER_KEY` from `loom-secrets/secret-store-master-key`; `loom cluster bootstrap-secrets --rotate` generates this key for new clusters.
 
 ### Provider egress contract
 

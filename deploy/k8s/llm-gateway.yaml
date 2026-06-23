@@ -84,6 +84,11 @@ spec:
           value: '120.0'
         - name: LOOM_GW_ADMIN_SECRET_FILE
           value: /var/run/loom/admin/secrets.toml
+        - name: LOOM_SECRET_STORE_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: secret-store-master-key
         - name: LOOM_ENV
           value: production
         ports:

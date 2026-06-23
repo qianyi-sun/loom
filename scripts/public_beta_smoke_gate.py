@@ -354,7 +354,10 @@ def _json_models_nonempty(response: HttpResponse) -> bool:
 
 
 def run_smoke(args: argparse.Namespace) -> SmokeReport:
-    client = SmokeClient(args.server_url, max_scan_bytes=args.max_scan_bytes)
+    client = SmokeClient(
+        args.server_url,
+        max_scan_bytes=args.max_response_scan_bytes,
+    )
     results: list[CheckResult] = []
 
     health = client.request("GET", "/api/v1/health")

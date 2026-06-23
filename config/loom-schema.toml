@@ -446,9 +446,10 @@ python_type = "float"
 default     = 1800.0
 description = "TTL on the builder slot in active_trial_cache_builds (30-min default). Sized for worst-case base-image-pull + install + push budget. Builder refreshes TTL every 60s during long operations; on crash, the heartbeat dies and the slot expires within ~60s."
 
-# ─── infra_secrets: Secret keys used by 3rd-party containers (postgres) ───
+# ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
-# but no codegen Settings field is emitted.
+# but no codegen Settings field is emitted. Use this for third-party containers
+# and env-only secrets that must not appear in Settings validation errors.
 #
 # Note: minio uses the same minio-access-key / minio-secret-key as the loom
 # services (declared in service_config above), so they need no entry here.
@@ -459,6 +460,10 @@ description = "Postgres superuser (POSTGRES_USER in postgres.yaml.j2)"
 [infra_secrets.postgres-password]
 description = "Postgres superuser password (POSTGRES_PASSWORD in postgres.yaml.j2)"
 generate    = "openssl rand -hex 16"
+
+[infra_secrets.secret-store-master-key]
+description = "Base64 AES-256 key for LocalEncryptedSecretStore (LOOM_SECRET_STORE_MASTER_KEY)."
+generate    = "python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip(\"=\"))'"
 
 # ─── render_config ───
 

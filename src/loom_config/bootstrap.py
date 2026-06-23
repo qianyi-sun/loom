@@ -27,7 +27,8 @@ _SMOKE_DEFAULTS: Mapping[str, str] = {
     "together-api-key":       "smoke-together",
     "huggingface-api-key":    "smoke-hf",
     "batch-runner-cp-token":  "smoke-batch-cp-token",
-    # infra_secrets: 3rd-party containers that read from loom-secrets
+    "secret-store-master-key": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE",
+    # infra_secrets: non-codegen secrets that read from loom-secrets
     "postgres-user":          "loom",
     "postgres-password":      "loom",
 }

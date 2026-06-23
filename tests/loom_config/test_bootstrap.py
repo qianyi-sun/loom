@@ -38,3 +38,4 @@ def test_bootstrap_includes_infra_secrets() -> None:
     line = render_bootstrap_command(schema, namespace="loom", smoke_defaults=True)
     assert "--from-literal=postgres-user=loom" in line
     assert "--from-literal=postgres-password=loom" in line
+    assert "--from-literal=secret-store-master-key=" in line

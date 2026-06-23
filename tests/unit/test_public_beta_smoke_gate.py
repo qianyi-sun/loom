@@ -124,3 +124,34 @@ def test_console_summary_omits_check_details_and_secret_values() -> None:
     assert "1 fail" in rendered
     assert "public-beta-smoke.md" in rendered
     assert "public-beta-smoke.json" in rendered
+
+
+def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
+    gate = _load_gate_module()
+    observed: dict[str, int] = {}
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            observed["max_scan_bytes"] = max_scan_bytes
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--max-response-scan-bytes", "12345",
+    ])
+
+    gate.run_smoke(args)
+
+    assert observed["max_scan_bytes"] == 12345

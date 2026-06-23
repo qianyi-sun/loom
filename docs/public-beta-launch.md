@@ -57,9 +57,10 @@ Attach these to the release issue or release PR:
   `loom eval trial download`.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data.
-- For IP-address staging hosts, note the hostless Ingress rendering and attach
+- For IP-address staging hosts, note the hostless Ingress rendering, attach
   evidence that the TLS Secret certificate includes the staging IP as a Subject
-  Alternative Name.
+  Alternative Name, and verify the ingress controller serves that Secret as its
+  default certificate.
 - Leak-scan note showing seeded fake secrets and internal service URLs were not
   found in API responses, audit excerpts, or downloaded safe artifacts.
 

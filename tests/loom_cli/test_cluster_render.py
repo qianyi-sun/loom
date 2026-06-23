@@ -211,6 +211,35 @@ def test_render_with_custom_image_tag_applies_to_every_loom_image() -> None:
         )
 
 
+def test_render_injects_secret_store_master_key_for_provider_paths() -> None:
+    """BYO provider create/test in service and provider dispatch in
+    gateway both use LocalEncryptedSecretStore. Cluster mode must wire
+    the shared master key into both pods from loom-secrets.
+    """
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    deployments = {
+        d["metadata"]["name"]: d
+        for d in docs
+        if d["kind"] == "Deployment"
+    }
+
+    expected = {
+        "loom-service": "LOOM_SECRET_STORE_MASTER_KEY",
+        "loom-llm-gateway": "LOOM_SECRET_STORE_MASTER_KEY",
+    }
+    for deployment_name, env_name in expected.items():
+        env = deployments[deployment_name]["spec"]["template"]["spec"]["containers"][0]["env"]
+        assert {
+            "name": env_name,
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": "loom-secrets",
+                    "key": "secret-store-master-key",
+                },
+            },
+        } in env
+
+
 def test_render_default_ingress_uses_tls_secret_and_class() -> None:
     cfg = ClusterConfig()
     docs = _load_docs(render_manifests(cfg))
