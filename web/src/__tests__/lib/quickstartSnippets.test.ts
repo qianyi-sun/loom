@@ -1,4 +1,5 @@
 import {
+  benchmarkCatalogCommands,
   batchInspectionCommands,
   cliLoginCommands,
   containsUnsafeSnippetValue,
@@ -41,6 +42,24 @@ describe("quickstartSnippets", () => {
     );
     expect(trialDownloadCommands("trial-1", "main/report.json")).toContain(
       "loom eval trial download trial-1 --kind artifact --artifact-key main/report.json --output artifact.bin",
+    );
+  });
+
+  it("builds secret-safe benchmark catalog commands", () => {
+    const commands = benchmarkCatalogCommands("https://loom.example.com/");
+
+    expect(commands).toEqual([
+      "loom datasets list --remote --server-url https://loom.example.com --token env:LOOM_API_TOKEN",
+      'loom datasets audit --all --db-url "$LOOM_DB_URL"',
+      [
+        "loom datasets sync-config",
+        "  --config config/benchmarks.toml",
+        '  --db-url "$LOOM_DB_URL"',
+        "  --dry-run",
+      ].join(" \\\n"),
+    ]);
+    expect(commands.some((command) => containsUnsafeSnippetValue(command))).toBe(
+      false,
     );
   });
 

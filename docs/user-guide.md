@@ -119,10 +119,10 @@ allows.
 
 Most web workflows now include contextual quickstarts directly on the page. Use
 the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
-Batch Detail, Trial Detail, Run Library, Usage, Rate cards, and Tasks when you
-want the CLI/API equivalent for the page you are viewing. The examples use
-safe placeholders and `env:`/`file:` secret references so users do not need to
-switch back to this guide for the common path.
+Batch Detail, Trial Detail, Run Library, Usage, Rate cards, Tasks, and
+Benchmarks when you want the CLI/API equivalent for the page you are viewing.
+The examples use safe placeholders and `env:`/`file:` secret references so
+users do not need to switch back to this guide for the common path.
 
 The CLI uses named team API tokens for service workflows. Create, rotate, or
 revoke those tokens from Team access only as a team owner. The one-time reveal
@@ -617,6 +617,12 @@ registered yet. `Needs republish` means raw task rows exist but their stored
 configs are not valid `TaskConfig` objects. Disabled rows show the API-provided
 readiness message and raw-versus-runnable counts so operators know whether to
 publish, republish, or repair the benchmark.
+
+The hidden `/benchmarks` route remains a power-user diagnostic view rather
+than the normal submission path. It includes the full registry, including rows
+New Batch may disable, plus copyable `loom datasets list --remote`,
+`loom datasets audit`, and `loom datasets sync-config --dry-run` snippets that
+use token and database environment references instead of raw secrets.
 
 For public-beta or release deployments, operators should provision the ready
 catalog with `loom datasets provision-public-beta-catalog` before inviting

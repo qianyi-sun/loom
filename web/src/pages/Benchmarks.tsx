@@ -17,6 +17,8 @@ import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -26,6 +28,8 @@ import Pagination, {
   prevPage,
   type PageState,
 } from "../components/Pagination";
+import { cn } from "../lib/cn";
+import { benchmarkCatalogCommands } from "../lib/quickstartSnippets";
 
 interface BenchmarkRow {
   id: string;
@@ -36,10 +40,65 @@ interface BenchmarkRow {
   upstream_locator: string;
   imported_at: string;
   task_count?: number;
+  raw_task_count?: number;
+  valid_task_config_count?: number;
+  invalid_task_config_count?: number;
+  readiness_state?: string;
+  readiness_label?: string;
+  readiness_message?: string | null;
+  selectable?: boolean;
+  blocker_reason?: string | null;
+}
+
+function currentServerOrigin(): string {
+  return window.location.origin;
+}
+
+function readinessLabel(row: BenchmarkRow): string {
+  if (row.readiness_label) return row.readiness_label;
+  if ((row.task_count ?? 0) > 0) return "Ready";
+  return "Needs publish";
+}
+
+function readinessMessage(row: BenchmarkRow): string {
+  if (row.readiness_message) return row.readiness_message;
+  if ((row.task_count ?? 0) > 0) {
+    const count = row.task_count ?? 0;
+    return `${count} runnable task${count === 1 ? "" : "s"} registered.`;
+  }
+  return "No runnable tasks are registered yet.";
+}
+
+function readinessCounts(row: BenchmarkRow): string | null {
+  if (
+    row.raw_task_count === undefined &&
+    row.valid_task_config_count === undefined &&
+    row.invalid_task_config_count === undefined
+  ) {
+    return null;
+  }
+  const valid = row.valid_task_config_count ?? row.task_count ?? 0;
+  const raw = row.raw_task_count ?? valid;
+  const invalid = row.invalid_task_config_count ?? Math.max(raw - valid, 0);
+  return `${valid} valid / ${raw} raw / ${invalid} invalid`;
+}
+
+function readinessBadgeClasses(row: BenchmarkRow): string {
+  if (row.readiness_state === "runnable" || row.selectable === true) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+  if (readinessLabel(row).toLowerCase().includes("republish")) {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+  return "border-slate-200 bg-slate-50 text-slate-700";
 }
 
 export default function Benchmarks(): JSX.Element {
   const [page, setPage] = useState<PageState>(initialPage);
+  const benchmarkCommands = useMemo(
+    () => benchmarkCatalogCommands(currentServerOrigin()),
+    [],
+  );
   const query = useQuery({
     queryKey: ["benchmarks", page.current],
     queryFn: () =>
@@ -101,7 +160,15 @@ export default function Benchmarks(): JSX.Element {
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">
-              {["ID", "Name", "Tasks", "License", "Source", "Imported"].map((h) => (
+              {[
+                "ID",
+                "Name",
+                "Tasks",
+                "Readiness",
+                "License",
+                "Source",
+                "Imported",
+              ].map((h) => (
                 <th
                   key={h}
                   className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
@@ -120,7 +187,7 @@ export default function Benchmarks(): JSX.Element {
               >
                 <tr className="bg-indigo-50/60">
                   <th
-                    colSpan={6}
+                    colSpan={7}
                     className="px-4 py-2.5 text-left text-sm font-semibold text-indigo-900"
                   >
                     <span className="inline-flex items-center gap-2">
@@ -145,6 +212,26 @@ export default function Benchmarks(): JSX.Element {
                     <td className="px-4 py-3 text-slate-700">{b.display_name}</td>
                     <td className="px-4 py-3 text-xs text-slate-500">
                       {b.task_count ?? <span className="text-slate-300">—</span>}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-500">
+                      <div className="max-w-xs space-y-1.5">
+                        <span
+                          className={cn(
+                            "inline-flex rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+                            readinessBadgeClasses(b),
+                          )}
+                        >
+                          {readinessLabel(b)}
+                        </span>
+                        <p className="leading-relaxed text-slate-500">
+                          {readinessMessage(b)}
+                        </p>
+                        {readinessCounts(b) ? (
+                          <p className="font-mono text-[11px] text-slate-400">
+                            {readinessCounts(b)}
+                          </p>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-slate-700">{b.license_spdx}</td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
@@ -172,6 +259,33 @@ export default function Benchmarks(): JSX.Element {
           to one `BenchmarkAdapter` discovered via entry-points.
         </p>
       </header>
+
+      <DocsCallout title="Benchmark catalog guidance" tone="info">
+        <p>
+          This hidden power-user view shows the full benchmark registry,
+          including rows New Batch may disable while data is missing or stale.
+          Ready rows have runnable task configs; Needs publish rows have no
+          runnable tasks yet; Needs republish rows usually have raw task rows
+          that need valid `TaskConfig` backfill.
+        </p>
+        <div className="grid gap-3 lg:grid-cols-3">
+          <CommandSnippet
+            label="Remote catalog"
+            command={benchmarkCommands[0]}
+            helperText="Read the service catalog with a team token reference."
+          />
+          <CommandSnippet
+            label="Readiness audit"
+            command={benchmarkCommands[1]}
+            helperText="Operator check for raw, valid, and blocked benchmark rows."
+          />
+          <CommandSnippet
+            label="Config sync dry-run"
+            command={benchmarkCommands[2]}
+            helperText="Preview config/benchmarks.toml changes before writing rows."
+          />
+        </div>
+      </DocsCallout>
 
       <Card>
         <Card.Body className="p-0">{body}</Card.Body>

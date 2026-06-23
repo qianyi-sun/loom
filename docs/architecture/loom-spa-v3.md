@@ -308,6 +308,12 @@ trials list. Clicking a trial row navigates to the Trial detail
 
 What disappears from nav:
 
+- **Benchmarks page** — stays routable at `/benchmarks` for
+  power-user catalog diagnostics, but it is not normal onboarding.
+  It uses `include_empty=true` to show the full adapter slate,
+  renders API-provided readiness labels/messages/counts, and carries
+  safe snippets for remote catalog listing, direct readiness audit,
+  and `config/benchmarks.toml` dry-run sync.
 - **Tasks page** — the catalog browser is gone. Tasks are picked
   inside the submit form via the benchmark dropdown + subset rules.
   If a power user needs to inspect a task's TaskConfig, the

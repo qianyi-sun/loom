@@ -34,6 +34,20 @@ export function hostedProviderCommands(
   ];
 }
 
+export function benchmarkCatalogCommands(serverOrigin: string): string[] {
+  const origin = cleanOrigin(serverOrigin);
+  return [
+    `loom datasets list --remote --server-url ${origin} --token env:LOOM_API_TOKEN`,
+    'loom datasets audit --all --db-url "$LOOM_DB_URL"',
+    [
+      "loom datasets sync-config",
+      "  --config config/benchmarks.toml",
+      '  --db-url "$LOOM_DB_URL"',
+      "  --dry-run",
+    ].join(" \\\n"),
+  ];
+}
+
 export function oracleSmokeBatchCommand(): string {
   return [
     "loom eval batch create",
