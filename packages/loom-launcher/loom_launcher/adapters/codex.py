@@ -69,9 +69,18 @@ class CodexAdapter:
         # for the trial's lifetime, doesn't leak across trials.
         env["CODEX_HOME"] = f"{workdir}/.codex-home"
         model_name = self.model_name_template.format(model_id=model.name)
+        # Codex with `wire_api = "responses"` POSTs to
+        # `<base_url>/responses`. OpenAI's actual base URL convention
+        # is `https://api.openai.com/v1`, so the gateway must also be
+        # addressed as `<gateway>/v1` (the loom gateway hosts the
+        # responses route at `/v1/responses`, not the root). The
+        # worker injects the gateway URL bare, so append `/v1` here.
+        base_url = env[self.base_url_env].rstrip("/")
+        if not base_url.endswith("/v1"):
+            base_url = base_url + "/v1"
         provider_config = (
             'model_providers.loom={ name = "Loom", '
-            f"base_url = {json.dumps(env[self.base_url_env])}, "
+            f"base_url = {json.dumps(base_url)}, "
             f'env_key = "{self.api_key_env}", wire_api = "responses" }}'
         )
         script = (
