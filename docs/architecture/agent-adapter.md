@@ -34,7 +34,7 @@ class AgentAdapter(Protocol):
     endpoint_dialect: EndpointDialect          # "openai_chat" | "anthropic" | ...
     api_key_env: str                           # e.g. "ANTHROPIC_API_KEY"
     base_url_env: str
-    model_name_template: str                   # "{model_id}" | "openai/{model_id}"
+    model_name_template: str                   # Agent-facing model id template
     supports_multi_turn: bool                  # metadata only in v1
     additional_egress: frozenset[str]          # extra hostnames beyond Gateway
     install_script: str | None                 # shell script that installs the
@@ -90,7 +90,7 @@ adapters compose one of them:
 | gemini-cli | stdout_jsonl | Google Gemini CLI |
 | kimi-cli | tail_pty | Moonshot Kimi CLI |
 | mini-swe-agent | stdout_jsonl | |
-| opencode | stdout_jsonl | |
+| opencode | stdout_jsonl | Custom OpenAI-compatible provider id; uses `/v1/chat/completions`, not Responses API |
 | openhands | stdout_jsonl | legacy name backed by the SDK runner |
 | openhands-sdk | stdout_jsonl | SDK variant |
 | qwen-cli | tail_pty | Alibaba Qwen CLI |

@@ -107,7 +107,7 @@ class AgentAdapter(Protocol):
     endpoint_dialect: EndpointDialect
     api_key_env: str  # e.g. "ANTHROPIC_API_KEY"
     base_url_env: str
-    model_name_template: str  # "{model_id}" / "openai/{model_id}"
+    model_name_template: str  # Agent-facing model id template.
     supports_multi_turn: bool  # metadata only in v1
     additional_egress: frozenset[str]  # hostnames beyond Gateway
 

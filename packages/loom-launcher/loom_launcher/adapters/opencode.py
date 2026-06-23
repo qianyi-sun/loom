@@ -19,6 +19,7 @@ from loom_launcher.registry import register_adapter
 # deploy/agent-sandbox/npm-packages.txt.
 _OPENCODE_PKG = "opencode-ai"
 _OPENCODE_VERSION = "1.17.8"
+_OPENCODE_PROVIDER_ID = "loom-openai-compatible"
 _OPENCODE_INSTALL_SCRIPT = f"""\
 set -euo pipefail
 if command -v apk >/dev/null 2>&1; then
@@ -50,7 +51,7 @@ class OpencodeAdapter:
     endpoint_dialect: str = "openai_chat"
     api_key_env: str = "OPENAI_API_KEY"
     base_url_env: str = "OPENAI_BASE_URL"
-    model_name_template: str = "openai/{model_id}"
+    model_name_template: str = f"{_OPENCODE_PROVIDER_ID}/{{model_id}}"
     supports_multi_turn: bool = False
     additional_egress: frozenset[str] = frozenset()
     install_script: str | None = _OPENCODE_INSTALL_SCRIPT
@@ -67,15 +68,20 @@ class OpencodeAdapter:
         model_name = self.model_name_template.format(model_id=model.name)
         provider_id, _, model_id = model_name.partition("/")
         config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": model_name,
+            "small_model": model_name,
             "provider": {
                 provider_id: {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Loom OpenAI-compatible Gateway",
                     "options": {
                         "baseURL": env[self.base_url_env],
                         "apiKey": env[self.api_key_env],
                     },
                     "models": {model_id: {"name": model_id}},
                 }
-            }
+            },
         }
         config_json = json.dumps(config, separators=(",", ":"))
         script = (

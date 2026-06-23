@@ -21,9 +21,14 @@ def test_build_invocation_argv() -> None:
     )
     assert argv[:4] == ["sh", "-c", argv[2], "loom-opencode"]
     assert argv[4] == "ping"
-    assert "opencode run --model openai/gpt-5" in argv[2]
+    assert "opencode run --model loom-openai-compatible/gpt-5" in argv[2]
     assert "--dangerously-skip-permissions" in argv[2]
     assert "</dev/null" in argv[2]
+    assert '"$schema":"https://opencode.ai/config.json"' in argv[2]
+    assert '"model":"loom-openai-compatible/gpt-5"' in argv[2]
+    assert '"small_model":"loom-openai-compatible/gpt-5"' in argv[2]
+    assert '"npm":"@ai-sdk/openai-compatible"' in argv[2]
+    assert '"name":"Loom OpenAI-compatible Gateway"' in argv[2]
     assert '"baseURL":"http://gateway.local"' in argv[2]
     assert '"apiKey":"step-token"' in argv[2]
     assert '"models":{"gpt-5"' in argv[2]
