@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
-from loom.db.schema import Batch, LlmCall, Team, Trial
+from loom.db.schema import Batch, LlmCall, ProviderModelCache, Team, Trial
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
@@ -101,6 +101,38 @@ async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
             status_code=403,
             detail="team submissions are paused",
         )
+
+
+async def _reject_if_known_failed_provider_model(
+    session: Any,
+    *,
+    provider_connection_id: UUID | None,
+    provider_model_id: str | None,
+) -> None:
+    if provider_connection_id is None or not provider_model_id:
+        return
+    row = (await session.execute(
+        select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == provider_connection_id,
+            ProviderModelCache.model_id == provider_model_id,
+        ),
+    )).scalar_one_or_none()
+    if row is None or row.last_preflight_status != "failed":
+        return
+    detail = (
+        f"provider model {provider_model_id!r} last preflight failed "
+        f"for this provider connection"
+    )
+    if row.last_preflight_error_code:
+        detail += f" ({row.last_preflight_error_code})"
+    detail += (
+        "; run provider model preflight again or choose another model"
+    )
+    _reject_submission(
+        reason="provider_model_preflight",
+        status_code=400,
+        detail=detail,
+    )
 
 
 def _serialize(
@@ -300,6 +332,24 @@ async def create_batch(
             ),
         )
 
+    # Validate provider_connection_id before task materialization/fan-out
+    # work so known bad provider/model input returns a direct actionable error.
+    if payload.provider_connection_id is not None and ctx.team_id is not None:
+        try:
+            await validate_provider_connection(
+                s, payload.provider_connection_id, team_id=ctx.team_id,
+            )
+        except HTTPException:
+            SUBMISSION_REJECTS_TOTAL.labels(
+                reason="provider_connection",
+            ).inc()
+            raise
+        await _reject_if_known_failed_provider_model(
+            s,
+            provider_connection_id=payload.provider_connection_id,
+            provider_model_id=payload.provider_model_id,
+        )
+
     task_ids = await resolve_task_filter(s, payload.task_filter)
     # Audit M2: a filter materializing to zero tasks creates a
     # batch stuck in `submitted` forever — reject up front.
@@ -344,19 +394,6 @@ async def create_batch(
             combinations=None,
         )
         combinations_jsonb = []
-
-    # Validate provider_connection_id BEFORE constructing the Batch
-    # row so we 400 on bad input rather than 500 on FK violation.
-    if payload.provider_connection_id is not None and ctx.team_id is not None:
-        try:
-            await validate_provider_connection(
-                s, payload.provider_connection_id, team_id=ctx.team_id,
-            )
-        except HTTPException:
-            SUBMISSION_REJECTS_TOTAL.labels(
-                reason="provider_connection",
-            ).inc()
-            raise
 
     b = Batch(
         team_id=ctx.team_id,

@@ -51,6 +51,7 @@ from loom_service.provider_connections_service import (
     default_pricing_source_for,
     default_rate_card_provider_for,
     fetch_upstream_models,
+    preflight_model,
     probe_connection,
     resolve_and_validate,
     validate_pricing,
@@ -175,6 +176,11 @@ class ProviderModelCacheEntry(BaseModel):
     agent_capable: bool
     recommended: bool
     visibility: str
+    last_preflight_status: str | None
+    last_preflight_at: datetime | None
+    last_preflight_http_status: int | None
+    last_preflight_error_code: str | None
+    last_preflight_error_message: str | None
 
 
 class ProviderModelCacheListResponse(BaseModel):
@@ -237,6 +243,11 @@ def _cache_row_to_entry(row: ProviderModelCache) -> ProviderModelCacheEntry:
         agent_capable=classification.agent_capable,
         recommended=recommended,
         visibility=visibility,
+        last_preflight_status=row.last_preflight_status,
+        last_preflight_at=row.last_preflight_at,
+        last_preflight_http_status=row.last_preflight_http_status,
+        last_preflight_error_code=row.last_preflight_error_code,
+        last_preflight_error_message=row.last_preflight_error_message,
     )
 
 
@@ -343,6 +354,28 @@ async def _get_active_connection(
     if not is_admin(ctx) and row.team_id != ctx.team_id:
         raise HTTPException(status_code=404, detail="provider_connection not found")
     return row
+
+
+async def _get_cached_model_or_404(
+    session: AsyncSession,
+    connection_id: UUID,
+    model_id: str,
+) -> ProviderModelCache:
+    cache_row = (await session.execute(
+        select(ProviderModelCache).where(
+            ProviderModelCache.provider_connection_id == connection_id,
+            ProviderModelCache.model_id == model_id,
+        ),
+    )).scalar_one_or_none()
+    if cache_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"model {model_id!r} not in cache for this connection — "
+                f"run POST /models/refresh first or add it manually"
+            ),
+        )
+    return cache_row
 
 
 def _require_provider_management(ctx: AuthContext) -> None:
@@ -945,6 +978,61 @@ async def refresh_models(
 
 
 @router.post(
+    "/provider-connections/{connection_id}/models/{model_id:path}/preflight",
+    response_model=ProviderModelCacheEntry,
+)
+async def preflight_cached_model(
+    request: Request,
+    connection_id: UUID,
+    model_id: str,
+    sc: SessionAndCtx,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> ProviderModelCacheEntry:
+    """Run a bounded entitlement check for one cached model id.
+
+    Discovery only proves that an upstream advertises a model. This route
+    sends one minimal generation request so operators can see whether the
+    current connection/key is allowed to call that exact model.
+    """
+    session, ctx = sc
+    _require_provider_management(ctx)
+    row = await _get_active_connection(session, connection_id, ctx)
+    cache_row = await _get_cached_model_or_404(session, row.id, model_id)
+
+    api_key = await _get_provider_api_key(session, row)
+    result = await preflight_model(
+        row.provider_type, row.base_url, api_key, model_id,
+    )
+
+    now = datetime.now(UTC)
+    cache_row.last_preflight_status = result.status
+    cache_row.last_preflight_at = now
+    cache_row.last_preflight_http_status = result.http_status
+    cache_row.last_preflight_error_code = result.error_code
+    cache_row.last_preflight_error_message = result.error_message
+    await session.flush()
+    await write_admin_audit_event(
+        session,
+        actor=_provider_audit_actor(ctx, x_loom_admin_actor),
+        action="provider_model.preflight",
+        target_type="provider_model",
+        target_id=f"{row.id}:{model_id}",
+        request=request,
+        metadata=_provider_audit_metadata(
+            row,
+            extra={
+                "model_id": model_id,
+                "status": result.status,
+                "http_status": result.http_status,
+                "error_code": result.error_code,
+            },
+        ),
+    )
+    await session.commit()
+    return _cache_row_to_entry(cache_row)
+
+
+@router.post(
     "/provider-connections/{connection_id}/models/{model_id:path}/hide",
     response_model=ProviderModelCacheEntry,
 )
@@ -961,20 +1049,7 @@ async def hide_model(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
-    cache_row = (await session.execute(
-        select(ProviderModelCache).where(
-            ProviderModelCache.provider_connection_id == row.id,
-            ProviderModelCache.model_id == model_id,
-        ),
-    )).scalar_one_or_none()
-    if cache_row is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"model {model_id!r} not in cache for this connection — "
-                f"run POST /models/refresh first"
-            ),
-        )
+    cache_row = await _get_cached_model_or_404(session, row.id, model_id)
     cache_row.visible = False
     cache_row.hidden_reason = "operator-hidden"
     await session.commit()
@@ -1001,20 +1076,7 @@ async def unhide_model(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
-    cache_row = (await session.execute(
-        select(ProviderModelCache).where(
-            ProviderModelCache.provider_connection_id == row.id,
-            ProviderModelCache.model_id == model_id,
-        ),
-    )).scalar_one_or_none()
-    if cache_row is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"model {model_id!r} not in cache for this connection — "
-                f"run POST /models/refresh first"
-            ),
-        )
+    cache_row = await _get_cached_model_or_404(session, row.id, model_id)
     if cache_row.upstream_present or _is_manual_model(cache_row):
         cache_row.visible = True
         cache_row.hidden_reason = None

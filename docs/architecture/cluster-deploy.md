@@ -285,7 +285,7 @@ loom providers create --name N --type {openai-compatible,anthropic,google,custom
     [--allowed-models LIST]
     [--input-usd-per-1m FLOAT --output-usd-per-1m FLOAT]          # both or neither
 loom providers {list,show,test} NAME
-loom providers models NAME [--refresh] [--hide MODEL] [--unhide MODEL]
+loom providers models NAME [--refresh] [--preflight MODEL] [--hide MODEL] [--unhide MODEL]
 loom providers update NAME [--base-url URL] [--api-key SOURCE] ...
 loom providers delete NAME                                         # soft-delete
 
@@ -352,21 +352,42 @@ created_at, updated_at      timestamptz
 provider_connection_id  UUID FK ON DELETE CASCADE
 model_id                text       -- (PK with provider_connection_id)
 family, context_length, capabilities, last_seen_at, visible, hidden_reason, upstream_present
+last_preflight_status   text | NULL -- NULL | 'valid' | 'failed'
+last_preflight_at       timestamptz | NULL
+last_preflight_http_status int | NULL
+last_preflight_error_code text | NULL
+last_preflight_error_message text | NULL -- redacted, user-facing
 ```
 
 `capabilities.source` is `"discovered"` for upstream `/models` entries
 and `"manual"` for user-entered model ids. Manual rows stay visible even
 when a later refresh does not return the id, which keeps self-hosted
 OpenAI-compatible endpoints usable when discovery is absent or noisy.
+Model discovery and entitlement are separate: `--refresh` only records
+advertised ids, while `--preflight MODEL` sends one minimal generation
+request and updates the nullable `last_preflight_*` fields. A known failed
+preflight warns in the SPA and blocks new batch creation for that exact
+provider/model pair; untested rows remain selectable.
 
 `GET /api/v1/models` returns a launch-safe catalog by default. It
 includes legacy rate-card tuples plus team-visible provider-connection
 cache rows tagged with `source`, `agent_capable`, `recommended`,
-`visibility`, `hidden_reason`, `provider_connection_id`, and freshness
-metadata. `view=raw` includes suppressed tool/API entries such as
+`visibility`, `hidden_reason`, `provider_connection_id`, freshness metadata,
+and preflight status/error metadata. `view=raw` includes suppressed tool/API
+entries such as
 Amap/APISports/TuShare-style ids with classifier reasons for debugging.
 
 `Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable; null = use platform-default provider). Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice.
+
+Benchmark task images remain model/provider/agent agnostic. The task image owns
+benchmark dependencies, task assets, harness code, and verifier behavior only.
+User choices for agent, provider, and model live in the submitted run/trial
+payload (`trial_config.agent_name`, `trial_config.agent_model`,
+`provider_connection_id`, `provider_model_id`) and are injected by the service,
+worker, and sandbox launch boundary at execution time. Agent runtime bits may
+come from the worker image, a cached layered sandbox image, or an install
+script, but changing a selected model/provider/agent must not require
+republishing a benchmark task image.
 
 ## Secrets, SSRF, gateway hot path
 

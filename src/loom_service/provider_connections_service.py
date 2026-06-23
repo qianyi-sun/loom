@@ -21,7 +21,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from loom.security.redaction import redact_text
 
@@ -304,6 +304,22 @@ class ProbeResult:
     error: str | None
 
 
+@dataclass(frozen=True)
+class ModelPreflightResult:
+    """Outcome of a single model entitlement probe.
+
+    `status='valid'` means the provider accepted a minimal non-streaming
+    generation request for this exact model id. `status='failed'` means the
+    connection/key/model combination could not be used. Error fields are safe
+    to persist and return to operators; secrets are redacted before return.
+    """
+
+    status: str  # 'valid' | 'failed'
+    http_status: int | None
+    error_code: str | None
+    error_message: str | None
+
+
 def _probe_url_and_headers(
     provider_type: str, base_url: str, api_key: str,
 ) -> tuple[str, dict[str, str]]:
@@ -333,6 +349,50 @@ def _probe_url_and_headers(
     return (
         f"{base}/models",
         {"Authorization": f"Bearer {api_key}"},
+    )
+
+
+def _preflight_url_headers_body(
+    provider_type: str, base_url: str, api_key: str, model_id: str,
+) -> tuple[str, dict[str, str], dict[str, object]]:
+    """Map a provider connection + model id to a minimal generation call.
+
+    Discovery uses `/models`; preflight intentionally hits the generation
+    surface so entitlement failures such as 403 "model not enabled" are
+    caught before a batch is submitted.
+    """
+    base = base_url.rstrip("/")
+    if provider_type == "anthropic":
+        return (
+            f"{base}/messages",
+            {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            {
+                "model": model_id,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+        )
+    if provider_type == "google":
+        quoted_model = quote(model_id, safe="")
+        return (
+            f"{base}/models/{quoted_model}:generateContent?key={api_key}",
+            {},
+            {
+                "contents": [{"parts": [{"text": "ping"}]}],
+                "generationConfig": {"maxOutputTokens": 1},
+            },
+        )
+    return (
+        f"{base}/chat/completions",
+        {"Authorization": f"Bearer {api_key}"},
+        {
+            "model": model_id,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        },
     )
 
 
@@ -400,6 +460,84 @@ async def probe_connection(
         status="invalid",
         http_status=resp.status_code,
         error=(
+            f"HTTP {resp.status_code} from {safe_url}; "
+            f"body excerpt: {safe_excerpt!r}"
+        ),
+    )
+
+
+async def preflight_model(
+    provider_type: str, base_url: str, api_key: str, model_id: str,
+    *, _client_factory: object = None,
+) -> ModelPreflightResult:
+    """Probe whether this connection/key can call one concrete model.
+
+    This is deliberately single-model and bounded: no catalog-wide probing,
+    no streaming, one token max. Any 2xx counts as valid; provider-specific
+    response validation is intentionally out of scope because entitlement is
+    already proven when the upstream accepts the generation request.
+    """
+    import httpx
+
+    url, headers, body = _preflight_url_headers_body(
+        provider_type, base_url, api_key, model_id,
+    )
+    if _client_factory is None:
+        client_cm = httpx.AsyncClient(
+            timeout=_PROBE_TIMEOUT_SEC, follow_redirects=False,
+        )
+    else:
+        client_cm = _client_factory()  # type: ignore[operator]
+
+    try:
+        async with client_cm as client:
+            try:
+                resp = await client.post(url, headers=headers, json=body)
+            except httpx.TimeoutException as e:
+                return ModelPreflightResult(
+                    status="failed",
+                    http_status=None,
+                    error_code="timeout",
+                    error_message=_redact_secret(
+                        f"timeout after {_PROBE_TIMEOUT_SEC}s: {e}",
+                        api_key,
+                    ),
+                )
+            except httpx.RequestError as e:
+                return ModelPreflightResult(
+                    status="failed",
+                    http_status=None,
+                    error_code="request-error",
+                    error_message=_redact_secret(f"{type(e).__name__}: {e}", api_key),
+                )
+    except Exception as e:
+        return ModelPreflightResult(
+            status="failed",
+            http_status=None,
+            error_code="unexpected-error",
+            error_message=_redact_secret(f"{type(e).__name__}: {e}", api_key),
+        )
+
+    if 200 <= resp.status_code < 300:
+        return ModelPreflightResult(
+            status="valid",
+            http_status=resp.status_code,
+            error_code=None,
+            error_message=None,
+        )
+
+    excerpt = (resp.text or "")[:200]
+    safe_url = _redact_secret(url, api_key)
+    safe_excerpt = _redact_secret(excerpt, api_key)
+    error_code = (
+        "access-denied" if resp.status_code in (401, 403)
+        else "upstream-http-error"
+    )
+    return ModelPreflightResult(
+        status="failed",
+        http_status=resp.status_code,
+        error_code=error_code,
+        error_message=(
             f"HTTP {resp.status_code} from {safe_url}; "
             f"body excerpt: {safe_excerpt!r}"
         ),

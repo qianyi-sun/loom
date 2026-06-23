@@ -415,6 +415,13 @@ time via a content-addressed layered image (`task_image` +
 new `(task_image, agent)` pair takes a few minutes (network +
 package installs); subsequent trials reuse the layered image.
 
+The benchmark task image is not the place to bake in a user's selected
+agent, provider, or model. Task images carry benchmark/task dependencies,
+assets, harnesses, and verifiers. The selected agent/model/provider come from
+the submitted run or trial payload and are injected when the worker launches
+the sandbox. To change a model or provider, submit a new run with different
+payload fields; do not republish the benchmark image.
+
 Subprocess agents call the LLM Gateway from inside the trial sandbox,
 not from the worker process. Keep `LOOM_WORKER_GATEWAY_URL` pointed at
 the worker-reachable gateway URL, and set
@@ -792,8 +799,21 @@ Provider discovery is cached per connection:
 
 ```bash
 loom providers models lab-vllm --refresh
+loom providers models lab-vllm --preflight MODEL_ID
 loom providers models lab-vllm
 ```
+
+Discovery and preflight are separate:
+
+- Refresh reads the upstream `/models` catalog and updates which ids Loom can
+  offer in the picker.
+- Preflight sends one minimal generation request for one model id and stores
+  `last_preflight_status`, HTTP status, and a redacted error code/message on
+  that cached row.
+- Untested rows remain selectable. Rows with a known failed preflight show a
+  warning in New Batch, and `POST /api/v1/batches` rejects that
+  provider/model pair until it passes preflight or the user chooses another
+  model.
 
 The service launch catalog at `GET /api/v1/models` defaults to
 agent-capable models only. Raw provider entries are still available with
@@ -1119,7 +1139,11 @@ after sign-in.
    followed by `loom providers models smoke-openai` returns a
    non-empty catalog. `curl /api/v1/models` from a team token shows
    the agent-capable view.
-8. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
+8. **Model preflight.** Run
+   `loom providers models smoke-openai --preflight gpt-4o-mini`. The model row
+   should show `preflight=valid`. A 401/403 should show `access-denied` without
+   raw provider keys.
+9. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
    canonical fixture). Submit once from the SPA New Batch page and once from the
    CLI. The CLI commands below keep the no-model canary separate from the
    provider-backed path:
@@ -1141,10 +1165,10 @@ after sign-in.
    loom eval batch show <batch-id>
    ```
    Re-run `batch show` until `state` reaches a terminal value.
-9. **Live progress visibility.** While the batch runs, the SPA Monitor page
+10. **Live progress visibility.** While the batch runs, the SPA Monitor page
    shows planned trials and current state transitions, and
    `GET /api/v1/trials/{id}` echoes the same state.
-10. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
+11. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
    with a sensible reason). `GET /api/v1/trials/{id}` carries
    `aggregate_reward`, `failure_reason` (when applicable),
    `total_prompt_tokens`, `total_completion_tokens`,
@@ -1153,7 +1177,7 @@ after sign-in.
    Artifact rows include `share_status` and a safe `blocked_reason`
    when org-wide sharing is blocked. Use `/api/v1/usage` for
    cost views rather than trial or batch detail responses.
-11. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
+12. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
     artifact `download_url` entries from trial detail return object bodies. The
@@ -1161,27 +1185,27 @@ after sign-in.
     cross-team callers must not be able to use owner-team artifact proxy URLs.
     Verify the public CLI path with `loom eval trial download ...`; it should
     write the object body locally without printing internal object-store URLs.
-12. **Run Library sharing.** Confirm the completed source run appears in Run
+13. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
     summary, task/agent/model summary, and artifact groups. Team B must be able
     to download a safe artifact only through the Run Library service URL.
-13. **Clone and reuse.** From Team B, clone config from Team A's completed run.
+14. **Clone and reuse.** From Team B, clone config from Team A's completed run.
     If the source run used a provider connection, select a Team B-owned
     provider connection before cloning. Then reuse a safe artifact from the
     source trial. Both created records must belong to Team B and show
     `source_provenance` with the source batch/trial/artifact key.
-14. **Blocked and private access denied.** Team B must be denied when trying to:
+15. **Blocked and private access denied.** Team B must be denied when trying to:
     download the seeded blocked artifact through Run Library; download Team A's
     artifact through the normal owner-team trial route; mutate Team A's original
     batch, such as cancelling it; or inspect/download private or blocked source
     artifacts. Denials should include safe reasons only.
-15. **Provider error surfaces.** Temporarily rotate the provider key
+16. **Provider error surfaces.** Temporarily rotate the provider key
     to an invalid value, re-run a trial, and confirm the SPA + API
     surface a clear `provider_error` reason rather than a generic 500. Confirm
     diagnostic text does not contain raw provider keys, bearer tokens, signed
     URL query parameters, or internal service hostnames.
-16. **Automated evidence script.** After steps 4-14, run the repeatable API
+17. **Automated evidence script.** After steps 4-15, run the repeatable API
     gate. Use disposable staging data because clone/reuse checks create Team B
     records:
     ```bash

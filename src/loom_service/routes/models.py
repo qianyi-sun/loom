@@ -64,6 +64,14 @@ def _byo_model_item(
         "recommended": recommended,
         "visibility": visibility,
         "hidden_reason": hidden_reason,
+        "last_preflight_status": cache.last_preflight_status,
+        "last_preflight_at": (
+            cache.last_preflight_at.isoformat()
+            if cache.last_preflight_at is not None else None
+        ),
+        "last_preflight_http_status": cache.last_preflight_http_status,
+        "last_preflight_error_code": cache.last_preflight_error_code,
+        "last_preflight_error_message": cache.last_preflight_error_message,
     }
 
 
@@ -95,6 +103,11 @@ async def list_models(
                 "recommended": True,
                 "visibility": "default",
                 "hidden_reason": None,
+                "last_preflight_status": None,
+                "last_preflight_at": None,
+                "last_preflight_http_status": None,
+                "last_preflight_error_code": None,
+                "last_preflight_error_message": None,
             })
 
     stmt = (

@@ -33,6 +33,7 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import (
     Batch,
     ProviderConnection,
+    ProviderModelCache,
     Secret,
     Task,
     Team,
@@ -311,6 +312,47 @@ def test_batch_create_with_valid_provider_succeeds(app_setup) -> None:
     sync_engine.dispose()
     assert row.provider_connection_id == ids["conn_a"]
     assert row.provider_model_id == "gpt-4o"
+
+
+def test_batch_create_with_known_failed_preflight_model_returns_400(
+    app_setup,
+) -> None:
+    app, tokens, ids = app_setup
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(ProviderModelCache).values(
+            provider_connection_id=ids["conn_a"],
+            model_id="gpt-private",
+            last_preflight_status="failed",
+            last_preflight_http_status=403,
+            last_preflight_error_code="access-denied",
+            last_preflight_error_message=(
+                "HTTP 403 from upstream: [REDACTED]"
+            ),
+        ))
+        s.commit()
+    sync_engine.dispose()
+
+    c = _client(app)
+    r = c.post(
+        "/api/v1/batches",
+        headers=_auth(tokens["a"]),
+        json={
+            "name": "known-failed-provider-model",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_a"]),
+            "provider_model_id": "gpt-private",
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "gpt-private" in detail
+    assert "last preflight failed" in detail
+    assert "access-denied" in detail
+    assert "sk-" not in detail
 
 
 def test_batch_create_without_provider_succeeds(app_setup) -> None:

@@ -8,7 +8,7 @@
  * Invalidation strategy (targeted, not bulk):
  * - create / update / test     → invalidate ["providers"] + ["providers", id]
  * - delete                     → invalidate ["providers"] + remove ["providers", id]
- * - addModel / refresh / hide / unhide → invalidate ["providers", id, "models"]
+ * - addModel / refresh / preflight / hide / unhide → invalidate ["providers", id, "models"]
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -77,6 +77,18 @@ export function useRefreshModels(id: string) {
     mutationFn: () => api.refreshProviderConnectionModels(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
+    },
+  });
+}
+
+export function usePreflightModel(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (modelId: string) =>
+      api.preflightProviderConnectionModel(id, modelId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
+      qc.invalidateQueries({ queryKey: ["models"] });
     },
   });
 }

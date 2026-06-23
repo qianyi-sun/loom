@@ -693,6 +693,13 @@ class ProviderModelCache(Base):
     override visibility independently via `visible` + `hidden_reason`.
     """
     __tablename__ = "provider_models_cache"
+    __table_args__ = (
+        CheckConstraint(
+            "last_preflight_status IS NULL OR "
+            "last_preflight_status IN ('valid', 'failed')",
+            name="provider_models_cache_preflight_status_check",
+        ),
+    )
     provider_connection_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("provider_connections.id", ondelete="CASCADE"),
@@ -713,6 +720,21 @@ class ProviderModelCache(Base):
     )
     upstream_present: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
+    )
+    # Per-model entitlement probe. NULL means discovered/manual but not
+    # yet preflighted. Failed entries can warn/block before submission.
+    last_preflight_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_preflight_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    last_preflight_http_status: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    last_preflight_error_code: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+    )
+    last_preflight_error_message: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
     )
 
 

@@ -13,6 +13,7 @@ import json
 import socket
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import boto3
@@ -1025,6 +1026,38 @@ def _stub_fetch_upstream_models(
     return state
 
 
+def _stub_preflight_model(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str = "valid",
+    http_status: int | None = 200,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, object]:
+    """Patch preflight_model on the routes module + record call args."""
+    state: dict[str, object] = {"call_count": 0, "last_args": None}
+
+    async def _fake(
+        provider_type: str, base_url: str, api_key: str, model_id: str,
+        *, _client_factory: object = None,
+    ) -> SimpleNamespace:
+        state["call_count"] = int(state["call_count"]) + 1  # type: ignore[arg-type]
+        state["last_args"] = (provider_type, base_url, api_key, model_id)
+        return SimpleNamespace(
+            status=status,
+            http_status=http_status,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.preflight_model",
+        _fake,
+        raising=False,
+    )
+    return state
+
+
 def _create_conn(c, token: str, name: str = "openai-prod") -> str:  # type: ignore[no-untyped-def]
     r = c.post(
         "/api/v1/provider-connections", headers=_auth(token),
@@ -1178,6 +1211,97 @@ def test_models_refresh_populates_cache_then_list_returns_it(
     assert sorted(it["model_id"] for it in listed["items"]) == [
         "gpt-3.5-turbo", "gpt-4o",
     ]
+
+
+def test_models_preflight_valid_persists_model_status(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+        json={"model_id": "gpt-4o-mini"},
+    )
+    state = _stub_preflight_model(monkeypatch)
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o-mini/preflight",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["model_id"] == "gpt-4o-mini"
+    assert body["last_preflight_status"] == "valid"
+    assert body["last_preflight_at"] is not None
+    assert body["last_preflight_http_status"] == 200
+    assert body["last_preflight_error_code"] is None
+    assert body["last_preflight_error_message"] is None
+    assert state["last_args"] == (
+        "openai-compatible",
+        "https://api.openai.com/v1",
+        "sk-XYZ",
+        "gpt-4o-mini",
+    )
+
+    listed = c.get(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+    )
+    listed_row = listed.json()["items"][0]
+    assert listed_row["last_preflight_status"] == "valid"
+    assert listed_row["last_preflight_at"] == body["last_preflight_at"]
+
+
+def test_models_preflight_access_denied_persists_safe_error(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+        json={"model_id": "gpt-private"},
+    )
+    _stub_preflight_model(
+        monkeypatch,
+        status="failed",
+        http_status=403,
+        error_code="access-denied",
+        error_message="HTTP 403 from upstream: [REDACTED]",
+    )
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-private/preflight",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["last_preflight_status"] == "failed"
+    assert body["last_preflight_http_status"] == 403
+    assert body["last_preflight_error_code"] == "access-denied"
+    assert body["last_preflight_error_message"] == (
+        "HTTP 403 from upstream: [REDACTED]"
+    )
+    assert "sk-XYZ" not in json.dumps(body)
+
+
+def test_models_preflight_404_for_uncached_model(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-never-cached/preflight",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 404
+    assert "run POST /models/refresh first" in r.json()["detail"]
 
 
 def test_models_refresh_marks_missing_models_unhidden_to_missing(
@@ -1399,6 +1523,7 @@ def test_models_routes_cross_team_return_404(app_setup) -> None:
         f"/api/v1/provider-connections/{conn_id}/models/refresh",
         f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/hide",
         f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/unhide",
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-4o/preflight",
     ]:
         r = c.post(path, headers=_auth(tokens["team_b"]))
         assert r.status_code == 404, path

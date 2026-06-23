@@ -75,6 +75,10 @@ function mockPickerEndpoints(): ReturnType<typeof vi.spyOn> {
               recommended: true,
               visibility: "default",
               hidden_reason: null,
+              last_preflight_status: "failed",
+              last_preflight_http_status: 403,
+              last_preflight_error_code: "access-denied",
+              last_preflight_error_message: "HTTP 403 from upstream: [REDACTED]",
             },
           ],
         });
@@ -131,5 +135,24 @@ describe("AgentModelPicker copy", () => {
     expect(
       screen.getByText(/Use this for a model ID that exists on the selected provider/i),
     ).toBeInTheDocument();
+  });
+
+  it("warns before submit when a selected provider model failed preflight", async () => {
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      await screen.findByRole("option", { name: /Lab vLLM/i }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      await screen.findByRole("option", { name: /deepseek-chat/i }),
+    );
+
+    expect(
+      screen.getByText(/This model failed its last preflight/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/access-denied/i)).toBeInTheDocument();
   });
 });

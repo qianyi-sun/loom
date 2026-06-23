@@ -16,12 +16,63 @@ import LoadingState from "../LoadingState";
 import {
   useAddManualModel,
   useHideModel,
+  usePreflightModel,
   useRefreshModels,
   useUnhideModel,
 } from "../../hooks/providers";
 import AddManualModelModal from "./AddManualModelModal";
 
 export type ModelsTabProps = { id: string; connectionName?: string };
+
+function PreflightStatus({ model }: { model: ProviderConnectionModelEntry }): JSX.Element {
+  if (model.last_preflight_status === "valid") {
+    return (
+      <div className="space-y-1">
+        <span
+          className="rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700"
+          title="The latest preflight call succeeded for this connection and model."
+        >
+          Callable
+        </span>
+        {model.last_preflight_http_status ? (
+          <p className="text-xs text-slate-500">
+            HTTP {model.last_preflight_http_status}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+  if (model.last_preflight_status === "failed") {
+    return (
+      <div className="max-w-sm space-y-1">
+        <span
+          className="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-700"
+          title="The latest preflight call failed. New batches using this known-failed model are blocked until it passes."
+        >
+          Cannot call
+        </span>
+        {model.last_preflight_error_code ? (
+          <p className="text-xs font-medium text-red-700">
+            {model.last_preflight_error_code}
+          </p>
+        ) : null}
+        {model.last_preflight_error_message ? (
+          <p className="break-words text-xs text-slate-500">
+            {model.last_preflight_error_message}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <span
+      className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-600"
+      title="Discovered or manually added, but no generation preflight has been run for this connection and model."
+    >
+      Not tested
+    </span>
+  );
+}
 
 export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.Element {
   const [filter, setFilter] = useState("");
@@ -35,6 +86,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
 
   const refresh = useRefreshModels(id);
   const addManual = useAddManualModel(id);
+  const preflight = usePreflightModel(id);
   const hide = useHideModel(id);
   const unhide = useUnhideModel(id);
 
@@ -98,6 +150,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
               <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wider text-slate-500">
                 <th className="px-4 py-2">Model ID</th>
                 <th className="px-4 py-2">Source</th>
+                <th className="px-4 py-2">Preflight</th>
                 <th className="px-4 py-2">Hidden</th>
                 <th className="px-4 py-2"></th>
               </tr>
@@ -110,6 +163,9 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
                     <td className="px-4 py-3 font-mono text-sm">{m.model_id}</td>
                     <td className="px-4 py-3 text-sm text-slate-600">{m.source ?? "—"}</td>
                     <td className="px-4 py-3 text-sm">
+                      <PreflightStatus model={m} />
+                    </td>
+                    <td className="px-4 py-3 text-sm">
                       {hidden ? (
                         <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-600"
                           title="Hidden models don't appear in New Batch's picker">
@@ -117,16 +173,26 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
                         </span>
                       ) : (<span className="text-slate-400">—</span>)}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => preflight.mutate(m.model_id)}
+                          disabled={preflight.isPending}
+                          title="Run one minimal generation request to confirm this connection can call the model."
+                        >
+                          Preflight
+                        </Button>
                       {hidden ? (
-                        <Button onClick={() => unhide.mutate(m.model_id)} disabled={unhide.isPending}>
+                        <Button size="sm" onClick={() => unhide.mutate(m.model_id)} disabled={unhide.isPending}>
                           Unhide
                         </Button>
                       ) : (
-                        <Button onClick={() => hide.mutate(m.model_id)} disabled={hide.isPending}>
+                        <Button size="sm" onClick={() => hide.mutate(m.model_id)} disabled={hide.isPending}>
                           Hide
                         </Button>
                       )}
+                      </div>
                     </td>
                   </tr>
                 );

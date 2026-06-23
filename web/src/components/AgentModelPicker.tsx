@@ -98,6 +98,12 @@ function sourceLabel(s: ModelSource): string {
   return s === "api" ? "Provider API" : s === "hf" ? "HuggingFace" : "Local server";
 }
 
+function preflightOptionSuffix(m: ModelEntry): string {
+  if (m.last_preflight_status === "valid") return " (callable)";
+  if (m.last_preflight_status === "failed") return " (preflight failed)";
+  return "";
+}
+
 function providerNamespace(conn: ProviderConnectionEntry | undefined): string {
   if (!conn) return "";
   if (conn.rate_card_provider) return conn.rate_card_provider;
@@ -255,6 +261,24 @@ export function AgentModelPicker({
     fallbackCatalogModels,
     value.modelProvider,
     value.modelName,
+  ]);
+
+  const selectedCatalogModel = useMemo(() => {
+    if (!models.data || !value.modelProvider || !value.modelName) return undefined;
+    return [...filteredModels, ...fallbackCatalogModels].find(
+      (m) =>
+        m.provider === value.modelProvider &&
+        m.name === value.modelName &&
+        (m.provider_connection_id ?? undefined) ===
+          (value.providerConnectionId ?? undefined),
+    );
+  }, [
+    models.data,
+    filteredModels,
+    fallbackCatalogModels,
+    value.modelProvider,
+    value.modelName,
+    value.providerConnectionId,
   ]);
 
   const [customMode, setCustomMode] = useState(false);
@@ -443,6 +467,7 @@ export function AgentModelPicker({
             .map((m) => (
               <option key={modelKey(m)} value={modelKey(m)}>
                 {m.name}
+                {preflightOptionSuffix(m)}
                 {showRaw && m.hidden_reason ? ` (${m.hidden_reason})` : ""}
               </option>
             ))}
@@ -522,6 +547,21 @@ export function AgentModelPicker({
           >
             Back to discovered models
           </Button>
+        </div>
+      ) : null}
+      {!customMode && selectedCatalogModel?.last_preflight_status === "failed" ? (
+        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          <p className="font-medium">This model failed its last preflight.</p>
+          {selectedCatalogModel.last_preflight_error_code ? (
+            <p className="mt-1 text-xs">
+              {selectedCatalogModel.last_preflight_error_code}
+            </p>
+          ) : null}
+          {selectedCatalogModel.last_preflight_error_message ? (
+            <p className="mt-1 break-words text-xs text-red-700">
+              {selectedCatalogModel.last_preflight_error_message}
+            </p>
+          ) : null}
         </div>
       ) : null}
       {value.providerConnectionId && filteredModels.length === 0 && !customMode ? (

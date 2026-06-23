@@ -203,6 +203,11 @@ export interface ModelEntry {
   visibility?: string;
   hidden_reason?: string | null;
   last_seen_at?: string | null;
+  last_preflight_status?: string | null;
+  last_preflight_at?: string | null;
+  last_preflight_http_status?: number | null;
+  last_preflight_error_code?: string | null;
+  last_preflight_error_message?: string | null;
 }
 
 export interface ProviderConnectionModelEntry {
@@ -218,6 +223,11 @@ export interface ProviderConnectionModelEntry {
   agent_capable?: boolean;
   recommended?: boolean;
   visibility?: string;
+  last_preflight_status?: string | null;
+  last_preflight_at?: string | null;
+  last_preflight_http_status?: number | null;
+  last_preflight_error_code?: string | null;
+  last_preflight_error_message?: string | null;
 }
 
 export interface ProviderConnectionEntry {
@@ -640,6 +650,11 @@ export const api = {
   refreshProviderConnectionModels: (id: string) =>
     apiFetch<ProviderConnectionModelsRefreshResult>(
       `/api/v1/provider-connections/${id}/models/refresh`,
+      { method: "POST" },
+    ),
+  preflightProviderConnectionModel: (id: string, modelId: string) =>
+    apiFetch<ProviderConnectionModelEntry>(
+      `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/preflight`,
       { method: "POST" },
     ),
   hideProviderConnectionModel: (id: string, modelId: string) =>

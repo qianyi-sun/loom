@@ -559,6 +559,10 @@ def test_test_tolerates_malformed_server_response(
 def _make_model(
     *, model_id: str, visible: bool = True,
     hidden_reason: str | None = None, upstream_present: bool = True,
+    last_preflight_status: str | None = None,
+    last_preflight_http_status: int | None = None,
+    last_preflight_error_code: str | None = None,
+    last_preflight_error_message: str | None = None,
 ) -> dict[str, Any]:
     return {
         "model_id": model_id,
@@ -569,6 +573,13 @@ def _make_model(
         "hidden_reason": hidden_reason,
         "last_seen_at": "2026-06-16T00:00:00Z",
         "upstream_present": upstream_present,
+        "last_preflight_status": last_preflight_status,
+        "last_preflight_at": (
+            "2026-06-16T00:01:00Z" if last_preflight_status else None
+        ),
+        "last_preflight_http_status": last_preflight_http_status,
+        "last_preflight_error_code": last_preflight_error_code,
+        "last_preflight_error_message": last_preflight_error_message,
     }
 
 
@@ -599,22 +610,30 @@ def test_models_table_renders_visible_and_hidden(
     mock_server.canned[
         ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
     ] = httpx.Response(200, json={"items": [
-        _make_model(model_id="gpt-4o"),
+        _make_model(model_id="gpt-4o", last_preflight_status="valid",
+                    last_preflight_http_status=200),
         _make_model(model_id="gpt-3.5", visible=False,
                     hidden_reason="operator-hidden"),
         _make_model(model_id="gpt-stale", visible=False,
                     hidden_reason="missing-upstream",
                     upstream_present=False),
+        _make_model(model_id="gpt-private", last_preflight_status="failed",
+                    last_preflight_http_status=403,
+                    last_preflight_error_code="access-denied"),
     ]})
     rc = main(["providers", "models", "openai-prod"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "gpt-4o" in out
-    assert "[visible]" in out
+    assert "[visible,preflight=valid]" in out
+    assert "preflight=valid" in out
     assert "gpt-3.5" in out
     assert "operator-hidden" in out
     assert "gpt-stale" in out
     assert "missing-upstream" in out
+    assert "gpt-private" in out
+    assert "preflight=failed" in out
+    assert "access-denied" in out
 
 
 def test_models_json_format(
@@ -661,6 +680,47 @@ def test_models_refresh_posts_then_lists(
     assert methods == [
         ("GET", "/api/v1/provider-connections"),
         ("POST", f"/api/v1/provider-connections/{conn['id']}/models/refresh"),
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models"),
+    ]
+
+
+def test_models_preflight_posts_then_lists(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    failed = _make_model(
+        model_id="gpt-private",
+        last_preflight_status="failed",
+        last_preflight_http_status=403,
+        last_preflight_error_code="access-denied",
+        last_preflight_error_message="HTTP 403 from upstream: [REDACTED]",
+    )
+    mock_server.canned[(
+        "POST",
+        f"/api/v1/provider-connections/{conn['id']}/models/gpt-private/preflight",
+    )] = httpx.Response(200, json=failed)
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": [failed]})
+
+    rc = main([
+        "providers", "models", "openai-prod", "--preflight", "gpt-private",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Preflighted model 'gpt-private': failed" in out
+    assert "access-denied" in out
+    methods = [(r.method, r.url.path) for r in mock_server.requests]
+    assert methods == [
+        ("GET", "/api/v1/provider-connections"),
+        (
+            "POST",
+            f"/api/v1/provider-connections/{conn['id']}/models/gpt-private/preflight",
+        ),
         ("GET", f"/api/v1/provider-connections/{conn['id']}/models"),
     ]
 

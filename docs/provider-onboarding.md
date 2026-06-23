@@ -35,7 +35,10 @@ Google when those types are enabled.
 9. Open the provider detail page and click **Test connection**.
 10. Open **Models**, click **Refresh**, and hide noisy non-chat entries if the
     upstream catalog includes embeddings, rerankers, or tool-only models.
-11. Open **New batch**, choose this provider connection, choose a discovered
+11. Click **Preflight** for the model you plan to use. Refresh only proves the
+    upstream advertises a model; preflight sends one minimal generation request
+    and records whether this connection/key can actually call it.
+12. Open **New batch**, choose this provider connection, choose a discovered
     model, and submit a small smoke batch before starting large runs.
 
 The CLI path uses secret indirection so keys do not land in shell history:
@@ -54,6 +57,7 @@ loom providers create \
 
 loom providers test together-prod
 loom providers models together-prod --refresh
+loom providers models together-prod --preflight gpt-4o-mini
 loom providers models together-prod
 ```
 
@@ -75,6 +79,11 @@ Common failures:
 - Empty model list: run `loom providers models NAME --refresh`; if the endpoint
   does not implement useful discovery, add model ids manually from the web
   Models tab or the provider model API.
+- Model advertised but not runnable: run
+  `loom providers models NAME --preflight MODEL`. A failed preflight is stored
+  on that connection/model and New Batch warns before submit; the API rejects
+  new batches for models with a known failed preflight until the model passes
+  or another model is selected.
 - Noisy model list: hide non-agent models in the Models tab.
 
 ## GPU Cluster Checkpoint
@@ -220,7 +229,8 @@ For a Lux-like smoke, validate:
 3. The service reaches `ready` through `./healthcheck.sh` from the same network
    path that Loom will use.
 4. `./register-provider.sh` creates the connection, `loom providers test`
-   returns `valid`, and `loom providers models NAME --refresh` lists the served
-   model.
+   returns `valid`, `loom providers models NAME --refresh` lists the served
+   model, and `loom providers models NAME --preflight MODEL` returns
+   `preflight=valid`.
 5. A small model-backed batch reaches verifier output. A numeric reward of `0`
    is still a platform-successful run; missing verifier output is not.

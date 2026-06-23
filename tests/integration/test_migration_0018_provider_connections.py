@@ -214,6 +214,44 @@ def test_provider_connection_delete_cascades_to_models_cache(
     assert remaining == 0
 
 
+def test_provider_models_cache_has_preflight_status_columns(
+    postgres_url: str, team_id: str,
+) -> None:
+    """Model discovery and model entitlement are different facts.
+    The cache needs nullable preflight columns so untested rows stay
+    distinguishable from rows that were proved valid or denied."""
+    engine = create_engine(postgres_url)
+    with engine.connect() as conn:
+        cols = {row[0] for row in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'provider_models_cache'",
+        ))}
+    assert {
+        "last_preflight_status",
+        "last_preflight_at",
+        "last_preflight_http_status",
+        "last_preflight_error_code",
+        "last_preflight_error_message",
+    }.issubset(cols)
+
+    with engine.begin() as conn:
+        conn_id = _insert_connection(
+            conn, team_id=team_id, display_name="preflight-cols",
+        )
+        conn.execute(text(
+            "INSERT INTO provider_models_cache "
+            "(provider_connection_id, model_id, last_preflight_status) "
+            "VALUES (:c, 'gpt-4o', 'valid')",
+        ), {"c": conn_id})
+
+    with engine.begin() as conn, pytest.raises(IntegrityError):
+        conn.execute(text(
+            "INSERT INTO provider_models_cache "
+            "(provider_connection_id, model_id, last_preflight_status) "
+            "VALUES (:c, 'bad-status', 'maybe')",
+        ), {"c": conn_id})
+
+
 def test_team_delete_blocked_by_existing_provider_connections(
     postgres_url: str, team_id: str,
 ) -> None:

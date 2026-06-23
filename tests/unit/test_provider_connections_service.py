@@ -9,6 +9,7 @@ real Postgres.
 from __future__ import annotations
 
 import ipaddress
+import json
 import socket
 
 import pytest
@@ -389,6 +390,7 @@ def test_default_pricing_source(provider_type: str, expected: str) -> None:
 import httpx  # noqa: E402
 
 from loom_service.provider_connections_service import (  # noqa: E402
+    preflight_model,
     probe_connection,
 )
 
@@ -550,6 +552,68 @@ async def test_probe_strips_trailing_slash_in_base_url() -> None:
     )
     # No `//models` — single slash.
     assert str(captured[0].url) == "https://api.openai.com/v1/models"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# preflight_model (uses httpx.MockTransport — no real network)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_preflight_openai_model_posts_minimal_chat_completion() -> None:
+    captured: list[httpx.Request] = []
+
+    async def _read_json(request: httpx.Request) -> dict[str, object]:
+        return json.loads((await request.aread()).decode())
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        body = await _read_json(request)
+        assert body == {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+        return httpx.Response(200, json={"id": "chatcmpl-ok"})
+
+    result = await preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ",
+        "gpt-4o-mini",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+
+    assert result.status == "valid"
+    assert result.http_status == 200
+    assert result.error_code is None
+    assert result.error_message is None
+    assert len(captured) == 1
+    req = captured[0]
+    assert req.method == "POST"
+    assert str(req.url) == "https://api.openai.com/v1/chat/completions"
+    assert req.headers["Authorization"] == "Bearer sk-XYZ"
+
+
+async def test_preflight_openai_403_marks_access_denied_and_redacts_key() -> None:
+    real_key = "sk-LIVE-model-preflight-secret"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            text=f"model blocked for Authorization: Bearer {real_key}",
+        )
+
+    result = await preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", real_key,
+        "gpt-private",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+
+    assert result.status == "failed"
+    assert result.http_status == 403
+    assert result.error_code == "access-denied"
+    assert result.error_message is not None
+    assert "HTTP 403" in result.error_message
+    assert real_key not in result.error_message
+    assert "[REDACTED]" in result.error_message
 
 
 # ──────────────────────────────────────────────────────────────────────

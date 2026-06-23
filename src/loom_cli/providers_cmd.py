@@ -19,6 +19,7 @@ import json
 import sys
 from collections.abc import Callable
 from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 
@@ -319,6 +320,13 @@ def _print_model_row(entry: dict[str, Any]) -> None:
         flags.append(entry["hidden_reason"])
     if not entry.get("upstream_present", True):
         flags.append("missing-upstream")
+    preflight_status = entry.get("last_preflight_status")
+    if preflight_status:
+        flags.append(f"preflight={preflight_status}")
+        if entry.get("last_preflight_error_code"):
+            flags.append(str(entry["last_preflight_error_code"]))
+    else:
+        flags.append("preflight=untested")
     flag_str = ",".join(flags)
     extras = []
     if entry.get("family"):
@@ -330,13 +338,13 @@ def _print_model_row(entry: dict[str, Any]) -> None:
 
 
 def _models(args: argparse.Namespace) -> int:
-    """`loom providers models NAME [--refresh] [--hide M] [--unhide M]
+    """`loom providers models NAME [--refresh] [--preflight M] [--hide M] [--unhide M]
     [--format text|json]` — inspect + manage the per-connection model
     cache.
 
-    Action order: refresh → hide → unhide → list. All actions are
-    additive (no mutual exclusion); the trailing list always runs so
-    the operator sees the resulting state."""
+    Action order: refresh → hide → unhide → preflight → list. All
+    actions are additive (no mutual exclusion); the trailing list
+    always runs so the operator sees the resulting state."""
     def _body() -> int:
         cfg = require_logged_in()
         with authed_client(cfg) as c:
@@ -385,6 +393,30 @@ def _models(args: argparse.Namespace) -> int:
                 )
                 if args.format != "json":
                     print(f"Unhid model {args.unhide!r}.")
+
+            if args.preflight is not None:
+                encoded_model = quote(args.preflight, safe="")
+                resp = c.post(
+                    f"/api/v1/provider-connections/{conn_id}/models/"
+                    f"{encoded_model}/preflight",
+                    timeout=30.0,
+                )
+                preflight_body = assert_2xx(
+                    resp,
+                    action=(
+                        f"preflight model {args.preflight!r} "
+                        f"for {args.name!r}"
+                    ),
+                )
+                if args.format != "json":
+                    status = preflight_body.get("last_preflight_status", "?")
+                    print(f"Preflighted model {args.preflight!r}: {status}")
+                    code = preflight_body.get("last_preflight_error_code")
+                    message = preflight_body.get("last_preflight_error_message")
+                    if code:
+                        print(f"  error code: {code}")
+                    if message:
+                        print(f"  error: {message}")
 
             list_resp = c.get(
                 f"/api/v1/provider-connections/{conn_id}/models",
@@ -712,6 +744,13 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Reverse a previous --hide. Re-visible only if the model "
             "is still upstream-present."
+        ),
+    )
+    p_models.add_argument(
+        "--preflight", default=None, metavar="MODEL",
+        help=(
+            "Run one minimal generation request against MODEL to verify "
+            "this connection/key can call it. MODEL must already be cached."
         ),
     )
     p_models.add_argument(

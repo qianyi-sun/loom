@@ -16,6 +16,16 @@ function renderTab(models: unknown[]) {
         items: models,
       }), { status: 200 }));
     }
+    if (_url.endsWith("/preflight")) {
+      return Promise.resolve(new Response(JSON.stringify({
+        ...(models[0] as object),
+        last_preflight_status: "valid",
+        last_preflight_at: "2026-06-16T00:01:00Z",
+        last_preflight_http_status: 200,
+        last_preflight_error_code: null,
+        last_preflight_error_message: null,
+      }), { status: 200 }));
+    }
     if (_url.endsWith("/hide") || _url.endsWith("/unhide")) {
       return Promise.resolve(new Response(null, { status: 204 }));
     }
@@ -41,7 +51,14 @@ describe("ModelsTab", () => {
 
   it("renders a row per model with hidden state", async () => {
     renderTab([
-      { model_id: "gpt-4o", source: "upstream", visible: true, visibility: "default" },
+      {
+        model_id: "gpt-4o",
+        source: "upstream",
+        visible: true,
+        visibility: "default",
+        last_preflight_status: "valid",
+        last_preflight_http_status: 200,
+      },
       { model_id: "manual/x", source: "manual", visible: false, visibility: "hidden" },
     ]);
     await waitFor(() => {
@@ -50,6 +67,27 @@ describe("ModelsTab", () => {
     });
     expect(screen.getByText("Model picker guidance")).toBeInTheDocument();
     expect(screen.getByText("loom providers models abc --refresh")).toBeInTheDocument();
+    expect(screen.getByText(/Callable/i)).toBeInTheDocument();
+    expect(screen.getByText(/Not tested/i)).toBeInTheDocument();
+  });
+
+  it("renders failed preflight details in human-readable copy", async () => {
+    renderTab([
+      {
+        model_id: "gpt-private",
+        source: "upstream",
+        visible: true,
+        visibility: "default",
+        last_preflight_status: "failed",
+        last_preflight_http_status: 403,
+        last_preflight_error_code: "access-denied",
+        last_preflight_error_message: "HTTP 403 from upstream: [REDACTED]",
+      },
+    ]);
+    await waitFor(() => screen.getByText("gpt-private"));
+    expect(screen.getByText(/Cannot call/i)).toBeInTheDocument();
+    expect(screen.getByText(/access-denied/i)).toBeInTheDocument();
+    expect(screen.getByText(/HTTP 403 from upstream/i)).toBeInTheDocument();
   });
 
   it("renders hidden rows from the provider models API visibility contract", async () => {
@@ -107,6 +145,21 @@ describe("ModelsTab", () => {
         ([url]) => url.endsWith("/gpt-4o/hide"),
       );
       expect(hideCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("Preflight button POSTs .../preflight", async () => {
+    const { fetchMock } = renderTab([
+      { model_id: "gpt-4o", source: "upstream", visible: true, visibility: "default" },
+    ]);
+    const user = userEvent.setup();
+    await waitFor(() => screen.getByText("gpt-4o"));
+    await user.click(screen.getByRole("button", { name: /^preflight$/i }));
+    await waitFor(() => {
+      const preflightCalls = (fetchMock.mock.calls as Array<[string, RequestInit | undefined]>).filter(
+        ([url]) => url.endsWith("/gpt-4o/preflight"),
+      );
+      expect(preflightCalls.length).toBeGreaterThan(0);
     });
   });
 
