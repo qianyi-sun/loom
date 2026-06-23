@@ -98,6 +98,16 @@ defaults. A model's wrong answer should produce a scored verifier result such
 as `{"rewards":{"score":0.0},"checks":[...]}` so the trial succeeds as a
 platform run while recording model correctness separately.
 
+For `litellm` service-mode runs, the platform can write the final model
+response into declared step artifacts before verification. Keep benchmark
+scoring rules in the verifier, not in the agent. `final_answer.txt` receives
+the model's final response with fenced helper code blocks removed so official
+or upstream-style extractors such as `Answer: ...`, `Exact Answer: ...`, or
+LaTeX `\boxed{...}` still see their expected answer text. A strict
+`answer.txt` artifact receives a normalized final answer value for
+Harbor-style exact-match tasks. Other artifact paths, including code or JSON
+outputs, continue to prefer the first fenced block when the model supplies one.
+
 ## Multi-step tasks
 
 Use multiple `[[steps]]` blocks. The runtime invokes the agent once

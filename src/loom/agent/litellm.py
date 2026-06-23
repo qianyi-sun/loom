@@ -9,6 +9,7 @@ follow-ups extend this loop.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -55,7 +56,10 @@ class LiteLLMAgent:
     # final LLM response should be written so file-artifact benchmarks'
     # verifiers (pytest etc.) can grade it. Set by the runner from
     # task_config.steps[*].artifacts when LiteLLMAgent is used. If
-    # empty, no artifact write happens (chat-only tasks).
+    # empty, no artifact write happens (chat-only tasks). final_answer.txt
+    # keeps verifier-facing answer text with helper code blocks removed;
+    # strict answer.txt artifacts receive a single answer value. Code/data
+    # artifacts still prefer fenced block extraction.
     artifact_paths: list[str] = field(default_factory=list)
     workdir: PurePosixPath = field(
         default_factory=lambda: PurePosixPath("/workspace"),
@@ -143,17 +147,19 @@ class LiteLLMAgent:
     async def _write_artifacts(self, env: Driver, content: str) -> None:
         """#184: write the LLM's final response into the declared
         artifact paths so file-artifact benchmarks (pytest etc.) can
-        grade it. Extracts the first fenced code block when present;
-        falls back to raw content. Each path is written individually
-        to `/workspace/{path}` via the driver's upload.
+        grade it. Rendering is artifact-aware: final-answer artifacts keep
+        answer text with helper code stripped, strict answer artifacts
+        receive a normalized value, and code/data artifacts keep the
+        historical fenced-block extraction. Each path is written
+        individually to `/workspace/{path}` via the driver's upload.
         """
         if not self.artifact_paths:
             return
-        body = _extract_first_code_block(content)
         import tempfile
         from pathlib import Path
 
         for rel_path in self.artifact_paths:
+            body = _render_artifact_body(content, rel_path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 suffix=".out",
@@ -169,6 +175,26 @@ class LiteLLMAgent:
                 tmp.unlink(missing_ok=True)
 
 
+_FINAL_ANSWER_ARTIFACT_FILENAMES = frozenset({"final_answer.txt"})
+_STRICT_ANSWER_ARTIFACT_FILENAMES = frozenset({"answer.txt"})
+
+
+def _render_artifact_body(content: str, rel_path: str) -> str:
+    """Render a model response for the declared artifact path.
+
+    Most file-artifact tasks expect code or structured data and benefit
+    from extracting a fenced block. final_answer.txt preserves answer prose
+    for benchmark-owned extraction; strict answer.txt mirrors Harbor-style
+    exact-match files by keeping only the answer value.
+    """
+    name = PurePosixPath(rel_path).name.lower()
+    if name in _FINAL_ANSWER_ARTIFACT_FILENAMES:
+        return _extract_final_answer_document(content)
+    if name in _STRICT_ANSWER_ARTIFACT_FILENAMES:
+        return _extract_final_answer_value(content)
+    return _extract_first_code_block(content)
+
+
 def _extract_first_code_block(text: str) -> str:
     """Return the first ```lang...``` fenced block's content, or the
     full text if no fence is present. Trims surrounding whitespace.
@@ -177,9 +203,117 @@ def _extract_first_code_block(text: str) -> str:
     against models that just return raw code, fall through to the
     full text.
     """
-    import re
-
     m = re.search(r"```[a-zA-Z0-9_-]*\n(.*?)```", text, re.DOTALL)
     if m is None:
         return text.strip()
     return m.group(1).rstrip()
+
+
+def _extract_final_answer_document(text: str) -> str:
+    """Return answer prose for verifier-owned extraction.
+
+    Official/reference final-answer evaluators commonly expect different
+    surface forms: `Answer: X`, `Exact Answer: ...`, `\\boxed{...}`, or a
+    raw exact-match string. Preserve non-code answer text so each benchmark
+    verifier can apply its own extraction and normalization rules.
+    """
+    without_code = _strip_fenced_code_blocks(text).strip()
+    if without_code:
+        return without_code
+    return _extract_final_answer_value(text)
+
+
+def _extract_final_answer_value(text: str) -> str:
+    """Extract a strict final-answer value from a model response.
+
+    Final-answer benchmarks commonly instruct the model to reason in the
+    response and put the answer at the end. Prefer non-code prose so helper
+    snippets do not become the answer file. When the prose contains a
+    boxed answer, return the boxed payload directly; AIME-style verifiers
+    then see the single integer they expect.
+    """
+    without_code = _strip_fenced_code_blocks(text).strip()
+    source = without_code or text.strip()
+    boxed = _extract_last_boxed_answer(source)
+    if boxed is not None:
+        return _clean_answer_fragment(boxed)
+
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    for line in reversed(lines):
+        fragment = _answer_marker_fragment(line)
+        if fragment:
+            boxed = _extract_last_boxed_answer(fragment)
+            if boxed is not None:
+                return _clean_answer_fragment(boxed)
+            return _clean_answer_fragment(fragment)
+
+    if lines:
+        return lines[-1]
+    return _extract_first_code_block(text)
+
+
+def _strip_fenced_code_blocks(text: str) -> str:
+    return re.sub(r"```[a-zA-Z0-9_-]*\n.*?```", "\n", text, flags=re.DOTALL)
+
+
+def _extract_last_boxed_answer(text: str) -> str | None:
+    starts: list[tuple[int, str]] = []
+    for command in (r"\boxed", r"\fbox"):
+        start = 0
+        while True:
+            idx = text.find(command, start)
+            if idx == -1:
+                break
+            starts.append((idx, command))
+            start = idx + len(command)
+    if not starts:
+        return None
+
+    idx, command = max(starts, key=lambda item: item[0])
+    pos = idx + len(command)
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if pos >= len(text):
+        return None
+    if text[pos] != "{":
+        end = pos
+        while end < len(text) and not text[end].isspace():
+            end += 1
+        return text[pos:end]
+
+    depth = 1
+    pos += 1
+    start = pos
+    while pos < len(text):
+        char = text[pos]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:pos]
+        pos += 1
+    return None
+
+
+def _answer_marker_fragment(line: str) -> str | None:
+    patterns = (
+        r"(?i)\b(?:the\s+)?(?:final\s+answer|exact\s+answer)\s*(?:is|=|:|：)\s*(.+)$",
+        r"(?i)\banswer\s*(?:is|=|:|：)\s*(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def _clean_answer_fragment(fragment: str) -> str:
+    value = fragment.strip()
+    value = value.strip("`'\" \t")
+    value = re.sub(r"(?i)^final\s+answer\s*(?:is|=|:|：)?\s*", "", value)
+    value = value.strip()
+    # Strict answer files should contain the answer, not sentence punctuation.
+    while value.endswith((".", "。", ";")):
+        value = value[:-1].strip()
+    return value

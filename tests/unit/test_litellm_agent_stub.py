@@ -1,5 +1,5 @@
 from collections.abc import AsyncGenerator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
@@ -116,3 +116,125 @@ async def test_max_turns_exhausted_raises(writer: TrajectoryWriter):
             instruction="x", env=driver, trajectory=writer,
             mcp=[], skills_dir=None, step_id="main",
         )
+
+
+async def test_final_answer_artifact_strips_helper_code_block_but_keeps_answer_text(
+    writer: TrajectoryWriter,
+):
+    """AIME-style answer artifacts must not receive helper code blocks."""
+    content = """I will compute it with a quick check.
+
+```python
+print(75)
+```
+
+The final answer is \\boxed{70}.
+"""
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp(content)])
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+        gateway=fake_gateway,
+        team_id="t",
+        trial_id=uuid4(),
+        max_turns=1,
+        artifact_paths=["final_answer.txt"],
+    )
+    await agent.run(
+        instruction="solve", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    written = driver.filesystem[PurePosixPath("/workspace/final_answer.txt")].decode()
+    assert "print(75)" not in written
+    assert written.endswith("The final answer is \\boxed{70}.")
+
+
+async def test_harbor_answer_artifact_writes_normalized_value(
+    writer: TrajectoryWriter,
+):
+    content = """Scratch work first.
+
+```python
+print(75)
+```
+
+The final answer is \\boxed{70}.
+"""
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp(content)])
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+        gateway=fake_gateway,
+        team_id="t",
+        trial_id=uuid4(),
+        max_turns=1,
+        artifact_paths=["answer.txt"],
+    )
+    await agent.run(
+        instruction="solve", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert driver.filesystem[PurePosixPath("/workspace/answer.txt")] == b"70"
+
+
+async def test_harbor_answer_artifact_strips_terminal_sentence_period(
+    writer: TrajectoryWriter,
+):
+    fake_gateway = FakeLLMGatewayClient(
+        scripted=[_resp("The final answer is 70.")],
+    )
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+        gateway=fake_gateway,
+        team_id="t",
+        trial_id=uuid4(),
+        max_turns=1,
+        artifact_paths=["answer.txt"],
+    )
+    await agent.run(
+        instruction="solve", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert driver.filesystem[PurePosixPath("/workspace/answer.txt")] == b"70"
+
+
+async def test_code_artifact_keeps_fenced_code_block(writer: TrajectoryWriter):
+    content = """Here is the implementation.
+
+```python
+def answer():
+    return 42
+```
+
+This solves the task.
+"""
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp(content)])
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+        gateway=fake_gateway,
+        team_id="t",
+        trial_id=uuid4(),
+        max_turns=1,
+        artifact_paths=["solution.py"],
+    )
+    await agent.run(
+        instruction="solve", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert driver.filesystem[PurePosixPath("/workspace/solution.py")] == (
+        b"def answer():\n    return 42"
+    )
