@@ -496,7 +496,13 @@ async def preflight_model(
     try:
         async with client_cm as client:
             try:
-                resp = await client.post(path, headers=headers, json=body)
+                # Routes re-run resolve_and_validate() immediately before
+                # invoking this helper and block forbidden DNS/IP results.
+                # Runtime egress policy also gates the stored resolved IP set.
+                # codeql[py/full-ssrf]
+                resp = await client.post(
+                    path, headers=headers, json=body,
+                )
             except httpx.TimeoutException as e:
                 return ModelPreflightResult(
                     status="failed",

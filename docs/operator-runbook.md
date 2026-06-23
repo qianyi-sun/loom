@@ -810,6 +810,10 @@ Discovery and preflight are separate:
 - Preflight sends one minimal generation request for one model id and stores
   `last_preflight_status`, HTTP status, and a redacted error code/message on
   that cached row.
+- Connection test, refresh, and preflight re-resolve the stored provider
+  `base_url` before sending a service-side request. If the current DNS/IP result
+  violates the team egress policy, the operation is blocked before upstream
+  contact; model preflight records `egress-policy-rejected`.
 - Untested rows remain selectable. Rows with a known failed preflight show a
   warning in New Batch, and `POST /api/v1/batches` rejects that
   provider/model pair until it passes preflight or the user chooses another
@@ -900,7 +904,7 @@ loom cluster up --config cluster-config.toml
 The render adds exact `ipBlock + TCP port` rules to:
 
 - `loom-service`, so `loom providers test NAME` and model discovery can probe
-  the connection.
+  the connection and model preflight can run.
 - `loom-llm-gateway`, so runtime model calls can reach the approved endpoint.
 - `loom-egress-proxy`, so the same endpoint works when Envoy egress proxy mode
   is enabled.

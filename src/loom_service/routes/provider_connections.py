@@ -46,6 +46,8 @@ from loom_service.dependencies import SessionAndCtx
 from loom_service.provider_connections_service import (
     InvalidBaseUrlError,
     InvalidPricingError,
+    ModelPreflightResult,
+    ProbeResult,
     SsrfRejectedError,
     UpstreamModelFetchError,
     default_pricing_source_for,
@@ -396,6 +398,24 @@ async def _team_allows_private(session: AsyncSession, team_id: UUID) -> bool:
     return bool(flag)
 
 
+async def _refresh_current_egress_or_error(
+    session: AsyncSession, row: ProviderConnection,
+) -> str | None:
+    """Re-check a stored provider URL before each service-side outbound call."""
+    allow_private = await _team_allows_private(session, row.team_id)
+    try:
+        resolved = resolve_and_validate(row.base_url, allow_private=allow_private)
+    except InvalidBaseUrlError as e:
+        return f"base_url invalid: {e}"
+    except SsrfRejectedError as e:
+        return f"base_url rejected: {e}"
+
+    row.upstream_host = resolved.upstream_host
+    row.resolved_egress_ips = resolved.resolved_ips
+    row.egress_ips_refreshed_at = datetime.now(UTC)
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Routes
 # ──────────────────────────────────────────────────────────────────────
@@ -694,11 +714,16 @@ async def test_connection(
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
 
-    api_key = await _get_provider_api_key(session, row)
-
-    result = await probe_connection(
-        row.provider_type, row.base_url, api_key,
-    )
+    policy_error = await _refresh_current_egress_or_error(session, row)
+    if policy_error is not None:
+        result = ProbeResult(
+            status="invalid", http_status=None, error=policy_error,
+        )
+    else:
+        api_key = await _get_provider_api_key(session, row)
+        result = await probe_connection(
+            row.provider_type, row.base_url, api_key,
+        )
 
     now = datetime.now(UTC)
     await session.execute(
@@ -846,6 +871,10 @@ async def refresh_models(
     session, ctx = sc
     _require_provider_management(ctx)
     row = await _get_active_connection(session, connection_id, ctx)
+
+    policy_error = await _refresh_current_egress_or_error(session, row)
+    if policy_error is not None:
+        raise HTTPException(status_code=400, detail=policy_error)
 
     api_key = await _get_provider_api_key(session, row)
 
@@ -999,10 +1028,19 @@ async def preflight_cached_model(
     row = await _get_active_connection(session, connection_id, ctx)
     cache_row = await _get_cached_model_or_404(session, row.id, model_id)
 
-    api_key = await _get_provider_api_key(session, row)
-    result = await preflight_model(
-        row.provider_type, row.base_url, api_key, model_id,
-    )
+    policy_error = await _refresh_current_egress_or_error(session, row)
+    if policy_error is not None:
+        result = ModelPreflightResult(
+            status="failed",
+            http_status=None,
+            error_code="egress-policy-rejected",
+            error_message=policy_error,
+        )
+    else:
+        api_key = await _get_provider_api_key(session, row)
+        result = await preflight_model(
+            row.provider_type, row.base_url, api_key, model_id,
+        )
 
     now = datetime.now(UTC)
     cache_row.last_preflight_status = result.status
