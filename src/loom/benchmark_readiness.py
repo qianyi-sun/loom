@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from loom.license_policy import is_license_allowed_for_submit
 from loom.models.task import TaskConfig
 
 ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked"]
@@ -32,6 +34,8 @@ class TaskAuditSource:
     id: str
     config: dict[str, Any]
     source: str | None
+    license: str | None = None
+    tags: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,9 @@ class BenchmarkReadinessItem:
     raw_task_count: int
     valid_task_config_count: int
     invalid_task_config_count: int
+    license_allowed_task_count: int
+    license_blocked_task_count: int
+    blocked_licenses: list[str]
     source_schemes: list[str]
     materializer_status: str
     smoke_status: str
@@ -64,17 +71,29 @@ def build_readiness_item(
     *,
     tasks: list[TaskAuditSource],
     registry_names: set[str],
+    license_allowlist: Iterable[str] | None = None,
 ) -> BenchmarkReadinessItem:
     adapter_status = "available" if benchmark.id in registry_names else "missing"
     raw_count = len(tasks)
     valid_count = 0
+    license_allowed_count = 0
+    blocked_licenses: set[str] = set()
     for task in tasks:
         try:
             TaskConfig.model_validate(task.config)
         except ValidationError:
             continue
         valid_count += 1
+        if license_allowlist is not None and not is_license_allowed_for_submit(
+            task_license=task.license,
+            allowlist=license_allowlist,
+            tags=task.tags,
+        ):
+            blocked_licenses.add(str(task.license))
+            continue
+        license_allowed_count += 1
     invalid_count = raw_count - valid_count
+    license_blocked_count = valid_count - license_allowed_count
 
     source_schemes = sorted({_source_scheme(task.source) for task in tasks})
     missing_materializer = bool(
@@ -98,6 +117,9 @@ def build_readiness_item(
     elif invalid_count > 0:
         readiness_state = "blocked"
         blocker_reason = "task_config_invalid"
+    elif license_allowed_count == 0:
+        readiness_state = "blocked"
+        blocker_reason = "license_not_allowed"
     else:
         readiness_state = "runnable"
 
@@ -110,6 +132,9 @@ def build_readiness_item(
         raw_task_count=raw_count,
         valid_task_config_count=valid_count,
         invalid_task_config_count=invalid_count,
+        license_allowed_task_count=license_allowed_count,
+        license_blocked_task_count=license_blocked_count,
+        blocked_licenses=sorted(blocked_licenses),
         source_schemes=source_schemes,
         materializer_status=materializer_status,
         smoke_status="unknown",
@@ -122,10 +147,17 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
     """Return user-facing API fields derived from readiness diagnostics."""
     if item.readiness_state == "runnable":
         label = "Ready"
-        message = f"{item.valid_task_config_count} runnable task"
-        if item.valid_task_config_count != 1:
+        message = f"{item.license_allowed_task_count} runnable task"
+        if item.license_allowed_task_count != 1:
             message += "s"
         message += " are registered."
+        if item.license_blocked_task_count:
+            suffix = "" if item.license_blocked_task_count == 1 else "s"
+            licenses = ", ".join(item.blocked_licenses)
+            message += (
+                f" {item.license_blocked_task_count} task{suffix} blocked by "
+                f"team license policy: {licenses}."
+            )
         selectable = True
     elif item.blocker_reason == "manifest_missing":
         label = "Needs publish"
@@ -155,6 +187,15 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
             "Add a materializer before selecting this benchmark."
         )
         selectable = False
+    elif item.blocker_reason == "license_not_allowed":
+        label = "License blocked"
+        suffix = "" if item.license_blocked_task_count == 1 else "s"
+        licenses = ", ".join(item.blocked_licenses) or "unknown"
+        message = (
+            f"{item.license_blocked_task_count} runnable task{suffix} blocked "
+            f"by team license policy: {licenses}."
+        )
+        selectable = False
     else:
         label = "Blocked"
         message = "This benchmark is not runnable yet. Check readiness diagnostics."
@@ -164,6 +205,9 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         "raw_task_count": item.raw_task_count,
         "valid_task_config_count": item.valid_task_config_count,
         "invalid_task_config_count": item.invalid_task_config_count,
+        "license_allowed_task_count": item.license_allowed_task_count,
+        "license_blocked_task_count": item.license_blocked_task_count,
+        "blocked_licenses": item.blocked_licenses,
         "source_schemes": item.source_schemes,
         "adapter_status": item.adapter_status,
         "manifest_status": item.manifest_status,
@@ -188,9 +232,7 @@ def render_readiness_json(items: list[BenchmarkReadinessItem]) -> str:
 def render_readiness_table(items: list[BenchmarkReadinessItem]) -> str:
     id_w = max(12, max((len(item.id) for item in items), default=0))
     state_w = max(9, max((len(item.readiness_state) for item in items), default=0))
-    blocker_w = max(
-        7, max((len(item.blocker_reason or "-") for item in items), default=0)
-    )
+    blocker_w = max(7, max((len(item.blocker_reason or "-") for item in items), default=0))
     benchmark_header = "BENCHMARK"
     readiness_header = "READINESS"
     raw_header = "RAW"

@@ -457,7 +457,10 @@ been re-verified. Dev compose host ports bind to
   allowlist and the task is on the default hard `allowlist` execution
   policy. Public benchmark mirrors can declare a task-level
   `license_execution_policy=notice`; their source license remains visible,
-  but the default internal research team can launch them.
+  but the default internal research team can launch them. Service-mode
+  benchmark readiness, `POST /api/v1/tasks/count`, and batch creation use the
+  same team allowlist before fan-out so UI preview counts match submitted
+  task slates.
 - **Idempotency** — batches + trials accept an `idempotency_key`;
   partial unique index `WHERE NOT NULL` on `trials.idempotency_key`.
   Cross-team collisions return 409.
@@ -486,12 +489,14 @@ been re-verified. Dev compose host ports bind to
 - **Runnable task counts** — benchmark `task_count` and
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete
-  `TaskConfig` data do not make a benchmark look launchable in New Batch;
+  `TaskConfig` data do not make a benchmark look launchable in New Batch,
+  and hard non-allowlisted licenses are excluded for the current team.
   `GET /api/v1/benchmarks` also returns raw/valid/invalid counts,
-  readiness state, blocker reason, and a user-facing readiness message so the
-  SPA can disable blocked benchmarks without hard-coded benchmark names.
-  The batch creation path still performs the final strict validation and
-  rejects invalid explicit selections with HTTP 400.
+  license-allowed/blocked counts, blocked license values, readiness state,
+  blocker reason, and a user-facing readiness message so the SPA can disable
+  blocked benchmarks without hard-coded benchmark names. The batch creation
+  path still performs the final strict validation and rejects invalid explicit
+  selections with HTTP 400.
 - **Task bundle lookup** — workers fetch the full task body from
   `GET /tasks/{task_id}/bundle`; task ids may include slashes such as
   `humaneval/HumanEval/26`.

@@ -16,8 +16,9 @@ from sqlalchemy import func, select
 
 from loom.db.schema import Task
 from loom_service.dependencies import SessionAndCtx
+from loom_service.license_policy import load_team_license_allowlist
 from loom_service.task_config_validation import split_valid_task_configs
-from loom_service.task_filter import resolve_task_filter
+from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
 router = APIRouter()
 
@@ -112,7 +113,7 @@ async def list_tasks(
 
 
 @router.post("/tasks/count")
-async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, int]:
+async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, Any]:
     """Return the exact count of tasks matching `task_filter`.
 
     Backs the SPA's NewBatch real-count check (issue #28). Uses the
@@ -132,10 +133,24 @@ async def count_tasks(payload: _CountReq, sc: SessionAndCtx) -> dict[str, int]:
     the cost is dominated by the candidate query that COUNT(*) would
     do anyway; the in-Python trim is O(N) on top.
     """
-    s, _ctx = sc
-    task_ids = await resolve_task_filter(s, payload.task_filter)
-    valid_task_ids, _invalid_tasks = await split_valid_task_configs(s, task_ids)
-    return {"count": len(valid_task_ids)}
+    s, ctx = sc
+    license_allowlist = await load_team_license_allowlist(s, ctx.team_id)
+    task_result = await resolve_task_filter_with_diagnostics(
+        s,
+        payload.task_filter,
+        license_allowlist=license_allowlist,
+    )
+    valid_task_ids, _invalid_tasks = await split_valid_task_configs(
+        s,
+        task_result.task_ids,
+    )
+    body: dict[str, int | list[str]] = {"count": len(valid_task_ids)}
+    if task_result.license_blocked_count:
+        body["license_blocked_count"] = task_result.license_blocked_count
+        body["license_blocked_reasons"] = list(
+            task_result.license_blocked_reasons,
+        )
+    return body
 
 
 @router.get("/tasks/{task_id:path}")

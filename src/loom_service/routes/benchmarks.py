@@ -26,6 +26,7 @@ from loom.benchmark_readiness import (
 )
 from loom.db.schema import Benchmark, Task
 from loom_service.dependencies import SessionAndCtx
+from loom_service.license_policy import load_team_license_allowlist
 
 router = APIRouter()
 
@@ -43,6 +44,7 @@ def _readiness_for_benchmark(
     *,
     tasks: list[TaskAuditSource],
     registry_names: set[str],
+    license_allowlist: tuple[str, ...] | None,
 ) -> BenchmarkReadinessItem:
     return build_readiness_item(
         BenchmarkAuditSource(
@@ -55,6 +57,7 @@ def _readiness_for_benchmark(
         ),
         tasks=tasks,
         registry_names=registry_names,
+        license_allowlist=license_allowlist,
     )
 
 
@@ -75,7 +78,7 @@ def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any
         # TaskConfig-valid rows. Raw/invalid rows are exposed in the
         # readiness diagnostics below so the SPA can explain why a
         # benchmark is blocked instead of treating every zero as empty.
-        "task_count": readiness.valid_task_config_count,
+        "task_count": readiness.license_allowed_task_count,
         # PR-2 series/tags: surface series so the SPA can group
         # related benchmarks in the dropdown. NULL = standalone.
         "series": b.series,
@@ -86,6 +89,8 @@ def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any
 async def _benchmark_rows_with_readiness(
     session: AsyncSession,
     benchmarks: list[Benchmark],
+    *,
+    license_allowlist: tuple[str, ...] | None,
 ) -> list[tuple[Benchmark, BenchmarkReadinessItem]]:
     if not benchmarks:
         return []
@@ -97,11 +102,13 @@ async def _benchmark_rows_with_readiness(
                 Task.id,
                 Task.config,
                 Task.source,
+                Task.license,
+                Task.tags,
             ).where(Task.benchmark_id.in_(benchmark_ids)),
         )
     ).all()
     tasks_by_benchmark: dict[str, list[TaskAuditSource]] = defaultdict(list)
-    for benchmark_id, task_id, config, source in task_rows:
+    for benchmark_id, task_id, config, source, license_, tags in task_rows:
         if benchmark_id is None:
             continue
         tasks_by_benchmark[str(benchmark_id)].append(
@@ -109,6 +116,8 @@ async def _benchmark_rows_with_readiness(
                 id=str(task_id),
                 config=dict(config),
                 source=source,
+                license=license_,
+                tags=dict(tags or {}),
             )
         )
 
@@ -120,6 +129,7 @@ async def _benchmark_rows_with_readiness(
                 row,
                 tasks=tasks_by_benchmark.get(row.id, []),
                 registry_names=registry_names,
+                license_allowlist=license_allowlist,
             ),
         )
         for row in benchmarks
@@ -139,12 +149,17 @@ async def list_benchmarks(
     # admin tools that drive imports).
     include_empty: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
-    s, _ctx = sc
+    s, ctx = sc
     stmt = select(Benchmark).order_by(Benchmark.display_name)
     if cursor:
         stmt = stmt.where(Benchmark.display_name > cursor)
     benchmarks = list((await s.scalars(stmt)).all())
-    rows = await _benchmark_rows_with_readiness(s, benchmarks)
+    license_allowlist = await load_team_license_allowlist(s, ctx.team_id)
+    rows = await _benchmark_rows_with_readiness(
+        s,
+        benchmarks,
+        license_allowlist=license_allowlist,
+    )
     if not include_empty:
         rows = [row for row in rows if row[1].readiness_state == "runnable"]
     rows = rows[: limit + 1]
@@ -164,7 +179,7 @@ async def get_benchmark(
     benchmark_id: str,
     sc: SessionAndCtx,
 ) -> dict[str, Any]:
-    s, _ctx = sc
+    s, ctx = sc
     b = (
         await s.execute(select(Benchmark).where(Benchmark.id == benchmark_id))
     ).scalar_one_or_none()
@@ -173,7 +188,12 @@ async def get_benchmark(
             status_code=404,
             detail="benchmark not found",
         )
-    rows = await _benchmark_rows_with_readiness(s, [b])
+    license_allowlist = await load_team_license_allowlist(s, ctx.team_id)
+    rows = await _benchmark_rows_with_readiness(
+        s,
+        [b],
+        license_allowlist=license_allowlist,
+    )
     return _bench_row(rows[0][0], rows[0][1])
 
 

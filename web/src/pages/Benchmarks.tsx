@@ -43,6 +43,9 @@ interface BenchmarkRow {
   raw_task_count?: number;
   valid_task_config_count?: number;
   invalid_task_config_count?: number;
+  license_allowed_task_count?: number;
+  license_blocked_task_count?: number;
+  blocked_licenses?: string[];
   readiness_state?: string;
   readiness_label?: string;
   readiness_message?: string | null;
@@ -73,13 +76,20 @@ function readinessCounts(row: BenchmarkRow): string | null {
   if (
     row.raw_task_count === undefined &&
     row.valid_task_config_count === undefined &&
-    row.invalid_task_config_count === undefined
+    row.invalid_task_config_count === undefined &&
+    row.license_allowed_task_count === undefined &&
+    row.license_blocked_task_count === undefined
   ) {
     return null;
   }
   const valid = row.valid_task_config_count ?? row.task_count ?? 0;
   const raw = row.raw_task_count ?? valid;
   const invalid = row.invalid_task_config_count ?? Math.max(raw - valid, 0);
+  const blocked = row.license_blocked_task_count ?? 0;
+  if (blocked > 0) {
+    const allowed = row.license_allowed_task_count ?? row.task_count ?? 0;
+    return `${allowed} allowed / ${blocked} license-blocked / ${valid} valid / ${raw} raw / ${invalid} invalid`;
+  }
   return `${valid} valid / ${raw} raw / ${invalid} invalid`;
 }
 

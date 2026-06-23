@@ -294,7 +294,10 @@ license metadata while declaring `license.execution_policy = "notice"` in
 allows it without mutating the team's hard-license allowlist. AIME 2022-2025
 uses this notice policy. Truly restricted, private, NDA, or non-commercial
 datasets should stay on the default hard allowlist path until an operator
-extends the team's allowlist via the rate-cards admin API.
+extends the team's allowlist via the rate-cards admin API. Service catalog
+readiness and task-count previews apply the same hard-license policy, so a
+benchmark made only of non-allowlisted tasks appears disabled instead of
+selectable.
 
 ## Upstream fetching
 
@@ -358,7 +361,7 @@ get cleaned up via `rmtree` on the next call.
 4. License must be in the default allowlist (MIT, Apache-2.0,
    BSD-3-Clause, CC-BY-4.0), use an explicit `notice` execution policy for
    public benchmark mirrors, or operators extend their team's allowlist before
-   trials run.
+   the benchmark becomes selectable.
 5. `convert_instance` must produce a deterministic checksum —
    `loom_benchmarks.util.sha256_of_dir` hashes `out_dir`'s relpaths +
    bytes in sorted order. Avoid timestamp-based content.

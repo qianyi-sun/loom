@@ -71,6 +71,7 @@ async def benchmarks_setup(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
@@ -254,6 +255,70 @@ async def test_list_benchmarks_counts_only_runnable_task_configs(
     assert all_items["mbpp"]["task_count"] == 0
 
 
+async def test_list_benchmarks_blocks_disallowed_task_licenses(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """#318: benchmark readiness is team-license aware, so a
+    TaskConfig-valid task with a license outside the team's allowlist
+    must not make that benchmark selectable.
+    """
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="aime/noncommercial-0",
+                benchmark_id="aime",
+                config=_valid_task_config("aime/noncommercial-0"),
+                checksum="2" * 64,
+                source="s3://bucket/aime/",
+                license="CC-BY-NC-4.0",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r_default = await ac.get(
+            "/api/v1/benchmarks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_all = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r_default.status_code == 200
+    assert "aime" not in {item["id"] for item in r_default.json()["items"]}
+
+    assert r_all.status_code == 200
+    items = {item["id"]: item for item in r_all.json()["items"]}
+    aime = items["aime"]
+    assert (
+        aime
+        | {
+            "task_count": 0,
+            "raw_task_count": 1,
+            "valid_task_config_count": 1,
+            "license_allowed_task_count": 0,
+            "license_blocked_task_count": 1,
+            "readiness_state": "blocked",
+            "readiness_label": "License blocked",
+            "selectable": False,
+            "blocker_reason": "license_not_allowed",
+        }
+        == aime
+    )
+    assert "CC-BY-NC-4.0" in aime["readiness_message"]
+
+
 async def test_list_benchmarks_surfaces_readiness_diagnostics(
     benchmarks_setup: tuple[FastAPI, str],
     postgres_url: str,
@@ -304,39 +369,51 @@ async def test_list_benchmarks_surfaces_readiness_diagnostics(
     assert r.status_code == 200
     items = {item["id"]: item for item in r.json()["items"]}
 
-    assert items["humaneval"] | {
-        "task_count": 1,
-        "raw_task_count": 1,
-        "valid_task_config_count": 1,
-        "invalid_task_config_count": 0,
-        "readiness_state": "runnable",
-        "readiness_label": "Ready",
-        "selectable": True,
-        "blocker_reason": None,
-    } == items["humaneval"]
+    assert (
+        items["humaneval"]
+        | {
+            "task_count": 1,
+            "raw_task_count": 1,
+            "valid_task_config_count": 1,
+            "invalid_task_config_count": 0,
+            "readiness_state": "runnable",
+            "readiness_label": "Ready",
+            "selectable": True,
+            "blocker_reason": None,
+        }
+        == items["humaneval"]
+    )
 
-    assert items["aime"] | {
-        "task_count": 0,
-        "raw_task_count": 0,
-        "valid_task_config_count": 0,
-        "invalid_task_config_count": 0,
-        "readiness_state": "blocked",
-        "readiness_label": "Needs publish",
-        "selectable": False,
-        "blocker_reason": "manifest_missing",
-    } == items["aime"]
+    assert (
+        items["aime"]
+        | {
+            "task_count": 0,
+            "raw_task_count": 0,
+            "valid_task_config_count": 0,
+            "invalid_task_config_count": 0,
+            "readiness_state": "blocked",
+            "readiness_label": "Needs publish",
+            "selectable": False,
+            "blocker_reason": "manifest_missing",
+        }
+        == items["aime"]
+    )
     assert "Publish" in items["aime"]["readiness_message"]
 
-    assert items["mbpp"] | {
-        "task_count": 0,
-        "raw_task_count": 1,
-        "valid_task_config_count": 0,
-        "invalid_task_config_count": 1,
-        "readiness_state": "blocked",
-        "readiness_label": "Needs republish",
-        "selectable": False,
-        "blocker_reason": "manifest_legacy_missing_task_config",
-    } == items["mbpp"]
+    assert (
+        items["mbpp"]
+        | {
+            "task_count": 0,
+            "raw_task_count": 1,
+            "valid_task_config_count": 0,
+            "invalid_task_config_count": 1,
+            "readiness_state": "blocked",
+            "readiness_label": "Needs republish",
+            "selectable": False,
+            "blocker_reason": "manifest_legacy_missing_task_config",
+        }
+        == items["mbpp"]
+    )
     assert "valid TaskConfig" in items["mbpp"]["readiness_message"]
 
 

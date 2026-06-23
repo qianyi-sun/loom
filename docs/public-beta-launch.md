@@ -58,7 +58,8 @@ Attach these to the release issue or release PR:
 - Benchmark catalog provisioning transcript showing
   `loom datasets provision-public-beta-catalog` with non-zero
   `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, plus
-  `/api/v1/benchmarks` evidence with at least one runnable entry.
+  `/api/v1/benchmarks` evidence with at least one team-license-allowed runnable
+  entry.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach

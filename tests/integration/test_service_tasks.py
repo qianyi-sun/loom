@@ -12,7 +12,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -371,6 +371,73 @@ async def test_count_benchmark_id_filter(
         )
     assert r.status_code == 200
     assert r.json() == {"count": 2}
+
+
+async def test_count_filters_team_license_allowlist(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """#318: New Batch preview must count only tasks allowed by the
+    current team's license allowlist and expose why candidates were
+    removed.
+    """
+    app, raw = tasks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        team_id = s.execute(
+            select(Token.team_id).where(
+                Token.token_hash == hashlib.sha256(raw.encode()).digest(),
+            ),
+        ).scalar_one()
+        s.execute(
+            insert(TeamQuota).values(
+                team_id=team_id,
+                license_allowlist=["MIT"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="humaneval/noncommercial",
+                checksum="y" * 64,
+                config={
+                    "schema_version": "1",
+                    "task": {
+                        "id": "humaneval/noncommercial",
+                        "name": "NC task",
+                    },
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+                source="local",
+                license="CC-BY-NC-4.0",
+                benchmark_id="humaneval",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"benchmark_id": "humaneval"}},
+        )
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "count": 2,
+        "license_blocked_count": 1,
+        "license_blocked_reasons": [
+            "CC-BY-NC-4.0 not in team license allowlist",
+        ],
+    }
 
 
 async def test_count_ignores_invalid_stored_task_configs(

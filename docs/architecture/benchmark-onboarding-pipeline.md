@@ -221,13 +221,17 @@ The service exposes readiness as catalog data on `GET /api/v1/benchmarks` and
 `GET /api/v1/benchmarks/{id}`. The SPA renders readiness from those API fields
 rather than hard-coded benchmark names.
 
-The response keeps `task_count` as the runnable count: rows whose stored config
-validates as `TaskConfig`. It also includes diagnostic fields for operators and
-the New Batch picker:
+The response keeps `task_count` as the user-submit runnable count: rows whose
+stored config validates as `TaskConfig` and whose hard license policy passes
+the current team's `license_allowlist`. It also includes diagnostic fields for
+operators and the New Batch picker:
 
 - `raw_task_count`
 - `valid_task_config_count`
 - `invalid_task_config_count`
+- `license_allowed_task_count`
+- `license_blocked_task_count`
+- `blocked_licenses`
 - `source_schemes`
 - `adapter_status`, `manifest_status`, `materializer_status`, `smoke_status`
 - `readiness_state`, `readiness_label`, `readiness_message`
@@ -240,6 +244,8 @@ New Batch behavior:
 - `Needs publish`: disabled; show publish/register guidance.
 - `Needs republish` or `Needs repair`: disabled; show raw-versus-runnable
   count and the stored `TaskConfig` blocker.
+- `License blocked`: disabled; show the team-policy blocker and blocked
+  license values.
 - `Smoke failed`: disabled by default; allow operator override later if needed.
 - `Heavy/special requirements`: disabled unless worker capabilities and runtime
   requirements are satisfied.
@@ -249,12 +255,14 @@ offer a benchmark as launchable when the API will reject it.
 
 Some blockers are team-policy dependent rather than catalog dependent. For
 example, a task can be structurally runnable but still rejected by the team's
-license allowlist when the runner submits child trials. Public benchmark
-mirrors can instead declare `license.execution_policy = "notice"` so the
-source license remains visible without blocking the default internal research
-team; AIME 2022-2025 uses this path. Deterministic fan-out failures are
-recorded on the Batch as `fanout_errors` and surfaced in Batch Detail/CLI;
-they must not leave the Batch indefinitely `submitted`.
+license allowlist. Service catalog and task-count previews apply that policy
+before submit so the picker count matches the slate that batch creation will
+accept. Public benchmark mirrors can instead declare
+`license.execution_policy = "notice"` so the source license remains visible
+without blocking the default internal research team; AIME 2022-2025 uses this
+path. Deterministic fan-out failures are still recorded on the Batch as
+`fanout_errors` and surfaced in Batch Detail/CLI as a defense-in-depth
+backstop; they must not leave the Batch indefinitely `submitted`.
 
 ## User-Owned Benchmark Path
 

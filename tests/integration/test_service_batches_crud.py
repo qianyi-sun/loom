@@ -188,6 +188,65 @@ async def test_post_batch_materializes_count(
     UUID(body["batch_id"])  # parseable
 
 
+async def test_post_batch_rejects_license_blocked_tasks_before_insert(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """#318: service-mode submit should reject a slate whose tasks are
+    all blocked by the team license policy before creating a batch row.
+    """
+    app, raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(TeamQuota).values(
+                team_id=team_id,
+                license_allowlist=["MIT"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="local/noncommercial",
+                checksum="z" * 64,
+                config=_valid_task_config("local/noncommercial"),
+                source="local",
+                license="CC-BY-NC-4.0",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "NC slate",
+                "task_filter": {"license": "CC-BY-NC-4.0"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert "CC-BY-NC-4.0" in detail
+    assert "team license allowlist" in detail
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        created = s.execute(
+            select(Batch).where(Batch.name == "NC slate"),
+        ).scalar_one_or_none()
+    sync_engine.dispose()
+    assert created is None
+
+
 async def test_post_batch_with_n_per_task_multiplies_count(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:

@@ -24,31 +24,65 @@ Filter shape (`task_filter`):
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import cast, false, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Task
+from loom.license_policy import is_license_allowed_for_submit
+from loom.models.task import TaskConfig
+from loom_service.license_policy import sorted_license_block_reasons
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
-FILTER_KEYS: frozenset[str] = frozenset({
-    "license", "task_ids", "benchmark_id",
-    "subset_kind", "n", "seed",
-    "benchmark_ids", "tag_filters",
-})
+FILTER_KEYS: frozenset[str] = frozenset(
+    {
+        "license",
+        "task_ids",
+        "benchmark_id",
+        "subset_kind",
+        "n",
+        "seed",
+        "benchmark_ids",
+        "tag_filters",
+    }
+)
 
 SUBSET_KINDS: frozenset[str] = frozenset(
     {"all", "first_n", "last_n", "random_n", "explicit"},
 )
 
 
+@dataclass(frozen=True)
+class TaskFilterResult:
+    task_ids: list[str]
+    license_blocked_count: int = 0
+    license_blocked_reasons: tuple[str, ...] = ()
+
+
 async def resolve_task_filter(
-    session: AsyncSession, task_filter: Mapping[str, Any],
+    session: AsyncSession,
+    task_filter: Mapping[str, Any],
 ) -> list[str]:
+    return (
+        await resolve_task_filter_with_diagnostics(
+            session,
+            task_filter,
+        )
+    ).task_ids
+
+
+async def resolve_task_filter_with_diagnostics(
+    session: AsyncSession,
+    task_filter: Mapping[str, Any],
+    *,
+    license_allowlist: tuple[str, ...] | None = None,
+) -> TaskFilterResult:
     """Materialize a task_filter into a list of Task.id strings.
 
     Honors `subset_kind`:
@@ -71,10 +105,7 @@ async def resolve_task_filter(
     if subset_kind not in SUBSET_KINDS:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"unknown subset_kind {subset_kind!r}. valid: "
-                f"{sorted(SUBSET_KINDS)}"
-            ),
+            detail=(f"unknown subset_kind {subset_kind!r}. valid: {sorted(SUBSET_KINDS)}"),
         )
 
     # Build the candidate query using the predicate keys. subset_kind
@@ -85,7 +116,9 @@ async def resolve_task_filter(
     # is a dict like `{"verified": ["true"]}` applied as a JSONB
     # containment predicate per key — `AND` across keys, `OR` within
     # each key's value list.
-    stmt = select(Task.id).order_by(Task.id.asc())
+    stmt = select(Task.id, Task.config, Task.license, Task.tags).order_by(
+        Task.id.asc(),
+    )
     if "license" in task_filter:
         stmt = stmt.where(Task.license == task_filter["license"])
     if "task_ids" in task_filter:
@@ -119,14 +152,10 @@ async def resolve_task_filter(
                     status_code=400,
                     detail="tag_filters keys must be non-empty strings",
                 )
-            if not isinstance(tag_values, list) or not all(
-                isinstance(v, str) for v in tag_values
-            ):
+            if not isinstance(tag_values, list) or not all(isinstance(v, str) for v in tag_values):
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"tag_filters[{tag_key!r}] must be a list of strings"
-                    ),
+                    detail=(f"tag_filters[{tag_key!r}] must be a list of strings"),
                 )
             if not tag_values:
                 continue
@@ -138,12 +167,37 @@ async def resolve_task_filter(
                 for v in tag_values
             ]
             stmt = stmt.where(or_(*value_clauses))
-    candidates: list[str] = [
-        row[0] for row in (await session.execute(stmt)).all()
-    ]
+    candidate_rows = (await session.execute(stmt)).all()
+    blocked_licenses: set[str] = set()
+    candidates: list[str] = []
+    for task_id, config, task_license, tags in candidate_rows:
+        valid_for_license_policy = True
+        if license_allowlist is not None:
+            try:
+                TaskConfig.model_validate(config)
+            except ValidationError:
+                valid_for_license_policy = False
+        if (
+            license_allowlist is not None
+            and valid_for_license_policy
+            and not is_license_allowed_for_submit(
+                task_license=task_license,
+                allowlist=license_allowlist,
+                tags=tags,
+            )
+        ):
+            blocked_licenses.add(str(task_license))
+            continue
+        candidates.append(str(task_id))
+    license_blocked_count = len(candidate_rows) - len(candidates)
+    license_blocked_reasons = sorted_license_block_reasons(blocked_licenses)
 
     if subset_kind == "all":
-        return candidates
+        return TaskFilterResult(
+            task_ids=candidates,
+            license_blocked_count=license_blocked_count,
+            license_blocked_reasons=license_blocked_reasons,
+        )
     if subset_kind == "explicit":
         # Explicit mode REQUIRES `task_ids` to be supplied AND the
         # existence check above runs via the `Task.id.in_(ids)`
@@ -151,28 +205,40 @@ async def resolve_task_filter(
         # of the supplied list and the live tasks table; any supplied
         # id not present in the table is silently dropped (the higher
         # route layer checks for empty-result).
-        return candidates
+        return TaskFilterResult(
+            task_ids=candidates,
+            license_blocked_count=license_blocked_count,
+            license_blocked_reasons=license_blocked_reasons,
+        )
 
     n_raw = task_filter.get("n")
     try:
         n = int(n_raw) if n_raw is not None else None
     except (TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail="task_filter.n must be an integer",
+            status_code=400,
+            detail="task_filter.n must be an integer",
         ) from exc
     if n is None or n < 1:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"task_filter.n is required and must be ≥ 1 when "
-                f"subset_kind={subset_kind!r}"
-            ),
+            detail=(f"task_filter.n is required and must be ≥ 1 when subset_kind={subset_kind!r}"),
         )
 
     if subset_kind == "first_n":
-        return candidates[:n]
+        selected = candidates[:n]
+        return TaskFilterResult(
+            task_ids=selected,
+            license_blocked_count=license_blocked_count,
+            license_blocked_reasons=license_blocked_reasons,
+        )
     if subset_kind == "last_n":
-        return candidates[-n:] if n <= len(candidates) else candidates
+        selected = candidates[-n:] if n <= len(candidates) else candidates
+        return TaskFilterResult(
+            task_ids=selected,
+            license_blocked_count=license_blocked_count,
+            license_blocked_reasons=license_blocked_reasons,
+        )
     # random_n
     seed_raw = task_filter.get("seed")
     if seed_raw is None:
@@ -184,10 +250,18 @@ async def resolve_task_filter(
         seed = int(seed_raw)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail="task_filter.seed must be an integer",
+            status_code=400,
+            detail="task_filter.seed must be an integer",
         ) from exc
     import random as _random
+
     rng = _random.Random(seed)
     if n >= len(candidates):
-        return candidates
-    return sorted(rng.sample(candidates, n))
+        selected = candidates
+    else:
+        selected = sorted(rng.sample(candidates, n))
+    return TaskFilterResult(
+        task_ids=selected,
+        license_blocked_count=license_blocked_count,
+        license_blocked_reasons=license_blocked_reasons,
+    )

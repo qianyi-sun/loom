@@ -13,6 +13,7 @@ from collections.abc import Iterable, Mapping
 LICENSE_EXECUTION_POLICY_TAG = "license_execution_policy"
 LICENSE_POLICY_ALLOWLIST = "allowlist"
 LICENSE_POLICY_NOTICE = "notice"
+DEFAULT_LICENSE_ALLOWLIST = ("MIT", "Apache-2.0", "BSD-3-Clause", "CC-BY-4.0")
 
 _VALID_POLICIES = frozenset({LICENSE_POLICY_ALLOWLIST, LICENSE_POLICY_NOTICE})
 

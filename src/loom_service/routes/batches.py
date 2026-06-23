@@ -35,6 +35,7 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
+from loom_service.license_policy import load_team_license_allowlist
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
@@ -43,7 +44,7 @@ from loom_service.task_config_validation import (
     invalid_task_config_detail,
     split_valid_task_configs,
 )
-from loom_service.task_filter import resolve_task_filter
+from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
@@ -350,10 +351,28 @@ async def create_batch(
             provider_model_id=payload.provider_model_id,
         )
 
-    task_ids = await resolve_task_filter(s, payload.task_filter)
+    license_allowlist = await load_team_license_allowlist(s, ctx.team_id)
+    task_result = await resolve_task_filter_with_diagnostics(
+        s,
+        payload.task_filter,
+        license_allowlist=license_allowlist,
+    )
+    task_ids = task_result.task_ids
     # Audit M2: a filter materializing to zero tasks creates a
     # batch stuck in `submitted` forever — reject up front.
     if not task_ids:
+        if task_result.license_blocked_count:
+            reasons = ", ".join(task_result.license_blocked_reasons)
+            _reject_submission(
+                reason="license_not_allowed",
+                status_code=403,
+                detail=(
+                    f"task_filter {payload.task_filter} matched zero "
+                    "tasks allowed by the team license allowlist; "
+                    f"{task_result.license_blocked_count} candidate "
+                    f"task(s) blocked: {reasons}"
+                ),
+            )
         _reject_submission(
             reason="empty_filter",
             status_code=400,

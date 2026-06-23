@@ -403,6 +403,9 @@ export interface components {
       raw_task_count?: number;
       valid_task_config_count?: number;
       invalid_task_config_count?: number;
+      license_allowed_task_count?: number;
+      license_blocked_task_count?: number;
+      blocked_licenses?: string[];
       source_schemes?: string[];
       adapter_status?: string;
       manifest_status?: string;

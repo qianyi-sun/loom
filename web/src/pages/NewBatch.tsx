@@ -63,6 +63,9 @@ interface BenchmarkItem {
   raw_task_count?: number;
   valid_task_config_count?: number;
   invalid_task_config_count?: number;
+  license_allowed_task_count?: number;
+  license_blocked_task_count?: number;
+  blocked_licenses?: string[];
   readiness_state?: string;
   readiness_label?: string;
   readiness_message?: string | null;
@@ -290,6 +293,11 @@ function benchmarkReadinessMessage(r: BenchmarkItem): string | undefined {
 }
 
 function benchmarkCountText(r: BenchmarkItem): string | null {
+  if (r.license_blocked_task_count && r.license_blocked_task_count > 0) {
+    const allowed = r.license_allowed_task_count ?? r.task_count ?? 0;
+    const valid = r.valid_task_config_count ?? allowed + r.license_blocked_task_count;
+    return `${allowed}/${valid} allowed`;
+  }
   const valid = r.valid_task_config_count ?? r.task_count;
   const raw = r.raw_task_count;
   if (valid === undefined) return null;
@@ -437,6 +445,7 @@ function BenchmarkPicker({
               const countText = benchmarkCountText(r);
               const selectable = benchmarkSelectable(r);
               const readinessLabel = benchmarkReadinessLabel(r);
+              const readinessMessage = benchmarkReadinessMessage(r);
               return (
                 <label
                   key={r.id}
@@ -445,7 +454,7 @@ function BenchmarkPicker({
                       ? "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-400 cursor-not-allowed"
                       : "flex items-center gap-2 pl-9 pr-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                   }
-                  title={benchmarkReadinessMessage(r)}
+                  title={readinessMessage}
                 >
                   <input
                     type="checkbox"
@@ -455,7 +464,14 @@ function BenchmarkPicker({
                     aria-label={`Select benchmark ${r.id}`}
                     className="h-4 w-4 border-slate-300 disabled:cursor-not-allowed"
                   />
-                  <span className="flex-1 truncate">{label}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{label}</span>
+                    {!selectable && readinessMessage ? (
+                      <span className="block truncate text-xs text-slate-500">
+                        {readinessMessage}
+                      </span>
+                    ) : null}
+                  </span>
                   {countText ? (
                     <span
                       className={
