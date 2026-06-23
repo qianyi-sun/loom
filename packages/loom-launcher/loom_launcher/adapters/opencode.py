@@ -84,7 +84,8 @@ class OpencodeAdapter:
             '"$HOME/.config/opencode/opencode.json" && '
             f"exec opencode run --model {shlex.quote(model_name)} "
             "--format json --print-logs --log-level ERROR "
-            f'--dir {shlex.quote(str(workdir))} "$1"'
+            "--dangerously-skip-permissions "
+            f'--dir {shlex.quote(str(workdir))} "$1" </dev/null'
         )
         return [
             "sh",
