@@ -885,6 +885,50 @@ def test_test_invalid_persists_error_message(
     assert "bad key" in show["last_validation_error"]
 
 
+def test_test_revalidates_current_dns_before_probe(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_service.provider_connections_service import ProbeResult
+
+    called = {"count": 0}
+
+    async def _fake_probe(*args, **kwargs) -> ProbeResult:  # type: ignore[no-untyped-def]
+        called["count"] += 1
+        return ProbeResult(status="valid", http_status=200, error=None)
+
+    monkeypatch.setattr(
+        "loom_service.routes.provider_connections.probe_connection",
+        _fake_probe,
+    )
+
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    _reroute_provider_dns(
+        monkeypatch, host="api.openai.com", ips=["127.0.0.1"],
+    )
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "invalid"
+    assert body["http_status"] is None
+    assert "base_url rejected" in body["last_validation_error"]
+    assert "127.0.0.1" in body["last_validation_error"]
+    assert called["count"] == 0
+
+    show = c.get(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    ).json()
+    assert show["status"] == "invalid"
+    assert "127.0.0.1" in show["last_validation_error"]
+
+
 def test_test_secret_decrypt_failure_returns_actionable_503(
     app_setup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1024,6 +1068,30 @@ def _stub_fetch_upstream_models(
         _fake,
     )
     return state
+
+
+def _reroute_provider_dns(
+    monkeypatch: pytest.MonkeyPatch, *, host: str, ips: list[str],
+) -> None:
+    """Replace provider DNS results after create-time validation.
+
+    This models DNS rebinding / stale DNS: the connection was accepted
+    when `host` resolved to a public IP, but the next outbound operation
+    sees a policy-forbidden address.
+    """
+
+    def _stub(host_arg: str, port, *args, **kwargs):
+        if host_arg == host:
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))
+                for ip in ips
+            ]
+        raise socket.gaierror(f"no test DNS entry for {host_arg}")
+
+    monkeypatch.setattr(
+        "loom_service.provider_connections_service.socket.getaddrinfo",
+        _stub,
+    )
 
 
 def _stub_preflight_model(
@@ -1213,6 +1281,29 @@ def test_models_refresh_populates_cache_then_list_returns_it(
     ]
 
 
+def test_models_refresh_revalidates_current_dns_before_fetch(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    state = _stub_fetch_upstream_models(monkeypatch, returns=["gpt-4o"])
+    _reroute_provider_dns(
+        monkeypatch, host="api.openai.com", ips=["127.0.0.1"],
+    )
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "base_url rejected" in detail
+    assert "127.0.0.1" in detail
+    assert int(state["call_count"]) == 0
+
+
 def test_models_preflight_valid_persists_model_status(
     app_setup, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1288,6 +1379,38 @@ def test_models_preflight_access_denied_persists_safe_error(
         "HTTP 403 from upstream: [REDACTED]"
     )
     assert "sk-XYZ" not in json.dumps(body)
+
+
+def test_models_preflight_revalidates_current_dns_before_upstream_call(
+    app_setup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    c.post(
+        f"/api/v1/provider-connections/{conn_id}/models",
+        headers=_auth(tokens["team_a"]),
+        json={"model_id": "gpt-private"},
+    )
+    state = _stub_preflight_model(monkeypatch)
+    _reroute_provider_dns(
+        monkeypatch, host="api.openai.com", ips=["127.0.0.1"],
+    )
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/gpt-private/preflight",
+        headers=_auth(tokens["team_a"]),
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["last_preflight_status"] == "failed"
+    assert body["last_preflight_http_status"] is None
+    assert body["last_preflight_error_code"] == "egress-policy-rejected"
+    assert "base_url rejected" in body["last_preflight_error_message"]
+    assert "127.0.0.1" in body["last_preflight_error_message"]
+    assert "sk-XYZ" not in json.dumps(body)
+    assert int(state["call_count"]) == 0
 
 
 def test_models_preflight_404_for_uncached_model(app_setup) -> None:

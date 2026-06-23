@@ -75,7 +75,11 @@ Common failures:
 - SSRF or private endpoint denial: expose the service through an approved
   public/tunnel path. If the endpoint uses a non-standard port such as a GPU
   cluster bastion forward, ask an operator to add a
-  `provider_egress_allowlist` entry before testing the connection.
+  `provider_egress_allowlist` entry before testing the connection. Loom
+  re-checks the current DNS/IP policy before connection tests, model refresh,
+  and model preflight, so a hostname that later resolves to loopback,
+  link-local, metadata, or an unapproved private range is blocked before any
+  provider request is sent.
 - Empty model list: run `loom providers models NAME --refresh`; if the endpoint
   does not implement useful discovery, add model ids manually from the web
   Models tab or the provider model API.
