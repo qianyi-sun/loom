@@ -19,6 +19,7 @@ from loom_service.provider_connections_service import (
     InvalidPricingError,
     ResolvedUpstream,
     SsrfRejectedError,
+    _preflight_base_path_headers_body,
     classify_ip,
     default_pricing_source_for,
     derive_upstream_host,
@@ -396,11 +397,13 @@ from loom_service.provider_connections_service import (  # noqa: E402
 
 
 def _client_factory(transport: httpx.MockTransport) -> object:
-    """Return a zero-arg callable producing an AsyncClient bound to
-    the supplied MockTransport. `probe_connection._client_factory`
-    expects exactly this shape (no args)."""
+    """Return a callable producing an AsyncClient bound to the supplied
+    MockTransport. Probe/fetch call it with no args; preflight passes a
+    base_url so request methods can use relative endpoint paths."""
 
-    def _factory() -> httpx.AsyncClient:
+    def _factory(*, base_url: str | None = None) -> httpx.AsyncClient:
+        if base_url is not None:
+            return httpx.AsyncClient(base_url=base_url, transport=transport)
         return httpx.AsyncClient(transport=transport)
 
     return _factory
@@ -557,6 +560,22 @@ async def test_probe_strips_trailing_slash_in_base_url() -> None:
 # ──────────────────────────────────────────────────────────────────────
 # preflight_model (uses httpx.MockTransport — no real network)
 # ──────────────────────────────────────────────────────────────────────
+
+
+def test_preflight_endpoint_uses_relative_path_under_validated_base() -> None:
+    base, path, headers, body = _preflight_base_path_headers_body(
+        "openai-compatible", "https://api.openai.com/v1/", "sk-XYZ",
+        "gpt-4o-mini",
+    )
+
+    assert base == "https://api.openai.com/v1"
+    assert path == "/chat/completions"
+    assert headers == {"Authorization": "Bearer sk-XYZ"}
+    assert body == {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+    }
 
 
 async def test_preflight_openai_model_posts_minimal_chat_completion() -> None:

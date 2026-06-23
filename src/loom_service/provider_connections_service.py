@@ -352,9 +352,9 @@ def _probe_url_and_headers(
     )
 
 
-def _preflight_url_headers_body(
+def _preflight_base_path_headers_body(
     provider_type: str, base_url: str, api_key: str, model_id: str,
-) -> tuple[str, dict[str, str], dict[str, object]]:
+) -> tuple[str, str, dict[str, str], dict[str, object]]:
     """Map a provider connection + model id to a minimal generation call.
 
     Discovery uses `/models`; preflight intentionally hits the generation
@@ -364,7 +364,8 @@ def _preflight_url_headers_body(
     base = base_url.rstrip("/")
     if provider_type == "anthropic":
         return (
-            f"{base}/messages",
+            base,
+            "/messages",
             {
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
@@ -378,7 +379,8 @@ def _preflight_url_headers_body(
     if provider_type == "google":
         quoted_model = quote(model_id, safe="")
         return (
-            f"{base}/models/{quoted_model}:generateContent?key={api_key}",
+            base,
+            f"/models/{quoted_model}:generateContent?key={api_key}",
             {},
             {
                 "contents": [{"parts": [{"text": "ping"}]}],
@@ -386,7 +388,8 @@ def _preflight_url_headers_body(
             },
         )
     return (
-        f"{base}/chat/completions",
+        base,
+        "/chat/completions",
         {"Authorization": f"Bearer {api_key}"},
         {
             "model": model_id,
@@ -479,20 +482,21 @@ async def preflight_model(
     """
     import httpx
 
-    url, headers, body = _preflight_url_headers_body(
+    base, path, headers, body = _preflight_base_path_headers_body(
         provider_type, base_url, api_key, model_id,
     )
     if _client_factory is None:
         client_cm = httpx.AsyncClient(
+            base_url=base,
             timeout=_PROBE_TIMEOUT_SEC, follow_redirects=False,
         )
     else:
-        client_cm = _client_factory()  # type: ignore[operator]
+        client_cm = _client_factory(base_url=base)  # type: ignore[operator]
 
     try:
         async with client_cm as client:
             try:
-                resp = await client.post(url, headers=headers, json=body)
+                resp = await client.post(path, headers=headers, json=body)
             except httpx.TimeoutException as e:
                 return ModelPreflightResult(
                     status="failed",
@@ -527,7 +531,7 @@ async def preflight_model(
         )
 
     excerpt = (resp.text or "")[:200]
-    safe_url = _redact_secret(url, api_key)
+    safe_url = _redact_secret(f"{base}{path}", api_key)
     safe_excerpt = _redact_secret(excerpt, api_key)
     error_code = (
         "access-denied" if resp.status_code in (401, 403)
