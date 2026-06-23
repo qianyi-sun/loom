@@ -36,7 +36,9 @@ def test_build_invocation_argv() -> None:
         ),
         "solve fizzbuzz",
     ]
-    assert env["CODEX_HOME"] == "/tmp/loom-codex-home"
+    # Under the trial workdir so codex 0.141+ doesn't refuse to
+    # write helper binaries (it rejects /tmp-rooted CODEX_HOME).
+    assert env["CODEX_HOME"] == "/workspace/.codex-home"
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:

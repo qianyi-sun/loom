@@ -327,6 +327,23 @@ def _fetch_trials_for_batch(
     return items
 
 
+def _is_capability_mismatch(failure_message: str) -> bool:
+    """Heuristic: the failure represents an (agent, benchmark)
+    capability mismatch declared at platform level, NOT a Loom bug.
+    E.g. `oracle` needs `solution/solve.sh` — benchmarks that don't
+    ship one are oracle-incompatible by design, not platform failures.
+
+    These should be SKIPPED in the matrix so PASS/FAIL counts reflect
+    real platform health rather than declared incompatibilities.
+    """
+    msg = failure_message.lower()
+    # Oracle's hard requirement: a `solution/solve.sh` script in the
+    # task bundle. Benchmarks without one are oracle-incompatible.
+    if "oracleagent requires" in msg and "solve.sh" in msg:
+        return True
+    return False
+
+
 def _classify_trial(trial: dict[str, Any]) -> tuple[CellState, str | None, float | None]:
     state = trial.get("state")
     # /api/v1/trials returns `aggregate_reward` at the top level.
@@ -342,6 +359,11 @@ def _classify_trial(trial: dict[str, Any]) -> tuple[CellState, str | None, float
     if state in {"failed", "cancelled"}:
         fr = trial.get("failure_reason") or state
         fm = trial.get("failure_message") or ""
+        if fm and _is_capability_mismatch(fm):
+            # Re-classify "agent doesn't apply to this benchmark" as
+            # SKIPPED — these aren't platform failures, they're
+            # declared (agent, benchmark) incompatibilities.
+            return "SKIPPED", f"capability mismatch: {fm[:160]}", None
         msg = fr if not fm else f"{fr}: {fm[:200]}"
         return "FAIL_PLATFORM", msg, None
     return "STUCK", f"state={state}", None

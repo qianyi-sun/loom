@@ -62,7 +62,12 @@ class CodexAdapter:
         model: ModelSpec,
         env: dict[str, str],
     ) -> list[str]:
-        env["CODEX_HOME"] = "/tmp/loom-codex-home"
+        # Codex 0.141+ refuses to create PATH-alias helper binaries
+        # under `/tmp` (it logs "Refusing to create helper binaries
+        # under temporary dir" and exits rc=1). Place CODEX_HOME under
+        # the trial workdir instead — guaranteed-writable, persists
+        # for the trial's lifetime, doesn't leak across trials.
+        env["CODEX_HOME"] = f"{workdir}/.codex-home"
         model_name = self.model_name_template.format(model_id=model.name)
         provider_config = (
             'model_providers.loom={ name = "Loom", '

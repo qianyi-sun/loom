@@ -149,6 +149,42 @@ def test_classify_trial_non_terminal_is_stuck() -> None:
     assert "running" in (reason or "")
 
 
+def test_classify_trial_oracle_solve_sh_missing_is_skipped() -> None:
+    """OracleAgent fails when the task bundle has no `solution/solve.sh`.
+    That's a declared (agent, benchmark) capability mismatch, not a
+    platform failure — re-classify to SKIPPED so PASS/FAIL counts
+    reflect real platform health."""
+    trial = {
+        "state": "failed",
+        "failure_reason": "agent_error",
+        "failure_message": (
+            "OracleAgent requires /tmp/loom-trial-abc/solution/solve.sh; "
+            "not found"
+        ),
+    }
+    state, reason, _ = qa_cmd._classify_trial(trial)
+    assert state == "SKIPPED"
+    assert "capability mismatch" in (reason or "")
+
+
+def test_is_capability_mismatch_recognizes_oracle_solve_sh() -> None:
+    assert qa_cmd._is_capability_mismatch(
+        "OracleAgent requires /tmp/x/solution/solve.sh; not found",
+    )
+
+
+def test_is_capability_mismatch_does_not_match_generic_failures() -> None:
+    """Real platform failures (rc=127, ModuleNotFoundError, gateway
+    timeout) must NOT be downgraded to SKIPPED."""
+    for msg in [
+        "aider exited rc=127 on step main",
+        "ModuleNotFoundError: openhands_sdk",
+        "Loom gateway timeout",
+        "verifier_error: test runner crashed",
+    ]:
+        assert not qa_cmd._is_capability_mismatch(msg), msg
+
+
 def test_classify_trial_reads_top_level_aggregate_reward() -> None:
     """The real /api/v1/trials list response exposes
     `aggregate_reward` at the TOP level, not nested under `result`.

@@ -101,6 +101,7 @@ services:
       LOOM_QA_RELAY_API_KEY: "${LOOM_QA_RELAY_API_KEY:-}"
     volumes:
       - ../src:/app/src
+      - ../packages:/app/packages
       - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro
     depends_on:
       postgres:
@@ -137,6 +138,7 @@ services:
       LOOM_CP_STEP_JWT_SIGNING_KEY: dev-only-shared-jwt-key-do-not-use-in-prod
     volumes:
       - ../src:/app/src
+      - ../packages:/app/packages
       - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro
     depends_on:
       postgres:
@@ -183,6 +185,7 @@ services:
       LOOM_QA_RELAY_API_KEY: "${LOOM_QA_RELAY_API_KEY:-}"
     volumes:
       - ../src:/app/src
+      - ../packages:/app/packages
       - ../.loom/admin/secrets.toml:/var/run/loom/admin/secrets.toml:ro
     depends_on:
       postgres:
@@ -219,6 +222,7 @@ services:
       LOOM_WORKER_FIXTURES_ROOT: /app/tests/fixtures/tasks
     volumes:
       - ../src:/app/src
+      - ../packages:/app/packages
       - ../tests/fixtures:/app/tests/fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - worker_trajectories:/var/lib/loom/trajectories
