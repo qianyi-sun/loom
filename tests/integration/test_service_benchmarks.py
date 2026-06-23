@@ -255,14 +255,11 @@ async def test_list_benchmarks_counts_only_runnable_task_configs(
     assert all_items["mbpp"]["task_count"] == 0
 
 
-async def test_list_benchmarks_blocks_disallowed_task_licenses(
+async def test_list_benchmarks_treats_task_licenses_as_informational(
     benchmarks_setup: tuple[FastAPI, str],
     postgres_url: str,
 ) -> None:
-    """#318: benchmark readiness is team-license aware, so a
-    TaskConfig-valid task with a license outside the team's allowlist
-    must not make that benchmark selectable.
-    """
+    """Benchmark readiness must not exclude tasks by source license."""
     app, raw = benchmarks_setup
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -296,7 +293,8 @@ async def test_list_benchmarks_blocks_disallowed_task_licenses(
         )
 
     assert r_default.status_code == 200
-    assert "aime" not in {item["id"] for item in r_default.json()["items"]}
+    default_items = {item["id"]: item for item in r_default.json()["items"]}
+    assert default_items["aime"]["task_count"] == 1
 
     assert r_all.status_code == 200
     items = {item["id"]: item for item in r_all.json()["items"]}
@@ -304,19 +302,20 @@ async def test_list_benchmarks_blocks_disallowed_task_licenses(
     assert (
         aime
         | {
-            "task_count": 0,
+            "task_count": 1,
             "raw_task_count": 1,
             "valid_task_config_count": 1,
-            "license_allowed_task_count": 0,
-            "license_blocked_task_count": 1,
-            "readiness_state": "blocked",
-            "readiness_label": "License blocked",
-            "selectable": False,
-            "blocker_reason": "license_not_allowed",
+            "license_allowed_task_count": 1,
+            "license_blocked_task_count": 0,
+            "blocked_licenses": [],
+            "readiness_state": "runnable",
+            "readiness_label": "Ready",
+            "readiness_message": "1 runnable task is registered.",
+            "selectable": True,
+            "blocker_reason": None,
         }
         == aime
     )
-    assert "CC-BY-NC-4.0" in aime["readiness_message"]
 
 
 async def test_list_benchmarks_surfaces_readiness_diagnostics(

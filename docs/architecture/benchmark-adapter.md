@@ -283,21 +283,15 @@ multi-service tasks (`security-vulhub-minio`, `simple-sheets-put`, and
 `simple-web-scraper`) declare `environment.sidecars` instead of falling back to
 a single-image approximation.
 
-## License enforcement
+## License metadata
 
-`team_quotas.license_allowlist` defaults to `[MIT, Apache-2.0,
-BSD-3-Clause, CC-BY-4.0]`. `POST /trials` returns 403 if the task's
-adapter declares a license outside the allowlist and its execution policy is
-the default `allowlist`. Public benchmark mirrors can keep their source
-license metadata while declaring `license.execution_policy = "notice"` in
-`benchmarks.json`; import/publish writes this as a task tag and submission
-allows it without mutating the team's hard-license allowlist. AIME 2022-2025
-uses this notice policy. Truly restricted, private, NDA, or non-commercial
-datasets should stay on the default hard allowlist path until an operator
-extends the team's allowlist via the rate-cards admin API. Service catalog
-readiness and task-count previews apply the same hard-license policy, so a
-benchmark made only of non-allowlisted tasks appears disabled instead of
-selectable.
+Adapters should declare upstream license metadata (`license.spdx`,
+`license.url`, and any catalog provenance tags) so operators can inspect what
+they are running. Loom does not use source license metadata as an execution
+gate: `POST /trials`, service catalog readiness, task-count previews, and batch
+creation all allow structurally valid tasks regardless of SPDX value. The
+legacy `license.execution_policy` field and `team_quotas.license_allowlist`
+remain compatibility metadata, not submit policy.
 
 ## Upstream fetching
 
@@ -358,10 +352,8 @@ get cleaned up via `rmtree` on the next call.
    [project.entry-points."loom.benchmarks"]
    <slug> = "loom_benchmark_<name>.adapter:<YourAdapterClass>"
    ```
-4. License must be in the default allowlist (MIT, Apache-2.0,
-   BSD-3-Clause, CC-BY-4.0), use an explicit `notice` execution policy for
-   public benchmark mirrors, or operators extend their team's allowlist before
-   the benchmark becomes selectable.
+4. Declare license SPDX/URL metadata when upstream provides it. License
+   metadata is visible to operators but does not affect selectability.
 5. `convert_instance` must produce a deterministic checksum —
    `loom_benchmarks.util.sha256_of_dir` hashes `out_dir`'s relpaths +
    bytes in sorted order. Avoid timestamp-based content.

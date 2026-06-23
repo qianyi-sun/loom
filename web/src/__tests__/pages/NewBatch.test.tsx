@@ -248,7 +248,6 @@ function mockEndpoints(opts: {
   noBenchmarks?: boolean;
   emptyBenchmark?: boolean;
   legacyBenchmark?: boolean;
-  licenseBlockedBenchmark?: boolean;
   /**
    * Override for `POST /api/v1/tasks/count`. When set, the count
    * endpoint returns this value regardless of body. Used by the
@@ -283,23 +282,6 @@ function mockEndpoints(opts: {
                     "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
                   selectable: false,
                   blocker_reason: "manifest_legacy_missing_task_config",
-                }
-            : opts.licenseBlockedBenchmark && b.id === "mbpp"
-              ? {
-                  ...b,
-                  task_count: 0,
-                  raw_task_count: 3,
-                  valid_task_config_count: 3,
-                  invalid_task_config_count: 0,
-                  license_allowed_task_count: 0,
-                  license_blocked_task_count: 3,
-                  blocked_licenses: ["CC-BY-NC-4.0"],
-                  readiness_state: "blocked",
-                  readiness_label: "License blocked",
-                  readiness_message:
-                    "3 runnable tasks blocked by team license policy: CC-BY-NC-4.0.",
-                  selectable: false,
-                  blocker_reason: "license_not_allowed",
                 }
             : opts.emptyBenchmark && b.id === "mbpp"
               ? {
@@ -506,21 +488,6 @@ describe("NewBatch", () => {
       "title",
       "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
     );
-  });
-
-  it("visibly explains team-license blocked benchmarks", async () => {
-    mockEndpoints({ licenseBlockedBenchmark: true });
-    renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
-
-    const blocked = await screen.findByRole("checkbox", {
-      name: /Select benchmark mbpp/i,
-    });
-    expect(blocked).toBeDisabled();
-    const row = blocked.closest("label");
-    expect(row).toHaveTextContent(/License blocked/i);
-    expect(row).toHaveTextContent(/0\/3 allowed/i);
-    expect(row).toHaveTextContent(/CC-BY-NC-4.0/i);
   });
 
   it("shows deployment-facing guidance instead of an operator import command when no benchmarks are provisioned", async () => {

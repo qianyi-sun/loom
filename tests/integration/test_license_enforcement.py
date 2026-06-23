@@ -1,8 +1,8 @@
-"""Plan 13 Task 4: license-allowlist enforcement at trial submit.
+"""License metadata is informational at trial submit.
 
-A task with a license not in the team's allowlist 403s. A task with no
-license tag passes (hand-authored tasks). A task with an allowlisted
-license submits cleanly."""
+Tasks submit regardless of source license. Team quota license allowlists remain
+legacy metadata and must not block research evaluation.
+"""
 
 import hashlib
 from collections.abc import Iterator
@@ -28,15 +28,15 @@ def seed(postgres_url: str) -> Iterator[dict]:
     now = datetime.now(UTC)
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        # Default allowlist will come via the DB default (MIT, Apache-2.0,
-        # BSD-3-Clause, CC-BY-4.0).
+        # The DB still carries the legacy license_allowlist default, but it is
+        # informational only and must not affect submit.
         s.execute(insert(TeamQuota).values(team_id=team_id))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
             issued_at=now, expires_at=None,
         ))
-        # Three tasks: MIT (allowed), GPL-3.0 (NOT in default), no license
+        # Three tasks: MIT, GPL-3.0, no license.
         s.execute(insert(Task).values(
             id="mit-task", checksum="0" * 64,
             config={
@@ -73,8 +73,8 @@ def seed(postgres_url: str) -> Iterator[dict]:
             },
             license=None,
         ))
-        # Empty-string license — a misconfigured importer might write
-        # this. It must NOT bypass enforcement (audit M3).
+        # Empty-string license — a misconfigured importer might write this,
+        # but license metadata must still not block submit.
         s.execute(insert(Task).values(
             id="empty-license-task", checksum="0" * 64,
             config={
@@ -125,20 +125,17 @@ def test_mit_task_accepted(app, seed):  # type: ignore[no-untyped-def]
         assert r.status_code == 201, r.text
 
 
-def test_gpl_task_rejected_with_403(app, seed):  # type: ignore[no-untyped-def]
+def test_gpl_task_accepted(app, seed):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={"task_id": "gpl-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
-        assert r.status_code == 403
-        assert "GPL-3.0-only" in r.json()["detail"]
+        assert r.status_code == 201, r.text
 
 
 def test_no_license_task_accepted(app, seed):  # type: ignore[no-untyped-def]
-    """Hand-authored tasks have license=NULL — those pass through
-    unchecked (allowlist enforcement only applies to tagged tasks)."""
     with TestClient(app) as client:
         r = client.post(
             "/trials",
@@ -148,22 +145,18 @@ def test_no_license_task_accepted(app, seed):  # type: ignore[no-untyped-def]
         assert r.status_code == 201, r.text
 
 
-def test_empty_string_license_rejected(app, seed):  # type: ignore[no-untyped-def]
-    """A task with license='' (empty string from a buggy importer)
-    must 403, not bypass — empty-string is NOT None and shouldn't be
-    in any sane allowlist (audit M3)."""
+def test_empty_string_license_accepted(app, seed):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(
             "/trials",
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={"task_id": "empty-license-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
-        assert r.status_code == 403
+        assert r.status_code == 201, r.text
 
 
-def test_tightened_allowlist_rejects_mit(app, seed, postgres_url):  # type: ignore[no-untyped-def]
-    """Operator-tightened allowlist: shrinking the array means previously-
-    allowed tasks now 403."""
+def test_tightened_allowlist_still_accepts_mit(app, seed, postgres_url):  # type: ignore[no-untyped-def]
+    """Operator-tightened legacy allowlists do not affect submit."""
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
         conn.execute(
@@ -179,5 +172,4 @@ def test_tightened_allowlist_rejects_mit(app, seed, postgres_url):  # type: igno
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={"task_id": "mit-task", "config": {"agent_name": "oracle", "agent_model": None}},
         )
-        assert r.status_code == 403
-        assert "MIT" in r.json()["detail"]
+        assert r.status_code == 201, r.text

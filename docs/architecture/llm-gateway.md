@@ -102,8 +102,8 @@ reasons:
 2. **Attribution** — `(team, trial, step)` cost slicing needs a
    *single* writer to the `llm_calls` table. With per-agent writes,
    teams have to trust every adapter to spell the keys right.
-3. **Policy** — rate limits, license allowlists, and per-team budget
-   accounting need a chokepoint. Gateway is that chokepoint.
+3. **Policy** — rate limits and per-team budget accounting need a chokepoint.
+   Gateway is that chokepoint.
 
 The cost is one extra hop + the need for a service stack — exactly
 the trade-off CLI mode declines, accepting weaker attribution to

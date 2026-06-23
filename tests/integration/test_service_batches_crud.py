@@ -188,13 +188,11 @@ async def test_post_batch_materializes_count(
     UUID(body["batch_id"])  # parseable
 
 
-async def test_post_batch_rejects_license_blocked_tasks_before_insert(
+async def test_post_batch_accepts_noncommercial_license_tasks(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    """#318: service-mode submit should reject a slate whose tasks are
-    all blocked by the team license policy before creating a batch row.
-    """
+    """Service-mode submit must not block tasks by source license."""
     app, raw, team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -232,10 +230,9 @@ async def test_post_batch_rejects_license_blocked_tasks_before_insert(
             },
         )
 
-    assert r.status_code == 403
-    detail = r.json()["detail"]
-    assert "CC-BY-NC-4.0" in detail
-    assert "team license allowlist" in detail
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["expected_trial_count"] == 1
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -244,7 +241,7 @@ async def test_post_batch_rejects_license_blocked_tasks_before_insert(
             select(Batch).where(Batch.name == "NC slate"),
         ).scalar_one_or_none()
     sync_engine.dispose()
-    assert created is None
+    assert created is not None
 
 
 async def test_post_batch_with_n_per_task_multiplies_count(

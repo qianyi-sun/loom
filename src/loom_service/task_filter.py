@@ -28,15 +28,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import ValidationError
 from sqlalchemy import cast, false, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Task
-from loom.license_policy import is_license_allowed_for_submit
-from loom.models.task import TaskConfig
-from loom_service.license_policy import sorted_license_block_reasons
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -61,8 +57,6 @@ SUBSET_KINDS: frozenset[str] = frozenset(
 @dataclass(frozen=True)
 class TaskFilterResult:
     task_ids: list[str]
-    license_blocked_count: int = 0
-    license_blocked_reasons: tuple[str, ...] = ()
 
 
 async def resolve_task_filter(
@@ -80,8 +74,6 @@ async def resolve_task_filter(
 async def resolve_task_filter_with_diagnostics(
     session: AsyncSession,
     task_filter: Mapping[str, Any],
-    *,
-    license_allowlist: tuple[str, ...] | None = None,
 ) -> TaskFilterResult:
     """Materialize a task_filter into a list of Task.id strings.
 
@@ -116,7 +108,7 @@ async def resolve_task_filter_with_diagnostics(
     # is a dict like `{"verified": ["true"]}` applied as a JSONB
     # containment predicate per key — `AND` across keys, `OR` within
     # each key's value list.
-    stmt = select(Task.id, Task.config, Task.license, Task.tags).order_by(
+    stmt = select(Task.id).order_by(
         Task.id.asc(),
     )
     if "license" in task_filter:
@@ -167,36 +159,11 @@ async def resolve_task_filter_with_diagnostics(
                 for v in tag_values
             ]
             stmt = stmt.where(or_(*value_clauses))
-    candidate_rows = (await session.execute(stmt)).all()
-    blocked_licenses: set[str] = set()
-    candidates: list[str] = []
-    for task_id, config, task_license, tags in candidate_rows:
-        valid_for_license_policy = True
-        if license_allowlist is not None:
-            try:
-                TaskConfig.model_validate(config)
-            except ValidationError:
-                valid_for_license_policy = False
-        if (
-            license_allowlist is not None
-            and valid_for_license_policy
-            and not is_license_allowed_for_submit(
-                task_license=task_license,
-                allowlist=license_allowlist,
-                tags=tags,
-            )
-        ):
-            blocked_licenses.add(str(task_license))
-            continue
-        candidates.append(str(task_id))
-    license_blocked_count = len(candidate_rows) - len(candidates)
-    license_blocked_reasons = sorted_license_block_reasons(blocked_licenses)
+    candidates = [str(task_id) for task_id in (await session.scalars(stmt)).all()]
 
     if subset_kind == "all":
         return TaskFilterResult(
             task_ids=candidates,
-            license_blocked_count=license_blocked_count,
-            license_blocked_reasons=license_blocked_reasons,
         )
     if subset_kind == "explicit":
         # Explicit mode REQUIRES `task_ids` to be supplied AND the
@@ -207,8 +174,6 @@ async def resolve_task_filter_with_diagnostics(
         # route layer checks for empty-result).
         return TaskFilterResult(
             task_ids=candidates,
-            license_blocked_count=license_blocked_count,
-            license_blocked_reasons=license_blocked_reasons,
         )
 
     n_raw = task_filter.get("n")
@@ -229,15 +194,11 @@ async def resolve_task_filter_with_diagnostics(
         selected = candidates[:n]
         return TaskFilterResult(
             task_ids=selected,
-            license_blocked_count=license_blocked_count,
-            license_blocked_reasons=license_blocked_reasons,
         )
     if subset_kind == "last_n":
         selected = candidates[-n:] if n <= len(candidates) else candidates
         return TaskFilterResult(
             task_ids=selected,
-            license_blocked_count=license_blocked_count,
-            license_blocked_reasons=license_blocked_reasons,
         )
     # random_n
     seed_raw = task_filter.get("seed")
@@ -262,6 +223,4 @@ async def resolve_task_filter_with_diagnostics(
         selected = sorted(rng.sample(candidates, n))
     return TaskFilterResult(
         task_ids=selected,
-        license_blocked_count=license_blocked_count,
-        license_blocked_reasons=license_blocked_reasons,
     )

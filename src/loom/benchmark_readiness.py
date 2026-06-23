@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from loom.license_policy import is_license_allowed_for_submit
 from loom.models.task import TaskConfig
 
 ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked"]
@@ -71,29 +70,19 @@ def build_readiness_item(
     *,
     tasks: list[TaskAuditSource],
     registry_names: set[str],
-    license_allowlist: Iterable[str] | None = None,
 ) -> BenchmarkReadinessItem:
     adapter_status = "available" if benchmark.id in registry_names else "missing"
     raw_count = len(tasks)
     valid_count = 0
-    license_allowed_count = 0
-    blocked_licenses: set[str] = set()
     for task in tasks:
         try:
             TaskConfig.model_validate(task.config)
         except ValidationError:
             continue
         valid_count += 1
-        if license_allowlist is not None and not is_license_allowed_for_submit(
-            task_license=task.license,
-            allowlist=license_allowlist,
-            tags=task.tags,
-        ):
-            blocked_licenses.add(str(task.license))
-            continue
-        license_allowed_count += 1
     invalid_count = raw_count - valid_count
-    license_blocked_count = valid_count - license_allowed_count
+    license_allowed_count = valid_count
+    license_blocked_count = 0
 
     source_schemes = sorted({_source_scheme(task.source) for task in tasks})
     missing_materializer = bool(
@@ -117,9 +106,6 @@ def build_readiness_item(
     elif invalid_count > 0:
         readiness_state = "blocked"
         blocker_reason = "task_config_invalid"
-    elif license_allowed_count == 0:
-        readiness_state = "blocked"
-        blocker_reason = "license_not_allowed"
     else:
         readiness_state = "runnable"
 
@@ -134,7 +120,7 @@ def build_readiness_item(
         invalid_task_config_count=invalid_count,
         license_allowed_task_count=license_allowed_count,
         license_blocked_task_count=license_blocked_count,
-        blocked_licenses=sorted(blocked_licenses),
+        blocked_licenses=[],
         source_schemes=source_schemes,
         materializer_status=materializer_status,
         smoke_status="unknown",
@@ -150,14 +136,9 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         message = f"{item.license_allowed_task_count} runnable task"
         if item.license_allowed_task_count != 1:
             message += "s"
-        message += " are registered."
-        if item.license_blocked_task_count:
-            suffix = "" if item.license_blocked_task_count == 1 else "s"
-            licenses = ", ".join(item.blocked_licenses)
-            message += (
-                f" {item.license_blocked_task_count} task{suffix} blocked by "
-                f"team license policy: {licenses}."
-            )
+            message += " are registered."
+        else:
+            message += " is registered."
         selectable = True
     elif item.blocker_reason == "manifest_missing":
         label = "Needs publish"
@@ -185,15 +166,6 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         message = (
             f"Task sources use unsupported materializer scheme(s): {schemes}. "
             "Add a materializer before selecting this benchmark."
-        )
-        selectable = False
-    elif item.blocker_reason == "license_not_allowed":
-        label = "License blocked"
-        suffix = "" if item.license_blocked_task_count == 1 else "s"
-        licenses = ", ".join(item.blocked_licenses) or "unknown"
-        message = (
-            f"{item.license_blocked_task_count} runnable task{suffix} blocked "
-            f"by team license policy: {licenses}."
         )
         selectable = False
     else:

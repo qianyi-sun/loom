@@ -373,14 +373,11 @@ async def test_count_benchmark_id_filter(
     assert r.json() == {"count": 2}
 
 
-async def test_count_filters_team_license_allowlist(
+async def test_count_ignores_team_license_allowlist(
     tasks_setup: tuple[FastAPI, str],
     postgres_url: str,
 ) -> None:
-    """#318: New Batch preview must count only tasks allowed by the
-    current team's license allowlist and expose why candidates were
-    removed.
-    """
+    """Legacy team license allowlists must not reduce New Batch counts."""
     app, raw = tasks_setup
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -431,13 +428,7 @@ async def test_count_filters_team_license_allowlist(
         )
 
     assert r.status_code == 200
-    assert r.json() == {
-        "count": 2,
-        "license_blocked_count": 1,
-        "license_blocked_reasons": [
-            "CC-BY-NC-4.0 not in team license allowlist",
-        ],
-    }
+    assert r.json() == {"count": 3}
 
 
 async def test_count_ignores_invalid_stored_task_configs(

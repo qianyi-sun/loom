@@ -614,11 +614,11 @@ backfill the benchmark before launching user batches.
 The same readiness model powers the service catalog. In New Batch, a benchmark
 marked `Ready` is selectable. `Needs publish` means no runnable tasks are
 registered yet. `Needs republish` means raw task rows exist but their stored
-configs are not valid `TaskConfig` objects. `License blocked` means the tasks
-are structurally runnable but the current team's license allowlist excludes
-them. Disabled rows show the API-provided readiness message and
+configs are not valid `TaskConfig` objects. Source license metadata is visible
+on catalog/task rows but does not disable benchmarks or block submit. Disabled
+rows show the API-provided readiness message and
 raw-versus-runnable counts so operators know whether to publish, republish,
-repair, or choose an allowed benchmark.
+or repair a benchmark.
 
 The hidden `/benchmarks` route remains a power-user diagnostic view rather
 than the normal submission path. It includes the full registry, including rows
@@ -633,12 +633,10 @@ referenced `s3://` bundles from a known-good source environment into the target
 database/object store. It is separate from `scripts/seed_test_data.py`, which is
 only for disposable auth/run fixtures.
 
-If a benchmark is structurally runnable but a team policy rejects a selected
-task, New Batch should show the license blocker before submit. Batch fan-out
-still treats deterministic team-policy failures as terminal defense-in-depth
-instead of leaving the batch `submitted`; open Batch Detail or run
-`loom eval batch show <id>` to inspect `failure_reason`, `failure_message`,
-and `fanout_errors`.
+Batch fan-out still treats deterministic non-license policy/config failures as
+terminal defense-in-depth instead of leaving the batch `submitted`; open Batch
+Detail or run `loom eval batch show <id>` to inspect `failure_reason`,
+`failure_message`, and `fanout_errors`.
 
 If a model gateway returns transient `502`, `503`, `504`, timeout, or
 connection-reset failures, Loom retries the agent call within the trial

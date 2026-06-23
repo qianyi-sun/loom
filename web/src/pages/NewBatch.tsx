@@ -293,11 +293,6 @@ function benchmarkReadinessMessage(r: BenchmarkItem): string | undefined {
 }
 
 function benchmarkCountText(r: BenchmarkItem): string | null {
-  if (r.license_blocked_task_count && r.license_blocked_task_count > 0) {
-    const allowed = r.license_allowed_task_count ?? r.task_count ?? 0;
-    const valid = r.valid_task_config_count ?? allowed + r.license_blocked_task_count;
-    return `${allowed}/${valid} allowed`;
-  }
   const valid = r.valid_task_config_count ?? r.task_count;
   const raw = r.raw_task_count;
   if (valid === undefined) return null;

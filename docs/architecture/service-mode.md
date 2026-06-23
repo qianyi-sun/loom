@@ -379,7 +379,7 @@ state before propagating:
 | `trials` | CP | State machine + DRF claim |
 | `llm_calls` | Gateway | Per-call cost attribution; FK to trial |
 | `tasks` + `benchmarks` | Operator CLI | Cluster task catalog |
-| `team_quotas` | CP | DRF weights + license allowlists |
+| `team_quotas` | CP | DRF weights + legacy license metadata |
 | `pending_team_registrations` | Service | Default-closed team onboarding queue and admin review state |
 | `team_invites` | Service | Hashed invite links for user membership onboarding |
 | `tokens` | Service / CP | Bearer tokens (all 4 kinds) |
@@ -458,16 +458,11 @@ been re-verified. Dev compose host ports bind to
   `bind_trial_context`. Does **not** nest — bind at outermost scope.
 - **Metrics** — Prometheus on `/metrics` (each service binds its own
   port, default 9090). Bounded cardinality — no per-trial labels.
-- **License enforcement** — per-team `license_allowlist` (default
-  `[MIT, Apache-2.0, BSD-3-Clause, CC-BY-4.0]`). `POST /trials`
-  returns 403 if the task's adapter declares a license outside the
-  allowlist and the task is on the default hard `allowlist` execution
-  policy. Public benchmark mirrors can declare a task-level
-  `license_execution_policy=notice`; their source license remains visible,
-  but the default internal research team can launch them. Service-mode
-  benchmark readiness, `POST /api/v1/tasks/count`, and batch creation use the
-  same team allowlist before fan-out so UI preview counts match submitted
-  task slates.
+- **License metadata** — `Task.license`, benchmark license fields, and legacy
+  `team_quotas.license_allowlist` values are informational. `POST /trials`,
+  benchmark readiness, `POST /api/v1/tasks/count`, and batch creation do not
+  reject or hide tasks based on SPDX value. `license_execution_policy` tags are
+  retained for catalog provenance but are not execution policy inputs.
 - **Idempotency** — batches + trials accept an `idempotency_key`;
   partial unique index `WHERE NOT NULL` on `trials.idempotency_key`.
   Cross-team collisions return 409.
@@ -496,14 +491,14 @@ been re-verified. Dev compose host ports bind to
 - **Runnable task counts** — benchmark `task_count` and
   `POST /api/v1/tasks/count` are user-facing runnable counts, not raw
   task-table row counts. Placeholder rows with empty or incomplete
-  `TaskConfig` data do not make a benchmark look launchable in New Batch,
-  and hard non-allowlisted licenses are excluded for the current team.
-  `GET /api/v1/benchmarks` also returns raw/valid/invalid counts,
-  license-allowed/blocked counts, blocked license values, readiness state,
-  blocker reason, and a user-facing readiness message so the SPA can disable
-  blocked benchmarks without hard-coded benchmark names. The batch creation
-  path still performs the final strict validation and rejects invalid explicit
-  selections with HTTP 400.
+  `TaskConfig` data do not make a benchmark look launchable in New Batch.
+  `GET /api/v1/benchmarks` also returns raw/valid/invalid counts, compatibility
+  license count fields (`license_allowed_task_count` equals valid tasks,
+  `license_blocked_task_count` is 0, `blocked_licenses` is empty), readiness
+  state, blocker reason, and a user-facing readiness message so the SPA can
+  disable blocked benchmarks without hard-coded benchmark names. The batch
+  creation path still performs the final strict validation and rejects invalid
+  explicit selections with HTTP 400.
 - **Task bundle lookup** — workers fetch the full task body from
   `GET /tasks/{task_id}/bundle`; task ids may include slashes such as
   `humaneval/HumanEval/26`.

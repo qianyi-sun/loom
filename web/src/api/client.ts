@@ -560,11 +560,7 @@ export const api = {
    * tag_filters are active. Closes #28.
    */
   countTasks: (body: { task_filter: Record<string, unknown> }) =>
-    apiFetch<{
-      count: number;
-      license_blocked_count?: number;
-      license_blocked_reasons?: string[];
-    }>("/api/v1/tasks/count", {
+    apiFetch<{ count: number }>("/api/v1/tasks/count", {
       method: "POST",
       body: JSON.stringify(body),
     }),

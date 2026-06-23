@@ -87,8 +87,8 @@ States:
   constraints are recorded.
 - `blocked`: readiness cannot advance. The blocker reason must be explicit,
   such as `legacy_manifest_missing_task_config`, `bundle_source_unreachable`,
-  `missing_worker_capability`, `license_not_redistributable`, or
-  `smoke_failed`.
+  `missing_worker_capability`, or `smoke_failed`. Source license metadata is
+  not a blocker.
 
 ## Data Model And Contract
 
@@ -222,16 +222,16 @@ The service exposes readiness as catalog data on `GET /api/v1/benchmarks` and
 rather than hard-coded benchmark names.
 
 The response keeps `task_count` as the user-submit runnable count: rows whose
-stored config validates as `TaskConfig` and whose hard license policy passes
-the current team's `license_allowlist`. It also includes diagnostic fields for
-operators and the New Batch picker:
+stored config validates as `TaskConfig`. Source license metadata is visible but
+does not reduce this count. It also includes diagnostic fields for operators
+and the New Batch picker:
 
 - `raw_task_count`
 - `valid_task_config_count`
 - `invalid_task_config_count`
-- `license_allowed_task_count`
-- `license_blocked_task_count`
-- `blocked_licenses`
+- `license_allowed_task_count` (compatibility field; equals valid task count)
+- `license_blocked_task_count` (compatibility field; always `0`)
+- `blocked_licenses` (compatibility field; always empty)
 - `source_schemes`
 - `adapter_status`, `manifest_status`, `materializer_status`, `smoke_status`
 - `readiness_state`, `readiness_label`, `readiness_message`
@@ -244,8 +244,6 @@ New Batch behavior:
 - `Needs publish`: disabled; show publish/register guidance.
 - `Needs republish` or `Needs repair`: disabled; show raw-versus-runnable
   count and the stored `TaskConfig` blocker.
-- `License blocked`: disabled; show the team-policy blocker and blocked
-  license values.
 - `Smoke failed`: disabled by default; allow operator override later if needed.
 - `Heavy/special requirements`: disabled unless worker capabilities and runtime
   requirements are satisfied.
@@ -253,14 +251,10 @@ New Batch behavior:
 This makes the user-facing UX consistent with the backend: the UI should never
 offer a benchmark as launchable when the API will reject it.
 
-Some blockers are team-policy dependent rather than catalog dependent. For
-example, a task can be structurally runnable but still rejected by the team's
-license allowlist. Service catalog and task-count previews apply that policy
-before submit so the picker count matches the slate that batch creation will
-accept. Public benchmark mirrors can instead declare
-`license.execution_policy = "notice"` so the source license remains visible
-without blocking the default internal research team; AIME 2022-2025 uses this
-path. Deterministic fan-out failures are still recorded on the Batch as
+Source licenses are catalog metadata rather than team-policy blockers. Service
+catalog and task-count previews therefore match the slate batch creation will
+accept based on structural validity, subset filters, and runtime requirements.
+Deterministic fan-out failures are still recorded on the Batch as
 `fanout_errors` and surfaced in Batch Detail/CLI as a defense-in-depth
 backstop; they must not leave the Batch indefinitely `submitted`.
 
@@ -377,7 +371,7 @@ surfaces:
 - HumanEval: regression baseline and already partially runnable.
 - MBPP: second code benchmark, cheap and simple.
 - AIME 2022-2025: lightweight provider/model smoke with full per-year
-  registration and notice-only source-license policy.
+  registration and source-license metadata.
 - Terminal-Bench-2 full pinned v0.1.1 task set: terminal sandbox behavior. The
   registered set contains 86 valid task configs, each declaring
   `workdir = "/app"`, a build-only `.loom-build/client` Docker context, and the
@@ -406,7 +400,6 @@ on. Examples:
 - `bundle_source_unreachable`
 - `materializer_missing`
 - `worker_capability_missing`
-- `license_blocked`
 - `smoke_failed`
 
 The CLI should exit nonzero only for command failures or policy violations. A

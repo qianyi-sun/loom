@@ -228,9 +228,10 @@ Internals:
 
 ## Common pitfalls
 
-- **CLI mode skips license enforcement**. The Control Plane's
-  `team_quotas.license_allowlist` gate is service-mode-only. CLI users
-  can run any adapter; the responsibility shifts to the human.
+- **License is metadata, not an execution gate**. CLI mode, service mode, and
+  the Control Plane all allow tasks regardless of SPDX value. The legacy
+  `team_quotas.license_allowlist` field is retained only as historical
+  metadata.
 - **No cross-trial coordination**. Each `loom run` invocation is
   independent. If you need rate limiting across many parallel
   invocations, run them inside one `loom run --concurrency N`

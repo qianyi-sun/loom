@@ -1,19 +1,17 @@
-"""License execution policy helpers.
+"""License metadata helpers.
 
-`Task.license` keeps the source/license metadata. The execution policy says
-whether a non-allowlisted license is a hard submit blocker or a launch-time
-notice for public benchmark mirrors that remain acceptable for internal
-research evaluation.
+`Task.license` and `license_execution_policy` remain catalog/import metadata.
+They are informational for research evaluation and must not block task
+selection or trial submission.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 
 LICENSE_EXECUTION_POLICY_TAG = "license_execution_policy"
 LICENSE_POLICY_ALLOWLIST = "allowlist"
 LICENSE_POLICY_NOTICE = "notice"
-DEFAULT_LICENSE_ALLOWLIST = ("MIT", "Apache-2.0", "BSD-3-Clause", "CC-BY-4.0")
 
 _VALID_POLICIES = frozenset({LICENSE_POLICY_ALLOWLIST, LICENSE_POLICY_NOTICE})
 
@@ -44,16 +42,3 @@ def tags_with_license_execution_policy(
     if normalized != LICENSE_POLICY_ALLOWLIST:
         merged[LICENSE_EXECUTION_POLICY_TAG] = normalized
     return merged
-
-
-def is_license_allowed_for_submit(
-    *,
-    task_license: str | None,
-    allowlist: Iterable[str],
-    tags: Mapping[str, str] | None,
-) -> bool:
-    if task_license is None:
-        return True
-    if task_license in set(allowlist):
-        return True
-    return (tags or {}).get(LICENSE_EXECUTION_POLICY_TAG) == LICENSE_POLICY_NOTICE

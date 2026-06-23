@@ -374,12 +374,12 @@ close to what PR J shipped, with three deliberate changes:
    Benchmark `task_count` values shown here are runnable counts, not
    raw task-table row counts. Placeholder benchmark rows whose stored
    `config` is empty or invalid surface as disabled readiness badges such as
-   `Needs publish`, `Needs republish`, or `Needs repair`; hard licenses outside
-   the current team's allowlist surface as `License blocked`. The picker uses
+   `Needs publish`, `Needs republish`, or `Needs repair`. License metadata is
+   visible but does not affect selectability. The picker uses
    the API-provided `readiness_label`, `readiness_message`, and `selectable`
    fields rather than hard-coded benchmark names. The real
    `/api/v1/tasks/count` check applies full stored-`TaskConfig` validation and
-   team-license filtering before enabling submit.
+   subset filtering before enabling submit.
 
    The selection is a radio between the five modes plus a benchmark
    dropdown above them (the benchmark scopes the pool that random/

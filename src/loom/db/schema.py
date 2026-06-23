@@ -62,9 +62,8 @@ class TeamQuota(Base):
     fair_share_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     in_flight_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # Per-team SPDX allowlist (Plan 13 A13.1). DB default ships
-    # MIT / Apache-2.0 / BSD-3-Clause / CC-BY-4.0 so the v1 benchmark
-    # slate passes without operator action.
+    # Legacy per-team SPDX metadata. This field is retained for API/backfill
+    # compatibility; license values no longer gate task selection or submit.
     license_allowlist: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False,
         server_default=text(

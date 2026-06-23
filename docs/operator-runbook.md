@@ -1022,7 +1022,7 @@ workload shape. Halve the `for:` durations for staging.
 | `loom_worker_reclaim_total` spiking | Workers crashing or heartbeat thread blocked | Check worker memory pressure + `state_patch_error` log lines |
 | 502 from Control Plane | Postgres unreachable | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres` |
 | Trials stuck queued | No worker matches `requires_caps` | Inspect `trials.requires_caps` vs registered `workers.capabilities` |
-| Batch finishes `all_failed` with zero child trials | Batch fan-out was rejected by deterministic submission policy, such as a hard license allowlist, after preview-time checks were bypassed or state changed | Open Batch Detail or `loom eval batch show <id>` and inspect `failure_reason`, `failure_message`, and `fanout_errors`; update policy/config, use an approved notice-only benchmark mirror, or choose a compatible benchmark |
+| Batch finishes `all_failed` with zero child trials | Batch fan-out was rejected by deterministic submission policy/config checks after preview-time checks were bypassed or state changed | Open Batch Detail or `loom eval batch show <id>` and inspect `failure_reason`, `failure_message`, and `fanout_errors`; update the task config, provider/backend selection, permissions, or catalog state before retrying |
 | 429 from Gateway | Provider rate limit | Check `loom_llm_calls_total{provider,result}` panel |
 | Trajectory or artifact uploads failing | MinIO credentials wrong or runtime bucket bootstrap failed | `kubectl logs deploy/loom-worker --tail=200` for `ensure_bucket`, `trajectory_flush_failed`, or `artifact_upload_failed`; verify `mc ls loom-minio/trajectories` and `mc ls loom-minio/artifacts` |
 
@@ -1119,8 +1119,8 @@ curl -sf -H "Authorization: Bearer $TEAM_A_TOKEN" \
 ```
 
 The public API response must include at least one benchmark with
-team-license-allowed `task_count > 0`, and the New Batch page must show
-selectable benchmark choices after sign-in.
+`task_count > 0`, and the New Batch page must show selectable benchmark
+choices after sign-in.
 
 ### Checklist
 

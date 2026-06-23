@@ -36,9 +36,7 @@ def test_livecodebench_emits_io_pytest(tmp_path: Path) -> None:
 
 
 def test_livecodebench_license_is_cc_by_nc(tmp_path: Path) -> None:
-    """Spec §7: LiveCodeBench tasks must carry `CC-BY-NC-4.0` so the
-    Plan 13 license-allowlist keeps them out of the default allowlist
-    until an operator opts in for non-commercial use (audit license-bypass)."""
+    """LiveCodeBench tasks must preserve upstream `CC-BY-NC-4.0` metadata."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(
         instance_id=rec["question_id"], split="test", raw=rec,

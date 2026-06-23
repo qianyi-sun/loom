@@ -26,7 +26,6 @@ from loom.benchmark_readiness import (
 )
 from loom.db.schema import Benchmark, Task
 from loom_service.dependencies import SessionAndCtx
-from loom_service.license_policy import load_team_license_allowlist
 
 router = APIRouter()
 
@@ -44,7 +43,6 @@ def _readiness_for_benchmark(
     *,
     tasks: list[TaskAuditSource],
     registry_names: set[str],
-    license_allowlist: tuple[str, ...] | None,
 ) -> BenchmarkReadinessItem:
     return build_readiness_item(
         BenchmarkAuditSource(
@@ -57,7 +55,6 @@ def _readiness_for_benchmark(
         ),
         tasks=tasks,
         registry_names=registry_names,
-        license_allowlist=license_allowlist,
     )
 
 
@@ -89,8 +86,6 @@ def _bench_row(b: Benchmark, readiness: BenchmarkReadinessItem) -> dict[str, Any
 async def _benchmark_rows_with_readiness(
     session: AsyncSession,
     benchmarks: list[Benchmark],
-    *,
-    license_allowlist: tuple[str, ...] | None,
 ) -> list[tuple[Benchmark, BenchmarkReadinessItem]]:
     if not benchmarks:
         return []
@@ -129,7 +124,6 @@ async def _benchmark_rows_with_readiness(
                 row,
                 tasks=tasks_by_benchmark.get(row.id, []),
                 registry_names=registry_names,
-                license_allowlist=license_allowlist,
             ),
         )
         for row in benchmarks
@@ -149,16 +143,14 @@ async def list_benchmarks(
     # admin tools that drive imports).
     include_empty: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
-    s, ctx = sc
+    s, _ctx = sc
     stmt = select(Benchmark).order_by(Benchmark.display_name)
     if cursor:
         stmt = stmt.where(Benchmark.display_name > cursor)
     benchmarks = list((await s.scalars(stmt)).all())
-    license_allowlist = await load_team_license_allowlist(s, ctx.team_id)
     rows = await _benchmark_rows_with_readiness(
         s,
         benchmarks,
-        license_allowlist=license_allowlist,
     )
     if not include_empty:
         rows = [row for row in rows if row[1].readiness_state == "runnable"]
@@ -179,7 +171,7 @@ async def get_benchmark(
     benchmark_id: str,
     sc: SessionAndCtx,
 ) -> dict[str, Any]:
-    s, ctx = sc
+    s, _ctx = sc
     b = (
         await s.execute(select(Benchmark).where(Benchmark.id == benchmark_id))
     ).scalar_one_or_none()
@@ -188,11 +180,9 @@ async def get_benchmark(
             status_code=404,
             detail="benchmark not found",
         )
-    license_allowlist = await load_team_license_allowlist(s, ctx.team_id)
     rows = await _benchmark_rows_with_readiness(
         s,
         [b],
-        license_allowlist=license_allowlist,
     )
     return _bench_row(rows[0][0], rows[0][1])
 

@@ -1,14 +1,9 @@
-"""End-to-end happy path: a benchmark-imported MIT task submits cleanly
-under the Plan 13 default license allowlist (Plan 16 Task 5).
+"""End-to-end license metadata submit path.
 
-Closes the loop on the license-enforcement story: Plan 13 added the
-submit-time `tasks.license ∈ team_quotas.license_allowlist` check.
-Plan 14 wired benchmark adapters to stamp `tasks.license` via the
-adapter's `license_spdx`. This test proves the integration: importing
-HumanEval (MIT) and then POSTing /trials returns 201 (not 403),
-exercising the full path: import → DB row written with license="MIT"
-→ submit reads the license → checks against the team's allowlist
-→ accepts."""
+Benchmark adapters stamp `tasks.license` via `license_spdx`, but source license
+metadata is informational. Imported tasks submit cleanly regardless of SPDX
+value while preserving the recorded license/tags for audit surfaces.
+"""
 
 from __future__ import annotations
 
@@ -42,8 +37,7 @@ _AIME_FIXTURE = (
 
 @pytest.fixture
 def seed(postgres_url: str) -> Iterator[dict[str, object]]:
-    """Insert a team + submit-scoped token; default allowlist comes from
-    the team_quotas server_default."""
+    """Insert a team + submit-scoped token."""
     engine = create_engine(postgres_url)
     session_local = sessionmaker(engine)
     team_id = uuid4()
@@ -96,16 +90,14 @@ def app(
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
-async def test_humaneval_mit_clears_default_allowlist(
+async def test_humaneval_mit_submits_with_license_metadata(
     app,  # type: ignore[no-untyped-def]
     seed: dict[str, object],
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """HumanEval declares license_spdx="MIT"; default team_quotas
-    allowlist (`[MIT, Apache-2.0, BSD-3-Clause, CC-BY-4.0]`) accepts.
-    POST /trials returns 201."""
+    """HumanEval declares license_spdx="MIT" and still submits."""
     from loom_benchmarks.adapters import humaneval as hv
     from loom_benchmarks.base import BenchmarkInstance
 
@@ -154,7 +146,7 @@ async def test_humaneval_mit_clears_default_allowlist(
     assert r.json()["state"] == "queued"
 
 
-async def test_lcb_cc_by_nc_rejected_under_default_allowlist(
+async def test_lcb_cc_by_nc_submits_with_license_metadata(
     app,  # type: ignore[no-untyped-def]
     seed: dict[str, object],
     postgres_url: str,
@@ -162,8 +154,7 @@ async def test_lcb_cc_by_nc_rejected_under_default_allowlist(
     tmp_path: Path,
 ) -> None:
     """The Plan 15 audit fix corrected LiveCodeBench's license to
-    CC-BY-NC-4.0 (not in the default allowlist). Importing → submitting
-    must 403 with the allowlist surfaced in detail. This guards
+    CC-BY-NC-4.0. Importing → submitting must still work while guarding
     against accidental MIT-tagging regressions for LCB."""
     from loom_benchmarks.adapters import livecodebench as lcb
     from loom_benchmarks.base import BenchmarkInstance
@@ -223,21 +214,18 @@ async def test_lcb_cc_by_nc_rejected_under_default_allowlist(
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
         )
-    assert r.status_code == 403, r.text
-    assert "CC-BY-NC-4.0" in r.json()["detail"]
+    assert r.status_code == 201, r.text
+    assert r.json()["state"] == "queued"
 
 
-async def test_aime_notice_policy_clears_default_submit_allowlist(
+async def test_aime_license_policy_tag_is_metadata_only(
     app,  # type: ignore[no-untyped-def]
     seed: dict[str, object],
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """AIME keeps `proprietary-MAA` as metadata, but #274 owner decision
-    treats public AIME mirrors as notice-only for internal research launches.
-    The submit path must allow the default team without adding
-    `proprietary-MAA` to the team's hard-license allowlist."""
+    """AIME keeps `proprietary-MAA` and `notice` tags as metadata only."""
     from loom_benchmarks.adapters import aime
     from loom_benchmarks.base import BenchmarkInstance
 

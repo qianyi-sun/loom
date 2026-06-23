@@ -159,9 +159,9 @@ def _decode_cases(raw: object) -> list[dict[str, object]]:
 
 
 class LiveCodeBenchAdapter(CatalogBackedAdapter):
-    # CC-BY-NC-4.0 — NOT in the default allowlist. Operators add
-    # `CC-BY-NC-4.0` to a team's allowlist explicitly to opt in
-    # (non-commercial use). `trust_remote_code=True` set in catalog.
+    # CC-BY-NC-4.0 is preserved as upstream metadata; Loom does not use
+    # benchmark source licenses to gate research evaluation.
+    # `trust_remote_code=True` is set in the catalog.
     name = "livecodebench"
 
     def list_instances(

@@ -148,8 +148,7 @@ def test_aime_run_sh_is_self_contained_and_writes_verifier_result(
 
 
 def test_aime_license_spdx_is_proprietary_maa(tmp_path: Path) -> None:
-    """AIME tasks keep source/license metadata even though their catalog
-    execution policy is notice-only for internal research launches."""
+    """AIME tasks keep source/license policy tags as metadata."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
     converted = AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
