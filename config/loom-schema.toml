@@ -525,6 +525,11 @@ description = "Approved BYO provider egress targets as IP-or-CIDR:TCP-port entri
 python_type = "int"
 default     = 100
 
+[render_config.worker_capacity]
+python_type = "table"
+description = "Production worker Deployment capacity knobs. One worker pod handles max_concurrent trials; replicas.worker multiplies total in-cluster trial slots."
+fields      = { max_concurrent = 16, cpu_request = "500m", cpu_limit = "8", memory_request = "1Gi", memory_limit = "16Gi" }
+
 [render_config.replicas]
 python_type = "table"
 # egress_xds + egress_proxy default 0 — Phase C is not yet wired

@@ -16,9 +16,10 @@
     {% import "_env.j2" as e %}
     {{ e.env_block("control-plane", schema) }}
 -#}
-{%- macro env_block(service, schema) -%}
+{%- macro env_block(service, schema, skip_names=()) -%}
 env:
 {% for entry in schema.service_config_for(service) %}
+{% if entry.name not in skip_names %}
 {% if entry.secret is not none %}
   - name: {{ entry.env_var_for(service) }}
     valueFrom:
@@ -34,6 +35,7 @@ env:
 {% elif entry.default is not none or entry.default_per_service is not none %}
   - name: {{ entry.env_var_for(service) }}
     value: {{ entry.value_for(service) | string | tojson }}
+{% endif %}
 {% endif %}
 {% endfor %}
 {%- endmacro -%}

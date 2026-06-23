@@ -89,7 +89,67 @@ rm -f "$kh"
 
 The script does not scan a subnet. It only connects to the hosts listed
 in the hostfile and prints CPU, memory, disk, Docker status, and
-reachability back to the control node endpoints.
+open-file limits plus reachability back to the control node endpoints.
+
+For production/public-beta capacity, the hostfile should include every
+candidate worker node the operator is allowed to use. Exclude a node
+only with a recorded reason such as missing Docker, failed endpoint
+reachability, insufficient disk, or Slurm reservation policy.
+
+## Capacity Plan
+
+Convert the inventory output into an initial per-node concurrency plan:
+
+```bash
+scripts/ops/worker_pool_inventory.sh worker-hosts.txt > worker-inventory.txt
+
+scripts/ops/worker_pool_plan.py \
+  --inventory worker-inventory.txt \
+  --cpu-per-trial 2 \
+  --mem-mib-per-trial 8192 \
+  --max-per-host 96 \
+  > worker-plan.csv
+```
+
+The planner emits CSV:
+
+```text
+host,status,cpus,mem_total_mib,docker_cpus,recommended_concurrency,reason
+worker-a,include,64,262144,64,32,
+worker-b,exclude,,,,0,ssh failed
+```
+
+The heuristic is intentionally an initial setting, not a final ceiling:
+it chooses the minimum of Docker/host CPU, RAM, and `--max-per-host`.
+Operators should raise or lower the per-host value after real benchmark
+load tests show CPU, RAM, Docker cleanup, MinIO/object-store writes,
+Gateway/provider calls, and Control Plane state updates are healthy.
+
+## Slurm Launch From A Plan
+
+On Slurm-managed pools, dry-run one worker job per included plan row:
+
+```bash
+scripts/ops/worker_pool_slurm_submit.sh worker-plan.csv \
+  --env-file /secure/path/.env.remote-worker \
+  --repo-dir /opt/loom \
+  --dry-run
+```
+
+After reviewing the printed `sbatch` commands, submit:
+
+```bash
+scripts/ops/worker_pool_slurm_submit.sh worker-plan.csv \
+  --env-file /secure/path/.env.remote-worker \
+  --repo-dir /opt/loom \
+  --yes
+```
+
+The script uses `--nodelist=<host>` for each included row and exports
+the row's `recommended_concurrency` as `LOOM_WORKER_MAX_CONCURRENT`.
+It requests the row's CPU and memory values and `--exclusive` so a
+remote worker can consume the node up to the measured stable boundary.
+Keep the env file untracked and available on each worker node.
 
 ## Start A Remote Worker
 
@@ -165,7 +225,8 @@ the task dir empty — the trial then fails at agent start.
 ## Capacity Settings
 
 Per-host trial concurrency is controlled by `LOOM_WORKER_MAX_CONCURRENT`.
-The default is 5, matching `WorkerSettings.max_concurrent`.
+The remote-worker compose default is 5 for first contact, but production
+capacity should come from the inventory and capacity-plan flow above.
 
 The Worker also configures Python's default blocking-I/O executor for
 Docker, S3/MinIO, Hugging Face, and filesystem calls. Leave
@@ -218,9 +279,9 @@ Recommended rollout:
 | Stage | Per-host setting | Purpose |
 |---|---:|---|
 | Smoke | 1 | Prove one remote worker can claim and finish a trial. |
-| Conservative | 5 | Match the runtime default and validate stable shared-dev capacity. |
-| Medium | 8 | Raise only after CPU, RAM, Docker cleanup, MinIO, and provider limits look healthy. |
-| Higher | 10+ | Requires explicit load-test evidence and sandbox resource-limit follow-up. |
+| Conservative | 5 | Match the remote-worker compose default and validate stable shared-dev capacity. |
+| Planned | `worker-plan.csv` | Use every healthy node at its recommended starting concurrency. |
+| Higher | above plan | Requires explicit load-test evidence from CPU, RAM, Docker cleanup, MinIO, gateway/provider, and Control Plane state-patch health. |
 
 Do not raise concurrency only because host CPU appears idle. API-model
 evaluations can still bottleneck on provider rate limits, artifact IO,
@@ -263,17 +324,21 @@ Before treating a remote worker pool as usable:
 
 1. Inventory every candidate worker and record CPU, memory, disk, Docker,
    and endpoint reachability.
-2. Start one remote worker at `LOOM_WORKER_MAX_CONCURRENT=1`.
-3. Submit a tiny API-model + Docker-terminal evaluation and verify the
+2. Generate `worker-plan.csv`; every usable node should be `include`,
+   and every excluded node needs a reason.
+3. Start one remote worker at `LOOM_WORKER_MAX_CONCURRENT=1`.
+4. Submit a tiny API-model + Docker-terminal evaluation and verify the
    remote worker claims it.
-4. Confirm the trial reaches a terminal state and artifacts/trajectory
+5. Confirm the trial reaches a terminal state and artifacts/trajectory
    downloads work. Workers bootstrap both runtime buckets
    (`trajectories` and `artifacts`) before claiming trials; a missing
    bucket or artifact upload failure should produce a terminal failed
    trial, not a succeeded trial with missing outputs.
-5. Scale to the rest of the worker hosts at concurrency 5.
-6. Run a 25-trial batch or equivalent load test.
-7. Check there are no stuck `claimed` / `running` trials, leaked Docker
+6. Scale to the rest of the included worker hosts at the planned
+   concurrency.
+7. Run a real supported-benchmark load test sized to exceed the planned
+   slot count.
+8. Check there are no stuck `claimed` / `running` trials, leaked Docker
    containers, missing artifacts, provider rate-limit storms, or host
    swap pressure.
 

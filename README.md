@@ -257,9 +257,12 @@ Provider setup for hosted APIs and Slurm/vLLM self-hosted checkpoints:
 [`docs/provider-onboarding.md`](docs/provider-onboarding.md).
 To add extra Docker-capable hosts to a shared-dev or staging control
 node before full Kubernetes mode, see
-[`docs/remote-worker-pool.md`](docs/remote-worker-pool.md). To share
-the per-trial agent-install cache across workers via a Docker
-registry, see [`docs/operator-runbook.md#trial-cache-per-trial-agent-install`](docs/operator-runbook.md#trial-cache-per-trial-agent-install).
+[`docs/remote-worker-pool.md`](docs/remote-worker-pool.md). That runbook
+includes host inventory, capacity planning, and Slurm submission helpers
+for OLDLAB-style pools that should consume every usable worker node near
+its stable CPU/RAM/Docker limit. To share the per-trial agent-install
+cache across workers via a Docker registry, see
+[`docs/operator-runbook.md#trial-cache-per-trial-agent-install`](docs/operator-runbook.md#trial-cache-per-trial-agent-install).
 
 ---
 

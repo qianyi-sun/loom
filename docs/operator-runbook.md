@@ -342,7 +342,7 @@ knob you need.
 
 **v0.3 (PR #150, 2026-06-17) — config consolidation.** Two operator-visible breakages when upgrading from a pre-#150 cluster:
 
-1. **`worker_max_concurrent` removed from `cluster-config.toml`.** The field no longer exists on `[render_config]`. Worker concurrency is now controlled by `LOOM_WORKER_MAX_CONCURRENT` (the existing env var). If your `cluster-config.toml` set this field, delete the line — otherwise `loom cluster render` exits with `unknown keys in cluster config: ['worker_max_concurrent']`. To override the default of 5, patch the worker Deployment's env block or set the value in `config/loom-schema.toml`'s `service_config.max_concurrent` and regenerate.
+1. **`worker_max_concurrent` removed from `cluster-config.toml`.** The old top-level field no longer exists. Modern cluster render uses `[worker_capacity].max_concurrent` and `[replicas].worker` instead. If your `cluster-config.toml` set the old field, delete it — otherwise `loom cluster render` exits with `unknown keys in cluster config: ['worker_max_concurrent']`.
 
 2. **Secret keys renamed in `loom-secrets`.** Two keys changed:
    - `cp-db-url` (used by loom-service) → `svc-db-url` (loom-service now has its own DB credential slot; control-plane keeps `cp-db-url`)
@@ -1298,9 +1298,25 @@ mock provider and browser automation job.
 
 - 1 vCPU + 256 MiB per Control Plane replica handles ~200 RPS for
   PATCH/GET; bump if `state_patch_total{result="timeout"}` non-zero.
-- Each Worker process runs `LOOM_WORKER_MAX_CONCURRENT` trials
-  (default 5). Memory scales with the trajectory ring buffer + the
-  largest artifact in flight; 8 GiB limit covers most workloads.
+- Each Worker process runs `LOOM_WORKER_MAX_CONCURRENT` trials. In
+  Kubernetes render output, set this through `[worker_capacity]` in
+  `cluster-config.toml`; the default render is 3 worker replicas at 16
+  trials each. Memory scales with the trajectory ring buffer + the
+  largest artifact in flight.
+- Example higher-capacity render config:
+
+  ```toml
+  [replicas]
+  worker = 8
+
+  [worker_capacity]
+  max_concurrent = 32
+  cpu_request = "4"
+  cpu_limit = "32"
+  memory_request = "16Gi"
+  memory_limit = "128Gi"
+  ```
+
 - Each Worker process also derives `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS`
   as `max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))` when unset.
   This is the thread pool for blocking Docker, S3/MinIO, Hugging Face,
@@ -1310,9 +1326,13 @@ mock provider and browser automation job.
   `nofile=65536`; equivalent production deployments should set the same
   limit at the container runtime or node service layer before sweeps.
 - For shared-dev or staging hosts outside Kubernetes, use
-  [remote-worker-pool.md](remote-worker-pool.md). Start at concurrency
-  5 per worker host, then raise only after CPU, RAM, Docker cleanup,
-  MinIO throughput, and provider rate limits are healthy.
+  [remote-worker-pool.md](remote-worker-pool.md). For OLDLAB-style
+  production capacity, inventory every candidate node, generate
+  `worker-plan.csv`, attach every usable node unless excluded with a
+  reason, and launch with
+  `scripts/ops/worker_pool_slurm_submit.sh`. Raise per-node concurrency
+  only after CPU, RAM, Docker cleanup, MinIO throughput, Gateway/provider
+  error rate, and Control Plane state-patch health are clean.
 - Until Docker sandbox CPU/RAM limits are enforced per trial, treat
   higher worker concurrency as an operator decision backed by load-test
   evidence, not just a CPU-count formula.

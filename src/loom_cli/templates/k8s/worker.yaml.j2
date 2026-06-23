@@ -14,7 +14,9 @@ spec:
       containers:
         - name: worker
           image: loom-worker:{{ image_tag }}
-          {{ env_macros.env_block("worker", schema) | indent(10) }}
+          {{ env_macros.env_block("worker", schema, skip_names=("max_concurrent",)) | indent(10) }}
+            - name: LOOM_WORKER_MAX_CONCURRENT
+              value: {{ worker_capacity.max_concurrent | string | tojson }}
             # Subprocess agents run inside Docker sandboxes, not the worker pod.
             # They cannot resolve k8s Service DNS, so use the node-local
             # gateway-router hostPort plus Docker's host-gateway alias.
@@ -38,8 +40,12 @@ spec:
               #   (c) switch to a non-Docker driver (sysbox / kata).
               mountPath: /var/run/docker.sock
           resources:
-            requests: { cpu: 500m, memory: 1Gi }
-            limits: { cpu: 4, memory: 8Gi }
+            requests:
+              cpu: {{ worker_capacity.cpu_request | tojson }}
+              memory: {{ worker_capacity.memory_request | tojson }}
+            limits:
+              cpu: {{ worker_capacity.cpu_limit | tojson }}
+              memory: {{ worker_capacity.memory_limit | tojson }}
       volumes:
         - name: trajectories
           persistentVolumeClaim:

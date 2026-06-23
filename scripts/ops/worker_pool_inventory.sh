@@ -84,8 +84,14 @@ echo "cpus=\$(nproc 2>/dev/null || echo unknown)"
 lscpu 2>/dev/null | awk -F: '/^Model name/ {gsub(/^ +/, "", \$2); print "cpu_model=" \$2; exit}' || true
 free -m 2>/dev/null | awk '/^Mem:/ {print "mem_total_mib=" \$2 " mem_available_mib=" \$7} /^Swap:/ {print "swap_total_mib=" \$2 " swap_free_mib=" \$4}' || true
 df -h / 2>/dev/null | awk 'NR==2 {print "root_disk_size=" \$2 " root_disk_used=" \$3 " root_disk_avail=" \$4 " root_disk_use_pct=" \$5}' || true
+echo "ulimit_nofile=\$(ulimit -n 2>/dev/null || echo unknown)"
 if command -v docker >/dev/null 2>&1; then
   docker info --format 'docker_version={{.ServerVersion}} docker_cpus={{.NCPU}} docker_mem_bytes={{.MemTotal}}' 2>/dev/null || echo docker_info=failed
+  docker info --format 'docker_root_dir={{.DockerRootDir}}' 2>/dev/null || true
+  docker_root=\$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+  if [[ -n "\$docker_root" ]]; then
+    df -h "\$docker_root" 2>/dev/null | awk 'NR==2 {print "docker_disk_size=" \$2 " docker_disk_used=" \$3 " docker_disk_avail=" \$4 " docker_disk_use_pct=" \$5}' || true
+  fi
 else
   echo docker=missing
 fi

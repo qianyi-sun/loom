@@ -32,8 +32,6 @@ spec:
           value: '5.0'
         - name: LOOM_WORKER_LOG_LEVEL
           value: info
-        - name: LOOM_WORKER_MAX_CONCURRENT
-          value: '5'
         - name: LOOM_WORKER_METRICS_PORT
           value: '9090'
         - name: LOOM_WORKER_MINIO_ACCESS_KEY
@@ -87,6 +85,8 @@ spec:
           value: '0.9'
         - name: LOOM_WORKER_VLLM_TENSOR_PARALLEL_SIZE
           value: '1'
+        - name: LOOM_WORKER_MAX_CONCURRENT
+          value: '16'
         # Subprocess agents run inside Docker sandboxes, not the worker pod.
         # They cannot resolve k8s Service DNS, so use the node-local
         # gateway-router hostPort plus Docker's host-gateway alias.
@@ -102,8 +102,8 @@ spec:
             cpu: 500m
             memory: 1Gi
           limits:
-            cpu: 4
-            memory: 8Gi
+            cpu: '8'
+            memory: 16Gi
       volumes:
       - name: trajectories
         persistentVolumeClaim:

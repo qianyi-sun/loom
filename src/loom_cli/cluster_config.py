@@ -79,6 +79,14 @@ if TYPE_CHECKING:
         worker: int = 3
 
     @dataclass(frozen=True)
+    class _WorkerCapacityConfig:
+        max_concurrent: int = 16
+        cpu_request: str = "500m"
+        cpu_limit: str = "8"
+        memory_request: str = "1Gi"
+        memory_limit: str = "16Gi"
+
+    @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
         ingress_cert_manager_cluster_issuer: str = ""
@@ -92,6 +100,7 @@ if TYPE_CHECKING:
         postgres_storage_gi: int = 50
         provider_egress_allowlist: tuple[str, ...] = ()
         replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
+        worker_capacity: _WorkerCapacityConfig = field(default_factory=_WorkerCapacityConfig)
         worker_trajectory_storage_gi: int = 100
 
         def to_render_context(self) -> dict[str, Any]: ...

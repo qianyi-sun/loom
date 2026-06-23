@@ -69,6 +69,16 @@ def test_default_replicas_match_spec() -> None:
     assert cfg.replicas.worker == 3
 
 
+def test_default_worker_capacity_is_above_single_worker_baseline() -> None:
+    """Production render must not silently regress to the public-beta
+    incident shape: one worker with five execution slots.
+    """
+    cfg = ClusterConfig()
+    assert cfg.replicas.worker >= 3
+    assert cfg.worker_capacity.max_concurrent >= 16
+    assert cfg.replicas.worker * cfg.worker_capacity.max_concurrent >= 48
+
+
 def test_load_config_from_toml(tmp_path: Path) -> None:
     cfg_path = tmp_path / "cluster.toml"
     cfg_path.write_text(
@@ -94,6 +104,25 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     assert cfg.replicas.worker == 10
     # Unspecified fields keep their defaults.
     assert cfg.replicas.control_plane == 2
+
+
+def test_load_config_from_toml_accepts_worker_capacity(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text(
+        '[worker_capacity]\n'
+        'max_concurrent = 24\n'
+        'cpu_request = "2"\n'
+        'cpu_limit = "32"\n'
+        'memory_request = "8Gi"\n'
+        'memory_limit = "128Gi"\n',
+        encoding="utf-8",
+    )
+    cfg = load_cluster_config(cfg_path)
+    assert cfg.worker_capacity.max_concurrent == 24
+    assert cfg.worker_capacity.cpu_request == "2"
+    assert cfg.worker_capacity.cpu_limit == "32"
+    assert cfg.worker_capacity.memory_request == "8Gi"
+    assert cfg.worker_capacity.memory_limit == "128Gi"
 
 
 def test_load_config_rejects_deprecated_gateway_public_host(
@@ -191,6 +220,32 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     assert by_name["LOOM_WORKER_SUBPROCESS_GATEWAY_URL"]["value"] == (
         "http://host.docker.internal:30443/openai/v1"
     )
+
+
+def test_worker_manifest_renders_configured_capacity_and_resources() -> None:
+    worker_capacity_cls = type(ClusterConfig().worker_capacity)
+    cfg = ClusterConfig(
+        worker_capacity=worker_capacity_cls(
+            max_concurrent=24,
+            cpu_request="2",
+            cpu_limit="32",
+            memory_request="8Gi",
+            memory_limit="128Gi",
+        ),
+    )
+    docs = _load_docs(render_manifests(cfg))
+    worker = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+    )
+    container = worker["spec"]["template"]["spec"]["containers"][0]
+    env = [entry for entry in container["env"] if entry["name"] == "LOOM_WORKER_MAX_CONCURRENT"]
+    assert env == [{"name": "LOOM_WORKER_MAX_CONCURRENT", "value": "24"}]
+    assert container["resources"] == {
+        "requests": {"cpu": "2", "memory": "8Gi"},
+        "limits": {"cpu": "32", "memory": "128Gi"},
+    }
 
 
 def test_render_default_matches_deploy_k8s_yamls() -> None:
@@ -433,9 +488,9 @@ def test_render_custom_storage_sizes() -> None:
 
 
 def test_render_worker_max_concurrent_schema_default() -> None:
-    """LOOM_WORKER_MAX_CONCURRENT comes from the schema default (5);
-    it must appear exactly once — the template-local duplicate was
-    removed in the worker_max_concurrent dedupe fix."""
+    """LOOM_WORKER_MAX_CONCURRENT comes from render worker_capacity;
+    it must appear exactly once so Kubernetes does not depend on
+    duplicate env-var ordering."""
     docs = _load_docs(render_manifests(ClusterConfig()))
     worker = next(
         d for d in docs
@@ -446,7 +501,7 @@ def test_render_worker_max_concurrent_schema_default() -> None:
     assert len(concurrent_entries) == 1, (
         f"expected exactly 1 LOOM_WORKER_MAX_CONCURRENT entry, got {len(concurrent_entries)}"
     )
-    assert concurrent_entries[0]["value"] == "5"
+    assert concurrent_entries[0]["value"] == "16"
 
 
 def test_render_uses_strict_undefined_so_missing_var_fails_loudly(

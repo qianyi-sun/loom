@@ -28,3 +28,11 @@ web = 0
 worker = 3
 egress_xds = 0
 egress_proxy = 0
+# Production worker Deployment capacity knobs. One worker pod handles max_concurrent trials; replicas.worker multiplies total in-cluster trial slots.
+
+[worker_capacity]
+max_concurrent = 16
+cpu_request = "500m"
+cpu_limit = "8"
+memory_request = "1Gi"
+memory_limit = "16Gi"

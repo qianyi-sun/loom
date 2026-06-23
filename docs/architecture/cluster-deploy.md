@@ -450,10 +450,29 @@ Rewrap during master-key rotation bumps `provider_connections.updated_at` for ev
 
 One `loom-worker` Deployment replica runs one worker process. That
 process handles N concurrent trials via the existing asyncio Semaphore,
-gated by `LOOM_WORKER_MAX_CONCURRENT`. The default is 5, matching
-`WorkerSettings.max_concurrent`; override it in the worker Deployment
-env block for now. The old `cluster-config.toml` `worker_max_concurrent`
-field was removed during config consolidation.
+gated by `LOOM_WORKER_MAX_CONCURRENT`. In Kubernetes render output this
+comes from `[worker_capacity].max_concurrent` in `cluster-config.toml`;
+the default render is three worker replicas at 16 trials each, or 48
+in-cluster slots before remote workers are attached. The service-mode
+worker runtime default remains conservative for non-rendered local
+processes, so production operators should use cluster render config
+rather than hand-patching the Deployment env block. The old
+top-level `cluster-config.toml` `worker_max_concurrent` field remains
+removed.
+
+Example production capacity override:
+
+```toml
+[replicas]
+worker = 8
+
+[worker_capacity]
+max_concurrent = 32
+cpu_request = "4"
+cpu_limit = "32"
+memory_request = "16Gi"
+memory_limit = "128Gi"
+```
 
 Workers also size their Python blocking-I/O executor from concurrency as
 `max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))` unless
@@ -468,11 +487,14 @@ the default:
 LOOM_WORKER_MAX_CONCURRENT <= min(cpu_cores // 2, memory_gb // 8, 32)
 ```
 
-One worker process per worker host is preferred because one process owns
-docker.sock cleanly, intra-process file locks are simpler than
-cross-process flock dances, and DRF claim is per-worker-id. The worker
-capability advertisement should include the effective concurrency once
-the scheduler consumes per-worker capacity directly.
+One worker process per worker host is preferred for remote pools because
+one process owns docker.sock cleanly, intra-process file locks are
+simpler than cross-process flock dances, and DRF claim is per-worker-id.
+For OLDLAB-style pools, inventory every candidate node, attach every
+usable node unless it has a recorded exclusion reason, and tune each
+node from measured CPU, RAM, Docker cleanup, object-store, gateway, and
+control-plane pressure. Do not treat a low default or an old four-node
+QA result as the production ceiling.
 
 ## Multi-tenancy boundaries
 
