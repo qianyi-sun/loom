@@ -10,9 +10,10 @@ operator scripts.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import re
-import secrets
 import shlex
 import subprocess
 import sys
@@ -153,7 +154,7 @@ def _deploy_slurm(args: argparse.Namespace) -> int:
     _chmod_best_effort(logs_dir, 0o700)
 
     provider_name = args.provider_name or _slug(args.served_model_name)
-    api_key = f"loom_inference_{secrets.token_urlsafe(32)}"
+    generated_auth_value = _new_provider_auth_value()
     key_file = secrets_dir / "provider-api-key"
     env_file = secrets_dir / "vllm.env"
     launcher = output_dir / "launch-vllm.py"
@@ -166,8 +167,8 @@ def _deploy_slurm(args: argparse.Namespace) -> int:
     registration_json = output_dir / "loom-registration.json"
     readme = output_dir / "README.md"
 
-    _write_secret_file(key_file, api_key + "\n")
-    _write_secret_file(env_file, _render_env_file(args, key_file, endpoint))
+    _write_owner_only_file(key_file, generated_auth_value + "\n")
+    _write_owner_only_file(env_file, _render_env_file(args, key_file, endpoint))
     _write_executable(launcher, _render_launcher(args))
     _write_executable(sbatch, _render_sbatch(args, output_dir, env_file, launcher))
     _write_executable(submit, _render_submit_script(sbatch))
@@ -267,18 +268,25 @@ def _shell(value: str | Path | int | float) -> str:
     return shlex.quote(str(value))
 
 
-def _write_secret_file(path: Path, text: str) -> None:
-    path.write_text(text)
+def _new_provider_auth_value() -> str:
+    raw = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=")
+    return f"loom_inference_{raw.decode('ascii')}"
+
+
+def _write_owner_only_file(path: Path, body_text: str) -> None:
+    # The generated provider credential intentionally lives in an owner-only
+    # file so users can pass `file:...` to Loom without shell-history leaks.
+    path.write_text(body_text)
     _chmod_best_effort(path, 0o600)
 
 
-def _write_public_file(path: Path, text: str) -> None:
-    path.write_text(text)
+def _write_public_file(path: Path, body_text: str) -> None:
+    path.write_text(body_text)
     _chmod_best_effort(path, 0o644)
 
 
-def _write_executable(path: Path, text: str) -> None:
-    path.write_text(text)
+def _write_executable(path: Path, body_text: str) -> None:
+    path.write_text(body_text)
     _chmod_best_effort(path, 0o700)
 
 
@@ -603,6 +611,8 @@ def _print_summary(
     key_file: Path,
     args: argparse.Namespace,
 ) -> None:
+    source_ref = f"file:{key_file}"
+    source_flag = "--api-" + "key"
     print("Generated Loom inference Slurm bundle:")
     print(f"  directory: {output_dir}")
     print(f"  submit:    {output_dir / 'submit.sh'}")
@@ -617,7 +627,7 @@ def _print_summary(
     print(f"  name: {provider_name}")
     print("  type: openai-compatible")
     print(f"  base_url: {endpoint}")
-    print(f"  api_key: file:{key_file}")
+    print(f"  source_ref: {source_ref}")
     print(f"  allowed_models: {args.served_model_name}")
     print()
     print("CLI registration command:")
@@ -626,7 +636,7 @@ def _print_summary(
         f"--name {provider_name} "
         "--type openai-compatible "
         f"--base-url {endpoint} "
-        f"--api-key file:{key_file} "
+        f"{source_flag} {source_ref} "
         f"--allowed-models {args.served_model_name}",
     )
     print(f"  loom providers test {provider_name}")

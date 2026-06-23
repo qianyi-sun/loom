@@ -10,7 +10,8 @@ def test_slurm_deploy_generates_vllm_bundle_without_printing_secret(
     monkeypatch, tmp_path: Path, capsys,
 ) -> None:
     monkeypatch.setattr(
-        "secrets.token_urlsafe", lambda _n: "deterministic-secret",
+        "loom_cli.inference_cmd._new_provider_auth_value",
+        lambda: "loom_inference_deterministic-secret",
     )
     out_dir = tmp_path / "lux-qwen"
 
