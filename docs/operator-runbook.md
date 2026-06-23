@@ -1007,12 +1007,55 @@ separate product policy exists.
 - One canonical task fixture registered. `hello-world` is enough for the gate;
   another tiny task is fine if it produces ATIF, trajectory, and at least one
   safe artifact.
+- A ready benchmark catalog provisioned into the staging/public-beta database
+  and object store. This is release data, not test fixture data, and must not
+  be created through `scripts/seed_test_data.py`.
 - One seeded blocked artifact on the source trial, marked
   `share_status=blocked`, whose raw object body contains a fake secret such as
   `seeded-public-beta-secret`. The release evidence should prove Team B cannot
   download it and that the fake secret does not appear in API responses.
 - One private source trial or batch with a safe artifact that Team A can read
   and Team B cannot read through Run Library.
+
+### Benchmark catalog provisioning
+
+Before inviting beta users or starting manual New Batch testing, copy the
+known-good ready catalog and referenced task bundles into the target
+environment:
+
+```bash
+export LOOM_CATALOG_SOURCE_DB_URL="$SOURCE_LOOM_DB_URL"
+export LOOM_CATALOG_SOURCE_MINIO_ENDPOINT="$SOURCE_LOOM_MINIO_ENDPOINT"
+export LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY="$SOURCE_LOOM_MINIO_ACCESS_KEY"
+export LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY="$SOURCE_LOOM_MINIO_SECRET_KEY"
+
+export LOOM_DB_URL="$PUBLIC_BETA_DB_URL"
+export LOOM_MINIO_ENDPOINT="$PUBLIC_BETA_MINIO_ENDPOINT"
+export LOOM_MINIO_ACCESS_KEY="$PUBLIC_BETA_MINIO_ACCESS_KEY"
+export LOOM_MINIO_SECRET_KEY="$PUBLIC_BETA_MINIO_SECRET_KEY"
+
+loom datasets provision-public-beta-catalog \
+  --target-bucket loom-benchmarks \
+  --imported-by "release:${IMAGE_TAG:-manual}"
+```
+
+The command is idempotent. It upserts only benchmarks whose stored task rows are
+fully runnable, creates the target bucket when needed, copies missing
+`s3://...` bundle objects, skips matching target objects, and exits non-zero if
+any source task bundle prefix has no objects. A healthy run reports non-zero
+`ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`.
+
+Verify the target before continuing:
+
+```bash
+loom datasets audit --all --db-url "$LOOM_DB_URL"
+curl -sf -H "Authorization: Bearer $TEAM_A_TOKEN" \
+  "$PUBLIC_SERVER_URL/api/v1/benchmarks?limit=200"
+```
+
+The public API response must include at least one runnable benchmark with
+`task_count > 0`, and the New Batch page must show selectable benchmark choices
+after sign-in.
 
 ### Checklist
 
@@ -1131,6 +1174,9 @@ separate product policy exists.
       --private-artifact-key "$PRIVATE_ARTIFACT_KEY" \
       --clone-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
       --reuse-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
+      --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
+      --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
+      --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
       --secret-needle seeded-public-beta-secret \
       --internal-url-needle loom-minio.loom.svc.cluster.local \
       --allow-mutating-checks \
@@ -1164,12 +1210,13 @@ checklist:
   probes `/healthz` + `/metrics` on every component. Closes the
   cold-start regression gap (~15-20 min).
 - **`scripts/public_beta_smoke_gate.py`** — covers public health, logged-out SPA
-  reachability, two-team API-token auth, provider/model discovery, batch/trial
-  detail, service-proxied ATIF/trajectory downloads, My team and All teams Run
-  Library visibility, owner-team label, cross-team safe artifact download,
-  direct-route denial, clone config, reuse artifact, provenance, blocked
-  artifact denial, private artifact denial, cross-team mutation denial, and
-  response leak scanning.
+  reachability, two-team API-token auth, provider/model discovery, runnable
+  benchmark catalog presence, sampled ready benchmark bundle objects,
+  batch/trial detail, service-proxied ATIF/trajectory downloads, My team and
+  All teams Run Library visibility, owner-team label, cross-team safe artifact
+  download, direct-route denial, clone config, reuse artifact, provenance,
+  blocked artifact denial, private artifact denial, cross-team mutation denial,
+  and response leak scanning.
 
 Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a

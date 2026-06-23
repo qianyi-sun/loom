@@ -485,6 +485,9 @@ loom datasets list --json           # machine-readable output
 loom datasets show <slug>           # full detail for one adapter
 loom datasets install <slug>        # pip-install a catalog entry
 loom datasets refresh-catalog      # drop the 24h catalog HTTP cache
+loom datasets provision-public-beta-catalog
+                                    # copy ready catalog rows + S3 bundles
+                                    # into a public-beta/release target
 ```
 
 Discovery sources, in precedence order (builtin wins on slug
@@ -613,7 +616,14 @@ marked `Ready` is selectable. `Needs publish` means no runnable tasks are
 registered yet. `Needs republish` means raw task rows exist but their stored
 configs are not valid `TaskConfig` objects. Disabled rows show the API-provided
 readiness message and raw-versus-runnable counts so operators know whether to
-publish, re-register, or repair the benchmark.
+publish, republish, or repair the benchmark.
+
+For public-beta or release deployments, operators should provision the ready
+catalog with `loom datasets provision-public-beta-catalog` before inviting
+users. That command copies only runnable benchmark/task rows and their
+referenced `s3://` bundles from a known-good source environment into the target
+database/object store. It is separate from `scripts/seed_test_data.py`, which is
+only for disposable auth/run fixtures.
 
 If a benchmark is structurally runnable but a team policy rejects a
 selected task during batch fan-out, the batch becomes terminal instead of

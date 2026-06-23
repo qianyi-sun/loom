@@ -1079,7 +1079,7 @@ export default function NewBatch(): JSX.Element {
   } else if (matchedTaskCount === 0) {
     countSummary = hasTagFilter
       ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
-      : "No tasks registered for the selected benchmarks. Run `python -m loom_benchmark_tool import <benchmark>` to populate, or pick a different benchmark.";
+      : "No runnable tasks are provisioned for the selected benchmarks. Ask an admin or operator to run the deployment catalog provisioning step, or pick a different ready benchmark.";
   } else if (hasTagFilter) {
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match the current benchmark + tag filters.`;
   } else {
@@ -1197,11 +1197,10 @@ export default function NewBatch(): JSX.Element {
                 {!benchmarks.isPending &&
                 (benchmarks.data?.items.length ?? 0) === 0 ? (
                   <Help>
-                    No benchmarks have tasks imported yet. Run{" "}
-                    <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">
-                      python -m loom_benchmark_tool import &lt;benchmark&gt;
-                    </code>{" "}
-                    to populate one.
+                    No runnable benchmarks are provisioned in this
+                    environment yet. Ask an admin or operator to run the
+                    public beta catalog provisioning step from the deployment
+                    runbook, then refresh this page.
                   </Help>
                 ) : null}
               </fieldset>

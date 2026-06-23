@@ -245,6 +245,7 @@ const BATCH_RESPONSE = {
 
 function mockEndpoints(opts: {
   matchingTasks?: number;
+  noBenchmarks?: boolean;
   emptyBenchmark?: boolean;
   legacyBenchmark?: boolean;
   /**
@@ -257,44 +258,46 @@ function mockEndpoints(opts: {
   const matching = opts.matchingTasks ?? 12;
   const benchmarksResponse = {
     ...BENCHMARKS_RESPONSE,
-    items: BENCHMARKS_RESPONSE.items.map((b) =>
-      b.id === "humaneval"
-        ? {
-            ...b,
-            task_count: matching,
-            raw_task_count: matching,
-            valid_task_config_count: matching,
-            readiness_message: `${matching} runnable tasks are registered.`,
-          }
-        : opts.legacyBenchmark && b.id === "mbpp"
-          ? {
-              ...b,
-              task_count: 0,
-              raw_task_count: 3,
-              valid_task_config_count: 0,
-              invalid_task_config_count: 3,
-              readiness_state: "blocked",
-              readiness_label: "Needs republish",
-              readiness_message:
-                "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
-              selectable: false,
-              blocker_reason: "manifest_legacy_missing_task_config",
-            }
-        : opts.emptyBenchmark && b.id === "mbpp"
-          ? {
-              ...b,
-              task_count: 0,
-              raw_task_count: 0,
-              valid_task_config_count: 0,
-              invalid_task_config_count: 0,
-              readiness_state: "blocked",
-              readiness_label: "Needs publish",
-              readiness_message: "Publish/register tasks before selecting this benchmark.",
-              selectable: false,
-              blocker_reason: "manifest_missing",
-            }
-          : b,
-    ),
+    items: opts.noBenchmarks
+      ? []
+      : BENCHMARKS_RESPONSE.items.map((b) =>
+          b.id === "humaneval"
+            ? {
+                ...b,
+                task_count: matching,
+                raw_task_count: matching,
+                valid_task_config_count: matching,
+                readiness_message: `${matching} runnable tasks are registered.`,
+              }
+            : opts.legacyBenchmark && b.id === "mbpp"
+              ? {
+                  ...b,
+                  task_count: 0,
+                  raw_task_count: 3,
+                  valid_task_config_count: 0,
+                  invalid_task_config_count: 3,
+                  readiness_state: "blocked",
+                  readiness_label: "Needs republish",
+                  readiness_message:
+                    "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
+                  selectable: false,
+                  blocker_reason: "manifest_legacy_missing_task_config",
+                }
+            : opts.emptyBenchmark && b.id === "mbpp"
+              ? {
+                  ...b,
+                  task_count: 0,
+                  raw_task_count: 0,
+                  valid_task_config_count: 0,
+                  invalid_task_config_count: 0,
+                  readiness_state: "blocked",
+                  readiness_label: "Needs publish",
+                  readiness_message: "Publish/register tasks before selecting this benchmark.",
+                  selectable: false,
+                  blocker_reason: "manifest_missing",
+                }
+              : b,
+        ),
   };
   return vi
     .spyOn(globalThis, "fetch")
@@ -485,6 +488,23 @@ describe("NewBatch", () => {
       "title",
       "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
     );
+  });
+
+  it("shows deployment-facing guidance instead of an operator import command when no benchmarks are provisioned", async () => {
+    mockEndpoints({ noBenchmarks: true });
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+
+    expect(
+      await screen.findByText(/No runnable benchmarks are provisioned/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/public beta catalog provisioning/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/loom_benchmark_tool import/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/python -m loom_benchmark_tool/i),
+    ).not.toBeInTheDocument();
   });
 
   it("POSTs the minimal body (backend + single-combo) when only required fields are set", async () => {

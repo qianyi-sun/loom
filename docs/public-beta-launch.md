@@ -55,6 +55,10 @@ Attach these to the release issue or release PR:
   `loom providers test`, `loom providers models`, `loom eval batch create`,
   `loom eval batch show`, `loom eval trial show`, and
   `loom eval trial download`.
+- Benchmark catalog provisioning transcript showing
+  `loom datasets provision-public-beta-catalog` with non-zero
+  `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, plus
+  `/api/v1/benchmarks` evidence with at least one runnable entry.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
@@ -82,6 +86,9 @@ python scripts/public_beta_smoke_gate.py \
   --private-artifact-key "$PRIVATE_ARTIFACT_KEY" \
   --clone-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
   --reuse-provider-connection-id "$TEAM_B_PROVIDER_CONNECTION_ID" \
+  --catalog-minio-endpoint "$PUBLIC_BETA_MINIO_ENDPOINT" \
+  --catalog-minio-access-key "$PUBLIC_BETA_MINIO_ACCESS_KEY" \
+  --catalog-minio-secret-key "$PUBLIC_BETA_MINIO_SECRET_KEY" \
   --secret-needle seeded-public-beta-secret \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --allow-mutating-checks \
@@ -95,6 +102,8 @@ The script checks:
 - public health and logged-out SPA reachability;
 - Team A and Team B token auth;
 - provider connection and model-discovery surfaces;
+- runnable benchmark catalog presence;
+- sampled ready benchmark task bundle prefixes in object storage;
 - batch/trial detail and service-proxied ATIF/trajectory downloads;
 - Run Library My team and All teams visibility;
 - owner-team label;
@@ -115,6 +124,7 @@ Markdown and JSON output.
 The public beta launch gate passes only when:
 
 - every required manual evidence item is attached;
+- the ready benchmark catalog has been provisioned with `missing=0`;
 - `scripts/public_beta_smoke_gate.py` exits 0 with `--fail-on-skip`;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains
   seeded fake secrets or internal URLs;

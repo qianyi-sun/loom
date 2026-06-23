@@ -154,6 +154,88 @@ def test_refresh_catalog_purges_cache(
     assert "purged" in capsys.readouterr().out.lower()
 
 
+def test_provision_public_beta_catalog_invokes_provisioner(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCatalog:
+        def __init__(self, db_url: str) -> None:
+            captured.setdefault("catalogs", []).append(db_url)
+
+    class FakeObjects:
+        def __init__(self, **kwargs: object) -> None:
+            captured.setdefault("stores", []).append(kwargs)
+
+    async def fake_provision(**kwargs: object):
+        from loom_cli.public_beta_catalog import ProvisionStats
+
+        captured.update(kwargs)
+        return ProvisionStats(
+            ready_benchmarks=2,
+            ready_tasks=3,
+            source_objects=5,
+            target_objects_uploaded=1,
+            target_objects_skipped=4,
+            target_objects_missing=0,
+            bytes_uploaded=11,
+            bytes_skipped=44,
+        )
+
+    monkeypatch.setattr(
+        "loom_cli.public_beta_catalog.PostgresCatalogStore",
+        FakeCatalog,
+    )
+    monkeypatch.setattr(
+        "loom_cli.public_beta_catalog.Boto3CatalogObjectStore",
+        FakeObjects,
+    )
+    monkeypatch.setattr(
+        "loom_cli.public_beta_catalog.provision_ready_benchmark_catalog",
+        fake_provision,
+    )
+
+    rc = dispatch([
+        "provision-public-beta-catalog",
+        "--source-db-url",
+        "postgresql://source/db",
+        "--target-db-url",
+        "postgresql://target/db",
+        "--source-minio-endpoint",
+        "http://source-minio:9000",
+        "--source-minio-access-key",
+        "source-access",
+        "--source-minio-secret-key",
+        "source-secret",
+        "--target-minio-endpoint",
+        "http://target-minio:9000",
+        "--target-minio-access-key",
+        "target-access",
+        "--target-minio-secret-key",
+        "target-secret",
+        "--target-bucket",
+        "loom-benchmarks",
+        "--imported-by",
+        "release:public-beta",
+    ])
+
+    assert rc == 0
+    assert captured["catalogs"] == [
+        "postgresql://source/db",
+        "postgresql://target/db",
+    ]
+    assert captured["target_bucket"] == "loom-benchmarks"
+    assert captured["imported_by"] == "release:public-beta"
+    out = capsys.readouterr().out
+    assert "ready_benchmarks=2" in out
+    assert "ready_tasks=3" in out
+    assert "source_objects=5" in out
+    assert "uploaded=1" in out
+    assert "skipped=4" in out
+    assert "missing=0" in out
+
+
 def test_import_passes_instance_ids_to_benchmark_tool(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

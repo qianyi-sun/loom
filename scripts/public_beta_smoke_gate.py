@@ -20,6 +20,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import boto3
+from botocore.config import Config
+
 REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "http.health",
     "spa.logged_out",
@@ -27,6 +30,8 @@ REQUIRED_CHECK_IDS: tuple[str, ...] = (
     "auth.team_b_whoami",
     "providers.list",
     "providers.models",
+    "benchmarks.runnable_catalog",
+    "benchmarks.ready_bundle_objects",
     "runs.batch_detail",
     "runs.trial_detail",
     "artifacts.owner_atif_download",
@@ -353,6 +358,52 @@ def _json_models_nonempty(response: HttpResponse) -> bool:
     return False
 
 
+def _json_items(response: HttpResponse) -> list[dict[str, Any]]:
+    try:
+        body = response.json()
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(body, dict):
+        return []
+    items = body.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _parse_s3_uri(source: str | None) -> tuple[str, str] | None:
+    if source is None or not source.startswith("s3://"):
+        return None
+    rest = source[len("s3://"):]
+    if "/" not in rest:
+        return None
+    bucket, prefix = rest.split("/", 1)
+    if not bucket or not prefix:
+        return None
+    return bucket, prefix
+
+
+def _s3_prefix_has_objects(
+    *,
+    endpoint_url: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+    bucket: str,
+    prefix: str,
+) -> bool:
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+        config=Config(signature_version="s3v4"),
+    )
+    response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return bool(response.get("KeyCount", 0) or response.get("Contents"))
+
+
 def run_smoke(args: argparse.Namespace) -> SmokeReport:
     client = SmokeClient(
         args.server_url,
@@ -423,6 +474,8 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         ),
         "" if models_ok else "Refresh provider models or resolve upstream provider entitlement.",
     ))
+
+    _append_benchmark_catalog_checks(client, args, results)
 
     if args.batch_id:
         batch = client.request("GET", f"/api/v1/batches/{args.batch_id}", token=args.team_a_token)
@@ -556,6 +609,160 @@ def run_smoke(args: argparse.Namespace) -> SmokeReport:
         results=results,
         response_bytes_scanned=client.response_bytes_scanned,
     )
+
+
+def _append_benchmark_catalog_checks(
+    client: SmokeClient,
+    args: argparse.Namespace,
+    results: list[CheckResult],
+) -> None:
+    benchmarks = client.request(
+        "GET",
+        "/api/v1/benchmarks",
+        token=args.team_a_token,
+        params={"limit": "200"},
+    )
+    items = _json_items(benchmarks)
+    runnable = [
+        item for item in items
+        if int(item.get("task_count") or 0) > 0
+        and item.get("readiness_state", "runnable") == "runnable"
+    ]
+    if benchmarks.status_code == 200 and runnable:
+        total_tasks = sum(int(item.get("task_count") or 0) for item in runnable)
+        results.append(CheckResult(
+            "benchmarks.runnable_catalog",
+            "benchmarks",
+            "pass",
+            f"{len(runnable)} runnable benchmark(s) expose {total_tasks} runnable task(s).",
+        ))
+    else:
+        results.append(CheckResult(
+            "benchmarks.runnable_catalog",
+            "benchmarks",
+            "fail",
+            (
+                "No runnable benchmarks were returned by /api/v1/benchmarks."
+                if benchmarks.status_code == 200
+                else f"/api/v1/benchmarks returned HTTP {benchmarks.status_code}."
+            ),
+            (
+                "Run the public beta catalog provisioning step, then rerun "
+                "the smoke gate before manual testing."
+            ),
+        ))
+
+    missing_inputs = [
+        name for name, value in (
+            ("--catalog-minio-endpoint", args.catalog_minio_endpoint),
+            ("--catalog-minio-access-key", args.catalog_minio_access_key),
+            ("--catalog-minio-secret-key", args.catalog_minio_secret_key),
+        ) if not value
+    ]
+    if missing_inputs:
+        results.append(CheckResult(
+            "benchmarks.ready_bundle_objects",
+            "benchmarks",
+            "skip",
+            f"{', '.join(missing_inputs)} not provided.",
+            "Pass catalog object-store credentials for release smoke.",
+        ))
+        return
+    if not runnable:
+        results.append(CheckResult(
+            "benchmarks.ready_bundle_objects",
+            "benchmarks",
+            "fail",
+            "No runnable benchmark tasks were available for bundle checks.",
+            "Provision the benchmark catalog and object bundles first.",
+        ))
+        return
+
+    checked = 0
+    missing: list[str] = []
+    skipped_non_s3 = 0
+    for benchmark in runnable[: args.catalog_bundle_benchmark_limit]:
+        remaining = args.catalog_bundle_task_limit
+        cursor: str | None = None
+        while remaining > 0:
+            params = {
+                "benchmark_id": str(benchmark["id"]),
+                "limit": str(min(200, remaining)),
+            }
+            if cursor:
+                params["cursor"] = cursor
+            tasks = client.request(
+                "GET",
+                "/api/v1/tasks",
+                token=args.team_a_token,
+                params=params,
+            )
+            if tasks.status_code != 200:
+                missing.append(f"{benchmark['id']}: tasks API HTTP {tasks.status_code}")
+                break
+            try:
+                body = tasks.json()
+            except json.JSONDecodeError:
+                missing.append(f"{benchmark['id']}: tasks API returned non-JSON")
+                break
+            items = _json_items(tasks)
+            if not items:
+                break
+            for task in items:
+                parsed = _parse_s3_uri(task.get("source"))
+                if parsed is None:
+                    skipped_non_s3 += 1
+                    continue
+                bucket, prefix = parsed
+                checked += 1
+                try:
+                    exists = _s3_prefix_has_objects(
+                        endpoint_url=args.catalog_minio_endpoint,
+                        access_key=args.catalog_minio_access_key,
+                        secret_key=args.catalog_minio_secret_key,
+                        region=args.catalog_minio_region,
+                        bucket=bucket,
+                        prefix=prefix,
+                    )
+                except Exception as exc:  # pragma: no cover - exercised by live smoke
+                    missing.append(f"{task.get('id', '<unknown>')}: object check failed: {exc}")
+                    continue
+                if not exists:
+                    missing.append(f"{task.get('id', '<unknown>')}: missing {bucket}/{prefix}")
+            cursor = body.get("next_cursor") if isinstance(body, dict) else None
+            if not cursor:
+                break
+            remaining -= len(items)
+
+    if missing:
+        results.append(CheckResult(
+            "benchmarks.ready_bundle_objects",
+            "benchmarks",
+            "fail",
+            "Missing ready benchmark bundle object(s): " + "; ".join(missing[:10]),
+            (
+                "Rerun catalog provisioning and verify the target "
+                "loom-benchmarks bucket before release."
+            ),
+        ))
+        return
+    if checked == 0:
+        detail = "No s3:// task bundle sources were found in the sampled ready catalog."
+        if skipped_non_s3:
+            detail += f" Skipped {skipped_non_s3} non-S3 task source(s)."
+        results.append(CheckResult(
+            "benchmarks.ready_bundle_objects",
+            "benchmarks",
+            "pass",
+            detail,
+        ))
+        return
+    results.append(CheckResult(
+        "benchmarks.ready_bundle_objects",
+        "benchmarks",
+        "pass",
+        f"Verified {checked} sampled ready task bundle prefix(es) contain objects.",
+    ))
 
 
 def _append_artifact_checks(
@@ -810,6 +1017,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reuse-provider-model-id", default=None)
     parser.add_argument("--secret-needle", action="append", default=[])
     parser.add_argument("--internal-url-needle", action="append", default=[])
+    parser.add_argument("--catalog-minio-endpoint", default=None)
+    parser.add_argument("--catalog-minio-access-key", default=None)
+    parser.add_argument("--catalog-minio-secret-key", default=None)
+    parser.add_argument("--catalog-minio-region", default="us-east-1")
+    parser.add_argument("--catalog-bundle-benchmark-limit", type=int, default=20)
+    parser.add_argument("--catalog-bundle-task-limit", type=int, default=200)
     parser.add_argument("--max-response-scan-bytes", type=int, default=1_000_000)
     parser.add_argument("--fail-on-skip", action="store_true")
     parser.add_argument("--json-output", type=Path, default=None)

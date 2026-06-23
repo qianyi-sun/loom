@@ -28,6 +28,8 @@ def test_gate_declares_required_public_beta_checks() -> None:
         "auth.team_b_whoami",
         "providers.list",
         "providers.models",
+        "benchmarks.runnable_catalog",
+        "benchmarks.ready_bundle_objects",
         "runs.batch_detail",
         "runs.trial_detail",
         "artifacts.owner_atif_download",
@@ -155,3 +157,84 @@ def test_run_smoke_uses_parser_max_response_scan_bytes(monkeypatch) -> None:
     gate.run_smoke(args)
 
     assert observed["max_scan_bytes"] == 12345
+
+
+def test_run_smoke_fails_when_runnable_benchmark_catalog_is_empty(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/benchmarks":
+                body = b'{"items":[]}'
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "benchmarks.runnable_catalog")
+
+    assert result.status == "fail"
+    assert "no runnable benchmarks" in result.detail.lower()
+    assert "provision" in result.remediation.lower()
+
+
+def test_run_smoke_fails_when_ready_task_bundle_prefix_is_missing(monkeypatch) -> None:
+    gate = _load_gate_module()
+
+    class FakeClient:
+        def __init__(self, server_url: str, *, max_scan_bytes: int) -> None:
+            self.server_url = server_url
+            self.evidence_chunks: list[str] = []
+            self.response_bytes_scanned = 0
+
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/api/v1/models":
+                body = b'{"items":[{"provider":"openai","name":"gpt-4o-mini"}]}'
+            elif path == "/api/v1/benchmarks":
+                body = (
+                    b'{"items":[{"id":"humaneval","task_count":1,'
+                    b'"readiness_state":"runnable"}]}'
+                )
+            elif path == "/api/v1/tasks":
+                body = (
+                    b'{"items":[{"id":"humaneval/HumanEval/0",'
+                    b'"source":"s3://loom-benchmarks/humaneval/HumanEval/0/"}]}'
+                )
+            else:
+                body = b'{"items":[]}'
+            return gate.HttpResponse(status_code=200, headers={}, body=body)
+
+    monkeypatch.setattr(gate, "SmokeClient", FakeClient)
+    monkeypatch.setattr(gate, "_s3_prefix_has_objects", lambda **_kwargs: False)
+    args = gate._build_parser().parse_args([
+        "--server-url", "https://loom.example.com",
+        "--team-a-token", "loom_api_team_a",
+        "--team-b-token", "loom_api_team_b",
+        "--catalog-minio-endpoint",
+        "http://minio:9000",
+        "--catalog-minio-access-key",
+        "access",
+        "--catalog-minio-secret-key",
+        "secret",
+    ])
+
+    report = gate.run_smoke(args)
+    result = next(r for r in report.results if r.check_id == "benchmarks.ready_bundle_objects")
+
+    assert result.status == "fail"
+    assert "humaneval/HumanEval/0" in result.detail
+    assert "missing" in result.detail.lower()

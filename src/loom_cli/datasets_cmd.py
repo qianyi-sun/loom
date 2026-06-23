@@ -6,6 +6,7 @@ Subcommands:
 - install <slug>
 - refresh-catalog
 - import <slug> [--db-url --minio-* --bucket --cache-dir --limit ...]
+- provision-public-beta-catalog [--source-db-url --target-db-url --source-minio-* --target-minio-*]
 - publish-local <path> [--db-url --minio-* --bucket ...]
 - publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
 - register <slug> [--hf-org --hf-token --db-url --revision]
@@ -148,6 +149,55 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _source_env(name: str) -> str | None:
+    return (
+        os.environ.get(f"LOOM_CATALOG_SOURCE_{name}")
+        or os.environ.get(f"LOOM_SOURCE_{name}")
+    )
+
+
+def _add_provision_public_beta_catalog_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--source-db-url",
+        default=_source_env("DB_URL"),
+        help="Source Postgres URL (env: LOOM_CATALOG_SOURCE_DB_URL or LOOM_SOURCE_DB_URL).",
+    )
+    p.add_argument(
+        "--target-db-url",
+        default=os.environ.get("LOOM_DB_URL"),
+        help="Target public-beta Postgres URL (defaults to env LOOM_DB_URL).",
+    )
+    p.add_argument(
+        "--source-minio-endpoint",
+        default=_source_env("MINIO_ENDPOINT"),
+    )
+    p.add_argument(
+        "--source-minio-access-key",
+        default=_source_env("MINIO_ACCESS_KEY"),
+    )
+    p.add_argument(
+        "--source-minio-secret-key",
+        default=_source_env("MINIO_SECRET_KEY"),
+    )
+    p.add_argument(
+        "--target-minio-endpoint",
+        default=os.environ.get("LOOM_MINIO_ENDPOINT"),
+    )
+    p.add_argument(
+        "--target-minio-access-key",
+        default=os.environ.get("LOOM_MINIO_ACCESS_KEY"),
+    )
+    p.add_argument(
+        "--target-minio-secret-key",
+        default=os.environ.get("LOOM_MINIO_SECRET_KEY"),
+    )
+    p.add_argument(
+        "--target-bucket",
+        default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
+    )
+    p.add_argument("--imported-by", default="public-beta-provision")
+
+
 def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", type=Path)
     p.add_argument(
@@ -270,6 +320,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_audit_args(sub.add_parser(
         "audit",
         help="Inspect benchmark readiness from registered catalog/task rows.",
+    ))
+    _add_provision_public_beta_catalog_args(sub.add_parser(
+        "provision-public-beta-catalog",
+        help=(
+            "Copy runnable benchmark/task rows and their S3 bundles from a "
+            "source environment into public beta."
+        ),
     ))
 
     _add_validate_local_args(sub.add_parser(
@@ -581,6 +638,93 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_provision_public_beta_catalog(args: argparse.Namespace) -> int:
+    from loom_cli.public_beta_catalog import (
+        Boto3CatalogObjectStore,
+        PostgresCatalogStore,
+        provision_ready_benchmark_catalog,
+    )
+
+    missing: list[str] = []
+
+    def require_present(label: str, *, present: bool) -> None:
+        if not present:
+            missing.append(label)
+
+    require_present("--source-db-url / LOOM_CATALOG_SOURCE_DB_URL", present=bool(args.source_db_url))
+    require_present("--target-db-url / LOOM_DB_URL", present=bool(args.target_db_url))
+    require_present(
+        "--source-minio-endpoint / LOOM_CATALOG_SOURCE_MINIO_ENDPOINT",
+        present=bool(args.source_minio_endpoint),
+    )
+    require_present(
+        "--source-minio-access-key / LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY",
+        present=bool(args.source_minio_access_key),
+    )
+    require_present(
+        "--source-minio-secret-key / LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY",
+        present=bool(args.source_minio_secret_key),
+    )
+    require_present(
+        "--target-minio-endpoint / LOOM_MINIO_ENDPOINT",
+        present=bool(args.target_minio_endpoint),
+    )
+    require_present(
+        "--target-minio-access-key / LOOM_MINIO_ACCESS_KEY",
+        present=bool(args.target_minio_access_key),
+    )
+    require_present(
+        "--target-minio-secret-key / LOOM_MINIO_SECRET_KEY",
+        present=bool(args.target_minio_secret_key),
+    )
+    if missing:
+        print(
+            f"error: provision-public-beta-catalog requires: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    source_catalog = PostgresCatalogStore(args.source_db_url)
+    target_catalog = PostgresCatalogStore(args.target_db_url)
+    source_objects = Boto3CatalogObjectStore(
+        endpoint_url=args.source_minio_endpoint,
+        access_key=args.source_minio_access_key,
+        secret_key=args.source_minio_secret_key,
+    )
+    target_objects = Boto3CatalogObjectStore(
+        endpoint_url=args.target_minio_endpoint,
+        access_key=args.target_minio_access_key,
+        secret_key=args.target_minio_secret_key,
+    )
+    stats = asyncio.run(provision_ready_benchmark_catalog(
+        source_catalog=source_catalog,
+        target_catalog=target_catalog,
+        source_objects=source_objects,
+        target_objects=target_objects,
+        target_bucket=args.target_bucket,
+        imported_by=args.imported_by,
+    ))
+    print(
+        "public-beta-catalog: "
+        f"ready_benchmarks={stats.ready_benchmarks} "
+        f"ready_tasks={stats.ready_tasks} "
+        f"source_objects={stats.source_objects} "
+        f"uploaded={stats.target_objects_uploaded} "
+        f"skipped={stats.target_objects_skipped} "
+        f"missing={stats.target_objects_missing} "
+        f"bytes_uploaded={stats.bytes_uploaded} "
+        f"bytes_skipped={stats.bytes_skipped}",
+    )
+    if stats.target_objects_missing:
+        print(
+            "error: source catalog referenced task bundle prefixes with no objects; "
+            "target DB rows were not updated",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _cmd_validate_local(args: argparse.Namespace) -> int:
     from loom_cli.local_benchmark_validate import (
         LocalBenchmarkValidationError,
@@ -777,6 +921,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,
+    "provision-public-beta-catalog": _cmd_provision_public_beta_catalog,
     "validate-local": _cmd_validate_local,
     "validate": _cmd_validate_local,
     "publish-local": _cmd_publish_local,
