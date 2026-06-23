@@ -100,9 +100,14 @@ def _fetch_catalogs(
     benchmarks_body = assert_2xx(
         c.get("/api/v1/benchmarks"), action="GET /benchmarks",
     )
+    # The API exposes benchmark readiness via `readiness_state` ∈
+    # {"runnable", "degraded", "blocked", ...} and a parallel
+    # `selectable` boolean. A benchmark is matrix-usable when either
+    # signal is green; we accept both for forward compat.
     benchmarks = [
         b for b in benchmarks_body.get("items", [])
-        if b.get("ready") is True or b.get("readiness_status") == "ready"
+        if b.get("readiness_state") == "runnable"
+        or b.get("selectable") is True
     ]
     if benchmark_filter:
         benchmarks = [b for b in benchmarks if b["id"] in benchmark_filter]
@@ -143,14 +148,30 @@ def _provider_compatible(agent: dict[str, Any], provider: str) -> bool:
     return provider in supported
 
 
-def _agent_provider_family(c: httpx.Client, connection_name: str) -> str:
-    """Look up the relay's rate-card provider family, used to evaluate
-    each agent's supported_providers."""
+def _resolve_provider_connection(
+    c: httpx.Client, connection_name: str,
+) -> dict[str, Any]:
+    """List the team's provider connections and return the one with
+    matching `name`. The API only exposes get-by-UUID; this is the
+    canonical name → record lookup."""
     body = assert_2xx(
-        c.get(f"/api/v1/provider-connections/{connection_name}"),
-        action=f"GET /provider-connections/{connection_name}",
+        c.get("/api/v1/provider-connections"),
+        action="GET /provider-connections",
     )
-    return str(body.get("rate_card_provider") or body.get("type"))
+    for item in body.get("items", []):
+        if item.get("name") == connection_name:
+            return item  # type: ignore[no-any-return]
+    raise SystemExit(
+        f"--provider-connection: no connection named {connection_name!r} "
+        f"on this team. Available: "
+        f"{sorted(i['name'] for i in body.get('items', []))}",
+    )
+
+
+def _agent_provider_family(conn: dict[str, Any]) -> str:
+    """Read the relay's rate-card provider family from a resolved
+    connection record. Used to evaluate each agent's supported_providers."""
+    return str(conn.get("rate_card_provider") or conn.get("type"))
 
 
 def _build_cells_and_combinations(
@@ -233,9 +254,10 @@ def _submit_batch(
     payload = {
         "name": name,
         "task_filter": {"subset_kind": "explicit", "task_ids": task_ids},
-        # When combinations is non-empty, trial_config is ignored
-        # but the API still requires it for schema compat.
-        "trial_config": {"agent_name": "oracle", "agent_model": None},
+        # When combinations is non-empty, trial_config.agent_name /
+        # agent_model MUST be absent — each combination carries its
+        # own. Pass an empty dict; the schema requires the key.
+        "trial_config": {},
         "combinations": combinations,
         "provider_connection_id": provider_connection_id,
         "provider_model_id": provider_model_id,
@@ -244,7 +266,9 @@ def _submit_batch(
         c.post("/api/v1/batches", json=payload),
         action=f"POST /batches ({name!r})",
     )
-    return str(body["id"])
+    # POST /batches returns `batch_id` on create; GET /batches lists
+    # under `id`. Tolerate both for forward compat.
+    return str(body.get("batch_id") or body.get("id"))
 
 
 async def _wait_for_batches(
@@ -268,7 +292,11 @@ async def _wait_for_batches(
                     continue
                 body = r.json()
                 state = body.get("state")
-                if state in {"succeeded", "failed", "cancelled"}:
+                # Batch terminal states (see loom_service.batch_runner):
+                # `finished` (success/partial — see result_status) and
+                # `cancelled`. `succeeded`/`failed` apply to individual
+                # TRIALS, not batches.
+                if state in {"finished", "cancelled"}:
                     states[bid] = state
                     pending.discard(bid)
             if pending:
@@ -301,8 +329,14 @@ def _fetch_trials_for_batch(
 
 def _classify_trial(trial: dict[str, Any]) -> tuple[CellState, str | None, float | None]:
     state = trial.get("state")
-    result = trial.get("result") or {}
-    reward = result.get("aggregate_reward") if isinstance(result, dict) else None
+    # /api/v1/trials returns `aggregate_reward` at the top level.
+    # `result.aggregate_reward` is the older detail-view shape; check
+    # both for forward-compat with future SPA detail responses.
+    reward = trial.get("aggregate_reward")
+    if reward is None:
+        result = trial.get("result") or {}
+        if isinstance(result, dict):
+            reward = result.get("aggregate_reward")
     if state == "succeeded" and isinstance(reward, (int, float)):
         return "PASS_PLATFORM", None, float(reward)
     if state in {"failed", "cancelled"}:
@@ -322,11 +356,14 @@ def _classify_cells(
     trial stay STUCK with reason='no trial recorded'."""
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for trial in trials:
+        # The /api/v1/trials list shape puts agent_name at the top
+        # level. (Some older detail responses nest it under `config`;
+        # fall back to that for forward-compat.)
         cfg = trial.get("config") or {}
-        agent_name = cfg.get("agent_name")
-        # Trial's task_id is "{benchmark_id}/{task_id_within_benchmark}" or
-        # the benchmark_id itself for atomic benchmarks. We index on the
-        # benchmark_id derived from the trial.
+        agent_name = trial.get("agent_name") or cfg.get("agent_name")
+        # Trial's task_id is "{benchmark_id}/{task_id_within_benchmark}"
+        # or the benchmark_id itself for atomic benchmarks. We index
+        # on the benchmark_id derived from the trial.
         bench = trial.get("benchmark_id") or (
             (cfg.get("task_id") or trial.get("task_id") or "").split("/", 1)[0]
         )
@@ -425,13 +462,11 @@ def _matrix(args: argparse.Namespace) -> int:
             if tid:
                 task_ids_by_benchmark[benchmark["id"]] = tid
 
-        provider_family = _agent_provider_family(c, args.provider_connection)
-        # Resolve the connection id (the submission API needs the UUID).
-        conn_body = assert_2xx(
-            c.get(f"/api/v1/provider-connections/{args.provider_connection}"),
-            action="GET provider connection",
+        conn_record = _resolve_provider_connection(
+            c, args.provider_connection,
         )
-        connection_id = str(conn_body["id"])
+        provider_family = _agent_provider_family(conn_record)
+        connection_id = str(conn_record["id"])
 
         cells, combinations = _build_cells_and_combinations(
             agents=agents,

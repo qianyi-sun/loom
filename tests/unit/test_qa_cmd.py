@@ -149,6 +149,43 @@ def test_classify_trial_non_terminal_is_stuck() -> None:
     assert "running" in (reason or "")
 
 
+def test_classify_trial_reads_top_level_aggregate_reward() -> None:
+    """The real /api/v1/trials list response exposes
+    `aggregate_reward` at the TOP level, not nested under `result`.
+    The unit test that uses `result.aggregate_reward` covers the
+    detail-view fallback; this one covers the live list shape."""
+    trial = {
+        "state": "succeeded",
+        "aggregate_reward": 1.0,
+    }
+    state, _, reward = qa_cmd._classify_trial(trial)
+    assert state == "PASS_PLATFORM"
+    assert reward == 1.0
+
+
+def test_classify_cells_reads_top_level_agent_name_and_derives_benchmark() -> None:
+    """Real /api/v1/trials list shape: `agent_name` at top level,
+    no `benchmark_id` key — benchmark is derived from `task_id`'s
+    first path segment. Bug caught when running the matrix live
+    against a real cluster."""
+    cells = [
+        qa_cmd.MatrixCell(agent="oracle", benchmark="mbpp", state="PENDING"),
+    ]
+    trials = [
+        {
+            "id": "t-1",
+            "agent_name": "oracle",
+            "task_id": "mbpp/100",
+            "state": "succeeded",
+            "aggregate_reward": 1.0,
+        },
+    ]
+    qa_cmd._classify_cells(cells, trials)
+    assert cells[0].state == "PASS_PLATFORM"
+    assert cells[0].trial_id == "t-1"
+    assert cells[0].reward == 1.0
+
+
 def test_classify_trial_succeeded_without_reward_is_failure() -> None:
     """If a trial says succeeded but emitted no aggregate_reward, the
     matrix should treat that as a platform failure (verifier didn't
