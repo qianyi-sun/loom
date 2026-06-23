@@ -201,9 +201,12 @@ async def test_agents_includes_builtins_and_adapters(
     assert r.status_code == 200
     names = {a["name"] for a in r.json()["items"]}
     # Builtins.
-    assert {"oracle", "litellm", "claude-code-inbox"}.issubset(names)
+    assert {"oracle", "litellm"}.issubset(names)
     # A representative adapter from loom-launcher.
     assert "claude-code" in names
+    # The legacy "claude-code-inbox" alias was retired (was redundant
+    # with the on-demand-install claude-code adapter since #317).
+    assert "claude-code-inbox" not in names
     # Oracle should be flagged needs_model=False; everything else True.
     by_name = {a["name"]: a for a in r.json()["items"]}
     assert by_name["oracle"]["needs_model"] is False

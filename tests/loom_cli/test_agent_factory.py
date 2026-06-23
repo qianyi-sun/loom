@@ -12,7 +12,6 @@ import pytest
 from loom.agent.gateway_client import FakeLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
-from loom.agent.subprocess import SubprocessAgent
 from loom.models.types import ModelSpec
 from loom_cli.agent_factory import build_agent_factory
 
@@ -52,13 +51,3 @@ def test_unknown_agent_raises(tmp_path: Path) -> None:
         )
 
 
-def test_claude_code_inbox_routes_to_current_subprocess_adapter(tmp_path: Path) -> None:
-    factory = build_agent_factory(team_id=uuid4(), trial_id=uuid4())
-    agent = factory(
-        tmp_path,
-        FakeLLMGatewayClient(scripted=[]),
-        ModelSpec(provider="anthropic", name="claude-sonnet-4"),
-        "claude-code-inbox",
-    )
-    assert isinstance(agent, SubprocessAgent)
-    assert agent.adapter.name == "claude-code"

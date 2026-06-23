@@ -170,32 +170,13 @@ _BUILTIN: tuple[AgentEntry, ...] = (
             model_name_template="{provider}/{model_id}",
         ),
     ),
-    AgentEntry(
-        name="claude-code-inbox",
-        needs_model=True,
-        kind="builtin",
-        description=(
-            "Claude Code running in-process inside the sandbox env "
-            "container (v0.7-style in-box runtime)."
-        ),
-        supported_providers=("anthropic",),
-        supported_model_sources=("api",),
-        runtime_contract=RuntimeContract(
-            execution="builtin-in-box-cli",
-            capture="loom-trajectory-jsonl",
-            required_executables=("claude",),
-            required_packages=("@anthropic-ai/claude-code",),
-            endpoint_dialect="anthropic",
-            api_key_env="ANTHROPIC_API_KEY",
-            base_url_env="ANTHROPIC_BASE_URL",
-            model_name_template="{model_id}",
-            install_hint=(
-                "Install the Claude Code CLI in every service-mode "
-                "sandbox image before enabling this agent."
-            ),
-        ),
-    ),
 )
+# Note: `claude-code-inbox` was a separate catalog entry for the v0.7
+# "in-box" runtime that required `@anthropic-ai/claude-code` pre-baked
+# into the sandbox image. Since #317 made the `claude-code` adapter
+# install on demand, no task image actually relied on the pre-baked
+# path, and the two routed to the same SubprocessAgent code anyway.
+# Retired as redundant; use `claude-code` instead.
 
 
 # Per-adapter overrides for the auto-discovered supported sets. Adapters

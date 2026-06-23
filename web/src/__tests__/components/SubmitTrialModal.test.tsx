@@ -24,10 +24,10 @@ const AGENTS_RESPONSE = {
       supported_model_sources: [],
     },
     {
-      name: "claude-code-inbox",
+      name: "claude-code",
       needs_model: true,
-      kind: "builtin",
-      description: "Claude Code in-box runtime.",
+      kind: "adapter",
+      description: "Claude Code CLI via loom-launcher.",
       supported_providers: ["anthropic"],
       supported_model_sources: ["api"],
     },
@@ -166,7 +166,7 @@ describe("SubmitTrialModal", () => {
     await screen.findByText(/Runs solution\/solve.sh/i);
     const dropdowns = await screen.findAllByRole("combobox");
     // First combobox = Agent.
-    await user.selectOptions(dropdowns[0], "claude-code-inbox");
+    await user.selectOptions(dropdowns[0], "claude-code");
     // After the agent change, a Model combobox appears. Wait for it.
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
@@ -182,7 +182,7 @@ describe("SubmitTrialModal", () => {
     expect(call.body).toMatchObject({
       task_id: "humaneval-0",
       config: {
-        agent_name: "claude-code-inbox",
+        agent_name: "claude-code",
         agent_model: {
           provider: "anthropic",
           name: "claude-opus-4-7",
@@ -202,7 +202,7 @@ describe("SubmitTrialModal", () => {
     );
     await screen.findByText(/Runs solution\/solve.sh/i);
     const dropdowns = await screen.findAllByRole("combobox");
-    await user.selectOptions(dropdowns[0], "claude-code-inbox");
+    await user.selectOptions(dropdowns[0], "claude-code");
     // Don't pick a model; click submit.
     await user.click(screen.getByRole("button", { name: /submit trial/i }));
     expect(

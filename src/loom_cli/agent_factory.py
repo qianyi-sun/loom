@@ -77,8 +77,7 @@ def build_agent_factory(
 
             from loom.agent.subprocess import SubprocessAgent
 
-            adapter_name = "claude-code" if agent_name == "claude-code-inbox" else agent_name
-            adapter = get_adapter(adapter_name)
+            adapter = get_adapter(agent_name)
             if adapter is None:
                 raise AgentError(
                     f"unknown agent {agent_name!r} — not 'oracle'/'litellm' "

@@ -61,7 +61,7 @@ drop them."
 | **Batch** | A group of Trials submitted together. A Batch picks a task slate + a backend + one-or-more Combinations. The SPA's submit form creates one Batch + N Trials atomically. Used for cancel-all, progress aggregation, runner idempotency. | DB table (renamed from `campaigns`), API path (`/api/v1/batches`), SPA, docs |
 | **Combination** | ONE (agent, model, n_per_task) tuple within a Batch. Harbor calls this `组合` ("AgentModelCombination"). A Batch may have multiple Combinations to run the same task slate against several (agent, model) pairs in one submission. Each Combination × Task × sample produces one Trial. | DB (jsonb on `batches.combinations`), SPA, docs |
 | **Benchmark** | A collection of Tasks shipped together (e.g. `humaneval`, `mbpp`). One row in `benchmarks` table. | DB, SPA, docs |
-| **Agent** | The runtime that drives the Trial (oracle, claude-code-inbox, a `loom-launcher` adapter). | Catalog, TaskConfig.agent, Combination.agent_name |
+| **Agent** | The runtime that drives the Trial (oracle, claude-code, a `loom-launcher` adapter). | Catalog, TaskConfig.agent, Combination.agent_name |
 | **Model** | An LLM the Agent calls (anthropic/claude-opus-4-7). Catalog from rate_cards. | Catalog, Combination.agent_model |
 | **Backend** | The sandbox provider (docker / daytona / fake / future modal). Picked at submit time, applied per-Batch (Harbor scopes it the same way). | Catalog (new), Batch.backend |
 
@@ -731,13 +731,13 @@ sends this shape when more than one combination is selected:
   "combinations": [
     {
       "label": "claude-opus",
-      "agent_name": "claude-code-inbox",
+      "agent_name": "claude-code",
       "agent_model": {"provider": "anthropic", "name": "claude-opus-4-7"},
       "n_per_task": 3
     },
     {
       "label": "gpt-4o",
-      "agent_name": "claude-code-inbox",
+      "agent_name": "claude-code",
       "agent_model": {"provider": "openai", "name": "gpt-4o"},
       "n_per_task": 3
     }

@@ -51,7 +51,6 @@ OutputProjectionCallback = Callable[
 # agent_name is read from task_config.agent.name; the factory routes:
 #   "oracle"             → OracleAgent
 #   "litellm" (or model) → LiteLLMAgent
-#   "claude-code-inbox"  → ClaudeCodeAgent (v0.7 in-box; renamed per spec)
 #   <launcher adapter>   → SubprocessAgent wrapping the adapter
 AgentFactory = Callable[
     [Path, LLMGatewayClient, "ModelSpec | None", str], AgentRuntime,

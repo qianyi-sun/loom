@@ -348,16 +348,12 @@ async def _resolve_layered_trial_image(
     """Look up the agent adapter and, if it declares an install_script,
     return the cached layered image (or build it). Returns `task_image`
     unchanged for agents without an install_script (oracle, litellm,
-    in-box, or adapters that haven't migrated to #317 yet — Phase 2
-    expands coverage)."""
-    # Mirror _default_agent_factory's alias for the in-box variant.
-    adapter_name = (
-        "claude-code" if agent_name == "claude-code-inbox" else agent_name
-    )
+    or adapters that haven't declared an install_script yet)."""
     # Built-in agents (oracle, litellm) aren't in the launcher registry
     # and don't need an install step. Skip.
-    if adapter_name in {"oracle", "litellm"}:
+    if agent_name in {"oracle", "litellm"}:
         return task_image
+    adapter_name = agent_name
     try:
         from loom_launcher import get_adapter
     except ImportError:
@@ -648,14 +644,11 @@ def _default_agent_factory(
     """Build the agent factory used by LocalTrialRunner. Routes by
     `agent_name` (read from `task_config.agent.name`):
 
-    - "oracle"            → OracleAgent (solution/solve.sh baseline)
-    - "litellm"           → LiteLLMAgent (v0.7 tool-loop runtime)
-    - "claude-code-inbox" → v0.7 ClaudeCodeAgent (in-box runtime, kept
-      for backwards compat under the renamed name; the new subprocess
-      "claude-code" adapter lives in loom-launcher)
-    - anything else       → SubprocessAgent wrapping the loom-launcher
-      adapter of that name. Raises ValueError if the name is unknown
-      (i.e. no v0.7 runtime and no registered adapter).
+    - "oracle"      → OracleAgent (solution/solve.sh baseline)
+    - "litellm"     → LiteLLMAgent (v0.7 tool-loop runtime)
+    - anything else → SubprocessAgent wrapping the loom-launcher adapter
+      of that name. Raises AgentError if the name is unknown (i.e. no
+      v0.7 runtime and no registered adapter).
     """
 
     def make(
@@ -690,8 +683,7 @@ def _default_agent_factory(
 
             from loom.agent.subprocess import SubprocessAgent
 
-            adapter_name = "claude-code" if agent_name == "claude-code-inbox" else agent_name
-            adapter = get_adapter(adapter_name)
+            adapter = get_adapter(agent_name)
             if adapter is None:
                 # Surface as AgentError so Trial.run() classifies it as
                 # AGENT_ERROR and the trial fails cleanly instead of

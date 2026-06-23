@@ -36,7 +36,7 @@ const AGENTS_RESPONSE = {
       supported_model_sources: ["api", "local-server", "hf"],
     },
     {
-      name: "claude-code-inbox",
+      name: "claude-code",
       needs_model: true,
       kind: "builtin",
       description: "Claude Code in-box runtime.",

@@ -98,18 +98,22 @@ def test_local_server_field_only_with_local_source() -> None:
     assert "local_server" in err
 
 
-def test_claude_code_inbox_rejects_openai() -> None:
+def test_claude_code_rejects_openai() -> None:
+    """claude-code (the loom-launcher adapter) is bound to anthropic.
+    Equivalent compatibility coverage previously lived under
+    `test_claude_code_inbox_rejects_openai` — that catalog entry was
+    retired (the inbox name was a redundant alias for the same code)."""
     err = validate_agent_model_compat(
-        "claude-code-inbox",
+        "claude-code",
         ModelSpec(provider="openai", name="gpt-4o"),
     )
     assert err is not None
     assert "anthropic" in err
 
 
-def test_claude_code_inbox_rejects_hf_source() -> None:
+def test_claude_code_rejects_hf_source() -> None:
     err = validate_agent_model_compat(
-        "claude-code-inbox",
+        "claude-code",
         ModelSpec(
             provider="anthropic",
             name="claude-opus-4",
@@ -151,7 +155,6 @@ def test_catalog_entries_include_service_mode_runtime_contract() -> None:
     displayed = {
         "oracle",
         "litellm",
-        "claude-code-inbox",
         "aider",
         "claude-code",
         "codex",

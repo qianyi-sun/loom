@@ -528,14 +528,14 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
     ) -> bool:
         return True
 
-    # Task says oracle/None; TrialConfig says claude-code-inbox/claude-opus-4-7
+    # Task says oracle/None; TrialConfig says claude-code/claude-opus-4-7
     # — the factory MUST see the TrialConfig values, not the task's.
     runner = LocalTrialRunner(
         trial_id=uuid4(), team_id=uuid4(),
         task_config=_task_config(), task_checksum="0" * 64,
         task_dir=hello_task,
         trial_config=stub_trial_config(
-            agent_name="claude-code-inbox",
+            agent_name="claude-code",
             agent_model=explicit_model,
         ),
         driver_factory=_driver_factory(handler),
@@ -547,5 +547,5 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
         state_patch_callback=noop_patch,
     )
     await runner.run()
-    assert captured["name"] == "claude-code-inbox"
+    assert captured["name"] == "claude-code"
     assert captured["model"] == explicit_model
