@@ -40,7 +40,12 @@ def test_convert_instance_writes_complete_fixture(tmp_path: Path) -> None:
     assert len(converted.checksum) == 64
     assert (out / "task.toml").exists()
     assert (out / "instruction.md").exists()
-    assert (out / "solution" / "solution.py").exists()
+    # Upstream reference at `_reference.py`; `solution.py` is a stub
+    # (raises NotImplementedError). Oracle's solve.sh copies the
+    # reference; other agents must overwrite the stub.
+    assert (out / "solution" / "_reference.py").exists()
+    stub = (out / "solution" / "solution.py").read_text()
+    assert "NotImplementedError" in stub
     solve_sh = out / "solution" / "solve.sh"
     assert solve_sh.exists()
     assert solve_sh.stat().st_mode & 0o111
@@ -59,8 +64,10 @@ def test_convert_instance_writes_complete_fixture(tmp_path: Path) -> None:
     assert cfg.agent.name == "oracle"
 
 
-def test_convert_instance_solution_runs(tmp_path: Path) -> None:
-    """The canonical solution + upstream tests must pass under pytest."""
+def test_convert_instance_solution_runs_after_oracle_copy(tmp_path: Path) -> None:
+    """End-to-end: after oracle's solve.sh runs (copy _reference →
+    solution.py), pytest must pass. Proves the reference is correct
+    and the oracle copy mechanism wires up properly."""
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(
         instance_id=rec["task_id"],
@@ -72,9 +79,11 @@ def test_convert_instance_solution_runs(tmp_path: Path) -> None:
     out.mkdir()
     adapter.convert_instance(inst, out_dir=out)
 
-    # Run pytest in a subprocess so sys.modules state doesn't leak into
-    # the outer test runner. Working dir is the converted task dir so
-    # `from solution import ...` resolves from the local solution/.
+    copy_result = subprocess.run(
+        ["bash", "solution/solve.sh"],
+        cwd=out, capture_output=True, text=True,
+    )
+    assert copy_result.returncode == 0, copy_result.stderr
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "-q"],
         cwd=out,
@@ -82,6 +91,29 @@ def test_convert_instance_solution_runs(tmp_path: Path) -> None:
         text=True,
     )
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+
+def test_convert_instance_pytest_fails_without_oracle_copy(tmp_path: Path) -> None:
+    """Stub solution.py must cause pytest to FAIL — guards #388
+    (false positives when bundle ships the reference solution)."""
+    rec = json.loads(FIXTURE.read_text())[0]
+    inst = BenchmarkInstance(
+        instance_id=rec["task_id"],
+        split="test",
+        raw=rec,
+    )
+    adapter = HumanEvalAdapter()
+    out = tmp_path / "HumanEval__0_stub"
+    out.mkdir()
+    adapter.convert_instance(inst, out_dir=out)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "-q"],
+        cwd=out, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, (
+        f"pytest passed against the stub — #388 regression "
+        f"(stdout={result.stdout})"
+    )
 
 
 def test_checksum_deterministic(tmp_path: Path) -> None:

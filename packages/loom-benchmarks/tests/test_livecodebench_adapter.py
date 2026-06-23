@@ -56,6 +56,13 @@ def test_livecodebench_solution_passes_subprocess_run(tmp_path: Path) -> None:
         instance_id=rec["question_id"], split="test", raw=rec,
     )
     LiveCodeBenchAdapter().convert_instance(inst, out_dir=tmp_path)
+    # Simulate oracle agent: solve.sh copies _reference.py over the
+    # stub solution.py. Without this, the stub exits rc=1 and pytest
+    # fails — that's the desired #388 guard (no silent free passes).
+    subprocess.run(
+        ["bash", "solution/solve.sh"],
+        cwd=tmp_path, check=True,
+    )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "-q"],
         cwd=tmp_path, capture_output=True, text=True,
@@ -115,6 +122,11 @@ def test_livecodebench_functional_cases_call_solution_method(tmp_path: Path) -> 
     )
     LiveCodeBenchAdapter().convert_instance(inst, out_dir=tmp_path)
 
+    # Simulate oracle: solve.sh copies _reference.py over the stub.
+    subprocess.run(
+        ["bash", "solution/solve.sh"],
+        cwd=tmp_path, check=True,
+    )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "-q"],
         cwd=tmp_path,
@@ -155,6 +167,11 @@ def test_livecodebench_functional_cases_support_multiline_args(
     )
     LiveCodeBenchAdapter().convert_instance(inst, out_dir=tmp_path)
 
+    # Simulate oracle: solve.sh copies _reference.py over the stub.
+    subprocess.run(
+        ["bash", "solution/solve.sh"],
+        cwd=tmp_path, check=True,
+    )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "-q"],
         cwd=tmp_path,

@@ -149,6 +149,88 @@ def test_classify_trial_non_terminal_is_stuck() -> None:
     assert "running" in (reason or "")
 
 
+def test_classify_trial_zero_cost_pass_with_needs_model_is_suspect() -> None:
+    """#388: a model-using agent that "succeeded" but spent $0 is
+    almost certainly passing on a pre-shipped reference solution
+    (the bundle ships the answer; the verifier passes regardless
+    of agent contribution). Re-classify as SUSPECT_PASS."""
+    trial = {
+        "state": "succeeded",
+        "aggregate_reward": 1.0,
+        "cost_usd": 0.0,
+    }
+    state, reason, reward = qa_cmd._classify_trial(
+        trial, agent_needs_model=True,
+    )
+    assert state == "SUSPECT_PASS"
+    assert "pre-shipped reference solution" in (reason or "")
+    assert reward == 1.0
+
+
+def test_classify_trial_zero_cost_pass_without_needs_model_is_real_pass() -> None:
+    """Oracle (needs_model=False) legitimately passes with $0 cost
+    because it doesn't call the LLM at all. Stay PASS_PLATFORM."""
+    trial = {
+        "state": "succeeded",
+        "aggregate_reward": 1.0,
+        "cost_usd": 0.0,
+    }
+    state, reason, reward = qa_cmd._classify_trial(
+        trial, agent_needs_model=False,
+    )
+    assert state == "PASS_PLATFORM"
+    assert reason is None
+    assert reward == 1.0
+
+
+def test_classify_trial_nonzero_cost_pass_is_real_pass() -> None:
+    """Model-using agent that spent > $0 → genuine PASS, not SUSPECT."""
+    trial = {
+        "state": "succeeded",
+        "aggregate_reward": 1.0,
+        "cost_usd": 0.0042,
+    }
+    state, reason, _ = qa_cmd._classify_trial(
+        trial, agent_needs_model=True,
+    )
+    assert state == "PASS_PLATFORM"
+    assert reason is None
+
+
+def test_classify_cells_propagates_needs_model_and_captures_cost() -> None:
+    cells = [
+        qa_cmd.MatrixCell(agent="aider", benchmark="mbpp", state="PENDING"),
+        qa_cmd.MatrixCell(agent="oracle", benchmark="mbpp", state="PENDING"),
+    ]
+    trials = [
+        {
+            "id": "t-aider",
+            "agent_name": "aider",
+            "task_id": "mbpp/100",
+            "state": "succeeded",
+            "aggregate_reward": 1.0,
+            "cost_usd": 0.0,
+        },
+        {
+            "id": "t-oracle",
+            "agent_name": "oracle",
+            "task_id": "mbpp/100",
+            "state": "succeeded",
+            "aggregate_reward": 1.0,
+            "cost_usd": 0.0,
+        },
+    ]
+    qa_cmd._classify_cells(
+        cells, trials, agents_needing_model={"aider"},
+    )
+    # aider needs model + $0 cost = SUSPECT
+    assert cells[0].state == "SUSPECT_PASS"
+    assert cells[0].cost_usd == 0.0
+    # oracle doesn't need a model = legitimate PASS
+    assert cells[1].state == "PASS_PLATFORM"
+    assert cells[1].cost_usd == 0.0
+
+
 def test_classify_trial_oracle_solve_sh_missing_is_skipped() -> None:
     """OracleAgent fails when the task bundle has no `solution/solve.sh`.
     That's a declared (agent, benchmark) capability mismatch, not a

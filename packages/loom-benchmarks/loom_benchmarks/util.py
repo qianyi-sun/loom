@@ -84,19 +84,65 @@ def structured_verifier_script(script_body: str, *, out_dir: Path) -> Path:
     return run_sh
 
 
-def oracle_noop_solve_script(*, solution_dir: Path) -> Path:
-    """Write the OracleAgent contract script for pre-seeded solutions.
+_STUB_SOLUTION_BODY = '''"""Stub solution module — agents must overwrite this file.
 
-    Code benchmarks such as HumanEval and MBPP ship a canonical
-    `solution/solution.py` plus pytest tests. In that layout the
-    oracle does not need to mutate the workspace before verification;
-    it only needs a successful `solution/solve.sh` so service-mode
-    oracle smoke runs exercise the same Agent contract as hand-authored
-    tasks.
+Code-task bundles (HumanEval, MBPP, LiveCodeBench, ...) ship the
+canonical upstream solution at `solution/_reference.py` and this
+stub at `solution/solution.py`. The pytest verifier imports from
+`solution.solution`, so any attempt to run the tests against this
+stub fails loudly with NotImplementedError instead of silently
+passing on a pre-shipped answer.
+
+- Non-oracle agents: must overwrite `solution.py` with their own
+  attempt (the file the pytest tests import from).
+- OracleAgent: `solve.sh` (written by `oracle_copy_reference_solve_script`)
+  copies `_reference.py` over `solution.py` before the verifier runs,
+  so oracle smoke trials still pass.
+"""
+
+def __getattr__(name: str):
+    raise NotImplementedError(
+        f"solution.solution.{name!r} not implemented — the agent must "
+        f"replace this file with a real solution. Oracle agents do "
+        f"this via solve.sh, which copies _reference.py."
+    )
+'''
+
+
+def write_stub_solution_module(*, solution_dir: Path) -> Path:
+    """Write the stub `solution/solution.py` next to a frozen
+    `solution/_reference.py`. See `_STUB_SOLUTION_BODY` for the
+    runtime contract."""
+    solution_dir.mkdir(parents=True, exist_ok=True)
+    stub = solution_dir / "solution.py"
+    stub.write_text(_STUB_SOLUTION_BODY)
+    return stub
+
+
+def oracle_copy_reference_solve_script(
+    *,
+    solution_dir: Path,
+    reference: str = "_reference.py",
+    target: str = "solution.py",
+) -> Path:
+    """Write `solve.sh` that copies the bundled reference solution
+    over the agent-editable target.
+
+    For code-task bundles where the upstream reference is stored at
+    `solution/_reference.py` and the agent-editable file is
+    `solution/solution.py`. OracleAgent shells out to this script
+    before the verifier runs, so oracle smoke still validates the
+    full pipeline (without acting as a free pass for other agents
+    that may not have written a real solution).
     """
     solution_dir.mkdir(parents=True, exist_ok=True)
     solve_sh = solution_dir / "solve.sh"
-    solve_sh.write_text("#!/bin/sh\nset -eu\nexit 0\n")
+    solve_sh.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'cd "$(dirname "$0")"\n'
+        f"cp -f {reference} {target}\n",
+    )
     solve_sh.chmod(0o755)
     return solve_sh
 

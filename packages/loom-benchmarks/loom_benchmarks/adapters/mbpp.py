@@ -21,10 +21,11 @@ from loom_benchmarks.base import (
     ConvertedTask,
 )
 from loom_benchmarks.util import (
-    oracle_noop_solve_script,
+    oracle_copy_reference_solve_script,
     pytest_from_test_strings,
     sha256_of_dir,
     toml_string,
+    write_stub_solution_module,
 )
 
 
@@ -74,9 +75,15 @@ class MBPPAdapter(CatalogBackedAdapter):
 
         sol_dir = out_dir / "solution"
         sol_dir.mkdir(parents=True, exist_ok=True)
+        # Upstream reference goes to `_reference.py`; the agent-editable
+        # working file `solution.py` is a stub that raises on import.
+        # OracleAgent's solve.sh copies _reference → solution at trial
+        # start (so oracle smoke passes); other agents must overwrite
+        # solution.py themselves.
         body = str(setup) + "\n" + str(r["code"])
-        (sol_dir / "solution.py").write_text(body)
-        oracle_noop_solve_script(solution_dir=sol_dir)
+        (sol_dir / "_reference.py").write_text(body)
+        write_stub_solution_module(solution_dir=sol_dir)
+        oracle_copy_reference_solve_script(solution_dir=sol_dir)
         (sol_dir / "__init__.py").write_text(
             "from solution.solution import *  # noqa: F401,F403\n",
         )

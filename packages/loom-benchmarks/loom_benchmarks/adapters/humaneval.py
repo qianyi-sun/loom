@@ -34,9 +34,10 @@ from loom_benchmarks.base import (
     ConvertedTask,
 )
 from loom_benchmarks.util import (
-    oracle_noop_solve_script,
+    oracle_copy_reference_solve_script,
     sha256_of_dir,
     toml_string,
+    write_stub_solution_module,
 )
 
 
@@ -86,11 +87,16 @@ class HumanEvalAdapter(CatalogBackedAdapter):
             f"```python\n{prompt}```\n",
         )
 
-        # solution/ — prompt + canonical body, importable from tests/.
+        # Upstream reference goes to `_reference.py`; agent-editable
+        # working file `solution.py` is a stub that raises NotImplementedError
+        # on import. OracleAgent's solve.sh copies _reference → solution
+        # at trial start; other agents must overwrite solution.py
+        # themselves (the file tests import from).
         sol_dir = out_dir / "solution"
         sol_dir.mkdir(parents=True, exist_ok=True)
-        (sol_dir / "solution.py").write_text(prompt + canonical)
-        oracle_noop_solve_script(solution_dir=sol_dir)
+        (sol_dir / "_reference.py").write_text(prompt + canonical)
+        write_stub_solution_module(solution_dir=sol_dir)
+        oracle_copy_reference_solve_script(solution_dir=sol_dir)
         (sol_dir / "__init__.py").write_text(
             f"from solution.solution import {entry_point}\n",
         )

@@ -44,7 +44,8 @@ from loom_cli.server_client import (
 )
 
 CellState = Literal[
-    "PASS_PLATFORM", "FAIL_PLATFORM", "SKIPPED", "STUCK", "PENDING",
+    "PASS_PLATFORM", "FAIL_PLATFORM", "SUSPECT_PASS",
+    "SKIPPED", "STUCK", "PENDING",
 ]
 
 
@@ -57,6 +58,7 @@ class MatrixCell:
     reward: float | None = None
     trial_id: str | None = None
     failure_reason: str | None = None
+    cost_usd: float | None = None
 
 
 @dataclass
@@ -344,7 +346,9 @@ def _is_capability_mismatch(failure_message: str) -> bool:
     return False
 
 
-def _classify_trial(trial: dict[str, Any]) -> tuple[CellState, str | None, float | None]:
+def _classify_trial(
+    trial: dict[str, Any], *, agent_needs_model: bool = False,
+) -> tuple[CellState, str | None, float | None]:
     state = trial.get("state")
     # /api/v1/trials returns `aggregate_reward` at the top level.
     # `result.aggregate_reward` is the older detail-view shape; check
@@ -355,6 +359,28 @@ def _classify_trial(trial: dict[str, Any]) -> tuple[CellState, str | None, float
         if isinstance(result, dict):
             reward = result.get("aggregate_reward")
     if state == "succeeded" and isinstance(reward, (int, float)):
+        # SUSPECT_PASS guard (#388): a model-using agent that
+        # "succeeded" without making any LLM call is almost certainly
+        # passing on a pre-existing reference solution shipped with
+        # the task bundle, not on its own work. mbpp does this today;
+        # other benchmarks may too. Using cost_usd as a proxy for
+        # "did any LLM call happen" — TODO swap for `total_tokens` /
+        # `llm_calls_count` once the trial API exposes either (the
+        # underlying llm_calls table records tokens per call, but the
+        # /trials list endpoint only surfaces cost_usd today).
+        cost = trial.get("cost_usd")
+        if (
+            agent_needs_model
+            and isinstance(cost, (int, float))
+            and cost == 0
+        ):
+            return (
+                "SUSPECT_PASS",
+                "model-using agent succeeded with $0 cost — likely "
+                "passing on a pre-shipped reference solution; verify "
+                "before trusting (see #388)",
+                float(reward),
+            )
         return "PASS_PLATFORM", None, float(reward)
     if state in {"failed", "cancelled"}:
         fr = trial.get("failure_reason") or state
@@ -372,10 +398,18 @@ def _classify_trial(trial: dict[str, Any]) -> tuple[CellState, str | None, float
 def _classify_cells(
     cells: list[MatrixCell],
     trials: list[dict[str, Any]],
+    *,
+    agents_needing_model: set[str] | None = None,
 ) -> None:
     """Mutate `cells` in place. Match each trial back to its (agent, task)
     via the trial's config + task metadata. Cells without a matched
-    trial stay STUCK with reason='no trial recorded'."""
+    trial stay STUCK with reason='no trial recorded'.
+
+    `agents_needing_model` is the set of agent slugs whose runs are
+    expected to make at least one LLM call. Used by the SUSPECT_PASS
+    guard to flag $0-cost "successes" by agents that should have
+    spent something."""
+    needs_model = agents_needing_model or set()
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for trial in trials:
         # The /api/v1/trials list shape puts agent_name at the top
@@ -401,7 +435,11 @@ def _classify_cells(
             cell.reason = "no trial recorded for this cell"
             continue
         cell.trial_id = str(matched.get("id") or "")
-        state, reason, reward = _classify_trial(matched)
+        cost = matched.get("cost_usd")
+        cell.cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+        state, reason, reward = _classify_trial(
+            matched, agent_needs_model=cell.agent in needs_model,
+        )
         cell.state = state
         if reason is not None:
             cell.reason = reason
@@ -427,20 +465,30 @@ def _render_markdown(result: MatrixResult) -> str:
     for state, n in sorted(counts.items()):
         lines.append(f"- {state}: {n}")
     lines.append("")
-    lines.append("## Cells (failures + skips first)\n")
-    lines.append("| Agent | Benchmark | State | Reward | Reason | Trial |")
-    lines.append("|---|---|---|---|---|---|")
-    sort_key = {"FAIL_PLATFORM": 0, "STUCK": 1, "SKIPPED": 2, "PASS_PLATFORM": 3, "PENDING": 4}
+    lines.append("## Cells (failures + suspect-passes + skips first)\n")
+    lines.append(
+        "| Agent | Benchmark | State | Reward | Cost USD | Reason | Trial |",
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    sort_key = {
+        "FAIL_PLATFORM": 0,
+        "STUCK": 1,
+        "SUSPECT_PASS": 2,
+        "SKIPPED": 3,
+        "PASS_PLATFORM": 4,
+        "PENDING": 5,
+    }
     for cell in sorted(
         result.cells,
         key=lambda c: (sort_key.get(c.state, 9), c.agent, c.benchmark),
     ):
         reward = "" if cell.reward is None else f"{cell.reward:.3f}"
+        cost = "" if cell.cost_usd is None else f"{cell.cost_usd:.4f}"
         reason = (cell.reason or "").replace("|", "\\|")[:120]
         trial = cell.trial_id or ""
         lines.append(
             f"| {cell.agent} | {cell.benchmark} | {cell.state} | "
-            f"{reward} | {reason} | {trial} |",
+            f"{reward} | {cost} | {reason} | {trial} |",
         )
     lines.append("")
     return "\n".join(lines)
@@ -532,7 +580,12 @@ def _matrix(args: argparse.Namespace) -> int:
             trials: list[dict[str, Any]] = []
             for bid in result.batch_ids:
                 trials.extend(_fetch_trials_for_batch(c, bid))
-            _classify_cells(cells, trials)
+            needs_model = {
+                a["name"] for a in agents if a.get("needs_model")
+            }
+            _classify_cells(
+                cells, trials, agents_needing_model=needs_model,
+            )
 
     result.finished_at = datetime.now(UTC).isoformat()
 

@@ -23,7 +23,20 @@ from loom_benchmarks.base import (
     CatalogBackedAdapter,
     ConvertedTask,
 )
-from loom_benchmarks.util import sha256_of_dir, toml_string
+from loom_benchmarks.util import (
+    oracle_copy_reference_solve_script,
+    sha256_of_dir,
+    toml_string,
+)
+
+_LIVECODEBENCH_STUB_SCRIPT = (
+    "import sys\n"
+    "sys.stderr.write(\n"
+    "    'solution.py not implemented; the agent must overwrite this "
+    "file with a real solution.\\n'\n"
+    ")\n"
+    "sys.exit(1)\n"
+)
 
 
 def _stdin_pytest_case(idx: int, inp: str, expected: str) -> str:
@@ -187,9 +200,24 @@ class LiveCodeBenchAdapter(CatalogBackedAdapter):
 
         sol_dir = out_dir / "solution"
         sol_dir.mkdir(parents=True, exist_ok=True)
-        (sol_dir / "solution.py").write_text(
-            str(r.get("code") or r.get("starter_code", "")),
-        )
+        # Two upstream shapes:
+        # 1) `code` present → reference solution. Ship it as
+        #    `_reference.py` (frozen); `solution.py` is a stub script
+        #    that exits non-zero so the pytest subprocess fails unless
+        #    the agent overwrites it. Oracle's solve.sh copies the
+        #    reference over the stub at trial start.
+        # 2) only `starter_code` → no canonical answer to ship as a
+        #    silent free pass; the starter goes into `solution.py`
+        #    directly so the agent has a function signature to extend.
+        reference = r.get("code")
+        if reference:
+            (sol_dir / "_reference.py").write_text(str(reference))
+            (sol_dir / "solution.py").write_text(_LIVECODEBENCH_STUB_SCRIPT)
+            oracle_copy_reference_solve_script(solution_dir=sol_dir)
+        else:
+            (sol_dir / "solution.py").write_text(
+                str(r.get("starter_code", "")),
+            )
 
         tests_dir = out_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
