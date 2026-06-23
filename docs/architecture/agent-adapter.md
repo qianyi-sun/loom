@@ -112,7 +112,11 @@ import time. `loom_cli/__init__.py` eager-imports
 2. Calls `driver.exec_streaming(adapter.build_invocation(...))` to
    launch
 3. Drains `adapter.capture_events(...)` into the trajectory writer
-4. On step end, kills the subprocess via the ExecHandle
+4. Waits for the subprocess exit code and surfaces non-zero exits as
+   `AgentError`
+5. If the step is cancelled or event capture fails before the process
+   exits, best-effort kills the streaming exec handle so a timed-out
+   adapter does not keep running in the sandbox
 
 The adapter package supplies metadata, argv construction, and capture
 logic. CLI installation into the trial sandbox is handled at trial

@@ -206,45 +206,58 @@ class SubprocessAgent:
         event_seq = 0
         useful_events = 0
         capture_warning: dict[str, object] | None = None
-        async for event in self.adapter.capture_events(
-            exec_handle=launcher_handle,
-            step_id=step_id,
-            trial_id=self.trial_id,
-        ):
-            # The launcher emits TrajectoryEventLike (dict-like); the
-            # trajectory writer accepts dicts via .write_raw_dict (added
-            # by Plan 11 task 4) or pre-validates against the event union.
-            # For v1 we use write_raw_dict to stay decoupled.
-            payload = event.model_dump()
-            # #321: capture helpers emit a synthetic terminal event
-            # `{"kind": "stream_capture_warning", ...}` when they
-            # silently dropped malformed lines. Hold onto the last one
-            # so we can include it in the AgentError when the process
-            # finishes without any usable events.
-            if payload.get("kind") == "stream_capture_warning":
-                capture_warning = payload
-            if _is_complete_loom_event_payload(payload):
-                await trajectory.write_raw_dict(payload)
-                useful_events += 1
-            else:
-                await trajectory.append(
-                    AgentThoughtEvent(
-                        emitted_at=datetime.now(UTC),
-                        trial_id=self.trial_id,
-                        step_id=step_id,
-                        seq=event_seq,
-                        content=_adapter_payload_to_content(payload),
-                    )
-                )
-                event_seq += 1
-                # Plain AgentThoughtEvents are "useful" too (claude-code,
-                # codex, etc. fall through to this branch). Only the
-                # synthetic stream_capture_warning is excluded.
-                if payload.get("kind") != "stream_capture_warning":
+        process_finished = False
+        try:
+            async for event in self.adapter.capture_events(
+                exec_handle=launcher_handle,
+                step_id=step_id,
+                trial_id=self.trial_id,
+            ):
+                # The launcher emits TrajectoryEventLike (dict-like); the
+                # trajectory writer accepts dicts via .write_raw_dict (added
+                # by Plan 11 task 4) or pre-validates against the event union.
+                # For v1 we use write_raw_dict to stay decoupled.
+                payload = event.model_dump()
+                # #321: capture helpers emit a synthetic terminal event
+                # `{"kind": "stream_capture_warning", ...}` when they
+                # silently dropped malformed lines. Hold onto the last one
+                # so we can include it in the AgentError when the process
+                # finishes without any usable events.
+                if payload.get("kind") == "stream_capture_warning":
+                    capture_warning = payload
+                if _is_complete_loom_event_payload(payload):
+                    await trajectory.write_raw_dict(payload)
                     useful_events += 1
+                else:
+                    await trajectory.append(
+                        AgentThoughtEvent(
+                            emitted_at=datetime.now(UTC),
+                            trial_id=self.trial_id,
+                            step_id=step_id,
+                            seq=event_seq,
+                            content=_adapter_payload_to_content(payload),
+                        )
+                    )
+                    event_seq += 1
+                    # Plain AgentThoughtEvents are "useful" too (claude-code,
+                    # codex, etc. fall through to this branch). Only the
+                    # synthetic stream_capture_warning is excluded.
+                    if payload.get("kind") != "stream_capture_warning":
+                        useful_events += 1
 
-        rc = await driver_handle.wait()
-        stderr_tail = await _finish_tail_task(stderr_task)
+            rc = await driver_handle.wait()
+            process_finished = True
+            stderr_tail = await _finish_tail_task(stderr_task)
+        except BaseException:
+            if not process_finished:
+                await _kill_exec_handle(
+                    driver_handle,
+                    adapter_name=self.adapter.name,
+                    step_id=step_id,
+                )
+            await _cancel_tail_task(stderr_task)
+            raise
+
         if rc != 0:
             detail = f"{self.adapter.name} exited rc={rc} on step {step_id}"
             if stderr_tail:
@@ -323,3 +336,46 @@ async def _finish_tail_task(task: asyncio.Task[str]) -> str:
         return ""
     except Exception:
         return ""
+
+
+async def _kill_exec_handle(
+    handle: DriverExecHandle,
+    *,
+    adapter_name: str,
+    step_id: str,
+) -> None:
+    kill_task = asyncio.create_task(handle.kill())
+    try:
+        await asyncio.wait_for(asyncio.shield(kill_task), timeout=5.0)
+    except TimeoutError:
+        kill_task.cancel()
+        try:
+            await kill_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        logger.warning(
+            "%s exec kill timed out during step %s cleanup",
+            adapter_name,
+            step_id,
+        )
+    except Exception:
+        logger.warning(
+            "%s exec kill failed during step %s cleanup",
+            adapter_name,
+            step_id,
+            exc_info=True,
+        )
+
+
+async def _cancel_tail_task(task: asyncio.Task[str]) -> None:
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass

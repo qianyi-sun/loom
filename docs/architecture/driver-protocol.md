@@ -87,6 +87,10 @@ State machine: `constructed → running → stopped`. No re-start.
 - `exec_streaming()` is unbounded — chunks flow through async
   iterators with no cap. Callers drain `stdout` + `stderr` in
   parallel. Closing the iterators is implicit when `wait()` resolves.
+- Callers that cancel a long-running `exec_streaming()` operation before
+  `wait()` resolves must call `ExecHandle.kill()` best-effort and clean
+  up any stream-drain tasks. `SubprocessAgent` does this when an agent
+  step timeout cancels the adapter run.
 
 ## NetworkPolicy
 
