@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import base64
 import os
-from collections.abc import AsyncIterator
+from typing import Protocol
 
 import pytest
 
@@ -25,6 +25,7 @@ from loom.security.secret_store import (
     LocalEncryptedSecretStore,
     SecretStoreError,
     _decode_b64_key,
+    assert_existing_secrets_decryptable,
     load_master_keys_from_env,
 )
 
@@ -125,6 +126,11 @@ class _FakeRow:
         self.master_key_version = version
 
 
+class _CompilableStatement(Protocol):
+    def compile(self, **kwargs: object) -> object:
+        ...
+
+
 class _FakeSession:
     """Minimal async session fake for unit testing SecretStore internals."""
 
@@ -147,11 +153,13 @@ class _FakeSession:
     async def flush(self) -> None:
         pass
 
-    async def execute(self, stmt: object) -> object:
+    async def execute(self, stmt: _CompilableStatement) -> object:
         # Introspect the statement to figure out what to return.
         # We do this by inspecting the compiled string — fragile but
         # sufficient for unit tests that don't need a real DB.
-        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))  # type: ignore[union-attr]
+        compiled = str(stmt.compile(
+            compile_kwargs={"literal_binds": True},
+        ))
         if "DELETE" in compiled:
             # delete by ref
             ref = self._extract_ref_from_compiled(compiled)
@@ -171,9 +179,8 @@ class _FakeSession:
         m = re.search(r"'(loom://[^']+)'", compiled)
         return m.group(1) if m else None
 
-    async def stream(self, stmt: object) -> AsyncIterator[tuple[str]]:
-        for ref in list(self._rows):
-            yield (ref,)
+    async def stream(self, stmt: object) -> _FakeStreamResult:
+        return _FakeStreamResult([(ref,) for ref in list(self._rows)])
 
     async def commit(self) -> None:
         pass
@@ -190,6 +197,20 @@ class _FakeScalar:
         if self._value is None:
             raise Exception("no row")
         return self._value
+
+
+class _FakeStreamResult:
+    def __init__(self, rows: list[tuple[str]]) -> None:
+        self._rows = iter(rows)
+
+    def __aiter__(self) -> _FakeStreamResult:
+        return self
+
+    async def __anext__(self) -> tuple[str]:
+        try:
+            return next(self._rows)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 @pytest.fixture
@@ -233,6 +254,43 @@ async def test_fallback_key_decrypts_old_row(fake_session: _FakeSession) -> None
         fallback_keys={1: old_key},
     )
     assert await new_store.get(ref) == "secret-value"
+
+
+@pytest.mark.asyncio
+async def test_startup_validation_fails_when_existing_row_uses_different_key(
+    fake_session: _FakeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_key = _make_key()
+    current_key = _make_key()
+    old_store = LocalEncryptedSecretStore(
+        fake_session,  # type: ignore[arg-type]
+        master_key=old_key,
+        master_key_version=1,
+    )
+    await old_store.put(namespace="team:abc", value="sk-old-key")
+
+    monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", _b64(current_key))
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
+
+    with pytest.raises(
+        DecryptError,
+        match="SecretStore startup validation failed",
+    ):
+        await assert_existing_secrets_decryptable(fake_session)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_startup_validation_skips_key_loading_when_no_secrets(
+    fake_session: _FakeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEY", raising=False)
+    monkeypatch.delenv("LOOM_SECRET_STORE_MASTER_KEYS", raising=False)
+
+    checked = await assert_existing_secrets_decryptable(fake_session)  # type: ignore[arg-type]
+
+    assert checked == 0
 
 
 @pytest.mark.asyncio

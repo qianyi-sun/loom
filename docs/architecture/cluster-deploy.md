@@ -383,6 +383,14 @@ class SecretStore(Protocol):
 
 Two impls ship: `local-encrypted` (AES-GCM, `LOOM_SECRET_STORE_MASTER_KEY`; ciphertext in `secrets` table) for user-API-key data path, and `k8s-secret` (one k8s Secret per ref) for bootstrap-supplied infra credentials. Both impls live in both deployment modes. In cluster mode, `loom-service` and `loom-llm-gateway` read `LOOM_SECRET_STORE_MASTER_KEY` from `loom-secrets/secret-store-master-key`; `loom cluster bootstrap-secrets --rotate` generates this key for new clusters.
 
+`loom-service` and `loom-llm-gateway` also perform a startup validation
+pass over existing `secrets` refs. Empty stores start without loading a
+master key; non-empty stores must decrypt with the configured
+`LOOM_SECRET_STORE_MASTER_KEY` or `LOOM_SECRET_STORE_MASTER_KEYS`
+fallback set. A mismatch fails startup with an operator-facing
+SecretStore validation error rather than letting provider traffic hit an
+AEAD decrypt failure on the first model request.
+
 ### Provider egress contract
 
 Provider `base_url` values may use `https://` or `http://`. The xDS

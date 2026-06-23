@@ -461,3 +461,39 @@ class LocalEncryptedSecretStore:
             row.master_key_version = self._master_key_version + 1
         await self._session.flush()
         return ref
+
+
+async def assert_existing_secrets_decryptable(session: AsyncSession) -> int:
+    """Fail fast if existing local-encrypted secrets do not decrypt.
+
+    The service and gateway normally discover a bad
+    ``LOOM_SECRET_STORE_MASTER_KEY`` only when a provider request tries to
+    decrypt ``provider_connections.encrypted_api_key_ref``. Running this once
+    during process startup turns that latent HTTP 500 into an operator-visible
+    startup failure.
+
+    Empty stores are valid and do not require a configured master key. This
+    keeps fresh databases and tests that never created provider connections
+    from needing secret-store env vars unnecessarily.
+    """
+    result = await session.stream(select(Secret.ref))
+    refs = [row[0] async for row in result]
+    if not refs:
+        return 0
+
+    store = LocalEncryptedSecretStore(session)
+    checked = 0
+    for ref in refs:
+        try:
+            await store.get(ref)
+        except DecryptError as exc:
+            raise DecryptError(
+                "SecretStore startup validation failed for "
+                f"{ref!r}; current LOOM_SECRET_STORE_MASTER_KEY/"
+                "LOOM_SECRET_STORE_MASTER_KEYS cannot decrypt an existing "
+                "secret. Restore the key that encrypted this row, configure it "
+                "as a fallback in LOOM_SECRET_STORE_MASTER_KEYS, or run "
+                "`loom admin secret-store rewrap` after loading the old key.",
+            ) from exc
+        checked += 1
+    return checked

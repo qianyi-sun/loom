@@ -9,9 +9,10 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from prometheus_client import make_asgi_app
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
+from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
@@ -39,6 +40,13 @@ def _load_admin_secret_verifier(
     )
 
 
+async def _assert_secret_store_startup(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with session_factory() as session:
+        return await assert_existing_secrets_decryptable(session)
+
+
 def create_app(settings: GatewaySettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -46,6 +54,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         admin_secret_verifier = _load_admin_secret_verifier(settings)
         app.state.settings = settings
         app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        await _assert_secret_store_startup(app.state.session_factory)
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.rate_card_cache = RateCardCache(
             session_factory=app.state.session_factory,

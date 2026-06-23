@@ -673,7 +673,11 @@ kubectl rollout status deploy/loom-service
 ```
 
 After this deploy, new secrets encrypt with the NEW key; existing secrets
-are still readable via the fallback.
+are still readable via the fallback. `loom-service` and
+`loom-llm-gateway` validate existing `secrets` rows during startup; if
+the deployed key set cannot decrypt a stored row, the process fails fast
+with a SecretStore startup validation error instead of serving provider
+requests that later fail with HTTP 500.
 
 **Step 2 — run the rewrap walk**
 
@@ -724,6 +728,13 @@ old key as a fallback in `LOOM_SECRET_STORE_MASTER_KEYS` during rotation,
 or rotate/re-enter the provider API key. Do not debug the provider's
 `/models` endpoint until `loom providers test <name>` can decrypt the
 stored key.
+
+If `loom-service` or `loom-llm-gateway` refuses to start with
+`SecretStore startup validation failed`, use the same recovery path:
+restore the key that encrypted the row, configure that key as a fallback,
+or re-enter/rotate the affected provider key after loading the correct
+old key. Empty databases skip this validation and do not require a
+secret-store master key until a provider secret is created.
 
 **Audit trail**
 

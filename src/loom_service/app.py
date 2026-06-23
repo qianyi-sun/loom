@@ -17,12 +17,13 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from prometheus_client import make_asgi_app
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.admin_secret import (
     AdminSecretVerifier,
     load_optional_admin_secret_verifier,
 )
+from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom_service.batch_runner import run_loop
 from loom_service.config import LoomServiceSettings
 from loom_service.metrics import (
@@ -69,11 +70,19 @@ def _load_admin_secret_verifier(
     )
 
 
+async def _assert_secret_store_startup(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with session_factory() as session:
+        return await assert_existing_secrets_decryptable(session)
+
+
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(str(settings.db_url))
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        await _assert_secret_store_startup(session_factory)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
         minio_client = create_minio_client(
