@@ -42,6 +42,13 @@ codex --version
 """
 
 
+def _responses_base_url(base_url: str) -> str:
+    stripped = base_url.rstrip("/")
+    if stripped.endswith("/v1"):
+        return stripped
+    return f"{stripped}/v1"
+
+
 @dataclass(frozen=True)
 class CodexAdapter:
     name: str = "codex"
@@ -69,9 +76,10 @@ class CodexAdapter:
         # for the trial's lifetime, doesn't leak across trials.
         env["CODEX_HOME"] = f"{workdir}/.codex-home"
         model_name = self.model_name_template.format(model_id=model.name)
+        base_url = _responses_base_url(env[self.base_url_env])
         provider_config = (
             'model_providers.loom={ name = "Loom", '
-            f"base_url = {json.dumps(env[self.base_url_env])}, "
+            f"base_url = {json.dumps(base_url)}, "
             f'env_key = "{self.api_key_env}", wire_api = "responses" }}'
         )
         script = (

@@ -326,7 +326,8 @@ hit them through a sandbox-facing Gateway URL):
 | POST | `/v1/messages` | Anthropic dialect |
 | POST | `/v1/chat/completions` | OpenAI dialect |
 | POST | `/openai/v1/chat/completions` | OpenAI-compatible provider facade for stock SDKs |
-| POST | `/v1/responses` | OpenAI Responses dialect |
+| POST | `/v1/responses` | OpenAI Responses dialect; also routes provider-connection calls when the step JWT carries `provider_connection_id` |
+| POST | `/openai/v1/responses` | OpenAI-compatible Responses provider facade for stock SDKs and Codex CLI |
 | POST | `/v1beta/models/{model_path}` | Gemini dialect (Google's `v1beta` namespace) |
 | POST | `/admin/rate-cards` | Upsert rate card (gated on `admin:rate_cards` scope) |
 | GET | `/healthz` | Liveness |

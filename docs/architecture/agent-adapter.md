@@ -140,6 +140,12 @@ different network namespaces:
   injects `host.docker.internal -> host-gateway` when that hostname is
   used.
 
+The Codex CLI adapter runs Codex 0.141+ in Responses API mode. Codex
+constructs requests as `<base_url>/responses`, so the adapter
+idempotently appends `/v1` when the injected base URL is bare
+(`http://llm-gateway:9100` -> `http://llm-gateway:9100/v1`) and leaves
+existing `/v1` facade URLs unchanged.
+
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client
 dependency since there's no Control Plane to record llm_calls to.

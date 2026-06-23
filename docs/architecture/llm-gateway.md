@@ -37,10 +37,10 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
 |--------------------------|---------------------|------------------------------------|
 | `POST /v1/messages`      | Anthropic native    | `anthropic.AsyncAnthropic.messages.create` |
 | `POST /v1/chat/completions` | OpenAI Chat / BYO OpenAI-compatible chat | Native OpenAI path or direct httpx through `EgressClientPool` when `loom.provider_connection_id` resolves to `openai-compatible` / `custom` |
-| `POST /v1/responses`     | OpenAI Responses    | `openai.AsyncOpenAI.responses.create` |
+| `POST /v1/responses`     | OpenAI Responses / BYO OpenAI-compatible Responses | Native OpenAI path or direct httpx through `EgressClientPool` when the step JWT or `x-loom-provider-connection-id` resolves to `openai-compatible` / `custom` |
 | `POST /v1/models/{model}:generateContent` | Gemini  | `google.generativeai.GenerativeModel.generate_content_async` |
 | `POST /v1/chat/completions` *(via litellm)* | Tail-provider shim | non-BYO and non-OpenAI-compatible fallback providers |
-| `POST /openai/v1/chat/completions`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
+| `POST /openai/v1/chat/completions`, `/openai/v1/responses`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
 
 The Gateway is **not** a single unified shape — each dialect's
 response is forwarded verbatim. Agents see exactly the native
@@ -48,10 +48,12 @@ upstream shape, so client-side parsing stays standard. The
 normalisation (TokenUsage → cost) happens *next to* the forward, not
 *after* it.
 
-Streaming is disabled at v1 (`stream=true` → 400). The fenced
-attribution model requires the response be inspectable to extract
-usage; streaming would require a tee + reassembly. Tracked as
-follow-up.
+Most streaming routes remain disabled at v1 where cost attribution
+depends on a final usage block. OpenAI Responses is the exception for
+Codex 0.141+ compatibility: the Gateway accepts
+`stream=true` on `/v1/responses` and `/openai/v1/responses`, forwards
+the request to the selected OpenAI-compatible provider, and records
+usage from a terminal `response.completed` SSE event when present.
 
 ## Dispatch contract
 
@@ -114,8 +116,9 @@ dispatches to ~100 providers. We use it as the **tail-provider
 adapter** — anything not covered by Anthropic / OpenAI Chat /
 Responses / Gemini routes through LiteLLM. BYO OpenAI-compatible
 connections are also excluded from LiteLLM on the service-mode gateway
-path: the route owns that wire shape and forwards with the pooled
-httpx client from `EgressClientPool`, so Envoy sees the
+path for both Chat Completions and Responses: the route owns that wire
+shape and forwards with the pooled httpx client from `EgressClientPool`,
+so Envoy sees the
 `x-loom-connection-id` CONNECT header for the selected
 `provider_connection_id`. We don't use LiteLLM for the top-4 providers
 or BYO OpenAI-compatible dispatch because:
@@ -137,7 +140,7 @@ or BYO OpenAI-compatible dispatch because:
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
-| `stream=true`                          | 400 with explicit "not supported v1" |
+| `stream=true`                          | Allowed for OpenAI Responses provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |
 | Model not in team allowlist            | 403; no upstream call                 |
 
 A failed call still produces an `llm_calls` row when the upstream

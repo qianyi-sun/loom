@@ -6,6 +6,8 @@ the upstream MockTransport intercepts either OpenAI or Gemini depending
 on the request URL host/path.
 """
 
+import base64
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -17,10 +19,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import mint_step_jwt
-from loom.db.schema import LlmCall, RateCard
+from loom.db.schema import LlmCall, ProviderConnection, RateCard, Secret, Team
+from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
+
+_TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 _RATE_CARD_TABLE = {
     "id": "card-test",
@@ -128,6 +134,134 @@ async def gateway(
         sync_engine.dispose()
 
 
+@pytest.fixture
+async def gateway_with_provider_connection(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+) -> AsyncIterator[
+    tuple[object, str, UUID, UUID, UUID, dict[str, list[httpx.Request]]]
+]:
+    for k, v in {
+        "LOOM_GW_DB_URL": postgres_url,
+        "LOOM_SECRET_STORE_MASTER_KEY": _TEST_MASTER_KEY,
+    }.items():
+        monkeypatch.setenv(k, v)
+    settings = GatewaySettings(_env_file=None)
+    app = create_app(settings)
+
+    async_engine = create_async_engine(str(settings.db_url))
+    app.state.settings = settings
+    app.state.session_factory = async_sessionmaker(
+        async_engine, expire_on_commit=False,
+    )
+    app.state.rate_card_cache = RateCardCache(
+        session_factory=app.state.session_factory,
+        ttl_sec=settings.rate_card_cache_ttl_sec,
+    )
+
+    captures: dict[str, list[httpx.Request]] = {"requests": []}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captures["requests"].append(request)
+        assert request.url.host == "provider.example"
+        assert request.headers["authorization"] == "Bearer sk-provider-XYZ"
+        body = json.loads(request.content)
+        if body.get("stream") is True:
+            payload = {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_stream",
+                    "model": body["model"],
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 4,
+                        "output_tokens_details": {"reasoning_tokens": 2},
+                    },
+                },
+            }
+            return httpx.Response(
+                200,
+                content=f"data: {json.dumps(payload)}\n\n".encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json={
+            "id": "resp_provider",
+            "model": body["model"],
+            "output": [{"type": "message", "content": [
+                {"type": "output_text", "text": "ok"},
+            ]}],
+            "usage": {
+                "input_tokens": 21,
+                "output_tokens": 7,
+                "output_tokens_details": {"reasoning_tokens": 3},
+            },
+        })
+
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        timeout=settings.upstream_timeout_sec,
+    )
+    app.state.egress_client_pool = EgressClientPool(
+        upstream_client=app.state.upstream_client,
+        proxy_url=settings.egress_proxy_url,
+        upstream_timeout_sec=settings.upstream_timeout_sec,
+    )
+
+    team_id = uuid4()
+    trial_id = uuid4()
+    connection_id = uuid4()
+
+    async_session_factory = async_sessionmaker(
+        async_engine, expire_on_commit=False,
+    )
+    async with async_session_factory() as ses:
+        store = LocalEncryptedSecretStore(ses)
+        ref = await store.put(
+            namespace=f"team:{team_id}", value="sk-provider-XYZ",
+        )
+        await ses.commit()
+
+    sync_engine = create_engine(postgres_url)
+    session_local = sessionmaker(sync_engine)
+    with session_local() as s:
+        s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+        s.execute(insert(ProviderConnection).values(
+            id=connection_id,
+            team_id=team_id,
+            provider_type="openai-compatible",
+            display_name="provider",
+            base_url="https://provider.example/v1",
+            upstream_host="provider.example",
+            resolved_egress_ips=["203.0.113.10"],
+            encrypted_api_key_ref=ref,
+            pricing_source="tokens-only",
+            created_by="test",
+        ))
+        s.commit()
+
+    step_jwt = mint_step_jwt(
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="main",
+        ttl_sec=60,
+        signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=connection_id,
+    )
+
+    try:
+        yield app, step_jwt, team_id, trial_id, connection_id, captures
+    finally:
+        await app.state.egress_client_pool.aclose()
+        await app.state.upstream_client.aclose()
+        await async_engine.dispose()
+        with session_local() as s:
+            s.execute(delete(LlmCall))
+            s.execute(delete(ProviderConnection))
+            s.execute(delete(Secret))
+            s.execute(delete(Team))
+            s.commit()
+        sync_engine.dispose()
+
+
 async def test_responses_native_passthrough(gateway, postgres_url):  # type: ignore[no-untyped-def]
     app, step_jwt, team_id, trial_id = gateway
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
@@ -154,6 +288,105 @@ async def test_responses_native_passthrough(gateway, postgres_url):  # type: ign
     assert row["input_tokens"] == 200
     assert row["output_tokens"] == 80
     assert row["provider_extras"] == {"reasoning_tokens": 20}
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/openai/v1/responses"])
+async def test_responses_routes_provider_connection_from_step_jwt(
+    gateway_with_provider_connection, postgres_url: str, path: str,
+) -> None:
+    app, step_jwt, team_id, trial_id, _conn_id, captures = (
+        gateway_with_provider_connection
+    )
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    payload = {
+        "model": "qwen2.5-coder-7b-instruct",
+        "instructions": "You are Codex.",
+        "input": [{
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        }],
+        "parallel_tool_calls": True,
+        "reasoning": {"effort": "low"},
+        "store": False,
+    }
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            path,
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json=payload,
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "resp_provider"
+
+    requests = captures["requests"]
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://provider.example/v1/responses"
+    assert json.loads(requests[0].content) == payload
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["dialect"] == "openai_responses"
+    assert row["model"] == "qwen2.5-coder-7b-instruct"
+    assert row["input_tokens"] == 21
+    assert row["output_tokens"] == 7
+    assert row["provider_extras"] == {"reasoning_tokens": 3}
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+
+
+async def test_responses_provider_connection_stream_passthrough(
+    gateway_with_provider_connection, postgres_url: str,
+) -> None:
+    app, step_jwt, team_id, trial_id, _conn_id, captures = (
+        gateway_with_provider_connection
+    )
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    payload = {
+        "model": "qwen2.5-coder-7b-instruct",
+        "input": "hi",
+        "stream": True,
+        "store": False,
+    }
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/v1/responses",
+            headers={
+                "Authorization": f"Bearer {step_jwt}",
+                "Accept": "text/event-stream",
+            },
+            json=payload,
+        )
+    assert r.status_code == 200, r.text
+    assert "text/event-stream" in r.headers["content-type"]
+    assert "response.completed" in r.text
+
+    requests = captures["requests"]
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://provider.example/v1/responses"
+    assert requests[0].headers["accept"] == "text/event-stream"
+    assert json.loads(requests[0].content) == payload
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["dialect"] == "openai_responses"
+    assert row["model"] == "qwen2.5-coder-7b-instruct"
+    assert row["input_tokens"] == 12
+    assert row["output_tokens"] == 4
+    assert row["provider_extras"] == {"reasoning_tokens": 2}
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
 
