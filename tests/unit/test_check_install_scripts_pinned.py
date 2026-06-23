@@ -15,6 +15,7 @@ _spec.loader.exec_module(_lint_mod)
 
 _scan = _lint_mod._scan_install_script
 _extract = _lint_mod._extract_install_script_from_module
+_extract_file = _lint_mod._extract_install_script_from_file
 _extract_catalog = _lint_mod._extract_required_packages_from_catalog
 _check_drift = _lint_mod._check_catalog_drift
 
@@ -64,6 +65,12 @@ def test_apk_ignored() -> None:
 def test_pip_install_with_requirements_file_passes() -> None:
     """`-r requirements.txt` is acceptable — the file pins versions."""
     assert _scan("pip install -r requirements.txt") == []
+
+
+def test_uv_pip_install_with_python_interpreter_passes() -> None:
+    assert _scan(
+        "uv pip install --python /opt/venv/bin/python --no-cache-dir pkg==1.0.0",
+    ) == []
 
 
 def test_line_continuations_collapsed() -> None:
@@ -143,6 +150,38 @@ def test_check_drift_fails_when_install_script_diverges(tmp_path) -> None:
         _lint_mod.ADAPTERS_DIR = orig
     assert len(violations) == 1
     assert declared_pkg in violations[0][1]
+
+
+def test_check_drift_follows_imported_install_script_constant(tmp_path) -> None:
+    """Adapters may share install_script constants from sibling modules;
+    drift checks still need to inspect the referenced script."""
+    adapters = tmp_path / "adapters"
+    adapters.mkdir()
+    (adapters / "_shared.py").write_text(
+        '_INSTALL_SCRIPT = "pip install declared-pkg==1.0.0"\n',
+    )
+    (adapters / "alpha.py").write_text(
+        """
+from loom_launcher.adapters._shared import _INSTALL_SCRIPT
+
+
+class Alpha:
+    name = "alpha"
+    install_script: str | None = _INSTALL_SCRIPT
+""",
+    )
+    required = {"alpha": ("declared-pkg",)}
+    slug_to_filename = {"alpha": "alpha.py"}
+    orig = _lint_mod.ADAPTERS_DIR
+    _lint_mod.ADAPTERS_DIR = adapters
+    try:
+        assert _extract_file(adapters / "alpha.py") == [
+            "pip install declared-pkg==1.0.0",
+        ]
+        violations = _check_drift(required, slug_to_filename)
+    finally:
+        _lint_mod.ADAPTERS_DIR = orig
+    assert violations == []
 
 
 def test_check_drift_flags_orphan_catalog_entries(tmp_path) -> None:

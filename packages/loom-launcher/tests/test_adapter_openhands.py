@@ -20,7 +20,7 @@ def test_build_invocation_argv() -> None:
         env=env,
     )
     assert argv == [
-        "python",
+        "/opt/loom-agents/openhands-sdk/bin/python",
         "-m",
         "loom_launcher.openhands_sdk_runner",
         "--model",
@@ -32,6 +32,22 @@ def test_build_invocation_argv() -> None:
         "--task",
         "solve it",
     ]
+
+
+def test_install_script_uses_managed_python312_venv() -> None:
+    adapter = get_adapter("openhands")
+    assert adapter is not None
+    assert adapter.install_script is not None
+    assert "https://astral.sh/uv/0.11.21/install.sh" in adapter.install_script
+    assert "uv python install 3.12" in adapter.install_script
+    assert "uv venv --python 3.12 /opt/loom-agents/openhands-sdk" in adapter.install_script
+    assert "/opt/loom-agents/openhands-sdk/bin/python" in adapter.install_script
+    assert (
+        "git+https://github.com/carinrc/loom.git@"
+        "19dabf78da96f45380eddabbe29d151e231842bb"
+        "#subdirectory=packages/loom-launcher"
+    ) in adapter.install_script
+    assert "--break-system-packages" not in adapter.install_script
 
 
 async def test_capture_via_stdout_jsonl(make_handle) -> None:

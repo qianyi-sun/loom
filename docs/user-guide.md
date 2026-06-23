@@ -712,7 +712,12 @@ reports `blocked`, the image is still missing a declared runtime
 dependency or the adapter contract no longer matches the upstream package.
 The `openhands` and `openhands-sdk` adapters intentionally use Loom's
 `loom_launcher.openhands_sdk_runner` module because upstream OpenHands SDK
-ships a Python library, not a stable one-shot CLI.
+ships a Python library, not a stable one-shot CLI. When these adapters are
+installed dynamically on a benchmark task image, Loom creates a dedicated
+Python 3.12 venv under `/opt/loom-agents/openhands-sdk` and installs
+`loom-launcher` from a pinned repository subdirectory ref; the provider/model you
+select is still injected at trial runtime through the gateway environment and
+adapter arguments, not baked into the task image.
 
 The audit command exits `0` only when every audited agent is ready for the
 named image. It exits `1` when any agent is still `blocked` by missing

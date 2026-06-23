@@ -152,7 +152,13 @@ def _scan_install_script(script: str) -> list[str]:
                     # the next token is a file path, not a package.
                     # Either way, treat as acceptable (the file pins
                     # versions).
-                    if pkg in {"-r", "--requirement", "-c", "--constraint"}:
+                    if pkg in {
+                        "-r",
+                        "--requirement",
+                        "-c",
+                        "--constraint",
+                        "--python",
+                    }:
                         skip_next = True
                         continue
                     if pkg in _PIP_FLAGS_TO_SKIP:
@@ -248,6 +254,70 @@ def _extract_install_script_from_module(source: str) -> list[str]:
     return scripts
 
 
+def _iter_imported_install_script_modules(
+    source: str,
+    *,
+    src_file: Path,
+) -> list[Path]:
+    """Return sibling adapter module files that export imported
+    install_script constants.
+
+    Adapter modules sometimes share install script text through a private
+    `loom_launcher.adapters.*` module. CI still needs to scan the real script
+    and catalog-drift checks still need to see the package names.
+    """
+    tree = ast.parse(source)
+    out: list[Path] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        imports_install_script = any(
+            "INSTALL_SCRIPT" in (alias.asname or alias.name)
+            for alias in node.names
+        )
+        if not imports_install_script:
+            continue
+
+        module = node.module or ""
+        candidate: Path | None = None
+        if node.level:
+            rel_parts = [part for part in module.split(".") if part]
+            if rel_parts:
+                candidate = src_file.parent.joinpath(*rel_parts).with_suffix(".py")
+        elif module.startswith("loom_launcher.adapters."):
+            rel = module.removeprefix("loom_launcher.adapters.")
+            rel_parts = [part for part in rel.split(".") if part]
+            if rel_parts:
+                candidate = ADAPTERS_DIR.joinpath(*rel_parts).with_suffix(".py")
+
+        if candidate is not None and candidate.is_file():
+            out.append(candidate)
+    return out
+
+
+def _extract_install_script_from_file(
+    src_file: Path,
+    *,
+    _seen: set[Path] | None = None,
+) -> list[str]:
+    """Extract install scripts from `src_file` and imported sibling
+    adapter modules that provide shared install script constants."""
+    seen = set() if _seen is None else _seen
+    resolved = src_file.resolve()
+    if resolved in seen:
+        return []
+    seen.add(resolved)
+
+    source = src_file.read_text()
+    scripts = _extract_install_script_from_module(source)
+    for imported in _iter_imported_install_script_modules(
+        source,
+        src_file=src_file,
+    ):
+        scripts.extend(_extract_install_script_from_file(imported, _seen=seen))
+    return scripts
+
+
 def _extract_required_packages_from_catalog(
     source: str,
 ) -> dict[str, tuple[str, ...]]:
@@ -340,7 +410,7 @@ def _check_catalog_drift(
             ))
             continue
         src_file = ADAPTERS_DIR / filename
-        scripts = _extract_install_script_from_module(src_file.read_text())
+        scripts = _extract_install_script_from_file(src_file)
         # `hello` and other no-install adapters have no install_script:
         # skip the cross-check — they wouldn't appear in the catalog
         # dict if they had no real packages, but we tolerate either way.
@@ -373,7 +443,7 @@ def main() -> int:
         if src_file.name == "__init__.py":
             continue
         files_scanned += 1
-        scripts = _extract_install_script_from_module(src_file.read_text())
+        scripts = _extract_install_script_from_file(src_file)
         for script in scripts:
             for violation in _scan_install_script(script):
                 pin_violations.append((src_file, violation))

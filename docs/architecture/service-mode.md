@@ -89,6 +89,13 @@ and `openhands-sdk` both use Loom's
 `loom_launcher.openhands_sdk_runner` module because upstream OpenHands SDK
 exposes a Python library rather than a stable one-shot CLI, and the old
 `openhands.server` entry point is not a usable non-interactive runner. A
+dynamic OpenHands install on top of an arbitrary benchmark task image uses a
+pinned `uv` installer to create `/opt/loom-agents/openhands-sdk` with Python
+3.12, installs `loom-launcher` from a pinned repository subdirectory ref, then
+invokes that venv's interpreter. This fixes Python-version drift in task images
+without baking the selected provider or model into the image; model choice is
+still passed at trial runtime through the adapter invocation and gateway
+environment. A
 successful image build or dependency audit does not by itself make an
 agent ready: the catalog should only be flipped after a platform-dev trial
 smoke passes. As of the #289 all-agent smoke, the displayed catalog is

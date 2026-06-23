@@ -256,9 +256,13 @@ The image provisions Node 22 CLI adapters (`claude`, `codex`, `gemini`,
 `kimi`, `opencode`, `qwen`) and Python runtimes for `aider`,
 `mini-swe-agent`, `openhands`, `openhands-sdk`, and `swe-agent`. `aider`
 and `mini-swe-agent` live in isolated virtual environments with PATH
-shims; OpenHands, the Loom-owned OpenHands SDK runner, and SWE-agent stay
-importable from the main Python 3.12 runtime because their adapters
-invoke `python -m ...`. SWE-agent is installed editable from its tagged
+shims. In the all-agent sandbox image, OpenHands, the Loom-owned OpenHands SDK
+runner, and SWE-agent stay importable from the main Python 3.12 runtime. When
+OpenHands is installed dynamically on top of a benchmark task image, the
+adapter instead creates `/opt/loom-agents/openhands-sdk` with pinned `uv` and
+Python 3.12, installs `loom-launcher` from a pinned repository subdirectory ref,
+then invokes that venv's interpreter so Python 3.11 task images do not block
+`openhands-sdk` resolution. SWE-agent is installed editable from its tagged
 source tree so its upstream `config/` layout is present at runtime.
 The legacy `openhands` adapter name is SDK-backed as well; the historical
 `python -m openhands.server` contract is not used for non-interactive
@@ -278,7 +282,9 @@ Dependency audit findings can also expose adapter drift. The upstream
 OpenHands SDK wheels provide `openhands.sdk`, not a stable one-shot CLI;
 `openhands` and `openhands-sdk` therefore run Loom's
 `loom_launcher.openhands_sdk_runner` module and the agent sandbox probes
-both that module and `openhands.sdk`.
+both that module and `openhands.sdk`. The selected model is not baked into the
+benchmark task image; the worker passes the model spec and gateway environment
+to the adapter process at trial runtime.
 
 ## Adding a new agent adapter
 

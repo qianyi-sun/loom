@@ -10,32 +10,16 @@ from uuid import UUID
 
 from loom_launcher.adapter import AgentAdapter as _AgentAdapter
 from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
+from loom_launcher.adapters._openhands_runtime import (
+    OPENHANDS_SDK_INSTALL_SCRIPT,
+    OPENHANDS_SDK_PYTHON,
+)
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install openhands-sdk into system Python (matches
-# deploy/agent-sandbox/python-requirements.txt). Also installs
-# loom-launcher because the adapter invokes
-# `python -m loom_launcher.openhands_sdk_runner`.
-_OPENHANDS_SDK_VERSION = "1.27.0"
-_LOOM_LAUNCHER_VERSION = "0.1.0"
-_OPENHANDS_SDK_INSTALL_SCRIPT = f"""\
-set -euo pipefail
-if command -v apk >/dev/null 2>&1; then
-  apk add --no-cache python3 py3-pip git
-elif command -v apt-get >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends python3 python3-pip git
-else
-  echo "no supported package manager (apk/apt-get); cannot install openhands-sdk" >&2
-  exit 1
-fi
-pip install --no-cache-dir --break-system-packages \\
-  "openhands-sdk=={_OPENHANDS_SDK_VERSION}" \\
-  "loom-launcher=={_LOOM_LAUNCHER_VERSION}"
-python -c "import openhands.sdk"
-"""
+# #317 Phase 2: install openhands-sdk plus loom-launcher into a
+# dedicated Python 3.12 venv because openhands-sdk 1.27.0 no longer
+# resolves against Python 3.11 task images.
 
 
 @dataclass(frozen=True)
@@ -48,7 +32,7 @@ class OpenHandsSdkAdapter:
     model_name_template: str = "openai/{model_id}"
     supports_multi_turn: bool = False
     additional_egress: frozenset[str] = frozenset()
-    install_script: str | None = _OPENHANDS_SDK_INSTALL_SCRIPT
+    install_script: str | None = OPENHANDS_SDK_INSTALL_SCRIPT
 
     def build_invocation(
         self,
@@ -59,7 +43,7 @@ class OpenHandsSdkAdapter:
         env: dict[str, str],
     ) -> list[str]:
         return [
-            "python",
+            OPENHANDS_SDK_PYTHON,
             "-m",
             "loom_launcher.openhands_sdk_runner",
             "--model",
