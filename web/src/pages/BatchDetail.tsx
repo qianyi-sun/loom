@@ -53,6 +53,10 @@ function comboSummary(
   return `${label} / ${combo.agent_name} / ${modelLabel(combo.agent_model)} / n=${combo.n_per_task}`;
 }
 
+function scoreText(value: number | null): string {
+  return value != null ? value.toFixed(3) : "—";
+}
+
 export default function BatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
   const queryClient = useQueryClient();
@@ -102,6 +106,10 @@ export default function BatchDetail(): JSX.Element {
   const rerunnableFailedCount = c.rerunnable_failed_count ?? 0;
   const effectiveSucceeded = c.effective_trial_summary?.succeeded ?? 0;
   const effectiveFailed = c.effective_trial_summary?.failed ?? 0;
+  const benchmarkSummary = Array.isArray(c.benchmark_summary)
+    ? c.benchmark_summary
+    : [];
+  const showBenchmarkSummary = benchmarkSummary.length > 1;
   const provenance = Array.isArray(c.source_provenance)
     ? c.source_provenance
     : [];
@@ -324,6 +332,82 @@ export default function BatchDetail(): JSX.Element {
           ) : null}
         </Card.Body>
       </Card>
+
+      {showBenchmarkSummary ? (
+        <Card>
+          <Card.Header
+            title="Benchmark results"
+            description="Per-benchmark score and platform failure counts for this multi-benchmark batch."
+          />
+          <Card.Body className="p-0">
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead>
+                  <tr className="bg-slate-50/50">
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                      Benchmark
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                      Score
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                      Completed
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                      Platform failures
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                      Trial states
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {benchmarkSummary.map((row) => {
+                    const succeeded = row.trial_summary.succeeded ?? 0;
+                    const running =
+                      (row.trial_summary.queued ?? 0) +
+                      (row.trial_summary.claimed ?? 0) +
+                      (row.trial_summary.running ?? 0);
+                    return (
+                      <tr key={row.benchmark_id ?? row.display_name}>
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-slate-900">
+                            {row.display_name}
+                          </div>
+                          {row.benchmark_id ? (
+                            <div className="mt-0.5 font-mono text-xs text-slate-500">
+                              {row.benchmark_id}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-slate-900">
+                            {scoreText(row.aggregate_reward)}
+                          </div>
+                          <div className="mt-0.5 text-xs text-slate-500">
+                            {row.metric_name}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {row.completed_trial_count} /{" "}
+                          {row.expected_trial_count}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {row.platform_failed_count} failed
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {succeeded} succeeded
+                          {running > 0 ? ` · ${running} active` : ""}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Card.Body>
+        </Card>
+      ) : null}
 
       <Card>
         <details className="group">

@@ -923,7 +923,11 @@ has no production users.
   - Inline confirmation banner above submit: per-combination
     chips + total fan-out + validation hints.
   - Submit button text dynamic: `Submit N trial(s)`.
-- Batch detail page (`/batches/:id`) with lazy trials list.
+- Batch detail page (`/batches/:id`) with lazy trials list and a
+  per-benchmark results table when `benchmark_summary` contains more
+  than one benchmark. The overall `aggregate_reward` remains a global
+  summary; multi-benchmark runs surface each benchmark's score,
+  completed/expected trial count, and platform failure count.
 - Two-status chips everywhere (lifecycle + outcome on Batch;
   lifecycle-only on Trial since the state encodes outcome).
 - Smart paste parser implementation + 15-format test coverage.

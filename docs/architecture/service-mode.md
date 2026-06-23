@@ -406,7 +406,12 @@ running image.
   trajectory viewer + EventTimeline (one row per event,
   click-to-expand JSON) + ATIF download button
 - **BatchesList** + **BatchDetail** — `refetchInterval: 5000`
-  while state ∈ {submitted, running}; stops on terminal
+  while state ∈ {submitted, running}; stops on terminal.
+  Multi-benchmark batch detail responses include `benchmark_summary`,
+  grouped server-side from trial task ids to task benchmark ids and
+  benchmark display names, so the SPA can show per-benchmark score,
+  expected/completed trial counts, and platform failures without
+  parsing task ids.
 - **NewBatch** — textarea JSON parse for `task_filter` +
   `trial_config` with local validation
 - **Tasks** — cluster task catalog

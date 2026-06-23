@@ -8,7 +8,9 @@ import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
 const BATCH_ID = "be792550-fb63-40b4-b5a2-795adbf2cc9d";
 
-const BATCH_BODY = {
+type BatchBody = Record<string, unknown>;
+
+const BATCH_BODY: BatchBody = {
   id: BATCH_ID,
   team_id: "team-1",
   owner_team: { id: "team-1", name: "Alpha Research" },
@@ -54,13 +56,14 @@ const BATCH_BODY = {
   expected_trial_count: 164,
   trial_summary: {},
   aggregate_reward: null,
+  benchmark_summary: [],
   total_prompt_tokens: 0,
   total_completion_tokens: 0,
   llm_calls_count: 0,
 };
 
 function mockBatch(
-  body = BATCH_BODY,
+  body: BatchBody = BATCH_BODY,
   rerunBody: Record<string, unknown> | null = null,
 ): ReturnType<typeof vi.spyOn> {
   return vi
@@ -133,6 +136,95 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText(/cloned batch config/i)).toBeInTheDocument();
+  });
+
+  it("shows per-benchmark scores for multi-benchmark batches", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      task_filter: {
+        subset_kind: "all",
+        benchmark_ids: ["humaneval", "mbpp"],
+      },
+      state: "finished",
+      result_status: "partial_failed",
+      expected_trial_count: 3,
+      trial_summary: { succeeded: 2, failed: 1 },
+      aggregate_reward: 0.5,
+      benchmark_summary: [
+        {
+          benchmark_id: "humaneval",
+          display_name: "HumanEval",
+          metric_name: "score",
+          expected_trial_count: 2,
+          completed_trial_count: 2,
+          platform_failed_count: 1,
+          aggregate_reward: 0.5,
+          trial_summary: {
+            queued: 0,
+            claimed: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 1,
+            cancelled: 0,
+          },
+        },
+        {
+          benchmark_id: "mbpp",
+          display_name: "MBPP",
+          metric_name: "score",
+          expected_trial_count: 1,
+          completed_trial_count: 1,
+          platform_failed_count: 0,
+          aggregate_reward: 0.5,
+          trial_summary: {
+            queued: 0,
+            claimed: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 0,
+            cancelled: 0,
+          },
+        },
+      ],
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText("Benchmark results")).toBeInTheDocument();
+    expect(screen.getByText("HumanEval")).toBeInTheDocument();
+    expect(screen.getByText("MBPP")).toBeInTheDocument();
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    expect(screen.getByText("1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("1 failed")).toBeInTheDocument();
+    expect(screen.getByText("0 failed")).toBeInTheDocument();
+  });
+
+  it("does not add benchmark-result clutter for single-benchmark batches", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      benchmark_summary: [
+        {
+          benchmark_id: "humaneval",
+          display_name: "HumanEval",
+          metric_name: "score",
+          expected_trial_count: 164,
+          completed_trial_count: 0,
+          platform_failed_count: 0,
+          aggregate_reward: null,
+          trial_summary: {
+            queued: 0,
+            claimed: 0,
+            running: 0,
+            succeeded: 0,
+            failed: 0,
+            cancelled: 0,
+          },
+        },
+      ],
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText(/Run plan/i)).toBeInTheDocument();
+    expect(screen.queryByText("Benchmark results")).not.toBeInTheDocument();
   });
 
   it("keeps raw batch payload available in diagnostics", async () => {

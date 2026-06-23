@@ -1201,6 +1201,10 @@ choices after sign-in.
    Artifact rows include `share_status` and a safe `blocked_reason`
    when org-wide sharing is blocked. Use `/api/v1/usage` for
    cost views rather than trial or batch detail responses.
+   For multi-benchmark batches, `GET /api/v1/batches/{id}` also
+   returns `benchmark_summary`; verify the SPA Batch Detail page shows
+   each benchmark's score, completed/expected trial count, and platform
+   failure count instead of only one overall average.
 12. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;

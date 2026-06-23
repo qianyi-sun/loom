@@ -474,9 +474,20 @@ export interface components {
       items: components["schemas"]["Batch"][];
       next_cursor: string | null;
     };
+    BenchmarkSummary: {
+      benchmark_id: string | null;
+      display_name: string;
+      metric_name: string;
+      expected_trial_count: number;
+      completed_trial_count: number;
+      platform_failed_count: number;
+      trial_summary: Record<string, number>;
+      aggregate_reward: number | null;
+    };
     BatchDetail: components["schemas"]["Batch"] & {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
+      benchmark_summary: components["schemas"]["BenchmarkSummary"][];
       rerun_batches: {
         id: string;
         name: string;

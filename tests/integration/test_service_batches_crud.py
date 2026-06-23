@@ -18,7 +18,17 @@ from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, LlmCall, Task, Team, TeamQuota, Token, Trial, Worker
+from loom.db.schema import (
+    Batch,
+    Benchmark,
+    LlmCall,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+    Worker,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -155,6 +165,7 @@ async def camp_setup(
             s.execute(delete(Token))
             s.execute(delete(Batch))
             s.execute(delete(Task))
+            s.execute(delete(Benchmark))
             s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
@@ -919,6 +930,136 @@ async def test_get_batch_detail_with_rollup(
     assert body["total_prompt_tokens"] == 18
     assert body["total_completion_tokens"] == 9
     assert body["llm_calls_count"] == 3
+
+
+async def test_get_batch_detail_includes_per_benchmark_rollup(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark),
+            [
+                {
+                    "id": "humaneval-420",
+                    "display_name": "HumanEval 420",
+                    "upstream_kind": "local",
+                    "upstream_locator": "fixture",
+                    "upstream_revision": "test",
+                    "license_spdx": "MIT",
+                    "license_url": "https://example.test/mit",
+                    "splits": ["test"],
+                },
+                {
+                    "id": "mbpp-420",
+                    "display_name": "MBPP 420",
+                    "upstream_kind": "local",
+                    "upstream_locator": "fixture",
+                    "upstream_revision": "test",
+                    "license_spdx": "MIT",
+                    "license_url": "https://example.test/mit",
+                    "splits": ["test"],
+                },
+            ],
+        )
+        for tid, benchmark_id in (
+            ("humaneval-420/task-0", "humaneval-420"),
+            ("humaneval-420/task-1", "humaneval-420"),
+            ("mbpp-420/task-0", "mbpp-420"),
+        ):
+            s.execute(
+                insert(Task).values(
+                    id=tid,
+                    checksum="b" * 64,
+                    config=_valid_task_config(tid),
+                    source="local",
+                    license="MIT",
+                    benchmark_id=benchmark_id,
+                )
+            )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        post = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "mixed benchmarks",
+                "task_filter": {
+                    "subset_kind": "all",
+                    "benchmark_ids": ["humaneval-420", "mbpp-420"],
+                },
+                "trial_config": {},
+            },
+        )
+        assert post.status_code == 201, post.text
+        batch_id = UUID(post.json()["batch_id"])
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        for task_id, state, reward in (
+            ("humaneval-420/task-0", "succeeded", 1.0),
+            ("humaneval-420/task-1", "failed", 0.0),
+            ("mbpp-420/task-0", "succeeded", 0.5),
+        ):
+            s.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    task_id=task_id,
+                    team_id=team_id,
+                    state=state,
+                    config={},
+                    requires_caps={},
+                    submitted_at=datetime.now(UTC),
+                    batch_id=batch_id,
+                    result={"aggregate_reward": reward},
+                )
+            )
+        s.commit()
+    sync_engine.dispose()
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["aggregate_reward"] == pytest.approx(0.5)
+    summary_by_id = {
+        row["benchmark_id"]: row for row in body["benchmark_summary"]
+    }
+    assert set(summary_by_id) == {"humaneval-420", "mbpp-420"}
+
+    humaneval = summary_by_id["humaneval-420"]
+    assert humaneval["display_name"] == "HumanEval 420"
+    assert humaneval["expected_trial_count"] == 2
+    assert humaneval["completed_trial_count"] == 2
+    assert humaneval["platform_failed_count"] == 1
+    assert humaneval["trial_summary"]["succeeded"] == 1
+    assert humaneval["trial_summary"]["failed"] == 1
+    assert humaneval["aggregate_reward"] == pytest.approx(0.5)
+
+    mbpp = summary_by_id["mbpp-420"]
+    assert mbpp["display_name"] == "MBPP 420"
+    assert mbpp["expected_trial_count"] == 1
+    assert mbpp["completed_trial_count"] == 1
+    assert mbpp["platform_failed_count"] == 0
+    assert mbpp["trial_summary"]["succeeded"] == 1
+    assert mbpp["aggregate_reward"] == pytest.approx(0.5)
 
 
 async def test_get_batch_detail_exposes_fanout_failure(

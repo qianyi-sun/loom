@@ -13,6 +13,7 @@ Routes:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn
@@ -22,7 +23,15 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
-from loom.db.schema import Batch, LlmCall, ProviderModelCache, Team, Trial
+from loom.db.schema import (
+    Batch,
+    Benchmark,
+    LlmCall,
+    ProviderModelCache,
+    Task,
+    Team,
+    Trial,
+)
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
@@ -617,6 +626,75 @@ def _rollup_from_trials(trials: Sequence[Trial]) -> float | None:
     return (reward_sum / reward_n) if reward_n > 0 else None
 
 
+async def _benchmark_summary_from_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> list[dict[str, Any]]:
+    task_ids = sorted({trial.task_id for trial in trials})
+    if not task_ids:
+        return []
+
+    rows = (await session.execute(
+        select(
+            Task.id,
+            Task.benchmark_id,
+            Benchmark.display_name,
+        )
+        .outerjoin(Benchmark, Benchmark.id == Task.benchmark_id)
+        .where(Task.id.in_(task_ids)),
+    )).all()
+    task_lookup = {
+        str(row.id): {
+            "benchmark_id": row.benchmark_id,
+            "display_name": row.display_name,
+        }
+        for row in rows
+    }
+
+    grouped: dict[str, list[Trial]] = defaultdict(list)
+    labels: dict[str, tuple[str | None, str]] = {}
+    for trial in trials:
+        meta = task_lookup.get(str(trial.task_id), {})
+        benchmark_id = meta.get("benchmark_id")
+        group_key = str(benchmark_id) if benchmark_id else "__unbenchmarked__"
+        display_name = (
+            str(meta.get("display_name"))
+            if meta.get("display_name")
+            else (str(benchmark_id) if benchmark_id else "Unbenchmarked tasks")
+        )
+        grouped[group_key].append(trial)
+        labels[group_key] = (
+            str(benchmark_id) if benchmark_id else None,
+            display_name,
+        )
+
+    summaries: list[dict[str, Any]] = []
+    for group_key, group_trials in grouped.items():
+        summary = _summary_from_trials(group_trials)
+        benchmark_id, display_name = labels[group_key]
+        summaries.append({
+            "benchmark_id": benchmark_id,
+            "display_name": display_name,
+            "metric_name": "score",
+            "expected_trial_count": len(group_trials),
+            "completed_trial_count": sum(
+                summary.get(state, 0)
+                for state in ("succeeded", "failed", "cancelled")
+            ),
+            "platform_failed_count": summary.get("failed", 0),
+            "trial_summary": summary,
+            "aggregate_reward": _rollup_from_trials(group_trials),
+        })
+
+    return sorted(
+        summaries,
+        key=lambda row: (
+            str(row["display_name"]).casefold(),
+            str(row["benchmark_id"] or ""),
+        ),
+    )
+
+
 def _trial_key(trial: Trial) -> tuple[str, int, int]:
     return (trial.task_id, int(trial.sample_idx), int(trial.combination_idx))
 
@@ -686,6 +764,9 @@ async def get_batch(
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
+    benchmark_summary = await _benchmark_summary_from_trials(
+        s, original_trials,
+    )
 
     rerun_batches = (await s.execute(
         select(Batch)
@@ -731,6 +812,7 @@ async def get_batch(
             "total_completion_tokens"
         ],
         "effective_llm_calls_count": effective_usage["llm_calls_count"],
+        "benchmark_summary": benchmark_summary,
     }
 
     return _serialize(
