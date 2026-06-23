@@ -163,7 +163,10 @@ knob you need.
    `loom-control-plane`, `loom-llm-gateway`, and `loom-service` validate
    the database Alembic revision at process startup. If the DB is behind the
    image code, they refuse to start with the migration command instead of
-   serving requests that later fail with missing-column errors.
+   serving requests that later fail with missing-column errors. Production
+   images for these services must include `migrations/alembic.ini` and
+   `migrations/versions/` so this startup gate can compare DB revisions against
+   the image code.
 
 6. **Apply DB-facing services and edge components:**
    ```bash

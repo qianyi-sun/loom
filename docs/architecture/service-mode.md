@@ -391,7 +391,10 @@ Migrations live in `migrations/versions/` and are applied with
 runs this automatically after Postgres is healthy. Direct service startup does
 not auto-migrate: `loom-service`, the Control Plane, and the LLM Gateway refuse
 to start when the database Alembic revision is behind repository code, so
-production deploys must run migrations before rolling DB-facing services.
+production deploys must run migrations before rolling DB-facing services. Their
+production images carry `migrations/alembic.ini` and `migrations/versions/` so
+the startup gate compares the live DB against the same migration tree as the
+running image.
 
 ## SPA
 
