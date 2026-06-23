@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import boto3
 from botocore.config import Config
@@ -30,6 +31,16 @@ from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskModel
 from loom.models.task import TaskConfig
 from loom_benchmark_tool.db_url import normalize_db_url
+
+POSTGRES_CATALOG_UPSERT_BATCH_SIZE = 1000
+T = TypeVar("T")
+
+
+def _batched(items: list[T], size: int) -> Iterable[list[T]]:
+    if size <= 0:
+        raise ValueError("batch size must be positive")
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
 
 
 @dataclass(frozen=True)
@@ -160,66 +171,86 @@ class PostgresCatalogStore:
         try:
             async with session_factory() as session:
                 if rows.benchmarks:
-                    bench_values = [
-                        {
-                            "id": row.id,
-                            "display_name": row.display_name,
-                            "upstream_kind": row.upstream_kind,
-                            "upstream_locator": row.upstream_locator,
-                            "upstream_revision": row.upstream_revision,
-                            "license_spdx": row.license_spdx,
-                            "license_url": row.license_url,
-                            "splits": row.splits,
-                            "series": row.series,
-                            "imported_by": row.imported_by,
-                        }
-                        for row in rows.benchmarks
-                    ]
-                    bench_insert = pg_insert(Benchmark).values(bench_values)
-                    await session.execute(
-                        bench_insert.on_conflict_do_update(
-                            index_elements=["id"],
-                            set_={
-                                "display_name": bench_insert.excluded.display_name,
-                                "upstream_kind": bench_insert.excluded.upstream_kind,
-                                "upstream_locator": bench_insert.excluded.upstream_locator,
-                                "upstream_revision": bench_insert.excluded.upstream_revision,
-                                "license_spdx": bench_insert.excluded.license_spdx,
-                                "license_url": bench_insert.excluded.license_url,
-                                "splits": bench_insert.excluded.splits,
-                                "series": bench_insert.excluded.series,
-                                "imported_by": bench_insert.excluded.imported_by,
-                            },
-                        ),
-                    )
+                    for bench_batch in _batched(
+                        rows.benchmarks,
+                        POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
+                    ):
+                        bench_values = [
+                            {
+                                "id": row.id,
+                                "display_name": row.display_name,
+                                "upstream_kind": row.upstream_kind,
+                                "upstream_locator": row.upstream_locator,
+                                "upstream_revision": row.upstream_revision,
+                                "license_spdx": row.license_spdx,
+                                "license_url": row.license_url,
+                                "splits": row.splits,
+                                "series": row.series,
+                                "imported_by": row.imported_by,
+                            }
+                            for row in bench_batch
+                        ]
+                        bench_insert = pg_insert(Benchmark).values(bench_values)
+                        await session.execute(
+                            bench_insert.on_conflict_do_update(
+                                index_elements=["id"],
+                                set_={
+                                    "display_name": (
+                                        bench_insert.excluded.display_name
+                                    ),
+                                    "upstream_kind": (
+                                        bench_insert.excluded.upstream_kind
+                                    ),
+                                    "upstream_locator": (
+                                        bench_insert.excluded.upstream_locator
+                                    ),
+                                    "upstream_revision": (
+                                        bench_insert.excluded.upstream_revision
+                                    ),
+                                    "license_spdx": (
+                                        bench_insert.excluded.license_spdx
+                                    ),
+                                    "license_url": bench_insert.excluded.license_url,
+                                    "splits": bench_insert.excluded.splits,
+                                    "series": bench_insert.excluded.series,
+                                    "imported_by": bench_insert.excluded.imported_by,
+                                },
+                            ),
+                        )
 
                 if rows.tasks:
-                    task_values = [
-                        {
-                            "id": row.id,
-                            "checksum": row.checksum,
-                            "config": row.config,
-                            "source": row.source,
-                            "license": row.license,
-                            "benchmark_id": row.benchmark_id,
-                            "tags": row.tags,
-                        }
-                        for row in rows.tasks
-                    ]
-                    task_insert = pg_insert(TaskModel).values(task_values)
-                    await session.execute(
-                        task_insert.on_conflict_do_update(
-                            index_elements=["id"],
-                            set_={
-                                "checksum": task_insert.excluded.checksum,
-                                "config": task_insert.excluded.config,
-                                "source": task_insert.excluded.source,
-                                "license": task_insert.excluded.license,
-                                "benchmark_id": task_insert.excluded.benchmark_id,
-                                "tags": task_insert.excluded.tags,
-                            },
-                        ),
-                    )
+                    for task_batch in _batched(
+                        rows.tasks,
+                        POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
+                    ):
+                        task_values = [
+                            {
+                                "id": row.id,
+                                "checksum": row.checksum,
+                                "config": row.config,
+                                "source": row.source,
+                                "license": row.license,
+                                "benchmark_id": row.benchmark_id,
+                                "tags": row.tags,
+                            }
+                            for row in task_batch
+                        ]
+                        task_insert = pg_insert(TaskModel).values(task_values)
+                        await session.execute(
+                            task_insert.on_conflict_do_update(
+                                index_elements=["id"],
+                                set_={
+                                    "checksum": task_insert.excluded.checksum,
+                                    "config": task_insert.excluded.config,
+                                    "source": task_insert.excluded.source,
+                                    "license": task_insert.excluded.license,
+                                    "benchmark_id": (
+                                        task_insert.excluded.benchmark_id
+                                    ),
+                                    "tags": task_insert.excluded.tags,
+                                },
+                            ),
+                        )
                 await session.commit()
         finally:
             await engine.dispose()

@@ -4,10 +4,13 @@ from dataclasses import replace
 
 import pytest
 
+import loom_cli.public_beta_catalog as public_beta_catalog
 from loom_cli.public_beta_catalog import (
+    POSTGRES_CATALOG_UPSERT_BATCH_SIZE,
     BenchmarkRow,
     CatalogRows,
     ObjectInfo,
+    PostgresCatalogStore,
     ProvisionStats,
     TaskRow,
     provision_ready_benchmark_catalog,
@@ -71,6 +74,70 @@ class FakeObjects:
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> None:
         self.objects[(bucket, key)] = body
+
+
+@pytest.mark.asyncio
+async def test_postgres_catalog_store_batches_large_task_upserts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.execute_count = 0
+            self.commits = 0
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> None:
+            self.execute_count += 1
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    engine = FakeEngine()
+    session = FakeSession()
+
+    monkeypatch.setattr(
+        public_beta_catalog,
+        "create_async_engine",
+        lambda _db_url: engine,
+    )
+    monkeypatch.setattr(
+        public_beta_catalog,
+        "async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: session,
+    )
+
+    task_count = POSTGRES_CATALOG_UPSERT_BATCH_SIZE * 2 + 1
+    rows = CatalogRows(
+        benchmarks=[],
+        tasks=[
+            TaskRow(
+                id=f"bench/task-{index}",
+                checksum="a" * 64,
+                config=_valid_task_config(f"bench/task-{index}"),
+                source=f"s3://loom-benchmarks/bench/task-{index}/",
+                license="MIT",
+                benchmark_id="bench",
+                tags={"split": "test"},
+            )
+            for index in range(task_count)
+        ],
+    )
+
+    await PostgresCatalogStore("postgresql://loom:loom@example/loom").upsert_rows(rows)
+
+    assert session.execute_count == 3
+    assert session.commits == 1
+    assert engine.disposed is True
 
 
 @pytest.mark.asyncio
