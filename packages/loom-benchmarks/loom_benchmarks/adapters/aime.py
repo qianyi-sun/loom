@@ -1,7 +1,8 @@
 """AIME — American Invitational Mathematics Exam. Spec §5.2 row 11.
 
-The agent emits its work; the verifier extracts the last integer from
-the agent output's final line and compares to `expected_answer.txt`.
+The agent emits its work; the verifier prefers the last integer from
+the agent output's final line, then falls back to common math answer
+markers such as ``\\boxed{...}``, and compares to `expected_answer.txt`.
 Implemented as a standalone python verifier (`verifier/check.py`)
 invoked by `verifier/run.sh` so we don't have to thread quotes through
 a shell here-doc.
@@ -48,13 +49,37 @@ _AIME_CHECK_PY = (
     )
     ans = agent_output.read_text().strip() if agent_output.is_file() else ""
     exp = (task_dir / "expected_answer.txt").read_text().strip()
-    last_line = ans.splitlines()[-1] if ans else ""
-    # Use the LAST integer on the line, not the first. Phrasings like
-    # "answer: 45 (out of 1000)" should extract 45 only if it's the
-    # final integer mentioned, so this matches AIME's "return final
-    # integer on last line" convention.
-    matches = re.findall(r"-?\\d+", last_line)
-    got = matches[-1] if matches else ""
+    def extract_answer(text):
+        last_line = text.splitlines()[-1] if text else ""
+        # Use the LAST integer on the line, not the first. Phrasings like
+        # "answer: 45 (out of 1000)" should extract 45 only if it's the
+        # final integer mentioned, so this matches AIME's "return final
+        # integer on last line" convention.
+        matches = re.findall(r"-?\\d+", last_line)
+        if matches:
+            return matches[-1]
+
+        # Many LLMs emit display math with the boxed answer on the
+        # penultimate line:
+        #
+        #   \\[
+        #   \\boxed{70}
+        #   \\]
+        #
+        # In that shape the final line has no integer, but the answer is
+        # still explicit and should not be reported as "<none>".
+        boxed_matches = re.findall(
+            r"\\\\(?:boxed|fbox)\\{([^{}]+)\\}",
+            text,
+            flags=re.DOTALL,
+        )
+        for boxed in reversed(boxed_matches):
+            matches = re.findall(r"-?\\d+", boxed)
+            if matches:
+                return matches[-1]
+        return ""
+
+    got = extract_answer(ans)
     passed = got == exp
     score = 1.0 if passed else 0.0
     got_display = got if got else "<none>"

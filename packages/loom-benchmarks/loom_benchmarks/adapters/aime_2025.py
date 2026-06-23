@@ -5,8 +5,9 @@ MathArena's two HF datasets (one per exam half) since the AI-MO team
 hasn't published a unified 2025 set yet.
 
 Same verifier wiring as AIMEAdapter — the agent emits a final
-integer; `verifier/check.py` extracts the last integer from the
-final line and compares to expected_answer.txt.
+integer; `verifier/check.py` prefers the last integer from the final
+line, falls back to common boxed math-answer markers, and compares to
+expected_answer.txt.
 """
 
 from __future__ import annotations

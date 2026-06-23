@@ -190,6 +190,45 @@ def test_aime_checker_picks_last_integer(tmp_path: Path) -> None:
     assert parsed.structured == {"got": "100", "expected": "100"}
 
 
+def test_aime_checker_extracts_boxed_answer_when_final_line_has_no_integer(
+    tmp_path: Path,
+) -> None:
+    """LiteLLM may preserve math answers as display math:
+    ``\\[\n\\boxed{45}\n\\]``. The verifier should extract the boxed
+    answer instead of reporting ``got <none>`` just because the last
+    line is the closing display delimiter."""
+    rec = json.loads(FIXTURE.read_text())[0]
+    inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
+    AIME22Adapter().convert_instance(inst, out_dir=tmp_path)
+
+    agent_out = tmp_path / "agent_output.txt"
+    agent_out.write_text(
+        "Reasoning with helper code already stripped.\n\n"
+        "Thus, the final answer is:\n\n"
+        "\\[\n"
+        "\\boxed{45}\n"
+        "\\]\n",
+    )
+    verifier_out = tmp_path / "verifier_output.json"
+
+    env = dict(os.environ)
+    env["LOOM_AGENT_OUTPUT"] = str(agent_out)
+    env["LOOM_TASK_DIR"] = str(tmp_path)
+    env["LOOM_VERIFIER_OUTPUT"] = str(verifier_out)
+
+    subprocess.run(
+        [sys.executable, str(tmp_path / "verifier" / "check.py")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    parsed = VerifierResult.model_validate_json(verifier_out.read_text())
+    assert parsed.rewards == {"score": 1.0}
+    assert parsed.checks[0].passed is True
+    assert parsed.structured == {"got": "45", "expected": "45"}
+
+
 def test_aime_checker_rejects_wrong_answer(tmp_path: Path) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
     inst = BenchmarkInstance(instance_id=rec["id"], split="train", raw=rec)
