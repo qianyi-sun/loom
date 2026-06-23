@@ -182,8 +182,9 @@ def _audit_ingress(
             object_kind="Ingress",
             object_name=name,
             detail=(
-                "Ingress must declare TLS with at least one host and "
-                "secretName. Public Loom traffic must use HTTPS."
+                "Ingress must declare TLS with secretName. Hostless "
+                "TLS is allowed for IP-address entrypoints; public "
+                "Loom traffic must use HTTPS."
             ),
         ))
     # `rules` may be missing entirely (defaultBackend-only Ingress is
@@ -243,8 +244,7 @@ def _audit_ingress(
 
 def _ingress_has_valid_tls(spec: dict[str, Any]) -> bool:
     for entry in spec.get("tls") or []:
-        hosts = entry.get("hosts") or []
-        if entry.get("secretName") and any(isinstance(h, str) and h for h in hosts):
+        if entry.get("secretName"):
             return True
     return False
 

@@ -12,9 +12,16 @@ metadata:
 spec:
   ingressClassName: {{ ingress_class_name }}
   tls:
+{% if ingress_host_is_ip %}
+    # Kubernetes forbids IP literals in Ingress host fields. For
+    # IP-address entrypoints, pre-create this Secret with an IP SAN
+    # certificate; the hostless rule below matches the IP Host header.
+    - secretName: {{ ingress_tls_secret_name }}
+{% else %}
     - hosts:
         - {{ ingress_host }}
       secretName: {{ ingress_tls_secret_name }}
+{% endif %}
   rules:
     # On `{{ ingress_host }}`:
     #   /api/v1/*  → loom_service (REST surface mounted at /api/v1/*)
@@ -24,8 +31,12 @@ spec:
     # Path order matters: more-specific `/api/v1` MUST precede the
     # catch-all `/`. Nginx ingress evaluates Prefix paths longest-first
     # by default, but listing in this order keeps it obvious to humans.
+{% if ingress_host_is_ip %}
+    - http:
+{% else %}
     - host: {{ ingress_host }}
       http:
+{% endif %}
         paths:
           - path: /api/v1
             pathType: Prefix

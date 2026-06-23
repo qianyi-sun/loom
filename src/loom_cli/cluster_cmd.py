@@ -17,6 +17,7 @@ clear `pip install loom[cluster]` hint when the import fails.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sys
 from dataclasses import dataclass, field
@@ -513,6 +514,11 @@ def render_manifests(config: ClusterConfig) -> str:
         lstrip_blocks=True,
     )
     ctx = config.to_render_context()
+    try:
+        ipaddress.ip_address(config.ingress_host)
+        ctx["ingress_host_is_ip"] = True
+    except ValueError:
+        ctx["ingress_host_is_ip"] = False
     ctx["schema"] = _load_schema(_REPO_ROOT / "config" / "loom-schema.toml")
     # Load dashboard JSON for the grafana-dashboards.yaml.j2 template.
     # The JSON is read from deploy/grafana/dashboards/ and passed as

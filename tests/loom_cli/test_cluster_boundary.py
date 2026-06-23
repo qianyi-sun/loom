@@ -332,6 +332,27 @@ spec:
     assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
+def test_audit_accepts_hostless_tls_ingress_for_ip_entrypoint() -> None:
+    """Hostless Ingress is the Kubernetes-valid shape for HTTPS on a
+    raw IP address. Boundary safety still comes from TLS, explicit
+    paths, and allowlisted backends.
+    """
+    yaml_text = """\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: loom-ingress }
+spec:
+  rules:
+    - http:
+        paths:
+          - { path: /api/v1, backend: { service: { name: loom-service, port: { number: 8090 } } } }
+          - { path: /, backend: { service: { name: loom-web, port: { number: 80 } } } }
+  tls:
+    - secretName: loom-ip-tls
+"""
+    assert audit_boundary(yaml_text, require_network_policies=False) == []
+
+
 def test_audit_flags_api_backend_on_non_api_path() -> None:
     yaml_text = """\
 apiVersion: networking.k8s.io/v1

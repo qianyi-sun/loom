@@ -186,6 +186,11 @@ The public Ingress is TLS-first. `cluster-config.toml` controls
 `ingress_cert_manager_cluster_issuer`. With cert-manager, the rendered Ingress
 gets a `cert-manager.io/cluster-issuer` annotation; without cert-manager,
 operators pre-create the named TLS Secret.
+When `ingress_host` is an IP literal for a lab or invite-only staging
+entrypoint, the renderer omits `spec.rules[].host` and `tls.hosts` because the
+Kubernetes API rejects IP literals in those fields. Operators must still
+pre-create `ingress_tls_secret_name` with an IP SAN certificate so clients can
+reach `https://<ip-address>`.
 
 The audit checks:
 

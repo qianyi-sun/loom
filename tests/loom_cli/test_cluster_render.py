@@ -223,6 +223,21 @@ def test_render_default_ingress_uses_tls_secret_and_class() -> None:
     assert "cert-manager.io/cluster-issuer" not in ingress["metadata"]["annotations"]
 
 
+def test_render_ip_ingress_host_uses_hostless_tls_ingress() -> None:
+    """Kubernetes rejects IP literals in Ingress host fields. For
+    staging deployments reached directly by IP, render a hostless
+    Ingress and let the operator-provided TLS secret carry the IP SAN.
+    """
+    cfg = ClusterConfig(
+        ingress_host="192.168.50.13",
+        ingress_tls_secret_name="loom-ip-tls",
+    )
+    docs = _load_docs(render_manifests(cfg))
+    ingress = next(d for d in docs if d["kind"] == "Ingress")
+    assert ingress["spec"]["tls"] == [{"secretName": "loom-ip-tls"}]
+    assert "host" not in ingress["spec"]["rules"][0]
+
+
 def test_render_with_cert_manager_cluster_issuer_annotation() -> None:
     cfg = ClusterConfig(
         ingress_host="loom.acme.example",

@@ -108,6 +108,12 @@ knob you need.
 
    - Create a DNS A/AAAA or CNAME record for `ingress_host` pointing at your
      ingress controller's public address.
+   - For a lab or invite-only staging host reached directly by IP address, set
+     `ingress_host` to that IP and pre-create the TLS Secret with a certificate
+     whose Subject Alternative Name includes the IP address. Kubernetes rejects
+     IP literals in `Ingress.spec.rules[].host`, so `loom cluster render`
+     emits a hostless ingress rule for IP entrypoints while keeping TLS
+     enabled through `ingress_tls_secret_name`.
    - Install an ingress controller matching `ingress_class_name` (default
      `nginx`).
    - Either pre-create the TLS Secret named by `ingress_tls_secret_name`, or
