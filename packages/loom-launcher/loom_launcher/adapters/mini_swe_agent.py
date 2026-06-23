@@ -31,7 +31,8 @@ fi
 python3 -m venv /opt/loom-agents/mini-swe-agent
 /opt/loom-agents/mini-swe-agent/bin/pip install --no-cache-dir mini-swe-agent=={_MINI_SWE_AGENT_VERSION}
 ln -sf /opt/loom-agents/mini-swe-agent/bin/mini-swe-agent /usr/local/bin/mini-swe-agent
-mini-swe-agent --version
+# mini-swe-agent v2.4.2 dropped `--version`; smoke-check via Python import.
+/opt/loom-agents/mini-swe-agent/bin/python -c "import minisweagent"
 """
 
 
