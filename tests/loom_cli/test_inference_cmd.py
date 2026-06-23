@@ -33,8 +33,9 @@ def test_slurm_deploy_generates_vllm_bundle_without_printing_secret(
     stdout = capsys.readouterr().out
     assert "Registration fields" in stdout
     assert "base_url: http://202.78.161.51:18001/v1" in stdout
-    assert "loom providers create" in stdout
-    assert "--api-key file:" in stdout
+    assert "./register-provider.sh" in stdout
+    assert "see loom-registration.json" in stdout
+    assert "--api-key file:" not in stdout
     assert "deterministic-secret" not in stdout
 
     key_file = out_dir / "secrets" / "provider-api-key"
@@ -42,6 +43,7 @@ def test_slurm_deploy_generates_vllm_bundle_without_printing_secret(
     sbatch_file = out_dir / "run-vllm.sbatch"
     launcher = out_dir / "launch-vllm.py"
     healthcheck = out_dir / "healthcheck.sh"
+    register_script = out_dir / "register-provider.sh"
     register_json = out_dir / "loom-registration.json"
 
     assert key_file.read_text() == "loom_inference_deterministic-secret\n"
@@ -70,6 +72,7 @@ def test_slurm_deploy_generates_vllm_bundle_without_printing_secret(
     assert "qwen2.5-coder-7b-instruct" in registration
     assert "http://202.78.161.51:18001/v1" in registration
     assert "deterministic-secret" not in registration
+    assert "--api-key file:" in register_script.read_text()
 
 
 def test_slurm_deploy_requires_endpoint_for_user_provided_exposure(

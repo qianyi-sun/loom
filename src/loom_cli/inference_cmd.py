@@ -276,18 +276,24 @@ def _new_provider_auth_value() -> str:
 def _write_owner_only_file(path: Path, body_text: str) -> None:
     # The generated provider credential intentionally lives in an owner-only
     # file so users can pass `file:...` to Loom without shell-history leaks.
-    path.write_text(body_text)
-    _chmod_best_effort(path, 0o600)
+    _write_file(path, body_text, 0o600)
 
 
 def _write_public_file(path: Path, body_text: str) -> None:
-    path.write_text(body_text)
-    _chmod_best_effort(path, 0o644)
+    _write_file(path, body_text, 0o644)
 
 
 def _write_executable(path: Path, body_text: str) -> None:
-    path.write_text(body_text)
-    _chmod_best_effort(path, 0o700)
+    _write_file(path, body_text, 0o700)
+
+
+def _write_file(path: Path, body_text: str, mode: int) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, body_text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    _chmod_best_effort(path, mode)
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
@@ -611,8 +617,6 @@ def _print_summary(
     key_file: Path,
     args: argparse.Namespace,
 ) -> None:
-    source_ref = f"file:{key_file}"
-    source_flag = "--api-" + "key"
     print("Generated Loom inference Slurm bundle:")
     print(f"  directory: {output_dir}")
     print(f"  submit:    {output_dir / 'submit.sh'}")
@@ -627,18 +631,11 @@ def _print_summary(
     print(f"  name: {provider_name}")
     print("  type: openai-compatible")
     print(f"  base_url: {endpoint}")
-    print(f"  source_ref: {source_ref}")
+    print("  source_ref: see loom-registration.json")
     print(f"  allowed_models: {args.served_model_name}")
     print()
     print("CLI registration command:")
-    print(
-        "  loom providers create "
-        f"--name {provider_name} "
-        "--type openai-compatible "
-        f"--base-url {endpoint} "
-        f"{source_flag} {source_ref} "
-        f"--allowed-models {args.served_model_name}",
-    )
+    print("  ./register-provider.sh")
     print(f"  loom providers test {provider_name}")
     print(f"  loom providers models {provider_name} --refresh")
 
