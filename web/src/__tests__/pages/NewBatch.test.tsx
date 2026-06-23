@@ -395,6 +395,10 @@ describe("NewBatch", () => {
     expect(screen.getByText("Task selection")).toBeInTheDocument();
     expect(screen.getByText("Agent/model combinations")).toBeInTheDocument();
     expect(screen.getByText("Advanced trial settings")).toBeInTheDocument();
+    expect(screen.getByText("CLI/API equivalent")).toBeInTheDocument();
+    expect(screen.getByText(/loom eval batch create/)).toHaveTextContent(
+      "--agent oracle",
+    );
     expect(
       screen.getByText(
         /Shared settings applied to every trial unless a combination overrides them/i,

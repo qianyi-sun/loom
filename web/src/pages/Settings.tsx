@@ -8,12 +8,15 @@ import { api, type ApiTokenEntry } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { cn } from "../lib/cn";
+import { cliLoginCommands } from "../lib/quickstartSnippets";
 import { currentServerOrigin } from "../lib/serverOrigin";
 
 type TeamDetail = Awaited<ReturnType<typeof api.getTeam>>;
@@ -111,7 +114,7 @@ export default function Settings(): JSX.Element {
   const [requestTeamName, setRequestTeamName] = useState("");
   const [requestEmail, setRequestEmail] = useState("");
   const serverOrigin = currentServerOrigin();
-  const cliLoginCommand = `loom auth login --server ${serverOrigin} --token env:LOOM_API_TOKEN`;
+  const cliLoginCommand = cliLoginCommands(serverOrigin).join("\n");
 
   const queryClient = useQueryClient();
   const currentTeam = teams.find((team) => team.id === currentTeamId) ?? null;
@@ -255,6 +258,19 @@ export default function Settings(): JSX.Element {
           </Card>
 
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-1">
+            <DocsCallout
+              title="First run checklist"
+              tone="info"
+              className="md:col-span-2 lg:col-span-1"
+            >
+              <ol className="list-decimal space-y-1 pl-4">
+                <li>Join with an invite link or request a team.</li>
+                <li>Ask a team owner for a scoped CLI token.</li>
+                <li>Log in with the CLI snippet below.</li>
+                <li>Create a provider, then launch a one-task smoke batch.</li>
+              </ol>
+            </DocsCallout>
+
             <Card>
               <Card.Header
                 title="Have an invite"
@@ -317,9 +333,7 @@ export default function Settings(): JSX.Element {
                 description="After an owner creates a scoped API token, point the CLI at this server."
               />
               <Card.Body>
-                <pre className="whitespace-pre-wrap break-words rounded-lg bg-slate-900 p-3 text-xs leading-relaxed text-slate-50">
-                  <code>{cliLoginCommand}</code>
-                </pre>
+                <CommandSnippet label="CLI login" command={cliLoginCommand} />
               </Card.Body>
             </Card>
           </div>

@@ -53,6 +53,8 @@ describe("Monitor human-readable labels", () => {
     renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
 
     expect(await screen.findByText("human-readable-batch")).toBeInTheDocument();
+    expect(screen.getByText("Monitor quick actions")).toBeInTheDocument();
+    expect(screen.getByText("loom eval batch show batch-1")).toBeInTheDocument();
     expect(screen.getByText("Planned trials")).toBeInTheDocument();
     expect(screen.queryByText("Expected")).not.toBeInTheDocument();
     expect(

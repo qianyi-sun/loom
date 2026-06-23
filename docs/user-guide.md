@@ -117,6 +117,13 @@ joined browser users, and role-aware setup links. Team owners get Team access
 for invites and API tokens; members and viewers see only the actions their role
 allows.
 
+Most web workflows now include contextual quickstarts directly on the page. Use
+the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
+Batch Detail, Trial Detail, Run Library, Usage, Rate cards, and Tasks when you
+want the CLI/API equivalent for the page you are viewing. The examples use
+safe placeholders and `env:`/`file:` secret references so users do not need to
+switch back to this guide for the common path.
+
 The CLI uses named team API tokens for service workflows. Create, rotate, or
 revoke those tokens from Team access only as a team owner. The one-time reveal
 shows CLI setup commands such as `export LOOM_API_TOKEN=loom_api_...` and
@@ -234,6 +241,12 @@ failed and batches using that connection may fail. `Untested` means
 the connection has been saved but should be tested before real runs.
 Allowed-model summaries distinguish unrestricted discovered models
 from explicit allow-lists.
+
+Contextual snippets are not a substitute for diagnostics. If a quickstart
+command fails, open the same page's diagnostic panel or detail view, then copy
+the relevant `loom eval batch show`, `loom eval trial show`, `loom eval trial
+download`, `loom providers test`, or `loom eval usage` command from the page
+to reproduce the issue from a shell.
 
 ## Cloud sandboxes (Daytona)
 

@@ -19,6 +19,7 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
+import { oracleSmokeBatchCommand } from "../lib/quickstartSnippets";
 import { currentServerOrigin } from "../lib/serverOrigin";
 
 function formatDate(value: string | null): string {
@@ -153,6 +154,12 @@ function CliSetupCommands({ token }: { token: string }): JSX.Element {
           </code>
         ))}
       </div>
+      <p className="pt-2 text-sm font-medium text-emerald-950">
+        Next CLI checks
+      </p>
+      <code className="block whitespace-pre-wrap break-words rounded-lg border border-emerald-200 bg-white p-3 font-mono text-xs leading-relaxed text-slate-800">
+        {oracleSmokeBatchCommand()}
+      </code>
     </div>
   );
 }

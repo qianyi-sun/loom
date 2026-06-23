@@ -30,6 +30,10 @@ describe("ProvidersList", () => {
     });
     const newBtn = screen.getByRole("link", { name: /new connection/i });
     expect(newBtn).toHaveAttribute("href", "/providers/new");
+    expect(screen.getByText("Hosted API quickstart")).toBeInTheDocument();
+    expect(screen.getByText(/loom providers create/)).toHaveTextContent(
+      "--api-key env:PROVIDER_API_KEY",
+    );
   });
 
   it("renders a table row per connection", async () => {

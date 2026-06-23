@@ -6,6 +6,7 @@ import { api, type InviteLookup, type InviteStatus } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
@@ -159,25 +160,51 @@ export default function InviteAccept(): JSX.Element {
           ) : null}
 
           {joinedTeam ? (
-            <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-4">
-              <Link
-                to="/monitor"
-                className={cn(
-                  LINK_BUTTON,
-                  "border-accent bg-accent text-white hover:bg-accent-hover",
-                )}
-              >
-                Open monitor
-              </Link>
-              <Link
-                to="/settings"
-                className={cn(
-                  LINK_BUTTON,
-                  "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-                )}
-              >
-                Team settings
-              </Link>
+            <div className="space-y-3 border-t border-slate-100 pt-4">
+              <DocsCallout title="Next setup steps" tone="success">
+                <p>
+                  Create or test a model provider first, then launch a one-task
+                  batch to verify the team, provider, worker, and artifact path.
+                </p>
+              </DocsCallout>
+              <div className="flex flex-wrap gap-2">
+                <Link
+                  to="/providers/new"
+                  className={cn(
+                    LINK_BUTTON,
+                    "border-accent bg-accent text-white hover:bg-accent-hover",
+                  )}
+                >
+                  Create provider
+                </Link>
+                <Link
+                  to="/batches/new"
+                  className={cn(
+                    LINK_BUTTON,
+                    "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                  )}
+                >
+                  Launch first batch
+                </Link>
+                <Link
+                  to="/monitor"
+                  className={cn(
+                    LINK_BUTTON,
+                    "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                  )}
+                >
+                  Open monitor
+                </Link>
+                <Link
+                  to="/settings"
+                  className={cn(
+                    LINK_BUTTON,
+                    "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                  )}
+                >
+                  Team settings
+                </Link>
+              </div>
             </div>
           ) : null}
 

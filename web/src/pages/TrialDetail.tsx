@@ -12,6 +12,8 @@ import { api } from "../api/client";
 import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
 import LoadingState from "../components/LoadingState";
@@ -21,6 +23,7 @@ import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
+import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { trialStateVariant } from "../lib/statusVariant";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
@@ -124,6 +127,7 @@ function TrialHeader({
   const provenance = Array.isArray(trial.source_provenance)
     ? trial.source_provenance
     : [];
+  const firstArtifactKey = trial.artifacts[0]?.key ?? null;
 
   return (
     <Card>
@@ -263,6 +267,18 @@ function TrialHeader({
             </Button>
           )}
         </div>
+
+        <DocsCallout title="Trial download commands" tone="info">
+          <div className="grid gap-3 lg:grid-cols-2">
+            {trialDownloadCommands(trial.id, firstArtifactKey).map((command) => (
+              <CommandSnippet
+                key={command}
+                label="Trial CLI"
+                command={command}
+              />
+            ))}
+          </div>
+        </DocsCallout>
 
         {trial.artifacts.length > 0 ? (
           <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">

@@ -57,6 +57,11 @@ loom providers models together-prod --refresh
 loom providers models together-prod
 ```
 
+The Providers list, New provider form, provider detail Overview, Models tab,
+and New Batch page show the same hosted-API quickstart and smoke-batch snippets
+inline. Prefer copying from the page when you are working against a specific
+public server, because those snippets derive the current server URL.
+
 Common failures:
 
 - `401` or `403`: the provider key is invalid, expired, missing entitlement for

@@ -34,6 +34,7 @@ describe("TrialCompare", () => {
   it("renders an empty-state prompt when neither trial is selected", () => {
     renderWithProviders(<TrialCompare />, { route: "/trials/compare" });
     expect(screen.getByText("Compare trials")).toBeInTheDocument();
+    expect(screen.getByText("Compare checklist")).toBeInTheDocument();
     expect(
       screen.getByText(/Open a trial from the Trials list/i),
     ).toBeInTheDocument();

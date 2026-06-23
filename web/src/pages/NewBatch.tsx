@@ -41,6 +41,8 @@ import {
 } from "../components/AgentModelPicker";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import { Input, Textarea } from "../components/Input";
 import {
@@ -49,6 +51,10 @@ import {
 } from "../lib/agentReadiness";
 import { EMPTY_BENCHMARK_HELP } from "../lib/helpText";
 import { parseTaskIds } from "../lib/parseTaskIds";
+import {
+  oracleSmokeBatchCommand,
+  providerSmokeBatchCommand,
+} from "../lib/quickstartSnippets";
 
 interface BenchmarkItem {
   id: string;
@@ -1090,6 +1096,22 @@ export default function NewBatch(): JSX.Element {
           then review how many trials Loom will launch.
         </p>
       </header>
+
+      <DocsCallout title="CLI/API equivalent" tone="info">
+        <p>
+          The form below builds the same task filter, agent, model, and retry
+          shape as the CLI. Start with the oracle canary, then run a
+          provider-backed smoke after adding a provider connection.
+        </p>
+        <CommandSnippet
+          label="Smoke batch examples"
+          command={[
+            oracleSmokeBatchCommand(),
+            "# provider-backed smoke after provider setup",
+            providerSmokeBatchCommand("smoke-openai", "gpt-4o-mini"),
+          ].join("\n\n")}
+        />
+      </DocsCallout>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}

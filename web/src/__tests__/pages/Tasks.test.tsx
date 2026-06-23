@@ -84,6 +84,10 @@ describe("Tasks page", () => {
     expect(screen.getByText(/verifier: pytest/i)).toBeInTheDocument();
     expect(screen.getByText(/2 steps/i)).toBeInTheDocument();
     expect(screen.getByText(/benchmark: humaneval/i)).toBeInTheDocument();
+    expect(screen.getByText("Catalog quickstart")).toBeInTheDocument();
+    expect(screen.getByText(/loom eval batch create/)).toHaveTextContent(
+      "--benchmark humaneval",
+    );
   });
 
   it("benchmark dropdown is populated from /api/v1/benchmarks", async () => {

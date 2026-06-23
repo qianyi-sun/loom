@@ -9,6 +9,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -19,6 +20,7 @@ import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
+import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 
 function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
@@ -235,6 +237,12 @@ export default function BatchDetail(): JSX.Element {
               </ul>
             </div>
           ) : null}
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            {batchInspectionCommands(c.id).map((command) => (
+              <CommandSnippet key={command} label="Batch CLI" command={command} />
+            ))}
+          </div>
 
           {ACTIVE_STATES.has(c.state) ? (
             <div className="space-y-2">

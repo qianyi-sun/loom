@@ -44,9 +44,12 @@ describe("ProviderCreate", () => {
     renderPage();
     expect(screen.getByText(/third-party api/i)).toBeInTheDocument();
     expect(screen.getByText(/gpu cluster checkpoint/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/loom inference deploy slurm/i),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText(/loom inference deploy slurm/i).length).toBeGreaterThan(0);
+    expect(screen.getByText("Hosted API CLI")).toBeInTheDocument();
+    expect(screen.getByText(/loom providers create/)).toHaveTextContent(
+      "--api-key env:PROVIDER_API_KEY",
+    );
+    expect(screen.getByText("Cluster deploy CLI")).toBeInTheDocument();
   });
 
   it("with ?returnTo=/batches/new redirects there", async () => {

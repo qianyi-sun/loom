@@ -16,6 +16,7 @@ import { api } from "../api/client";
 import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
 import { Input } from "../components/Input";
@@ -154,6 +155,13 @@ export default function TrialCompare(): JSX.Element {
             Compare trials
           </h1>
         </header>
+        <DocsCallout title="Compare checklist" tone="info">
+          <p>
+            Compare trials with the same task when you are reviewing model,
+            agent, or provider changes. Open a trial first so the left column is
+            prefilled, then paste the second trial ID here.
+          </p>
+        </DocsCallout>
         <Card>
           <Card.Body>
             <p className="text-sm text-slate-500">

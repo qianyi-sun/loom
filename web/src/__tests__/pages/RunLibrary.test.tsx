@@ -228,6 +228,8 @@ describe("RunLibrary", () => {
     renderWithProviders(<RunLibrary />, { route: "/library?scope=all" });
 
     expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    expect(screen.getByText("Reuse guide")).toBeInTheDocument();
+    expect(screen.getByText(/Provider credentials are not copied/i)).toBeInTheDocument();
     expect(screen.getByText("Alpha Research")).toBeInTheDocument();
     expect(screen.getAllByText("org / shared").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Reports 1").length).toBeGreaterThan(0);
@@ -272,6 +274,12 @@ describe("RunLibraryBatchDetail", () => {
     );
 
     expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    expect(screen.getByText("Library CLI downloads")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "loom eval trial download trial-alpha --kind artifact --artifact-key team-alpha/trial-alpha/main/report.json --output artifact.bin",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("Owner team")).toBeInTheDocument();
     expect(screen.getByText("Alpha Research")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();

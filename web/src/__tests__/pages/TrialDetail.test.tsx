@@ -134,6 +134,12 @@ describe("TrialDetail trajectory section", () => {
     expect(
       screen.getByText("openai-compatible/gpt-5-mini"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Trial download commands")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `loom eval trial download ${TRIAL_ID} --kind atif --output atif.json`,
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Load more/i }),
     ).not.toBeInTheDocument();
@@ -207,6 +213,11 @@ describe("TrialDetail trajectory section", () => {
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:artifact");
     expect(screen.getByText("701 B")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `loom eval trial download ${TRIAL_ID} --kind artifact --artifact-key main/result.txt --output artifact.bin`,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("labels artifacts blocked from org-wide sharing", async () => {

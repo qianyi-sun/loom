@@ -7,9 +7,12 @@ import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
+import { hostedProviderCommands } from "../lib/quickstartSnippets";
 import { providerStatusSummary } from "../lib/providerDisplay";
+import { currentServerOrigin } from "../lib/serverOrigin";
 
 type Conn = {
   id: string;
@@ -40,7 +43,7 @@ export default function ProvidersList(): JSX.Element {
   if (items.length === 0) {
     return (
       <Card>
-        <Card.Body className="space-y-4 text-center">
+        <Card.Body className="space-y-4">
           <h1 className="text-2xl font-bold text-slate-900">Provider connections</h1>
           <p className="text-sm text-slate-500">
             No provider connections yet. Create one to launch evaluations against
@@ -52,6 +55,11 @@ export default function ProvidersList(): JSX.Element {
           >
             + New connection
           </Link>
+          <CommandSnippet
+            label="Hosted API quickstart"
+            command={hostedProviderCommands(currentServerOrigin()).join("\n")}
+            helperText="Use env: or file: secret references; do not paste raw provider keys into saved commands."
+          />
         </Card.Body>
       </Card>
     );

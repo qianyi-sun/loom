@@ -48,6 +48,8 @@ describe("ModelsTab", () => {
       expect(screen.getByText("gpt-4o")).toBeInTheDocument();
       expect(screen.getByText("manual/x")).toBeInTheDocument();
     });
+    expect(screen.getByText("Model picker guidance")).toBeInTheDocument();
+    expect(screen.getByText("loom providers models abc --refresh")).toBeInTheDocument();
   });
 
   it("renders hidden rows from the provider models API visibility contract", async () => {

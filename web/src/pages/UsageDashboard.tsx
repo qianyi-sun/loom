@@ -8,11 +8,13 @@ import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
+import { usageCommand } from "../lib/quickstartSnippets";
 
 const SELECT_CLASSES =
   "rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700";
@@ -105,6 +107,16 @@ export default function UsageDashboard(): JSX.Element {
           />
         </label>
       </div>
+
+      <CommandSnippet
+        label="Usage CLI"
+        command={usageCommand(start, end, teamId)}
+        helperText={
+          teamId
+            ? "The web filter is scoped to the entered team ID when your role can read it."
+            : "Leave the team filter blank to inspect your current team."
+        }
+      />
 
       {query.isPending ? <LoadingState /> : null}
       {query.isError ? <ErrorState error={query.error} /> : null}

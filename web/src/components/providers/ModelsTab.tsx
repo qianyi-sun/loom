@@ -9,6 +9,8 @@ import { useState } from "react";
 import { api, type ProviderConnectionModelEntry } from "../../api/client";
 import { Button } from "../Button";
 import { Card } from "../Card";
+import CommandSnippet from "../CommandSnippet";
+import DocsCallout from "../DocsCallout";
 import { Input } from "../Input";
 import LoadingState from "../LoadingState";
 import {
@@ -19,11 +21,12 @@ import {
 } from "../../hooks/providers";
 import AddManualModelModal from "./AddManualModelModal";
 
-export type ModelsTabProps = { id: string };
+export type ModelsTabProps = { id: string; connectionName?: string };
 
-export default function ModelsTab({ id }: ModelsTabProps): JSX.Element {
+export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.Element {
   const [filter, setFilter] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const cliConnection = connectionName ?? id;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["providers", id, "models"],
@@ -72,6 +75,17 @@ export default function ModelsTab({ id }: ModelsTabProps): JSX.Element {
           </Button>
         </div>
       </div>
+      <DocsCallout title="Model picker guidance" tone="info">
+        <p>
+          Refreshed visible models appear in New Batch. Hide noisy upstream
+          entries, or add a manual model ID when the provider omits it from
+          discovery.
+        </p>
+        <CommandSnippet
+          label="Refresh provider model cache"
+          command={`loom providers models ${cliConnection} --refresh`}
+        />
+      </DocsCallout>
       <Card>
         {items.length === 0 ? (
           <Card.Body className="text-center text-sm text-slate-500">

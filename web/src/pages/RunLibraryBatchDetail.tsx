@@ -10,6 +10,8 @@ import {
 } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
@@ -18,6 +20,7 @@ import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
+import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant } from "../lib/statusVariant";
 
 const GROUP_LABELS: Record<ArtifactGroup, string> = {
@@ -180,6 +183,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
     matchedTaskCount: batch.expected_trial_count,
   });
   const configSummary = humanizeTrialConfig(batch.trial_config);
+  const firstSharedArtifact = GROUP_ORDER.flatMap(
+    (group) => batch.artifact_inventory[group] ?? [],
+  ).find((artifact) => artifact.share_status === "shared");
 
   return (
     <div className="space-y-6">
@@ -331,6 +337,19 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           description="Shared files are downloadable through Loom API URLs; blocked files stay owner-team diagnostics."
         />
         <Card.Body className="space-y-5">
+          {firstSharedArtifact ? (
+            <DocsCallout title="Library CLI downloads" tone="info">
+              <CommandSnippet
+                label="Shared artifact CLI"
+                command={
+                  trialDownloadCommands(
+                    firstSharedArtifact.trial_id,
+                    firstSharedArtifact.key,
+                  ).find((command) => command.includes("--kind artifact")) ?? ""
+                }
+              />
+            </DocsCallout>
+          ) : null}
           {GROUP_ORDER.map((group) => {
             const artifacts = batch.artifact_inventory[group] ?? [];
             if (artifacts.length === 0) return null;

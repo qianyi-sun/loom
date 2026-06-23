@@ -66,6 +66,15 @@ describe("InviteAccept", () => {
     await userEvent.click(screen.getByRole("button", { name: "Accept invite" }));
 
     expect(await screen.findByText("Joined Invite Alpha")).toBeInTheDocument();
+    expect(screen.getByText("Next setup steps")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Create provider" })).toHaveAttribute(
+      "href",
+      "/providers/new",
+    );
+    expect(screen.getByRole("link", { name: "Launch first batch" })).toHaveAttribute(
+      "href",
+      "/batches/new",
+    );
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledWith(
         expect.stringContaining("/api/v1/invites/accept"),

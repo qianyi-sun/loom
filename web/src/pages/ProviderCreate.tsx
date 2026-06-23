@@ -6,10 +6,20 @@ import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
 import ProviderForm, {
   type ProviderFormValues,
 } from "../components/providers/ProviderForm";
 import { useCreateConnection } from "../hooks/providers";
+import { hostedProviderCommands } from "../lib/quickstartSnippets";
+import { currentServerOrigin } from "../lib/serverOrigin";
+
+const CLUSTER_DEPLOY_COMMAND = [
+  "loom inference deploy slurm",
+  "  --name lab-vllm",
+  "  --model-path /models/checkpoint",
+  "  --expose bastion-forward",
+].join(" \\\n");
 
 export default function ProviderCreate(): JSX.Element {
   const navigate = useNavigate();
@@ -65,6 +75,12 @@ export default function ProviderCreate(): JSX.Element {
               API key. Create the connection, test it, refresh models, then
               select a model in New Batch.
             </p>
+            <div className="mt-3">
+              <CommandSnippet
+                label="Hosted API CLI"
+                command={hostedProviderCommands(currentServerOrigin()).join("\n")}
+              />
+            </div>
           </section>
           <section className="rounded-md border border-slate-200 bg-slate-50 p-3">
             <h2 className="text-sm font-semibold text-slate-900">
@@ -77,6 +93,13 @@ export default function ProviderCreate(): JSX.Element {
               </code>{" "}
               to generate a vLLM service bundle and registration fields.
             </p>
+            <div className="mt-3">
+              <CommandSnippet
+                label="Cluster deploy CLI"
+                command={CLUSTER_DEPLOY_COMMAND}
+                helperText="The generated registration script should use a file: or env: key reference."
+              />
+            </div>
           </section>
         </div>
         {error && (

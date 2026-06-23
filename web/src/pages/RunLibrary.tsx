@@ -4,6 +4,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, type ArtifactSummary, type RunLibraryBatch } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
+import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -145,6 +146,14 @@ export default function RunLibrary(): JSX.Element {
           </ScopeButton>
         </div>
       </div>
+
+      <DocsCallout title="Reuse guide" tone="info">
+        <p>
+          Clone copies the run shape into your current team. Provider
+          credentials are not copied; choose one of your own provider
+          connections on the shared run detail page before queueing the clone.
+        </p>
+      </DocsCallout>
 
       <Card>
         <Card.Body className="grid gap-3 md:grid-cols-3">

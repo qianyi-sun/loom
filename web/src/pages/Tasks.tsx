@@ -16,6 +16,8 @@ import { useMemo, useState } from "react";
 import { api } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
@@ -182,6 +184,25 @@ export default function Tasks(): JSX.Element {
           submit.
         </p>
       </header>
+
+      <DocsCallout title="Catalog quickstart" tone="info">
+        <p>
+          Use this page to find task IDs and benchmark IDs, then launch a small
+          benchmark slice before scaling up.
+        </p>
+        <CommandSnippet
+          label="Explicit task smoke"
+          command={[
+            "loom eval batch create",
+            "  --name catalog-smoke",
+            "  --benchmark humaneval",
+            "  --subset explicit",
+            "  --task-id humaneval/HumanEval/0",
+            "  --agent oracle",
+            "  --n-per-task 1",
+          ].join(" \\\n")}
+        />
+      </DocsCallout>
 
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex flex-col gap-1">

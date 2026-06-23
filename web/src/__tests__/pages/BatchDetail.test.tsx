@@ -108,6 +108,8 @@ describe("BatchDetail run plan", () => {
     renderBatchDetail();
 
     expect(await screen.findByText(/Run plan/i)).toBeInTheDocument();
+    expect(screen.getAllByText("Batch CLI").length).toBeGreaterThan(0);
+    expect(screen.getByText(`loom eval batch show ${BATCH_ID}`)).toBeInTheDocument();
     expect(
       screen.getByText("HumanEval / all runnable tasks / 164 tasks"),
     ).toBeInTheDocument();

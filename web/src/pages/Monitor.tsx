@@ -16,6 +16,8 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { Card } from "../components/Card";
+import CommandSnippet from "../components/CommandSnippet";
+import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
@@ -28,6 +30,7 @@ import Pagination, {
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 
 type View = "batches" | "trials";
@@ -185,10 +188,20 @@ function BatchesView({
 
   const COLS = 5;
   return (
-    <Card>
-      <Card.Body className="p-0">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200 text-sm">
+    <div className="space-y-3">
+      {items.length > 0 ? (
+        <DocsCallout title="Monitor quick actions" tone="info">
+          <div className="grid gap-3 lg:grid-cols-2">
+            {batchInspectionCommands(items[0].id).map((command) => (
+              <CommandSnippet key={command} label="Batch CLI" command={command} />
+            ))}
+          </div>
+        </DocsCallout>
+      ) : null}
+      <Card>
+        <Card.Body className="p-0">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead>
               <tr className="bg-slate-50/50">
                 {[
@@ -259,24 +272,25 @@ function BatchesView({
                 ))
               )}
             </tbody>
-          </table>
-        </div>
-      </Card.Body>
-      {query.data && items.length > 0 ? (
-        <Card.Footer>
-          <Pagination
-            state={page}
-            hasNext={query.data.next_cursor !== null}
-            onNext={() => {
-              if (query.data?.next_cursor) {
-                setPage((p) => nextPage(p, query.data!.next_cursor!));
-              }
-            }}
-            onPrev={() => setPage((p) => prevPage(p))}
-          />
-        </Card.Footer>
-      ) : null}
-    </Card>
+            </table>
+          </div>
+        </Card.Body>
+        {query.data && items.length > 0 ? (
+          <Card.Footer>
+            <Pagination
+              state={page}
+              hasNext={query.data.next_cursor !== null}
+              onNext={() => {
+                if (query.data?.next_cursor) {
+                  setPage((p) => nextPage(p, query.data!.next_cursor!));
+                }
+              }}
+              onPrev={() => setPage((p) => prevPage(p))}
+            />
+          </Card.Footer>
+        ) : null}
+      </Card>
+    </div>
   );
 }
 
