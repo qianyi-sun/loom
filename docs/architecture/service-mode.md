@@ -386,9 +386,12 @@ state before propagating:
 | `batches` | Service | Batch grouping + idempotency keys |
 | `cloud_compute_records` | Cloud drivers | Per-sandbox lifetime + cost; `cloud_provider` column |
 
-Migrations: `migrations/versions/0001_initial_schema.py` through
-`0022_pending_team_registrations.py`. Run via
-`alembic -c migrations/alembic.ini upgrade head`.
+Migrations live in `migrations/versions/` and are applied with
+`alembic -c migrations/alembic.ini upgrade head`. Local `loom service up`
+runs this automatically after Postgres is healthy. Direct service startup does
+not auto-migrate: `loom-service`, the Control Plane, and the LLM Gateway refuse
+to start when the database Alembic revision is behind repository code, so
+production deploys must run migrations before rolling DB-facing services.
 
 ## SPA
 

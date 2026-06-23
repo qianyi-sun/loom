@@ -12,9 +12,10 @@ import boto3
 from botocore.config import Config
 from fastapi import FastAPI
 from prometheus_client import make_asgi_app
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
+from loom.db.schema_startup import assert_schema_at_head
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
 from loom_control_plane.retry_exhausted_sweeper import (
@@ -46,10 +47,15 @@ def _load_admin_secret_verifier(
     )
 
 
+async def _assert_schema_startup(engine: AsyncEngine) -> int:
+    return await assert_schema_at_head(engine, db_url_env_var="LOOM_CP_DB_URL")
+
+
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_async_engine(str(settings.db_url))
+        await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 

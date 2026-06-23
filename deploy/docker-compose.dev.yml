@@ -9,8 +9,9 @@
 #
 # Manual equivalent:
 #   loom service init-admin --secret-file .loom/admin/secrets.toml
-#   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d
+#   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d postgres minio
 #   alembic -c migrations/alembic.ini upgrade head
+#   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d
 #   python scripts/seed_test_data.py --mode dev --print all
 #   # Put the printed team/worker tokens plus the revealed admin token in .env.
 #
@@ -18,6 +19,8 @@
 # root tokens without changing bind-mount resolution. If you run compose by
 # hand, keep the explicit `--env-file .env` form; changing the project
 # directory can make `../src` resolve outside the repo checkout.
+# DB-facing services refuse to start when the database Alembic revision is
+# behind repository code; `loom service up` runs migrations before token seeding.
 #
 # Endpoint map (matches the k8s ingress in deploy/k8s/):
 #   localhost:5173   React SPA via Vite HMR (the user panel)

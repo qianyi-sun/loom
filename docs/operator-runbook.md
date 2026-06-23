@@ -142,11 +142,31 @@ knob you need.
      | yq '. | select(.kind == "Ingress") | .spec'
    ```
 
-4. **Apply manifests in dependency order:**
+4. **Apply stateful dependencies first:**
    ```bash
    kubectl apply -f deploy/k8s/postgres.yaml
    kubectl apply -f deploy/k8s/minio.yaml
    # wait for postgres + minio ready
+   ```
+
+5. **Run migrations before DB-facing services start.** Use a one-off Job or
+   operator shell with the same image and database Secret as the Control Plane.
+   Existing clusters may also exec into an already-running Control Plane pod:
+   ```bash
+   # Fresh deploy: run this from a one-off migration pod/job before app rollout.
+   LOOM_DB_URL="$LOOM_CP_DB_URL" alembic -c migrations/alembic.ini upgrade head
+
+   # Existing deploy, when a compatible Control Plane pod is already running:
+   kubectl exec deploy/loom-control-plane -- alembic upgrade head
+   ```
+
+   `loom-control-plane`, `loom-llm-gateway`, and `loom-service` validate
+   the database Alembic revision at process startup. If the DB is behind the
+   image code, they refuse to start with the migration command instead of
+   serving requests that later fail with missing-column errors.
+
+6. **Apply DB-facing services and edge components:**
+   ```bash
    kubectl apply -f deploy/k8s/llm-gateway.yaml
    kubectl apply -f deploy/k8s/control-plane.yaml
    kubectl apply -f deploy/k8s/loom-service.yaml
@@ -155,12 +175,7 @@ knob you need.
    kubectl apply -f deploy/k8s/ingress.yaml
    ```
 
-5. **Run migrations** (one-off Job, from a pod with the Control Plane image):
-   ```bash
-   kubectl exec deploy/loom-control-plane -- alembic upgrade head
-   ```
-
-6. **Mint a worker token** via the admin API. The admin credential is the
+7. **Mint a worker token** via the admin API. The admin credential is the
    singleton `loom-admin-secret` mounted into `loom_service`, the Control Plane,
    and the LLM Gateway. Use the same `ADMIN_TOKEN` revealed in step 2; do not
    create a database-backed admin row for this bootstrap path.
@@ -389,7 +404,9 @@ loom cluster status
 `--skip-preflight` is safe here because preflight checks (Secrets,
 IngressClass, StorageClass) don't change between rollouts.
 
-Migration rollbacks: `alembic downgrade -1` from a Control Plane pod.
+Migration rollbacks: `alembic downgrade -1` from a Control Plane pod or
+one-off migration Job, then restart DB-facing services so their startup schema
+gate re-checks the downgraded revision.
 DB-level downgrades that drop columns are NOT reversible without
 restore from snapshot — gate destructive migrations behind a flag.
 
