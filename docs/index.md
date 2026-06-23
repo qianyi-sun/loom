@@ -6,6 +6,9 @@ What you're looking for, where it lives:
 
 - **[user-guide.md](user-guide.md)** — `loom` CLI: install, `run`,
   `datasets`, `config`, troubleshooting
+- **[provider-onboarding.md](provider-onboarding.md)** — hosted
+  third-party API setup, Slurm/vLLM checkpoint deployment, provider
+  testing, model refresh, and safe registration
 
 ## I want to author a benchmark task
 

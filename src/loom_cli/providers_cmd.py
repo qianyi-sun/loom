@@ -106,6 +106,17 @@ def _print_connection_summary(item: dict[str, Any]) -> None:
     print(f"created_at:    {item['created_at']}")
 
 
+def _print_create_next_steps(name: str) -> None:
+    print()
+    print("Next steps:")
+    print(f"  loom providers test {name}")
+    print(f"  loom providers models {name} --refresh")
+    print(
+        "  Then choose this provider connection and a discovered model in "
+        "New Batch, or pass the provider/model flags in CLI eval commands.",
+    )
+
+
 def _resolve_by_name(client: httpx.Client, name: str) -> dict[str, Any]:
     """Look up a connection by display_name (the CLI's surface) and
     return its full row dict. Raises _NameNotFoundError if no/multiple
@@ -186,6 +197,7 @@ def _create(args: argparse.Namespace) -> int:
         )
         print(f"Created provider connection {body['name']!r}:")
         _print_connection_summary(body)
+        _print_create_next_steps(body["name"])
         return 0
 
     return _run_with_error_handling(_body)

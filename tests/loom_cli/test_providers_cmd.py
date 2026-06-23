@@ -137,6 +137,9 @@ def test_create_happy_path_posts_correct_payload(
     out = capsys.readouterr().out
     assert "Created provider connection 'openai-prod'" in out
     assert "name:          openai-prod" in out
+    assert "Next steps:" in out
+    assert "loom providers test openai-prod" in out
+    assert "loom providers models openai-prod --refresh" in out
 
     # Verify the request shape.
     assert len(mock_server) == 1

@@ -65,6 +65,9 @@ describe("ProviderDetail", () => {
     expect(
       screen.getByText(/last provider test passed/i),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/OpenAI-compatible root ending in \/v1/i),
+    ).toBeInTheDocument();
   });
 
   it("clicking Models tab switches content", async () => {

@@ -127,6 +127,10 @@ export default function ProviderForm({
           required
           placeholder="https://api.example.com/v1"
         />
+        <p className="mt-1 text-xs text-slate-500">
+          For OpenAI-compatible servers, use the API root ending in /v1. For
+          Anthropic or Google, use the provider's documented API root.
+        </p>
       </div>
       {mode === "create" && (
         <div>

@@ -52,6 +52,33 @@ export default function ProviderCreate(): JSX.Element {
             Configure a BYO model provider for batch + trial submission.
           </p>
         </header>
+        <div
+          aria-label="Provider setup paths"
+          className="grid gap-3 md:grid-cols-2"
+        >
+          <section className="rounded-md border border-slate-200 bg-slate-50 p-3">
+            <h2 className="text-sm font-semibold text-slate-900">
+              Third-party API
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Use this form when you already have a hosted provider URL and
+              API key. Create the connection, test it, refresh models, then
+              select a model in New Batch.
+            </p>
+          </section>
+          <section className="rounded-md border border-slate-200 bg-slate-50 p-3">
+            <h2 className="text-sm font-semibold text-slate-900">
+              GPU cluster checkpoint
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              On a Slurm cluster, run{" "}
+              <code className="rounded bg-white px-1 py-0.5 font-mono text-xs">
+                loom inference deploy slurm
+              </code>{" "}
+              to generate a vLLM service bundle and registration fields.
+            </p>
+          </section>
+        </div>
         {error && (
           <div
             role="alert"

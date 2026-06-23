@@ -156,7 +156,13 @@ function OverviewTab({
       <Card.Body className="space-y-4">
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <dt className="font-medium text-slate-600">Base URL</dt>
-          <dd>{conn.base_url}</dd>
+          <dd>
+            <p>{conn.base_url}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              OpenAI-compatible root ending in /v1; this is the URL Loom calls
+              from the server side.
+            </p>
+          </dd>
           <dt className="font-medium text-slate-600">Type</dt>
           <dd>{conn.type}</dd>
           <dt className="font-medium text-slate-600">Allowed models</dt>

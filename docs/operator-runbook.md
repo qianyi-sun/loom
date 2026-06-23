@@ -798,6 +798,36 @@ model id for a batch; the current backend contract stores that override
 at batch level, so all BYO-provider combinations in one batch must share
 the same connection/model.
 
+## GPU-cluster checkpoint provider onboarding
+
+For Lux-like clusters, prefer the user-facing bundle generator documented in
+[`provider-onboarding.md`](provider-onboarding.md#gpu-cluster-checkpoint):
+
+```bash
+loom inference deploy slurm \
+  --model Qwen/Qwen2.5-Coder-7B-Instruct \
+  --served-model-name qwen2.5-coder-7b-instruct \
+  --partition compute \
+  --gres gpu:h100:1 \
+  --venv /pm/qy/uv_envs/vcbm \
+  --expose user-provided \
+  --endpoint-url http://bastion.example.com:18001/v1 \
+  --output-dir ~/loom-inference/lux-qwen25 \
+  --no-submit
+```
+
+The generated bundle stores the provider API key in an owner-only file, starts
+vLLM through a launcher that avoids putting the key in long-lived process argv,
+and emits non-secret Loom registration fields. Operator validation should cover
+`./submit.sh`, the network exposure path, `./healthcheck.sh`,
+`./register-provider.sh`, `loom providers test NAME`,
+`loom providers models NAME --refresh`, and one small model-backed batch.
+
+Loom does not need SSH access to the GPU cluster for normal calls; it only needs
+HTTP reachability to the registered `/v1` endpoint. SSH, Slurm credentials, or
+cluster-specific submit rights are only needed when a user or future Loom
+automation is launching or restarting the inference service.
+
 ## Observability: dashboards
 
 Five Grafana dashboards ship in `deploy/grafana/dashboards/`. When you run

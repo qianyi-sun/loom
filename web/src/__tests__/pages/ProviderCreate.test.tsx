@@ -40,6 +40,15 @@ describe("ProviderCreate", () => {
     });
   });
 
+  it("shows the two provider setup paths in human language", () => {
+    renderPage();
+    expect(screen.getByText(/third-party api/i)).toBeInTheDocument();
+    expect(screen.getByText(/gpu cluster checkpoint/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/loom inference deploy slurm/i),
+    ).toBeInTheDocument();
+  });
+
   it("with ?returnTo=/batches/new redirects there", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ id: "new-id" }), { status: 201 }),

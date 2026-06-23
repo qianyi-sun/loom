@@ -253,6 +253,8 @@ Tear down: `loom service down` (preserves volumes) or `loom service
 down -v` (wipes Postgres + MinIO).
 
 Production deployment: [`docs/operator-runbook.md`](docs/operator-runbook.md).
+Provider setup for hosted APIs and Slurm/vLLM self-hosted checkpoints:
+[`docs/provider-onboarding.md`](docs/provider-onboarding.md).
 To add extra Docker-capable hosts to a shared-dev or staging control
 node before full Kubernetes mode, see
 [`docs/remote-worker-pool.md`](docs/remote-worker-pool.md). To share

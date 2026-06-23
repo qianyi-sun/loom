@@ -231,6 +231,14 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     sub.add_parser(
+        "inference",
+        help=(
+            "Prepare self-hosted OpenAI-compatible inference services "
+            "(Slurm/vLLM bundle generation)"
+        ),
+        add_help=False,
+    )
+    sub.add_parser(
         "eval",
         help="Manage evaluation batches (batch create/show/list/cancel)",
         add_help=False,
@@ -335,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "providers":
         from loom_cli.providers_cmd import dispatch as providers_dispatch
         return providers_dispatch(raw[1:])
+    if raw and raw[0] == "inference":
+        from loom_cli.inference_cmd import dispatch as inference_dispatch
+        return inference_dispatch(raw[1:])
     if raw and raw[0] == "eval":
         from loom_cli.eval_cmd import dispatch as eval_dispatch
         return eval_dispatch(raw[1:])
