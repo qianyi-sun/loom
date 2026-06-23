@@ -135,8 +135,9 @@ Admin authority is now file-backed rather than DB-backed, and the development
 stack uses the same singleton-admin path as production. Browser users now use
 HttpOnly session cookies, CSRF protection, invite acceptance, and persisted
 team memberships instead of pasted bearer tokens. Scoped CLI/API tokens are
-hash-only at rest with one-time raw reveal. Remaining public-beta auth risk is
-concentrated in completing the Run Library sharing surface and broader
-audit/incident controls before broad external exposure. Quota/rate-limit
-enforcement is intentionally outside the current public-beta gate until a
-concrete operating policy exists.
+hash-only at rest with one-time raw reveal. Run Library sharing now uses
+explicit visibility/share-state checks and owner-team labels instead of
+weakening execution routes. Remaining public-beta auth risk is concentrated in
+final staging smoke, documentation review, and operational incident practice
+before broad external exposure. Quota/rate-limit enforcement is intentionally
+outside the current public-beta gate until a concrete operating policy exists.

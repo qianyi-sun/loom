@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
-from loom.db.schema import Trial
+from loom.db.schema import Team, Trial
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
     known_names,
@@ -125,6 +125,9 @@ def _trial_row(t: Trial) -> dict[str, Any]:
         "cost_usd": _extract_cost(t.result),
         "agent_name": agent_name,
         "model": model,
+        "visibility": t.visibility,
+        "share_status": t.share_status,
+        "source_provenance": t.source_provenance,
     }
 
 
@@ -308,6 +311,14 @@ async def get_trial(
     require_team_or_admin(ctx, trial.team_id)
 
     base = _trial_row(trial)
+    owner_team = (await s.execute(
+        select(Team).where(Team.id == trial.team_id),
+    )).scalar_one_or_none()
+    if owner_team is not None:
+        base["owner_team"] = {
+            "id": str(owner_team.id),
+            "name": owner_team.name,
+        }
     trajectory_index = trial.trajectory_index or {}
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;

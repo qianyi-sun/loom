@@ -262,18 +262,18 @@ owner users can manage team API tokens/provider connections. Switching teams
 clears query cache so Monitor, Batch Detail, Trial Detail, Providers, Usage,
 and Settings reload against the new team context.
 
-Issue #336 will add the separate org-wide Run Library. That future view can
-show completed run metadata and safe shared artifacts across teams, with owner
-team labels and explicit share states. It must not reuse current-team execution
-routes as a cross-team bypass: running/submitted work, provider secrets, member
-management, cancellation, reruns, private artifacts, and blocked artifacts
-remain controlled by the owner team.
+The separate org-wide Run Library shows completed run metadata and safe shared
+artifacts across teams, with owner-team labels, provenance, and explicit share
+states. It must not reuse current-team execution routes as a cross-team bypass:
+running/submitted work, provider secrets, member management, cancellation,
+reruns, private artifacts, and blocked artifacts remain controlled by the owner
+team.
 
 ## Surfaces
 
 ### Top-level navigation
 
-The SPA reduces from 7 nav entries to 3:
+The SPA reduces the old mixed navigation into four primary entries:
 
 - **New batch** — the submission form. Submit button text
   reflects the resolved fan-out (`Submit 1 trial` if one task
@@ -287,6 +287,10 @@ The SPA reduces from 7 nav entries to 3:
   layout under both. Harbor's pattern: route is
   `/monitor?view=batches|trials` and switching the toggle
   preserves filters.
+- **Run Library** — org-wide completed-result browser with **My team** and
+  **All teams** scopes, owner-team labels, task/config summaries, artifact
+  groups, safe shared artifact downloads, clone-config actions, reuse actions,
+  and provenance.
 - **Settings** — signed-out sign-in/invite/request-access/CLI setup guidance;
   signed-in current team, role, team switcher, joined browser members,
   role-aware setup links, and API-token summaries. Token-paste login is no

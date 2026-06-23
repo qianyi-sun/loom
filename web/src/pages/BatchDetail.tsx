@@ -18,6 +18,7 @@ import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
+import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 
 function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
@@ -99,6 +100,9 @@ export default function BatchDetail(): JSX.Element {
   const rerunnableFailedCount = c.rerunnable_failed_count ?? 0;
   const effectiveSucceeded = c.effective_trial_summary?.succeeded ?? 0;
   const effectiveFailed = c.effective_trial_summary?.failed ?? 0;
+  const provenance = Array.isArray(c.source_provenance)
+    ? c.source_provenance
+    : [];
   const diagnostics = [
     { title: "task_filter", data: c.task_filter, expanded: true },
     { title: "trial_config", data: c.trial_config, expanded: true },
@@ -189,7 +193,15 @@ export default function BatchDetail(): JSX.Element {
             </div>
           ) : null}
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-7">
+            <StatCard
+              label="Owner team"
+              value={c.owner_team?.name ?? c.team_id}
+            />
+            <StatCard
+              label="Visibility"
+              value={`${c.visibility ?? "team"} / ${c.share_status ?? "pending_scan"}`}
+            />
             <StatCard label="Expected" value={c.expected_trial_count} />
             <StatCard
               label="Reward (avg)"
@@ -212,6 +224,17 @@ export default function BatchDetail(): JSX.Element {
               value={c.finished_at?.slice(0, 16).replace("T", " ") ?? "—"}
             />
           </div>
+
+          {provenance.length > 0 ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              <div className="font-semibold text-slate-900">Provenance</div>
+              <ul className="mt-1 space-y-1 text-xs text-slate-600">
+                {provenance.map((item, index) => (
+                  <li key={index}>{provenanceLabel(item)}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
 
           {ACTIVE_STATES.has(c.state) ? (
             <div className="space-y-2">

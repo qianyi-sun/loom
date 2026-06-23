@@ -54,6 +54,9 @@ Start with the overview, drill into the area you care about:
 - **[architecture/trajectory-and-atif.md](architecture/trajectory-and-atif.md)**
   — event-sourced JSONL trajectories; ATIF v1.7 projection; how
   trajectories flow from sandbox to MinIO to ATIF
+- **[architecture/run-library.md](architecture/run-library.md)** —
+  org-wide completed-run metadata, safe shared artifacts, clone/reuse
+  provenance, and the team boundary for shared results
 - **[architecture/cli-mode.md](architecture/cli-mode.md)** — how the
   `loom` CLI reuses `Trial.run()` statelessly with no server stack
 - **[architecture/local-llm.md](architecture/local-llm.md)** — local

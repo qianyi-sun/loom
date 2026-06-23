@@ -182,9 +182,9 @@ Artifact share states are security metadata, not download URLs:
 
 - `pending_scan`: legacy or not-yet-classified artifact. Treat as owner-team
   only for org-wide sharing decisions.
-- `shared`: conservative scan found no secret-like content. Future Run Library
+- `shared`: conservative scan found no secret-like content. Run Library
   download/reuse may expose it across teams through authenticated service
-  routes.
+  routes when the parent trial or batch is also Run-Library-readable.
 - `blocked`: scan matched token, provider key, secret-ref, signed URL,
   internal endpoint, cookie, CSRF, or similar secret-like material. The raw
   object remains available to the owner team for diagnostics through normal

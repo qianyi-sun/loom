@@ -391,6 +391,91 @@ export interface ApiTokenReveal {
   item?: ApiTokenEntry;
 }
 
+export type RunVisibility = "team" | "org" | "private";
+export type ShareStatus = "pending_scan" | "shared" | "blocked";
+export type ArtifactGroup =
+  | "reports"
+  | "trajectories"
+  | "reusable_outputs"
+  | "logs_diagnostics"
+  | "raw_diagnostics";
+
+export interface RunLibraryOwnerTeam {
+  id: string;
+  name: string;
+}
+
+export interface RunLibraryArtifact {
+  trial_id: string;
+  key: string;
+  size: number;
+  role: ArtifactGroup;
+  share_status: ShareStatus;
+  blocked_reason?: string | null;
+  download_url: string;
+}
+
+export type ArtifactSummary = Record<ArtifactGroup, number>;
+export type ArtifactInventory = Record<ArtifactGroup, RunLibraryArtifact[]>;
+
+export interface RunLibraryBatch {
+  id: string;
+  team_id: string;
+  owner_team: RunLibraryOwnerTeam;
+  name: string;
+  description: string | null;
+  task_filter: Record<string, unknown>;
+  trial_config: Record<string, unknown>;
+  backend: string;
+  combinations: Combination[];
+  provider_connection_id: string | null;
+  provider_model_id?: string | null;
+  state: string;
+  result_status: string | null;
+  visibility: RunVisibility;
+  share_status: ShareStatus;
+  source_provenance: Record<string, unknown>[];
+  expected_trial_count: number;
+  created_by_token_prefix: string;
+  created_at: string;
+  finished_at: string | null;
+  trial_summary: Record<string, number>;
+  aggregate_reward: number | null;
+  total_cost_usd: number;
+  artifact_summary: ArtifactSummary;
+}
+
+export interface RunLibraryBatchDetail extends RunLibraryBatch {
+  artifact_inventory: ArtifactInventory;
+}
+
+export interface RunLibraryBatchList {
+  items: RunLibraryBatch[];
+  next_cursor: string | null;
+}
+
+export interface CloneRunLibraryBatchResult {
+  batch_id: string;
+  cloned_from_batch_id: string;
+  provider_connection_id: string | null;
+  provider_model_id?: string | null;
+  source_provenance: Record<string, unknown>[];
+  state: string;
+  created_at: string;
+}
+
+export interface ReuseRunLibraryArtifactResult {
+  batch_id: string;
+  source_artifact: {
+    trial_id: string;
+    key: string;
+    role: ArtifactGroup;
+  };
+  source_provenance: Record<string, unknown>[];
+  state: string;
+  created_at: string;
+}
+
 function qs(params: Record<string, string | number | undefined>): string {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
@@ -653,6 +738,47 @@ export const api = {
     apiFetch<BatchList>(`/api/v1/batches${qs(q)}`),
   getBatch: (id: string) =>
     apiFetch<BatchDetail>(`/api/v1/batches/${id}`),
+  listRunLibraryBatches: (
+    q: Record<string, string | undefined> = {},
+  ) => apiFetch<RunLibraryBatchList>(`/api/v1/run-library/batches${qs(q)}`),
+  getRunLibraryBatch: (id: string) =>
+    apiFetch<RunLibraryBatchDetail>(`/api/v1/run-library/batches/${id}`),
+  cloneRunLibraryBatchConfig: (
+    id: string,
+    body: {
+      name: string;
+      description?: string | null;
+      provider_connection_id?: string | null;
+      provider_model_id?: string | null;
+    },
+  ) =>
+    apiFetch<CloneRunLibraryBatchResult>(
+      `/api/v1/run-library/batches/${id}/clone-config`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  reuseRunLibraryArtifact: (
+    trialId: string,
+    body: {
+      key: string;
+      name: string;
+      description?: string | null;
+      provider_connection_id?: string | null;
+      provider_model_id?: string | null;
+    },
+  ) =>
+    apiFetch<ReuseRunLibraryArtifactResult>(
+      `/api/v1/run-library/trials/${trialId}/artifacts/reuse`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  downloadRunLibraryArtifact: (
+    trialId: string,
+    key: string,
+    filename: string,
+  ) =>
+    apiDownload(
+      `/api/v1/run-library/trials/${trialId}/artifacts/download${qs({ key })}`,
+      filename,
+    ),
   createBatch: (body: CreateBatchBody) =>
     apiFetch<BatchCreate>("/api/v1/batches", {
       method: "POST",

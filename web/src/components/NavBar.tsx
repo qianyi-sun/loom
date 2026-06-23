@@ -15,6 +15,7 @@ import { cn } from "../lib/cn";
 const NAV_ITEMS = [
   { to: "/batches/new", label: "New batch" },
   { to: "/monitor", label: "Monitor" },
+  { to: "/library", label: "Run Library" },
   { to: "/providers", label: "Providers" },
 ];
 

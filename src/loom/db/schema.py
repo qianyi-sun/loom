@@ -414,6 +414,22 @@ class Batch(Base):
     provider_model_id: Mapped[str | None] = mapped_column(
         Text, nullable=True,
     )
+    # Issue #336: completed-run sharing is org-visible by default.
+    # Team/private keeps the run in the owner team's boundary; org +
+    # shared makes safe metadata visible in the org-wide Run Library.
+    visibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'org'"), default="org",
+    )
+    share_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'shared'"),
+        default="shared",
+    )
+    source_provenance: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        default=list,
+    )
 
     @property
     def failure_reason(self) -> str | None:
@@ -501,6 +517,19 @@ class Trial(Base):
     )
     provider_model_id: Mapped[str | None] = mapped_column(
         Text, nullable=True,
+    )
+    visibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'org'"), default="org",
+    )
+    share_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'shared'"),
+        default="shared",
+    )
+    source_provenance: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        default=list,
     )
 
 

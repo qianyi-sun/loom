@@ -31,11 +31,12 @@ invite-only public platform track.
 - SSO, SAML, OIDC, and automated email delivery. Invite links are revealed once
   to an admin/team owner on create or resend; a later mailer can deliver the
   same link without changing the database contract.
-- Scoped public CLI/API tokens; those belong to #328. Legacy team bearer tokens
-  stay supported until that replacement lands.
-- Org-wide completed-result sharing and artifact reuse; those belong to #336 and
-  must use explicit Run Library/share-state checks instead of weakening existing
-  team-scoped execution/control routes.
+- Scoped public CLI/API tokens and org-wide completed-result sharing are
+  documented in their own API/UX specs. This document keeps the auth,
+  membership, invite, and CSRF contract focused.
+- Run Library sharing and artifact reuse must use explicit visibility/
+  share-state checks instead of weakening existing team-scoped execution/
+  control routes.
 - Changing step-scoped sandbox JWTs or gateway provider egress controls.
 
 ## Target Flow
@@ -82,9 +83,9 @@ without making the singleton admin secret a browser identity.
 | `platform_admin` | `admin:platform` | Global operator/admin user for inspection and incident response. |
 
 The team boundary remains the execution, cost attribution, credential, member,
-and API-token administration boundary. Completed run metadata and safe
-artifacts are planned to be organization-visible through #336's Run Library
-only after explicit redaction/share-state checks pass.
+and API-token administration boundary. Completed run metadata and safe artifacts
+are organization-visible only through the Run Library after explicit
+visibility/share-state checks pass.
 
 ## Admin Secret File
 
@@ -516,6 +517,6 @@ They are not normal browser identity for public users.
   complete platform-wide audit.
 - Browser sessions must set HttpOnly, SameSite cookies. Production deployments
   must use Secure cookies by running with `LOOM_ENV=production` behind HTTPS.
-- Until #336 lands, existing batch/trial/artifact execution and control routes
-  remain owner-team scoped. Org-wide completed-result sharing must be added as
-  explicit Run Library behavior with redaction/share-state enforcement.
+- Existing batch/trial/artifact execution and control routes remain owner-team
+  scoped. Org-wide completed-result sharing is explicit Run Library behavior
+  with redaction/share-state enforcement.

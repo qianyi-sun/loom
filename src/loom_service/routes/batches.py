@@ -109,6 +109,7 @@ def _serialize(
     summary: dict[str, int] | None = None,
     aggregate_reward: float | None = None,
     total_cost_usd: float = 0.0,
+    owner_team: Team | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
@@ -136,7 +137,15 @@ def _serialize(
         "n_per_task": b.n_per_task,
         "backend": b.backend,
         "combinations": b.combinations,
+        "visibility": b.visibility,
+        "share_status": b.share_status,
+        "source_provenance": b.source_provenance,
     }
+    if owner_team is not None:
+        out["owner_team"] = {
+            "id": str(owner_team.id),
+            "name": owner_team.name,
+        }
     if summary is not None:
         out["trial_summary"] = summary
         out["aggregate_reward"] = aggregate_reward
@@ -568,6 +577,9 @@ async def get_batch(
             status_code=404, detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
+    owner_team = (await s.execute(
+        select(Team).where(Team.id == b.team_id),
+    )).scalar_one_or_none()
 
     original_trials = (await s.execute(
         select(Trial).where(Trial.batch_id == batch_id),
@@ -619,6 +631,7 @@ async def get_batch(
         summary=summary,
         aggregate_reward=avg_reward,
         total_cost_usd=cost_total,
+        owner_team=owner_team,
         extra=extra,
     )
 

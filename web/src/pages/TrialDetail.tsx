@@ -20,6 +20,7 @@ import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
+import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialStateVariant } from "../lib/statusVariant";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
@@ -120,6 +121,9 @@ function TrialHeader({
   const failure = trial.failure_reason
     ? humanizeFailureReason(trial.failure_reason)
     : null;
+  const provenance = Array.isArray(trial.source_provenance)
+    ? trial.source_provenance
+    : [];
 
   return (
     <Card>
@@ -154,7 +158,15 @@ function TrialHeader({
           <p className="mt-1 text-xs text-slate-600">{outcome.description}</p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+          <StatCard
+            label="Owner team"
+            value={trial.owner_team?.name ?? trial.team_id}
+          />
+          <StatCard
+            label="Visibility"
+            value={`${trial.visibility ?? "team"} / ${trial.share_status ?? "pending_scan"}`}
+          />
           <StatCard label="Agent" value={trial.agent_name ?? "—"} />
           <StatCard label="Model" value={modelLabel(trial.model)} />
           <StatCard
@@ -185,6 +197,17 @@ function TrialHeader({
           Evaluator score measures task performance when a verifier reports one;
           it is separate from whether the platform run succeeded or failed.
         </p>
+
+        {provenance.length > 0 ? (
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            <div className="font-semibold text-slate-900">Provenance</div>
+            <ul className="mt-1 space-y-1 text-xs text-slate-600">
+              {provenance.map((item, index) => (
+                <li key={index}>{provenanceLabel(item)}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         {failure ? (
           <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">

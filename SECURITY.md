@@ -75,7 +75,8 @@ For public repository operation:
   visibility/share-state checks. Do not implement cross-team downloads by
   weakening `require_team_or_admin()` on execution/control routes.
 - Safe shared artifacts must download through authenticated service-proxied
-  routes, never raw object-store URLs.
+  Run Library routes, never raw object-store URLs. Reuse must record source
+  provenance and must not copy source-team provider credentials.
 - Unsafe, secret-like, or policy-blocked artifacts must be denied to other teams
   and surfaced only with a safe blocked reason. Redaction/leak tests for shared
   artifacts are part of the public-beta security gate.

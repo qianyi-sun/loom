@@ -12,6 +12,8 @@ import Monitor from "./pages/Monitor";
 import NewBatch from "./pages/NewBatch";
 import NotFound from "./pages/NotFound";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
+import RunLibrary from "./pages/RunLibrary";
+import RunLibraryBatchDetail from "./pages/RunLibraryBatchDetail";
 import Settings from "./pages/Settings";
 import Tasks from "./pages/Tasks";
 import TrialCompare from "./pages/TrialCompare";
@@ -24,6 +26,8 @@ export default function App(): JSX.Element {
       <Route path="/" element={<Layout />}>
         <Route index element={<Navigate to="/monitor" replace />} />
         <Route path="monitor" element={<Monitor />} />
+        <Route path="library" element={<RunLibrary />} />
+        <Route path="library/batches/:batchId" element={<RunLibraryBatchDetail />} />
         {/* Legacy redirects — preserve old links from external docs / chats. */}
         <Route path="trials" element={<Navigate to="/monitor?view=trials" replace />} />
         <Route path="batches" element={<Navigate to="/monitor?view=batches" replace />} />

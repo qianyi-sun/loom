@@ -345,6 +345,10 @@ export interface components {
       next_cursor: string | null;
     };
     TrialDetail: components["schemas"]["Trial"] & {
+      owner_team?: { id: string; name: string };
+      visibility?: "team" | "org" | "private";
+      share_status?: "pending_scan" | "shared" | "blocked";
+      source_provenance?: Record<string, unknown>[];
       atif_url: string;
       trajectory_url: string;
       atif_ready: boolean;
@@ -430,6 +434,7 @@ export interface components {
     Batch: {
       id: string;
       team_id: string;
+      owner_team?: { id: string; name: string };
       name: string;
       description: string | null;
       task_filter: Record<string, unknown>;
@@ -447,6 +452,9 @@ export interface components {
       finished_at: string | null;
       created_by_token_prefix: string;
       expected_trial_count: number;
+      visibility?: "team" | "org" | "private";
+      share_status?: "pending_scan" | "shared" | "blocked";
+      source_provenance?: Record<string, unknown>[];
     };
     Combination: {
       label?: string;

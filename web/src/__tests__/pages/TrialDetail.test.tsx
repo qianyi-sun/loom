@@ -25,6 +25,7 @@ const TRIAL_BODY: components["schemas"]["TrialDetail"] = {
   id: TRIAL_ID,
   task_id: "hello-world",
   team_id: "team-1",
+  owner_team: { id: "team-1", name: "Alpha Research" },
   state: "queued",
   agent_name: "oracle",
   model: {
@@ -42,6 +43,11 @@ const TRIAL_BODY: components["schemas"]["TrialDetail"] = {
   atif_url: "",
   trajectory_ready: false,
   trajectory_url: "",
+  visibility: "team",
+  share_status: "pending_scan",
+  source_provenance: [
+    { kind: "reused_artifact", source_artifact_key: "alpha/report.json" },
+  ],
   artifacts: [],
 };
 
@@ -134,6 +140,23 @@ describe("TrialDetail trajectory section", () => {
     expect(
       screen.queryByRole("button", { name: /Retry/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows owner team, share status, and provenance", async () => {
+    fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    expect(await screen.findByText("Owner team")).toBeInTheDocument();
+    expect(screen.getByText("Alpha Research")).toBeInTheDocument();
+    expect(screen.getByText("Visibility")).toBeInTheDocument();
+    expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText(/reused artifact/i)).toBeInTheDocument();
   });
 
   it("downloads artifacts through the authenticated service endpoint", async () => {

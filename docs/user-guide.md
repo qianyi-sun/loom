@@ -119,10 +119,10 @@ revoke those tokens from Team access only as a team owner. The one-time reveal
 shows CLI setup commands such as `export LOOM_API_TOKEN=loom_api_...` and
 `loom auth login --server URL --token env:LOOM_API_TOKEN`. Use
 `loom auth whoami` to verify the active server, team, scopes, and token prefix
-without printing the raw token. Completed run metadata and safe artifacts will
-become organization-visible through the separate Run Library work; ordinary
-batch/trial/detail/download routes remain current-team scoped until that
-feature adds explicit share-state checks.
+without printing the raw token. Completed run metadata and safe artifacts are
+shared across teams through the Run Library; ordinary batch, trial, trajectory,
+ATIF, artifact, cancellation, rerun, and provider routes remain current-team
+scoped.
 
 ### Public server CLI flow
 
@@ -173,13 +173,42 @@ Text and JSON output redact raw bearer tokens, provider keys, internal service
 hosts, and signed object-store URLs. `loom eval trial show` prints copyable
 download commands instead of MinIO/S3 signed URLs.
 
+## Run Library
+
+Run Library is the org-wide place to inspect completed shared work. Team still
+controls execution, cost, provider credentials, members, and API tokens. The
+Library only exposes completed metadata and artifacts that passed sharing
+checks.
+
+Use the SPA top-level **Run Library** page:
+
+- **My team** shows your team's library rows.
+- **All teams** shows your team plus completed org-shared rows from other
+  teams.
+- Owner-team labels show who ran the original work.
+- State, team, and artifact-type filters narrow the table without showing raw
+  JSON payloads.
+
+Open a Library row to inspect task selection, agent/model config, trial rollup,
+provenance, and artifact groups. Safe shared artifacts expose Download, Copy
+URL, and Reuse actions. Blocked artifacts show only a safe reason and cannot be
+downloaded or reused by another team.
+
+Clone config and reuse artifact both create new records in your current team and
+record `source_provenance`. They do not copy the source team's provider
+connection or credentials; choose a provider connection owned by your team when
+the source config requires one. The Run Library detail page shows that selector
+before cloning provider-backed work.
+
 ## Default views and diagnostics
 
 The SPA defaults to readable summaries instead of raw API payloads.
 New Batch explains task selection, agent/model combinations, backend,
 and advanced trial settings in product terms. Batch Detail shows a
-Run plan, Monitor shows planned trials and evaluator score, and Trial
-Detail separates platform outcome from evaluator reward.
+Run plan, Monitor shows planned trials and evaluator score, Run Library shows
+org-wide completed shared work, and Trial Detail separates platform outcome
+from evaluator reward. Batch Detail and Trial Detail also show owner team,
+visibility/share status, and provenance when a run was cloned or reused.
 
 When a finished batch has transient gateway failures, Batch Detail shows
 `Rerun failed cases`. That action creates a linked rerun batch containing

@@ -11,6 +11,7 @@ const BATCH_ID = "be792550-fb63-40b4-b5a2-795adbf2cc9d";
 const BATCH_BODY = {
   id: BATCH_ID,
   team_id: "team-1",
+  owner_team: { id: "team-1", name: "Alpha Research" },
   name: "qwen2.5-litellm",
   description: null,
   task_filter: { subset_kind: "all", benchmark_ids: ["humaneval"] },
@@ -34,6 +35,11 @@ const BATCH_BODY = {
   fanout_errors: [],
   rerun_of_batch_id: null,
   rerun_targets: [],
+  visibility: "team",
+  share_status: "pending_scan",
+  source_provenance: [
+    { kind: "cloned_batch_config", source_batch_id: "source-batch" },
+  ],
   rerun_batches: [],
   rerunnable_failed_count: 0,
   effective_trial_summary: {},
@@ -109,6 +115,18 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("Defaults only")).toBeInTheDocument();
     expect(screen.queryByText("task_filter")).not.toBeInTheDocument();
     expect(screen.queryByText("trial_config")).not.toBeInTheDocument();
+  });
+
+  it("shows owner team, share status, and provenance on the detail header", async () => {
+    mockBatch();
+    renderBatchDetail();
+
+    expect(await screen.findByText("Owner team")).toBeInTheDocument();
+    expect(screen.getByText("Alpha Research")).toBeInTheDocument();
+    expect(screen.getByText("Visibility")).toBeInTheDocument();
+    expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText(/cloned batch config/i)).toBeInTheDocument();
   });
 
   it("keeps raw batch payload available in diagnostics", async () => {
