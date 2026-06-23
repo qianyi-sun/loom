@@ -159,14 +159,15 @@ rate-card, license) leave no row.
 | `input_tokens`   | from DialectAdapter                                      |
 | `output_tokens`  | from DialectAdapter                                      |
 | `provider_extras`| JSONB — cache + reasoning counters verbatim              |
-| `cost_usd`       | computed at insert; cached for fast aggregation         |
+| `cost_usd`       | computed at insert; cached for usage metrics/audits     |
 | `rate_card_id`   | FK to the rate-card row used; re-pricing follows the row |
 | `error_kind`     | non-null when upstream returned a non-2xx                |
 
 Why both `cost_usd` (frozen) and `rate_card_id` (re-derivable)? The
-column is a fast index for `/api/v1/usage`; re-derive from
-`provider_extras` + a *different* rate card to model what-if pricing
-without touching history.
+column is a fast index for `/api/v1/usage` and Gateway cost metrics;
+trial and batch detail responses expose token totals and call counts
+instead. Re-derive from `provider_extras` + a *different* rate card to
+model what-if pricing without touching history.
 
 ## See also
 

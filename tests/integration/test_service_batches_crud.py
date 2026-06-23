@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import boto3
@@ -17,7 +18,7 @@ from sqlalchemy import create_engine, delete, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial, Worker
+from loom.db.schema import Batch, LlmCall, Task, Team, TeamQuota, Token, Trial, Worker
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -149,6 +150,7 @@ async def camp_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(LlmCall))
             s.execute(delete(Trial))
             s.execute(delete(Token))
             s.execute(delete(Batch))
@@ -663,8 +665,9 @@ async def test_post_requires_submit_scope(
 
 async def test_list_batches(
     camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -679,7 +682,7 @@ async def test_list_batches(
                 "trial_config": {},
             },
         )
-        await ac.post(
+        c2 = await ac.post(
             "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
             json={
@@ -688,6 +691,43 @@ async def test_list_batches(
                 "trial_config": {},
             },
         )
+        assert c2.status_code == 201, c2.text
+        c2_id = UUID(c2.json()["batch_id"])
+
+        sync_engine = create_engine(postgres_url)
+        with sync_engine.begin() as conn:
+            trial_id = uuid4()
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    task_id="local/apache-0",
+                    team_id=team_id,
+                    state="succeeded",
+                    batch_id=c2_id,
+                    sample_idx=0,
+                    combination_idx=0,
+                    config={},
+                    requires_caps={},
+                    result={"aggregate_reward": 1.0, "cost_usd": 99.0},
+                )
+            )
+            conn.execute(
+                insert(LlmCall).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    trial_id=trial_id,
+                    step_id="main",
+                    model="openai/gpt-test",
+                    dialect="openai",
+                    input_tokens=4,
+                    output_tokens=2,
+                    provider_extras={},
+                    cost_usd=Decimal("99.000000"),
+                    rate_card_hash="stale-rate-card",
+                )
+            )
+        sync_engine.dispose()
+
         r = await ac.get(
             "/api/v1/batches",
             headers={"Authorization": f"Bearer {raw}"},
@@ -697,6 +737,13 @@ async def test_list_batches(
     assert len(items) == 2
     # Newest first.
     assert items[0]["name"] == "C2"
+    assert "total_cost_usd" not in items[0]
+    assert items[0]["total_prompt_tokens"] == 4
+    assert items[0]["total_completion_tokens"] == 2
+    assert items[0]["llm_calls_count"] == 1
+    assert items[1]["total_prompt_tokens"] == 0
+    assert items[1]["total_completion_tokens"] == 0
+    assert items[1]["llm_calls_count"] == 0
 
 
 async def test_get_batch_detail_with_rollup(
@@ -723,10 +770,12 @@ async def test_get_batch_detail_with_rollup(
         cid = UUID(post.json()["batch_id"])
 
     # Seed 3 trial rows under this batch: 2 succeeded with rewards,
-    # 1 still running.
+    # 1 still running. LLM usage should come from llm_calls, not the
+    # stale/frozen cost_usd values in Trial.result.
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        seeded_trial_ids: list[UUID] = []
         for i, (state, result) in enumerate(
             (
                 ("succeeded", {"aggregate_reward": 1.0, "cost_usd": 0.05}),
@@ -734,9 +783,11 @@ async def test_get_batch_detail_with_rollup(
                 ("running", None),
             )
         ):
+            trial_id = uuid4()
+            seeded_trial_ids.append(trial_id)
             s.execute(
                 insert(Trial).values(
-                    id=uuid4(),
+                    id=trial_id,
                     task_id=f"local/mit-{i}",
                     team_id=team_id,
                     state=state,
@@ -747,6 +798,50 @@ async def test_get_batch_detail_with_rollup(
                     result=result,
                 )
             )
+        s.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": seeded_trial_ids[0],
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("9.990000"),
+                    "rate_card_hash": "stale-rate-card",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": seeded_trial_ids[1],
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.000000"),
+                    "rate_card_hash": "missing-rate-card",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": seeded_trial_ids[2],
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.000001"),
+                    "rate_card_hash": "running-rate-card",
+                },
+            ],
+        )
         s.commit()
     sync_engine.dispose()
 
@@ -764,8 +859,10 @@ async def test_get_batch_detail_with_rollup(
     assert body["trial_summary"]["running"] == 1
     # avg of 1.0 + 0.5 = 0.75
     assert body["aggregate_reward"] == pytest.approx(0.75)
-    # sum 0.05 + 0.03
-    assert body["total_cost_usd"] == pytest.approx(0.08)
+    assert "total_cost_usd" not in body
+    assert body["total_prompt_tokens"] == 18
+    assert body["total_completion_tokens"] == 9
+    assert body["llm_calls_count"] == 3
 
 
 async def test_get_batch_detail_exposes_fanout_failure(
@@ -926,6 +1023,8 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
     failed_trial_id = uuid4()
 
     sync_engine = create_engine(postgres_url)
+    original_success_trial_id = uuid4()
+    rerun_success_trial_id = uuid4()
     with sync_engine.begin() as conn:
         conn.execute(
             insert(Batch).values(
@@ -944,7 +1043,7 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
         )
         conn.execute(
             insert(Trial).values(
-                id=uuid4(),
+                id=original_success_trial_id,
                 task_id="local/mit-0",
                 team_id=team_id,
                 state="succeeded",
@@ -998,7 +1097,7 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
         )
         conn.execute(
             insert(Trial).values(
-                id=uuid4(),
+                id=rerun_success_trial_id,
                 task_id="local/mit-0",
                 team_id=team_id,
                 state="succeeded",
@@ -1010,6 +1109,37 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
                 combination_idx=0,
                 result={"aggregate_reward": 0.8, "cost_usd": 0.02},
             )
+        )
+        conn.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": original_success_trial_id,
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.010000"),
+                    "rate_card_hash": "old-rate-card",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": rerun_success_trial_id,
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 11,
+                    "output_tokens": 4,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.020000"),
+                    "rate_card_hash": "old-rate-card",
+                },
+            ],
         )
     sync_engine.dispose()
 
@@ -1028,7 +1158,14 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
     assert body["effective_trial_summary"]["failed"] == 0
     assert body["effective_result_status"] == "succeeded"
     assert body["effective_aggregate_reward"] == pytest.approx(0.9)
-    assert body["effective_total_cost_usd"] == pytest.approx(0.03)
+    assert "total_cost_usd" not in body
+    assert "effective_total_cost_usd" not in body
+    assert body["total_prompt_tokens"] == 5
+    assert body["total_completion_tokens"] == 2
+    assert body["llm_calls_count"] == 1
+    assert body["effective_total_prompt_tokens"] == 16
+    assert body["effective_total_completion_tokens"] == 6
+    assert body["effective_llm_calls_count"] == 2
     assert body["rerunnable_failed_count"] == 1
     assert body["rerun_batches"][0]["id"] == str(rerun_batch_id)
 

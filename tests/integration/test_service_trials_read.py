@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from io import BytesIO
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -25,7 +26,7 @@ from sqlalchemy import create_engine, delete, insert, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, LlmCall, Task, Team, TeamQuota, Token, Trial
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -106,6 +107,37 @@ async def trials_setup(
                     result=({"aggregate_reward": 1.0, "cost_usd": 0.05} if i % 2 == 0 else None),
                 )
             )
+        s.execute(
+            insert(LlmCall),
+            [
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": trial_ids[0],
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("9.990000"),
+                    "rate_card_hash": "old-rate-card",
+                },
+                {
+                    "id": uuid4(),
+                    "team_id": team_id,
+                    "trial_id": trial_ids[0],
+                    "step_id": "main",
+                    "model": "openai/gpt-test",
+                    "dialect": "openai",
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                    "provider_extras": {},
+                    "cost_usd": Decimal("0.000000"),
+                    "rate_card_hash": "missing-rate-card",
+                },
+            ],
+        )
         s.commit()
     try:
         yield app, raw, team_id, trial_ids
@@ -113,6 +145,7 @@ async def trials_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(LlmCall))
             s.execute(delete(Trial))
             s.execute(delete(Batch))
             s.execute(delete(Token))
@@ -141,11 +174,18 @@ async def test_list_my_trials(
     assert len(items) == 3
     # Newest first (submitted_at desc). trial_ids[0] is newest in the fixture.
     assert items[0]["id"] == str(trial_ids[0])
-    # Reward + cost extracted from result.
+    # Reward stays projected from result, but LLM usage is derived from
+    # llm_calls so stale/frozen cost values are not exposed.
     assert items[0]["aggregate_reward"] == 1.0
-    assert items[0]["cost_usd"] == 0.05
+    assert "cost_usd" not in items[0]
+    assert items[0]["total_prompt_tokens"] == 12
+    assert items[0]["total_completion_tokens"] == 6
+    assert items[0]["llm_calls_count"] == 2
     # Running trial: no reward.
     assert items[1]["aggregate_reward"] is None
+    assert items[1]["total_prompt_tokens"] == 0
+    assert items[1]["total_completion_tokens"] == 0
+    assert items[1]["llm_calls_count"] == 0
     # Agent name pulled from config.
     assert items[0]["agent_name"] == "oracle"
     # failure_message field present in list response (issue #164).
@@ -362,6 +402,10 @@ async def test_trial_detail_returns_service_download_urls(
     assert "X-Amz-Signature" not in body["atif_url"]
     assert "X-Amz-Signature" not in body["trajectory_url"]
     assert body["artifacts"] == []
+    assert "cost_usd" not in body
+    assert body["total_prompt_tokens"] == 12
+    assert body["total_completion_tokens"] == 6
+    assert body["llm_calls_count"] == 2
     # failure_message field present in response (issue #164).
     assert "failure_message" in body
 

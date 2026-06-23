@@ -10,25 +10,26 @@ Write forwarders (Task 8):
 - POST /api/v1/trials/{id}/cancel — proxies to Control Plane /trials/{id}/cancel
 
 Field extraction notes: the v0.7 `trials` table does NOT carry
-`aggregate_reward`, `cost_usd`, or `batch_id` columns. Reward + cost
-are extracted from `Trial.result` (the JSONB the worker writes at
-finalize). Agent name + model are pulled from current top-level
+`aggregate_reward` or `batch_id` columns. Reward is extracted from
+`Trial.result` (the JSONB the worker writes at finalize). LLM usage
+is aggregated from `llm_calls` so stale rate-card snapshots do not leak
+into trial read responses. Agent name + model are pulled from current top-level
 `Trial.config["agent_name"]` / `Trial.config["agent_model"]`, with
 legacy `Trial.config["agent"]` fallback for older rows.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
+from collections.abc import Sequence
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 
-from loom.db.schema import Team, Trial
+from loom.db.schema import LlmCall, Team, Trial
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
     known_names,
@@ -69,18 +70,42 @@ def _extract_reward(result: dict[str, Any] | None) -> float | None:
         return None
 
 
-def _extract_cost(result: dict[str, Any] | None) -> float:
-    """Total cost in USD across all LLM calls; 0.0 if absent or
-    malformed."""
-    if not result:
-        return 0.0
-    val = result.get("cost_usd", 0)
-    if isinstance(val, Decimal):
-        return float(val)
-    try:
-        return float(val or 0)
-    except (TypeError, ValueError):
-        return 0.0
+def _empty_usage_projection() -> dict[str, int]:
+    return {
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "llm_calls_count": 0,
+    }
+
+
+async def _usage_by_trial_ids(
+    session: Any,
+    trial_ids: Sequence[UUID],
+) -> dict[UUID, dict[str, int]]:
+    if not trial_ids:
+        return {}
+    rows = (await session.execute(
+        select(
+            LlmCall.trial_id.label("trial_id"),
+            func.coalesce(
+                func.sum(LlmCall.input_tokens), 0,
+            ).label("total_prompt_tokens"),
+            func.coalesce(
+                func.sum(LlmCall.output_tokens), 0,
+            ).label("total_completion_tokens"),
+            func.count(LlmCall.id).label("llm_calls_count"),
+        )
+        .where(LlmCall.trial_id.in_(trial_ids))
+        .group_by(LlmCall.trial_id),
+    )).all()
+    return {
+        row.trial_id: {
+            "total_prompt_tokens": int(row.total_prompt_tokens or 0),
+            "total_completion_tokens": int(row.total_completion_tokens or 0),
+            "llm_calls_count": int(row.llm_calls_count or 0),
+        }
+        for row in rows
+    }
 
 
 def _extract_agent_projection(
@@ -108,8 +133,13 @@ def _extract_agent_projection(
     )
 
 
-def _trial_row(t: Trial) -> dict[str, Any]:
+def _trial_row(
+    t: Trial,
+    *,
+    usage: dict[str, int] | None = None,
+) -> dict[str, Any]:
     agent_name, model = _extract_agent_projection(t.config)
+    usage_projection = usage or _empty_usage_projection()
     return {
         "id": str(t.id),
         "task_id": t.task_id,
@@ -122,7 +152,11 @@ def _trial_row(t: Trial) -> dict[str, Any]:
         "finished_at": (t.finished_at.isoformat() if t.finished_at else None),
         "attempt_count": t.attempt_count,
         "aggregate_reward": _extract_reward(t.result),
-        "cost_usd": _extract_cost(t.result),
+        "total_prompt_tokens": usage_projection["total_prompt_tokens"],
+        "total_completion_tokens": usage_projection[
+            "total_completion_tokens"
+        ],
+        "llm_calls_count": usage_projection["llm_calls_count"],
         "agent_name": agent_name,
         "model": model,
         "visibility": t.visibility,
@@ -202,8 +236,11 @@ async def list_trials(
         )
     else:
         next_c = None
+    usage_by_trial = await _usage_by_trial_ids(s, [r.id for r in rows])
     return {
-        "items": [_trial_row(r) for r in rows],
+        "items": [
+            _trial_row(r, usage=usage_by_trial.get(r.id)) for r in rows
+        ],
         "next_cursor": next_c,
     }
 
@@ -310,7 +347,8 @@ async def get_trial(
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
 
-    base = _trial_row(trial)
+    usage_by_trial = await _usage_by_trial_ids(s, [trial.id])
+    base = _trial_row(trial, usage=usage_by_trial.get(trial.id))
     owner_team = (await s.execute(
         select(Team).where(Team.id == trial.team_id),
     )).scalar_one_or_none()

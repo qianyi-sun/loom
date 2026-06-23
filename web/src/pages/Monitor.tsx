@@ -133,7 +133,9 @@ interface TrialRow {
   state: string;
   agent_name: string | null;
   aggregate_reward: number | null;
-  cost_usd: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  llm_calls_count: number;
   submitted_at: string;
 }
 
@@ -357,7 +359,7 @@ function TrialsView({
                   "State",
                   "Agent",
                   "Evaluator score",
-                  "Cost",
+                  "LLM usage",
                   "Submitted",
                 ].map((h) => (
                   <th
@@ -365,6 +367,8 @@ function TrialsView({
                     title={
                       h === "Evaluator score"
                         ? "Reward reported by the evaluator; platform success or failure is shown in State."
+                        : h === "LLM usage"
+                          ? "Recorded model calls and prompt/completion tokens for this trial."
                         : undefined
                     }
                     className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
@@ -425,7 +429,11 @@ function TrialsView({
                         : "—"}
                     </td>
                     <td className="px-4 py-3 text-slate-700">
-                      ${t.cost_usd.toFixed(4)}
+                      <div>{t.llm_calls_count} calls</div>
+                      <div className="text-xs text-slate-500">
+                        P {t.total_prompt_tokens} / C{" "}
+                        {t.total_completion_tokens}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
                       {t.submitted_at.slice(0, 16).replace("T", " ")}

@@ -441,7 +441,6 @@ export interface RunLibraryBatch {
   finished_at: string | null;
   trial_summary: Record<string, number>;
   aggregate_reward: number | null;
-  total_cost_usd: number;
   artifact_summary: ArtifactSummary;
 }
 

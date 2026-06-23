@@ -33,7 +33,6 @@ const sharedBatch = {
   finished_at: "2026-06-22T20:03:00Z",
   trial_summary: { succeeded: 1 },
   aggregate_reward: 1,
-  total_cost_usd: 0.02,
   artifact_summary: {
     reports: 1,
     trajectories: 0,

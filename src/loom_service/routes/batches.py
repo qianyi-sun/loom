@@ -5,8 +5,8 @@ Routes:
                                   expected_trial_count from task_filter
 - GET  /api/v1/batches          — list with cursor pagination
 - GET  /api/v1/batches/{id}     — detail + trial roll-up (state summary,
-                                  aggregate reward, total cost) extracted
-                                  from Trial.result JSONB
+                                  aggregate reward from Trial.result JSONB,
+                                  and token totals from llm_calls)
 - POST /api/v1/batches/{id}/cancel — terminate the batch + cascade-cancel
                                   its still-active trials
 """
@@ -20,9 +20,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 
-from loom.db.schema import Batch, Team, Trial
+from loom.db.schema import Batch, LlmCall, Team, Trial
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
@@ -108,7 +108,7 @@ def _serialize(
     *,
     summary: dict[str, int] | None = None,
     aggregate_reward: float | None = None,
-    total_cost_usd: float = 0.0,
+    usage: dict[str, int] | None = None,
     owner_team: Team | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -146,10 +146,10 @@ def _serialize(
             "id": str(owner_team.id),
             "name": owner_team.name,
         }
+    out.update(usage or _empty_usage_projection())
     if summary is not None:
         out["trial_summary"] = summary
         out["aggregate_reward"] = aggregate_reward
-        out["total_cost_usd"] = total_cost_usd
     if extra:
         out.update(extra)
     return out
@@ -458,31 +458,92 @@ async def list_batches(
         )
     else:
         next_cursor = None
+    usage_by_batch = await _usage_by_batch_ids(s, [r.id for r in items])
     return {
-        "items": [_serialize(r) for r in items],
+        "items": [
+            _serialize(r, usage=usage_by_batch.get(r.id)) for r in items
+        ],
         "next_cursor": next_cursor,
     }
 
 
-def _rollup_from_result(result: dict[str, Any] | None) -> tuple[float | None, float]:
-    """Pull (reward, cost) out of a Trial.result JSONB. Same logic as
+def _rollup_from_result(result: dict[str, Any] | None) -> float | None:
+    """Pull reward out of a Trial.result JSONB. Same logic as
     routes/trials.py — kept inline here so the rollup query can flow
     naturally."""
     if not result:
-        return None, 0.0
+        return None
     reward = result.get("aggregate_reward")
     if reward is None:
         reward = result.get("reward")
     try:
-        reward_f = float(reward) if reward is not None else None
+        return float(reward) if reward is not None else None
     except (TypeError, ValueError):
-        reward_f = None
-    cost = result.get("cost_usd", 0)
-    try:
-        cost_f = float(cost or 0)
-    except (TypeError, ValueError):
-        cost_f = 0.0
-    return reward_f, cost_f
+        return None
+
+
+def _empty_usage_projection() -> dict[str, int]:
+    return {
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "llm_calls_count": 0,
+    }
+
+
+async def _usage_totals_for_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> dict[str, int]:
+    trial_ids = [trial.id for trial in trials]
+    if not trial_ids:
+        return _empty_usage_projection()
+    row = (await session.execute(
+        select(
+            func.coalesce(
+                func.sum(LlmCall.input_tokens), 0,
+            ).label("total_prompt_tokens"),
+            func.coalesce(
+                func.sum(LlmCall.output_tokens), 0,
+            ).label("total_completion_tokens"),
+            func.count(LlmCall.id).label("llm_calls_count"),
+        ).where(LlmCall.trial_id.in_(trial_ids)),
+    )).one()
+    return {
+        "total_prompt_tokens": int(row.total_prompt_tokens or 0),
+        "total_completion_tokens": int(row.total_completion_tokens or 0),
+        "llm_calls_count": int(row.llm_calls_count or 0),
+    }
+
+
+async def _usage_by_batch_ids(
+    session: Any,
+    batch_ids: Sequence[UUID],
+) -> dict[UUID, dict[str, int]]:
+    if not batch_ids:
+        return {}
+    rows = (await session.execute(
+        select(
+            Trial.batch_id.label("batch_id"),
+            func.coalesce(
+                func.sum(LlmCall.input_tokens), 0,
+            ).label("total_prompt_tokens"),
+            func.coalesce(
+                func.sum(LlmCall.output_tokens), 0,
+            ).label("total_completion_tokens"),
+            func.count(LlmCall.id).label("llm_calls_count"),
+        )
+        .join(LlmCall, LlmCall.trial_id == Trial.id)
+        .where(Trial.batch_id.in_(batch_ids))
+        .group_by(Trial.batch_id),
+    )).all()
+    return {
+        row.batch_id: {
+            "total_prompt_tokens": int(row.total_prompt_tokens or 0),
+            "total_completion_tokens": int(row.total_completion_tokens or 0),
+            "llm_calls_count": int(row.llm_calls_count or 0),
+        }
+        for row in rows
+    }
 
 
 def _empty_trial_summary() -> dict[str, int]:
@@ -502,20 +563,17 @@ def _summary_from_trials(trials: Sequence[Trial]) -> dict[str, int]:
     return summary
 
 
-def _rollup_from_trials(trials: Sequence[Trial]) -> tuple[float | None, float]:
+def _rollup_from_trials(trials: Sequence[Trial]) -> float | None:
     reward_sum = 0.0
     reward_n = 0
-    cost_total = 0.0
     for trial in trials:
         if str(trial.state) not in {"succeeded", "failed"}:
             continue
-        rew, cost = _rollup_from_result(trial.result)
-        cost_total += cost
+        rew = _rollup_from_result(trial.result)
         if rew is not None:
             reward_sum += rew
             reward_n += 1
-    avg_reward = (reward_sum / reward_n) if reward_n > 0 else None
-    return avg_reward, cost_total
+    return (reward_sum / reward_n) if reward_n > 0 else None
 
 
 def _trial_key(trial: Trial) -> tuple[str, int, int]:
@@ -585,7 +643,8 @@ async def get_batch(
         select(Trial).where(Trial.batch_id == batch_id),
     )).scalars().all()
     summary = _summary_from_trials(original_trials)
-    avg_reward, cost_total = _rollup_from_trials(original_trials)
+    avg_reward = _rollup_from_trials(original_trials)
+    usage = await _usage_totals_for_trials(s, original_trials)
 
     rerun_batches = (await s.execute(
         select(Batch)
@@ -600,7 +659,8 @@ async def get_batch(
         )).scalars().all())
     effective_trials = _effective_trials(original_trials, rerun_trials)
     effective_summary = _summary_from_trials(effective_trials)
-    effective_reward, effective_cost = _rollup_from_trials(effective_trials)
+    effective_reward = _rollup_from_trials(effective_trials)
+    effective_usage = await _usage_totals_for_trials(s, effective_trials)
     rerunnable_failed_count = sum(
         1 for trial in original_trials if _is_rerunnable_failure(trial)
     )
@@ -623,14 +683,20 @@ async def get_batch(
         "effective_trial_summary": effective_summary,
         "effective_result_status": _result_status_from_trials(effective_trials),
         "effective_aggregate_reward": effective_reward,
-        "effective_total_cost_usd": effective_cost,
+        "effective_total_prompt_tokens": effective_usage[
+            "total_prompt_tokens"
+        ],
+        "effective_total_completion_tokens": effective_usage[
+            "total_completion_tokens"
+        ],
+        "effective_llm_calls_count": effective_usage["llm_calls_count"],
     }
 
     return _serialize(
         b,
         summary=summary,
         aggregate_reward=avg_reward,
-        total_cost_usd=cost_total,
+        usage=usage,
         owner_team=owner_team,
         extra=extra,
     )

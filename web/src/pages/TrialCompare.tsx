@@ -5,7 +5,7 @@
  *
  * Reads `?a=<trial_id>&b=<trial_id>` from the URL; renders an input
  * for the second trial id when not provided. Each column shows the
- * trial header (state, agent, model, reward, cost) plus a compact
+ * trial header (state, agent, model, reward, usage) plus a compact
  * event-timeline view.
  */
 import { useQuery } from "@tanstack/react-query";
@@ -82,7 +82,11 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
                 : "—"
             }
           />
-          <StatCard label="Cost" value={`$${t.cost_usd.toFixed(4)}`} />
+          <StatCard label="LLM calls" value={t.llm_calls_count} />
+          <StatCard
+            label="Tokens"
+            value={`P ${t.total_prompt_tokens} / C ${t.total_completion_tokens}`}
+          />
         </div>
 
         <div>

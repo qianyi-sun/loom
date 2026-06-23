@@ -325,7 +325,9 @@ export interface components {
       finished_at: string | null;
       attempt_count: number;
       aggregate_reward: number | null;
-      cost_usd: number;
+      total_prompt_tokens: number;
+      total_completion_tokens: number;
+      llm_calls_count: number;
       agent_name: string | null;
       model: components["schemas"]["ModelSpec"] | null;
     };
@@ -452,6 +454,9 @@ export interface components {
       finished_at: string | null;
       created_by_token_prefix: string;
       expected_trial_count: number;
+      total_prompt_tokens: number;
+      total_completion_tokens: number;
+      llm_calls_count: number;
       visibility?: "team" | "org" | "private";
       share_status?: "pending_scan" | "shared" | "blocked";
       source_provenance?: Record<string, unknown>[];
@@ -469,7 +474,6 @@ export interface components {
     BatchDetail: components["schemas"]["Batch"] & {
       trial_summary: Record<string, number>;
       aggregate_reward: number | null;
-      total_cost_usd: number;
       rerun_batches: {
         id: string;
         name: string;
@@ -483,7 +487,9 @@ export interface components {
       effective_trial_summary: Record<string, number>;
       effective_result_status: string | null;
       effective_aggregate_reward: number | null;
-      effective_total_cost_usd: number;
+      effective_total_prompt_tokens: number;
+      effective_total_completion_tokens: number;
+      effective_llm_calls_count: number;
     };
     UsageBucket: {
       start_at: string;

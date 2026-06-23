@@ -45,14 +45,18 @@ const BATCH_BODY = {
   effective_trial_summary: {},
   effective_result_status: null,
   effective_aggregate_reward: null,
-  effective_total_cost_usd: 0,
+  effective_total_prompt_tokens: 0,
+  effective_total_completion_tokens: 0,
+  effective_llm_calls_count: 0,
   created_at: "2026-06-19T20:23:00Z",
   finished_at: null,
   created_by_token_prefix: "test:web",
   expected_trial_count: 164,
   trial_summary: {},
   aggregate_reward: null,
-  total_cost_usd: 0,
+  total_prompt_tokens: 0,
+  total_completion_tokens: 0,
+  llm_calls_count: 0,
 };
 
 function mockBatch(

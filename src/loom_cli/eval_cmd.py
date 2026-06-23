@@ -146,8 +146,17 @@ def _print_trial_summary(item: dict[str, Any]) -> None:
             print(f"model:            {m}")
     if item.get("aggregate_reward") is not None:
         print(f"reward:           {item['aggregate_reward']}")
-    if item.get("cost_usd") is not None:
-        print(f"cost_usd:         {item['cost_usd']}")
+    if item.get("llm_calls_count") is not None:
+        print(f"llm_calls:        {item['llm_calls_count']}")
+    if (
+        item.get("total_prompt_tokens") is not None
+        or item.get("total_completion_tokens") is not None
+    ):
+        print(
+            "tokens:           "
+            f"prompt={item.get('total_prompt_tokens', 0)} "
+            f"completion={item.get('total_completion_tokens', 0)}",
+        )
     if item.get("submitted_at"):
         print(f"submitted_at:     {item['submitted_at']}")
     if item.get("finished_at"):
@@ -224,8 +233,17 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
         )
     if item.get("aggregate_reward") is not None:
         print(f"aggregate_reward:      {item['aggregate_reward']}")
-    if item.get("total_cost_usd") is not None:
-        print(f"total_cost_usd:        {item['total_cost_usd']}")
+    if item.get("llm_calls_count") is not None:
+        print(f"llm_calls:             {item['llm_calls_count']}")
+    if (
+        item.get("total_prompt_tokens") is not None
+        or item.get("total_completion_tokens") is not None
+    ):
+        print(
+            "tokens:                "
+            f"prompt={item.get('total_prompt_tokens', 0)} "
+            f"completion={item.get('total_completion_tokens', 0)}",
+        )
     if item.get("created_at"):
         print(f"created_at:            {item['created_at']}")
     if item.get("finished_at"):

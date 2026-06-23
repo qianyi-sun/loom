@@ -653,7 +653,10 @@ def test_trial_list_warns_on_truncation(
             "state": "succeeded", "failure_reason": None,
             "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
             "finished_at": None, "attempt_count": 1,
-            "aggregate_reward": 0.5, "cost_usd": 0.01,
+            "aggregate_reward": 0.5,
+            "total_prompt_tokens": 12,
+            "total_completion_tokens": 3,
+            "llm_calls_count": 1,
             "agent_name": "litellm", "model": None,
         }], "next_cursor": "opaque-cursor-token"},
     )
@@ -679,7 +682,9 @@ def test_batch_show_renders_rollup(
             "trial_summary": {"queued": 0, "claimed": 0, "running": 0,
                               "succeeded": 3, "failed": 1, "cancelled": 0},
             "aggregate_reward": 0.75,
-            "total_cost_usd": 1.234,
+            "total_prompt_tokens": 120,
+            "total_completion_tokens": 45,
+            "llm_calls_count": 3,
         },
     )
     rc = main(["eval", "batch", "show", _BATCH_ID])
@@ -688,7 +693,8 @@ def test_batch_show_renders_rollup(
     assert "s=3" in out
     assert "f=1" in out
     assert "0.75" in out
-    assert "1.234" in out
+    assert "llm_calls:             3" in out
+    assert "prompt=120 completion=45" in out
 
 
 def test_batch_show_renders_fanout_failure(
@@ -709,7 +715,9 @@ def test_batch_show_renders_fanout_failure(
             "trial_summary": {"queued": 0, "claimed": 0, "running": 0,
                               "succeeded": 0, "failed": 0, "cancelled": 0},
             "aggregate_reward": None,
-            "total_cost_usd": 0.0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "llm_calls_count": 0,
         },
     )
     rc = main(["eval", "batch", "show", _BATCH_ID])
@@ -745,7 +753,10 @@ def test_trial_list_with_task_id_filter(
             "team_id": "x", "state": "succeeded", "failure_reason": None,
             "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
             "finished_at": None, "attempt_count": 1,
-            "aggregate_reward": 0.875, "cost_usd": 0.0123,
+            "aggregate_reward": 0.875,
+            "total_prompt_tokens": 20,
+            "total_completion_tokens": 8,
+            "llm_calls_count": 1,
             "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
         }], "next_cursor": None},
@@ -772,7 +783,10 @@ def test_trial_show_renders_public_download_commands_when_ready(
             "started_at": "2026-06-16T00:01:00Z",
             "finished_at": "2026-06-16T00:02:00Z",
             "attempt_count": 1, "aggregate_reward": 1.0,
-            "cost_usd": 0.05, "agent_name": "litellm",
+            "total_prompt_tokens": 50,
+            "total_completion_tokens": 12,
+            "llm_calls_count": 1,
+            "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
             "atif_url": f"https://loom.test/api/v1/trials/{_TRIAL_ID}/atif",
             "trajectory_url": (
@@ -814,7 +828,10 @@ def test_trial_show_redacts_legacy_signed_urls_in_text_output(
             "started_at": "2026-06-16T00:01:00Z",
             "finished_at": "2026-06-16T00:02:00Z",
             "attempt_count": 1, "aggregate_reward": 1.0,
-            "cost_usd": 0.05, "agent_name": "litellm",
+            "total_prompt_tokens": 50,
+            "total_completion_tokens": 12,
+            "llm_calls_count": 1,
+            "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
             "atif_url": (
                 "https://minio.internal/atif.json?"
@@ -856,7 +873,10 @@ def test_trial_show_json_format(
         "state": "queued", "failure_reason": None,
         "submitted_at": "2026-06-16T00:00:00Z",
         "started_at": None, "finished_at": None,
-        "attempt_count": 0, "aggregate_reward": None, "cost_usd": 0.0,
+        "attempt_count": 0, "aggregate_reward": None,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "llm_calls_count": 0,
         "agent_name": None, "model": None,
         "atif_url": "https://minio.internal/atif?X-Amz-Signature=abc",
         "trajectory_url": "https://minio.internal/traj?X-Amz-Signature=abc",

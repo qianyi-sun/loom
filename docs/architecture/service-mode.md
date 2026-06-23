@@ -237,8 +237,10 @@ After a successful trial finalizes, the Worker also sends a fenced
 `PATCH /trials/{id}/trajectory_index` carrying two durable projections:
 
 - `trials.result`: the serialized `TrialResult` plus an
-  `aggregate_reward` scalar and `cost_usd` default for list/batch
-  rollups.
+  `aggregate_reward` scalar for list/batch rollups. Trial and batch
+  read APIs aggregate `llm_calls` separately for
+  `total_prompt_tokens`, `total_completion_tokens`, and
+  `llm_calls_count`.
 - `trials.trajectory_index`: trajectory URI, ATIF URI/schema version,
   and the actual uploaded artifact object keys and sizes.
 

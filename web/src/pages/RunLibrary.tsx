@@ -233,7 +233,6 @@ export default function RunLibrary(): JSX.Element {
                       "Agent / model",
                       "Status",
                       "Score",
-                      "Cost",
                       "Trials",
                       "Creator",
                       "Created",
@@ -285,9 +284,6 @@ export default function RunLibrary(): JSX.Element {
                           {batch.aggregate_reward != null
                             ? batch.aggregate_reward.toFixed(3)
                             : "--"}
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          ${batch.total_cost_usd.toFixed(4)}
                         </td>
                         <td className="px-4 py-3 text-slate-700">
                           {batch.expected_trial_count}

@@ -182,8 +182,12 @@ function TrialHeader({
             }
           />
           <StatCard
-            label="Cost"
-            value={`$${trial.cost_usd.toFixed(4)}`}
+            label="LLM calls"
+            value={trial.llm_calls_count}
+          />
+          <StatCard
+            label="Tokens"
+            value={`P ${trial.total_prompt_tokens} / C ${trial.total_completion_tokens}`}
           />
           <StatCard
             label="Submitted"

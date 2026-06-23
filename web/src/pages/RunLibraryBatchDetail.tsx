@@ -215,7 +215,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
             <StatCard label="Owner team" value={batch.owner_team.name} />
             <StatCard
               label="Visibility"
@@ -229,10 +229,6 @@ export default function RunLibraryBatchDetail(): JSX.Element {
                   ? batch.aggregate_reward.toFixed(3)
                   : "--"
               }
-            />
-            <StatCard
-              label="Cost"
-              value={`$${batch.total_cost_usd.toFixed(4)}`}
             />
             <StatCard
               label="Created"

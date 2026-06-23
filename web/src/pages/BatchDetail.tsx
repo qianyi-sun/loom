@@ -195,7 +195,7 @@ export default function BatchDetail(): JSX.Element {
             </div>
           ) : null}
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-7">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
             <StatCard
               label="Owner team"
               value={c.owner_team?.name ?? c.team_id}
@@ -214,8 +214,12 @@ export default function BatchDetail(): JSX.Element {
               }
             />
             <StatCard
-              label="Cost"
-              value={`$${c.total_cost_usd.toFixed(4)}`}
+              label="LLM calls"
+              value={c.llm_calls_count}
+            />
+            <StatCard
+              label="Tokens"
+              value={`P ${c.total_prompt_tokens} / C ${c.total_completion_tokens}`}
             />
             <StatCard
               label="Created"
@@ -312,7 +316,9 @@ export default function BatchDetail(): JSX.Element {
                 {effectiveSucceeded} succeeded, {effectiveFailed} failed ·
                 reward {c.effective_aggregate_reward != null
                   ? c.effective_aggregate_reward.toFixed(3)
-                  : "—"} · cost ${c.effective_total_cost_usd.toFixed(4)}
+                  : "—"} · {c.effective_llm_calls_count} LLM calls · tokens P{" "}
+                {c.effective_total_prompt_tokens} / C{" "}
+                {c.effective_total_completion_tokens}
               </div>
             </div>
           ) : null}

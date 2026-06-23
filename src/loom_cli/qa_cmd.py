@@ -58,7 +58,7 @@ class MatrixCell:
     reward: float | None = None
     trial_id: str | None = None
     failure_reason: str | None = None
-    cost_usd: float | None = None
+    llm_calls_count: int | None = None
 
 
 @dataclass
@@ -363,22 +363,18 @@ def _classify_trial(
         # "succeeded" without making any LLM call is almost certainly
         # passing on a pre-existing reference solution shipped with
         # the task bundle, not on its own work. mbpp does this today;
-        # other benchmarks may too. Using cost_usd as a proxy for
-        # "did any LLM call happen" — TODO swap for `total_tokens` /
-        # `llm_calls_count` once the trial API exposes either (the
-        # underlying llm_calls table records tokens per call, but the
-        # /trials list endpoint only surfaces cost_usd today).
-        cost = trial.get("cost_usd")
+        # other benchmarks may too.
+        llm_calls = trial.get("llm_calls_count")
         if (
             agent_needs_model
-            and isinstance(cost, (int, float))
-            and cost == 0
+            and isinstance(llm_calls, int)
+            and llm_calls == 0
         ):
             return (
                 "SUSPECT_PASS",
-                "model-using agent succeeded with $0 cost — likely "
-                "passing on a pre-shipped reference solution; verify "
-                "before trusting (see #388)",
+                "model-using agent succeeded without an LLM call — "
+                "likely passing on a pre-shipped reference solution; "
+                "verify before trusting (see #388)",
                 float(reward),
             )
         return "PASS_PLATFORM", None, float(reward)
@@ -435,15 +431,15 @@ def _classify_cells(
             cell.reason = "no trial recorded for this cell"
             continue
         cell.trial_id = str(matched.get("id") or "")
-        cost = matched.get("cost_usd")
-        cell.cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+        llm_calls = matched.get("llm_calls_count")
+        cell.llm_calls_count = llm_calls if isinstance(llm_calls, int) else None
         state, reason, reward = _classify_trial(
             matched, agent_needs_model=cell.agent in needs_model,
         )
         cell.state = state
         if reason is not None:
             cell.reason = reason
-            cell.failure_reason = trial.get("failure_reason")
+            cell.failure_reason = matched.get("failure_reason")
         if reward is not None:
             cell.reward = reward
 
@@ -467,7 +463,7 @@ def _render_markdown(result: MatrixResult) -> str:
     lines.append("")
     lines.append("## Cells (failures + suspect-passes + skips first)\n")
     lines.append(
-        "| Agent | Benchmark | State | Reward | Cost USD | Reason | Trial |",
+        "| Agent | Benchmark | State | Reward | LLM calls | Reason | Trial |",
     )
     lines.append("|---|---|---|---|---|---|---|")
     sort_key = {
@@ -483,12 +479,15 @@ def _render_markdown(result: MatrixResult) -> str:
         key=lambda c: (sort_key.get(c.state, 9), c.agent, c.benchmark),
     ):
         reward = "" if cell.reward is None else f"{cell.reward:.3f}"
-        cost = "" if cell.cost_usd is None else f"{cell.cost_usd:.4f}"
+        llm_calls = (
+            "" if cell.llm_calls_count is None
+            else str(cell.llm_calls_count)
+        )
         reason = (cell.reason or "").replace("|", "\\|")[:120]
         trial = cell.trial_id or ""
         lines.append(
             f"| {cell.agent} | {cell.benchmark} | {cell.state} | "
-            f"{reward} | {cost} | {reason} | {trial} |",
+            f"{reward} | {llm_calls} | {reason} | {trial} |",
         )
     lines.append("")
     return "\n".join(lines)

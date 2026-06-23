@@ -1,30 +1,33 @@
 # Cost & rate cards
 
-How Loom turns token counts into dollar amounts, why the model is
-*usage frozen, cost derived*, and where the rate cards live in each
-mode.
+How Loom turns token counts into dollar amounts, why the user-facing
+model is *usage frozen, cost derived*, and where the rate cards live in
+each mode.
 
 ## The model: usage frozen, cost derived
 
 Every LLM call freezes its raw token counts (input, output, cache
 reads, cache writes, plus any dialect-specific extras) verbatim into
-storage at the moment the response lands. **Cost is not stored** —
-it's derived at query time from a versioned rate card.
+storage at the moment the response lands. Trial and batch read APIs
+return token totals plus `llm_calls_count`; they do not expose a
+top-level dollar cost. Cost views derive spend from a versioned rate
+card over the recorded call rows.
 
 ```
-  provider response                           query time
-       │                                          │
-       ▼                                          ▼
-  TokenUsage  ──►  llm_calls row          rate_card lookup
-                   { input_tokens,        (provider, model,
-                     output_tokens,    ×   effective_at)
-                     provider_extras,         │
-                     ... }                    ▼
-                          \             { input_per_mtok,
-                           \              output_per_mtok,
-                            \             cache_read_per_mtok,
-                             ▼            cache_write_per_mtok }
-                       cost_usd  ◄────  compute_cost_usd(...)
+provider response
+     │
+     ▼
+TokenUsage ──► llm_calls row
+               { input_tokens, output_tokens,
+                 provider_extras, rate_card_hash,
+                 cost_usd snapshot }
+                     │
+        ┌────────────┴────────────┐
+        ▼                         ▼
+ trial/batch usage projection     usage/rate-card cost view
+ { total_prompt_tokens,           { derived spend totals,
+   total_completion_tokens,         rate-card diagnostics }
+   llm_calls_count }
 ```
 
 Why this shape:
@@ -36,9 +39,13 @@ Why this shape:
   appear (`cache_creation_input_tokens`, `reasoning_tokens`,
   `thoughtsTokenCount`). The `provider_extras` JSONB column
   absorbs them without a schema change.
-- **Cost attribution stays auditable** — a per-call breakdown is
-  reproducible because the inputs to the formula are all in the
-  row.
+- **Trial/batch responses stay stable** — dashboards can distinguish
+  "no calls were made" from "rate-card lookup missed" using
+  `llm_calls_count`, prompt tokens, and completion tokens.
+- **Cost attribution stays auditable** — the Gateway records a
+  per-call `cost_usd` snapshot and `rate_card_hash` for metrics and
+  diagnostics, while consumers that need spend totals should query the
+  usage/rate-card surface rather than reading trial or batch rows.
 
 (Harbor froze `cost_usd` at emit time. RFC0001 acknowledges this
 goes wrong when prices move.)
@@ -91,7 +98,8 @@ defaults are `anthropic`, `google`, and `openai` for
 set to `pricing_source='rate-card'` and no matching entry exists, the
 gateway records tokens with `cost_usd=0` and
 `rate_card_hash='facade:rate-card:missing'` so billing audits can flag
-the gap without losing call attribution.
+the gap without losing call attribution. Trial and batch responses still
+show the non-zero call count and token totals in this case.
 
 ## Local / self-hosted rates
 

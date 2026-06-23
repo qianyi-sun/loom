@@ -1146,10 +1146,13 @@ after sign-in.
    `GET /api/v1/trials/{id}` echoes the same state.
 10. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
    with a sensible reason). `GET /api/v1/trials/{id}` carries
-   `aggregate_reward`, `cost_usd`, and `failure_reason` (when
-   applicable), plus `atif_url`, `trajectory_url`, `atif_ready`,
-   `trajectory_ready`, and `artifacts` for download. Artifact rows include
-   `share_status` and a safe `blocked_reason` when org-wide sharing is blocked.
+   `aggregate_reward`, `failure_reason` (when applicable),
+   `total_prompt_tokens`, `total_completion_tokens`,
+   `llm_calls_count`, plus `atif_url`, `trajectory_url`,
+   `atif_ready`, `trajectory_ready`, and `artifacts` for download.
+   Artifact rows include `share_status` and a safe `blocked_reason`
+   when org-wide sharing is blocked. Use `/api/v1/usage` for
+   cost views rather than trial or batch detail responses.
 11. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
