@@ -134,13 +134,30 @@ def oracle_copy_reference_solve_script(
     before the verifier runs, so oracle smoke still validates the
     full pipeline (without acting as a free pass for other agents
     that may not have written a real solution).
+
+    Path note: the script handles two invocation patterns. OracleAgent
+    uploads it to `<workdir>/solve.sh` and execs with `cwd=<workdir>`,
+    so `dirname` is `.` (workdir-root) and `_reference.py` lives at
+    `./solution/_reference.py`. Adapter unit tests invoke it as
+    `bash solution/solve.sh` with `cwd=<tmp_path>`, so `dirname` is
+    `solution` and `_reference.py` lives at `solution/_reference.py`.
+    The script probes both layouts and cds into whichever has the
+    reference.
     """
     solution_dir.mkdir(parents=True, exist_ok=True)
     solve_sh = solution_dir / "solve.sh"
     solve_sh.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        'cd "$(dirname "$0")"\n'
+        'HERE="$(dirname "$0")"\n'
+        f'if [ -f "$HERE/{reference}" ]; then\n'
+        '    cd "$HERE"\n'
+        f'elif [ -f "$HERE/solution/{reference}" ]; then\n'
+        '    cd "$HERE/solution"\n'
+        "else\n"
+        f'    echo "solve.sh: cannot locate {reference} relative to $HERE" >&2\n'
+        "    exit 1\n"
+        "fi\n"
         f"cp -f {reference} {target}\n",
     )
     solve_sh.chmod(0o755)

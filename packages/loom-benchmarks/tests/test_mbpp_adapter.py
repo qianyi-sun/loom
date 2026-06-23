@@ -90,6 +90,40 @@ def test_mbpp_solution_runs_against_tests_after_oracle_copy(
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
 
 
+def test_mbpp_solve_sh_works_under_oracle_agent_layout(
+    tmp_path: Path,
+) -> None:
+    """OracleAgent uploads solve.sh to `<workdir>/solve.sh` (one level
+    above the materialized `solution/` dir) and execs it with
+    `cwd=<workdir>`. Mirror that layout and prove solve.sh still finds
+    `_reference.py`. Regression guard: the original solve.sh used
+    `cd "$(dirname "$0")"` which worked from cwd=tmp_path/solution but
+    not from workdir-root."""
+    rec = json.loads(FIXTURE.read_text())[0]
+    inst = BenchmarkInstance(
+        instance_id=str(rec["task_id"]),
+        split="test",
+        raw=rec,
+    )
+    MBPPAdapter().convert_instance(inst, out_dir=tmp_path)
+    # Replicate OracleAgent.run: copy solve.sh to workdir-root, exec
+    # with cwd=workdir-root.
+    oracle_solve = tmp_path / "solve.sh"
+    oracle_solve.write_bytes(
+        (tmp_path / "solution" / "solve.sh").read_bytes(),
+    )
+    oracle_solve.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "solve.sh"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    # solution.py should now be the reference, not the stub.
+    assert "NotImplementedError" not in (
+        tmp_path / "solution" / "solution.py"
+    ).read_text()
+
+
 def test_mbpp_solution_fails_pytest_when_stub_not_replaced(
     tmp_path: Path,
 ) -> None:
