@@ -631,14 +631,11 @@ export default function NewBatch(): JSX.Element {
   const navigate = useNavigate();
 
   const benchmarks = useQuery({
-    queryKey: ["benchmarks", "with-empty"],
-    // include_empty=true so series groups stay coherent — the SPA
-    // would otherwise hide e.g. aime-25 (task_count=0 until its HF
-    // manifest is published), leaving the "aime" series header empty
-    // and the picker out of step with the Benchmarks browse page.
-    // Empty rows are rendered disabled with a "0 tasks" badge so users
-    // can't pick them by accident.
-    queryFn: () => api.listBenchmarks({ limit: "200", include_empty: "true" }),
+    queryKey: ["benchmarks", "runnable"],
+    // New Batch is a submission path. It should show only benchmarks the
+    // backend says are runnable instead of mixing in operator-only catalog rows
+    // that need publish/repair work.
+    queryFn: () => api.listBenchmarks({ limit: "200" }),
     staleTime: 5 * 60 * 1000,
   });
   const agents = useQuery({

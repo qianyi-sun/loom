@@ -1119,11 +1119,29 @@ Verify the target before continuing:
 loom datasets audit --all --db-url "$LOOM_DB_URL"
 curl -sf -H "Authorization: Bearer $TEAM_A_TOKEN" \
   "$PUBLIC_SERVER_URL/api/v1/benchmarks?limit=200"
+python scripts/benchmark_reward_gate.py readiness \
+  --server-url "$PUBLIC_SERVER_URL" \
+  --token env:TEAM_A_TOKEN
 ```
 
 The public API response must include at least one benchmark with
 `task_count > 0`, and the New Batch page must show selectable benchmark
 choices after sign-in.
+
+For release acceptance, submit a supported-benchmark batch with the intended
+production runner/provider mix and wait for it to finish. Then verify every
+trial reached evaluator output:
+
+```bash
+python scripts/benchmark_reward_gate.py batch \
+  --server-url "$PUBLIC_SERVER_URL" \
+  --token env:TEAM_A_TOKEN \
+  --batch-id "$SUPPORTED_BENCHMARK_ACCEPTANCE_BATCH_ID"
+```
+
+The batch gate treats numeric rewards, including `0`, as successful benchmark
+evaluation. It fails on missing rewards, benchmark-side verifier errors,
+task-image/environment failures, and incomplete trial fan-out.
 
 ### Checklist
 

@@ -59,6 +59,12 @@ Attach these to the release issue or release PR:
   `loom datasets provision-public-beta-catalog` with non-zero
   `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, plus
   `/api/v1/benchmarks` evidence with at least one runnable entry.
+- Benchmark reward acceptance transcript from
+  `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
+  user-visible catalog, and every trial in the supported-benchmark acceptance
+  batch must finish with a numeric reward. A model answer scored `0` is a valid
+  evaluator result; a missing reward, verifier error, task-image failure, or
+  benchmark-side timeout is not.
 - If a remote-worker pool is attached, private tunnel evidence from
   `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
   Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the
@@ -122,6 +128,24 @@ The script checks:
 The script intentionally redacts raw tokens, provider-key-like values, seeded
 fake secrets, signed object-store URLs, and internal service URLs from its
 Markdown and JSON output.
+
+Run the benchmark reward gate after catalog provisioning and again after the
+supported-benchmark acceptance batch reaches a terminal state:
+
+```bash
+python scripts/benchmark_reward_gate.py readiness \
+  --server-url https://loom.example.com \
+  --token env:TEAM_A_TOKEN
+
+python scripts/benchmark_reward_gate.py batch \
+  --server-url https://loom.example.com \
+  --token env:TEAM_A_TOKEN \
+  --batch-id "$SUPPORTED_BENCHMARK_ACCEPTANCE_BATCH_ID"
+```
+
+The readiness command uses the same default benchmark API surface as New Batch;
+it does not inspect the hidden operator catalog view that includes
+`include_empty=true` diagnostic rows.
 
 ## Remote Worker Tunnel Gate
 

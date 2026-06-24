@@ -256,48 +256,49 @@ function mockEndpoints(opts: {
   tasksCount?: number;
 } = {}): ReturnType<typeof vi.spyOn> {
   const matching = opts.matchingTasks ?? 12;
-  const benchmarksResponse = {
-    ...BENCHMARKS_RESPONSE,
-    items: opts.noBenchmarks
-      ? []
-      : BENCHMARKS_RESPONSE.items.map((b) =>
-          b.id === "humaneval"
+  const benchmarkItems = opts.noBenchmarks
+    ? []
+    : BENCHMARKS_RESPONSE.items.map((b) =>
+        b.id === "humaneval"
+          ? {
+              ...b,
+              task_count: matching,
+              raw_task_count: matching,
+              valid_task_config_count: matching,
+              readiness_message: `${matching} runnable tasks are registered.`,
+            }
+          : opts.legacyBenchmark && b.id === "mbpp"
             ? {
                 ...b,
-                task_count: matching,
-                raw_task_count: matching,
-                valid_task_config_count: matching,
-                readiness_message: `${matching} runnable tasks are registered.`,
+                task_count: 0,
+                raw_task_count: 3,
+                valid_task_config_count: 0,
+                invalid_task_config_count: 3,
+                readiness_state: "blocked",
+                readiness_label: "Needs republish",
+                readiness_message:
+                  "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
+                selectable: false,
+                blocker_reason: "manifest_legacy_missing_task_config",
               }
-            : opts.legacyBenchmark && b.id === "mbpp"
-              ? {
-                  ...b,
-                  task_count: 0,
-                  raw_task_count: 3,
-                  valid_task_config_count: 0,
-                  invalid_task_config_count: 3,
-                  readiness_state: "blocked",
-                  readiness_label: "Needs republish",
-                  readiness_message:
-                    "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
-                  selectable: false,
-                  blocker_reason: "manifest_legacy_missing_task_config",
-                }
-            : opts.emptyBenchmark && b.id === "mbpp"
-              ? {
-                  ...b,
-                  task_count: 0,
-                  raw_task_count: 0,
-                  valid_task_config_count: 0,
-                  invalid_task_config_count: 0,
-                  readiness_state: "blocked",
-                  readiness_label: "Needs publish",
-                  readiness_message: "Publish/register tasks before selecting this benchmark.",
-                  selectable: false,
-                  blocker_reason: "manifest_missing",
-                }
-              : b,
-        ),
+          : opts.emptyBenchmark && b.id === "mbpp"
+            ? {
+                ...b,
+                task_count: 0,
+                raw_task_count: 0,
+                valid_task_config_count: 0,
+                invalid_task_config_count: 0,
+                readiness_state: "blocked",
+                readiness_label: "Needs publish",
+                readiness_message: "Publish/register tasks before selecting this benchmark.",
+                selectable: false,
+                blocker_reason: "manifest_missing",
+              }
+            : b,
+      );
+  const benchmarksResponse = {
+    ...BENCHMARKS_RESPONSE,
+    items: benchmarkItems,
   };
   return vi
     .spyOn(globalThis, "fetch")
@@ -325,7 +326,17 @@ function mockEndpoints(opts: {
         const id = decodeURIComponent(tagsMatch[1]);
         return json(BENCHMARK_TAGS_RESPONSES[id] ?? { items: [] });
       }
-      if (url.includes("/api/v1/benchmarks")) return json(benchmarksResponse);
+      if (url.includes("/api/v1/benchmarks")) {
+        const includeEmpty = url.includes("include_empty=true");
+        return json({
+          ...benchmarksResponse,
+          items: includeEmpty
+            ? benchmarksResponse.items
+            : benchmarksResponse.items.filter(
+                (b) => b.readiness_state === "runnable" && (b.task_count ?? 0) > 0,
+              ),
+        });
+      }
       if (url.includes("/api/v1/backends")) return json(BACKENDS_RESPONSE);
       // `/tasks/count` MUST be checked before `/tasks` since the
       // substring match would otherwise route both to the list stub.
@@ -422,6 +433,18 @@ describe("NewBatch", () => {
     expect(dropdown.value).toBe("docker");
   });
 
+  it("requests only runnable benchmarks for the submission picker", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+    await screen.findByText(/Runs solution\/solve.sh/i);
+
+    const benchmarkCall = spy.mock.calls.find((c) =>
+      String(c[0]).includes("/api/v1/benchmarks"),
+    );
+
+    expect(String(benchmarkCall?.[0])).not.toContain("include_empty=true");
+  });
+
   it("marks agents without service runtime as setup-needed", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
@@ -461,33 +484,26 @@ describe("NewBatch", () => {
     ).toBeInTheDocument();
   });
 
-  it("explains why an empty benchmark is marked needs publish", async () => {
+  it("omits unpublished benchmarks from the submission picker", async () => {
     mockEndpoints({ emptyBenchmark: true });
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
 
-    const marker = await screen.findByText(/Needs publish/i);
-    expect(marker.closest("label")).toHaveAttribute(
-      "title",
-      "Publish/register tasks before selecting this benchmark.",
-    );
+    expect(screen.queryByText(/Needs publish/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /Select benchmark mbpp/i }),
+    ).not.toBeInTheDocument();
   });
 
-  it("uses API readiness states to distinguish legacy rows from unpublished benchmarks", async () => {
+  it("omits legacy republish-needed benchmarks from the submission picker", async () => {
     mockEndpoints({ legacyBenchmark: true });
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
 
-    const legacy = await screen.findByRole("checkbox", {
-      name: /Select benchmark mbpp/i,
-    });
-    expect(legacy).toBeDisabled();
-    expect(legacy.closest("label")).toHaveTextContent(/Needs republish/i);
-    expect(legacy.closest("label")).toHaveTextContent(/0\/3 runnable/i);
-    expect(legacy.closest("label")).toHaveAttribute(
-      "title",
-      "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
-    );
+    expect(screen.queryByText(/Needs republish/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /Select benchmark mbpp/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows deployment-facing guidance instead of an operator import command when no benchmarks are provisioned", async () => {

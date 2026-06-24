@@ -603,6 +603,9 @@ opening the SPA:
 loom datasets audit --all --db-url "$LOOM_DB_URL"
 loom datasets audit swe-bench-verified --db-url "$LOOM_DB_URL"
 loom datasets audit --all --db-url "$LOOM_DB_URL" --json
+python scripts/benchmark_reward_gate.py readiness \
+  --server-url "$LOOM_SERVER_URL" \
+  --token env:LOOM_API_TOKEN
 ```
 
 The audit reports raw task rows, valid `TaskConfig` rows, source
@@ -625,6 +628,21 @@ than the normal submission path. It includes the full registry, including rows
 New Batch may disable, plus copyable `loom datasets list --remote`,
 `loom datasets audit`, and `loom datasets sync-config --dry-run` snippets that
 use token and database environment references instead of raw secrets.
+
+After a supported-benchmark acceptance batch finishes, operators can verify the
+reward contract from the public API:
+
+```bash
+python scripts/benchmark_reward_gate.py batch \
+  --server-url "$LOOM_SERVER_URL" \
+  --token env:LOOM_API_TOKEN \
+  --batch-id "$BATCH_ID"
+```
+
+This gate checks that the batch is terminal, fan-out produced the expected
+number of trials, and every succeeded trial has a numeric reward. It treats
+model-correctness scores such as `0` as valid verifier output, but fails
+missing rewards and benchmark-side verifier or environment failures.
 
 For public-beta or release deployments, operators should provision the ready
 catalog with `loom datasets provision-public-beta-catalog` before inviting
