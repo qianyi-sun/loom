@@ -49,6 +49,11 @@
     "default": "5.0",
     "required": false
   },
+  "idle_exit_after_seconds": {
+    "annotation": "float | None",
+    "default": "None",
+    "required": false
+  },
   "log_level": {
     "annotation": "typing.Literal['debug', 'info', 'warn', 'error', 'fatal']",
     "default": "'info'",

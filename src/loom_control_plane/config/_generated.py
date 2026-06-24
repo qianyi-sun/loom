@@ -30,6 +30,26 @@ class ControlPlaneSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     signed_url_expiry_sec: int = 3600
+    slurm_worker_controller_allowed_nodes: str = ""
+    slurm_worker_controller_command_timeout_seconds: float = 20.0
+    slurm_worker_controller_enabled: bool = False
+    slurm_worker_controller_env_file: str = ""
+    slurm_worker_controller_environment: str = "development"
+    slurm_worker_controller_max_jobs: int = 0
+    slurm_worker_controller_min_queued_trials: int = 1
+    slurm_worker_controller_partition: str = ""
+    slurm_worker_controller_pending_job_cap: int = 1
+    slurm_worker_controller_pool_name: str = "oldlab"
+    slurm_worker_controller_repo_dir: str = ""
+    slurm_worker_controller_requested_concurrency: int = 6
+    slurm_worker_controller_requested_cpus: int = 12
+    slurm_worker_controller_requested_memory_mib: int = 58000
+    slurm_worker_controller_sacct_path: str = "sacct"
+    slurm_worker_controller_sbatch_path: str = "sbatch"
+    slurm_worker_controller_scancel_path: str = "scancel"
+    slurm_worker_controller_squeue_path: str = "squeue"
+    slurm_worker_controller_stale_after_seconds: int = 300
+    slurm_worker_controller_time_limit: str = "7-00:00:00"
     step_jwt_signing_key: SecretStr
     worker_heartbeat_expiry_sec: int = 15
     worker_reclaim_sweep_interval_sec: int = 30

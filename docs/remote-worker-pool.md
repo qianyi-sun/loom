@@ -240,16 +240,57 @@ The script uses `--nodelist=<host>` for each included row and exports
 the row's `recommended_concurrency` as `LOOM_WORKER_MAX_CONCURRENT`.
 It requests the row's CPU and memory values and `--exclusive` so a
 remote worker can consume the node up to the measured stable boundary.
-Keep the env file untracked and available on each worker node.
+Keep the env file untracked and available on each worker node. This script is
+for manual or staged launches. For elastic pools, prefer the Control Plane
+controller below so batch submission stays independent of Slurm latency.
+
+## Elastic Slurm Controller
+
+The Control Plane can run an internal elastic Slurm worker controller loop. It
+observes queued Loom trials and the `slurm_worker_jobs` registry, submits
+worker jobs when backlog exceeds active capacity, and cancels still-pending
+jobs after the queue drains. Batch creation never calls Slurm synchronously.
+
+Enable it only in environments where the Control Plane process can run
+`sbatch`, `squeue`, `sacct`, and `scancel` with the intended Slurm identity:
+
+```bash
+LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=true
+LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT=production
+LOOM_CP_SLURM_WORKER_CONTROLLER_POOL_NAME=oldlab
+LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES=oldlab-1,oldlab-2,oldlab-3,oldlab-4,oldlab-5
+LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE=/secure/path/.env.remote-worker
+LOOM_CP_SLURM_WORKER_CONTROLLER_REPO_DIR=/opt/loom
+LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS=12
+LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB=58000
+LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY=6
+LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS=5
+LOOM_CP_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP=2
+LOOM_CP_SLURM_WORKER_CONTROLLER_TIME_LIMIT=7-00:00:00
+# Optional when the site uses a named partition:
+# LOOM_CP_SLURM_WORKER_CONTROLLER_PARTITION=cpu
+```
+
+The controller submits at most one active Loom worker job per allowed node and
+relies on the registry's active-capacity uniqueness guard for dedupe. Existing
+pending jobs pause new submissions once `PENDING_JOB_CAP` is reached; running
+plus pending jobs are also bounded by `MAX_JOBS`. Pending jobs are cancelled
+when there are no ready queued trials. Workers that start late still register
+and claim normally through the standard worker token and service URLs in the
+remote-worker env file.
+
+Keep worker tokens, MinIO credentials, and provider credentials only in the
+remote-worker env file. The registry stores a redacted env snapshot for
+operator diagnostics.
 
 ## Slurm Job Registry
 
-Elastic worker controllers should record every Loom-submitted Slurm job in the
-Control Plane before or immediately after `sbatch` returns. The registry stores
-the environment, pool name, nodelist, requested CPU, requested memory,
-requested concurrency, Slurm job id/state, optional worker id, timestamps, and
-a redacted copy of the submitted worker environment. Secret-looking env keys
-such as tokens, passwords, credentials, and keys are stored as `<redacted>`.
+The Control Plane records every Loom-submitted Slurm job in the registry after
+`sbatch` returns. The registry stores the environment, pool name, nodelist,
+requested CPU, requested memory, requested concurrency, Slurm job id/state,
+optional worker id, timestamps, and a redacted copy of the submitted worker
+environment. Secret-looking env keys such as tokens, passwords, credentials,
+and keys are stored as `<redacted>`.
 
 Inspect the registry through the CP admin surface:
 
@@ -273,10 +314,10 @@ The registry's normalized states are:
 | `cancelled` | Slurm reported cancellation. Use pending reason/logs to distinguish operator cancellation from policy preemption. |
 | `stale` | Loom had an active record, but the Slurm reconcile pass no longer saw the job after the stale window. |
 
-The future elastic controller should reconcile the table from `squeue`,
-`sacct`, or an equivalent Slurm query, including pending reasons. It must not
-submit another job for the same environment, pool, nodelist, CPU, memory, and
-concurrency while an active `pending` or `running` record already exists.
+The elastic controller reconciles the table from `squeue` and `sacct`,
+including pending reasons where Slurm reports them. It must not submit another
+job for the same environment, pool, nodelist, CPU, memory, and concurrency
+while an active `pending` or `running` record already exists.
 
 ## Start A Remote Worker
 

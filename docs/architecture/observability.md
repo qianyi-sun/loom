@@ -163,7 +163,10 @@ at least one panel in the dashboards above.
    `loom admin slurm-workers status --cp-url <private-cp-url>`. Pending slots
    with pending reasons point to Slurm scheduling pressure; failed submissions
    point to controller/config errors; stale records mean Loom expected capacity
-   that Slurm no longer reports.
+   that Slurm no longer reports. Check Control Plane logs for
+   `elastic_slurm_worker_decision`, `elastic_slurm_worker_submit_failed`, and
+   `elastic_slurm_worker_cancel_failed` to distinguish capacity math,
+   submission failures, and cancellation failures.
 
 ### Claim latency (`LoomClaimLatencyP95High`)
 

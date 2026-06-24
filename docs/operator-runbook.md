@@ -1581,11 +1581,32 @@ mock provider and browser automation job.
 - For shared-dev or staging hosts outside Kubernetes, use
   [remote-worker-pool.md](remote-worker-pool.md). For OLDLAB-style
   production capacity, inventory every candidate node, generate
-  `worker-plan.csv`, attach every usable node unless excluded with a
-  reason, and launch with
-  `scripts/ops/worker_pool_slurm_submit.sh`. Raise per-node concurrency
-  only after CPU, RAM, Docker cleanup, MinIO throughput, Gateway/provider
-  error rate, and Control Plane state-patch health are clean.
+  `worker-plan.csv`, and attach every usable node unless excluded with a
+  reason. Use `scripts/ops/worker_pool_slurm_submit.sh` for manual smoke
+  launches; use the Control Plane elastic Slurm controller for normal
+  OLDLAB capacity so Slurm latency stays out of the batch submit path.
+- The default production shape is a fixed Kubernetes worker baseline plus
+  OLDLAB 1-5 as elastic capacity. Configure each environment independently:
+
+  ```bash
+  LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=true
+  LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT=production
+  LOOM_CP_SLURM_WORKER_CONTROLLER_POOL_NAME=oldlab
+  LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES=oldlab-1,oldlab-2,oldlab-3,oldlab-4,oldlab-5
+  LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE=/secure/path/.env.remote-worker
+  LOOM_CP_SLURM_WORKER_CONTROLLER_REPO_DIR=/opt/loom
+  LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS=12
+  LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB=58000
+  LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY=6
+  LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS=5
+  LOOM_CP_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP=2
+  ```
+
+  `MAX_JOBS` bounds running plus pending Slurm jobs. `PENDING_JOB_CAP` stops
+  new submits when existing pending jobs already reach the threshold, which
+  avoids piling up Slurm queue entries when OLDLAB is busy. Raise per-node
+  concurrency only after CPU, RAM, Docker cleanup, MinIO throughput,
+  Gateway/provider error rate, and Control Plane state-patch health are clean.
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
 

@@ -64,6 +64,106 @@
     "default": "3600",
     "required": false
   },
+  "slurm_worker_controller_allowed_nodes": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "slurm_worker_controller_command_timeout_seconds": {
+    "annotation": "<class 'float'>",
+    "default": "20.0",
+    "required": false
+  },
+  "slurm_worker_controller_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "slurm_worker_controller_env_file": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "slurm_worker_controller_environment": {
+    "annotation": "<class 'str'>",
+    "default": "'development'",
+    "required": false
+  },
+  "slurm_worker_controller_max_jobs": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
+  "slurm_worker_controller_min_queued_trials": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "slurm_worker_controller_partition": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "slurm_worker_controller_pending_job_cap": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "slurm_worker_controller_pool_name": {
+    "annotation": "<class 'str'>",
+    "default": "'oldlab'",
+    "required": false
+  },
+  "slurm_worker_controller_repo_dir": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "slurm_worker_controller_requested_concurrency": {
+    "annotation": "<class 'int'>",
+    "default": "6",
+    "required": false
+  },
+  "slurm_worker_controller_requested_cpus": {
+    "annotation": "<class 'int'>",
+    "default": "12",
+    "required": false
+  },
+  "slurm_worker_controller_requested_memory_mib": {
+    "annotation": "<class 'int'>",
+    "default": "58000",
+    "required": false
+  },
+  "slurm_worker_controller_sacct_path": {
+    "annotation": "<class 'str'>",
+    "default": "'sacct'",
+    "required": false
+  },
+  "slurm_worker_controller_sbatch_path": {
+    "annotation": "<class 'str'>",
+    "default": "'sbatch'",
+    "required": false
+  },
+  "slurm_worker_controller_scancel_path": {
+    "annotation": "<class 'str'>",
+    "default": "'scancel'",
+    "required": false
+  },
+  "slurm_worker_controller_squeue_path": {
+    "annotation": "<class 'str'>",
+    "default": "'squeue'",
+    "required": false
+  },
+  "slurm_worker_controller_stale_after_seconds": {
+    "annotation": "<class 'int'>",
+    "default": "300",
+    "required": false
+  },
+  "slurm_worker_controller_time_limit": {
+    "annotation": "<class 'str'>",
+    "default": "'7-00:00:00'",
+    "required": false
+  },
   "step_jwt_signing_key": {
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",

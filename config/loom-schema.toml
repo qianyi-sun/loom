@@ -113,6 +113,126 @@ used_by     = ["control-plane", "loom-service"]
 python_type = "int"
 default     = 3600
 
+[service_config.slurm_worker_controller_enabled]
+used_by     = ["control-plane"]
+python_type = "bool"
+default     = false
+description = "Enable the Control Plane elastic Slurm worker controller loop."
+
+[service_config.slurm_worker_controller_environment]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "development"
+description = "Environment label written to slurm_worker_jobs for elastic worker jobs."
+
+[service_config.slurm_worker_controller_pool_name]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "oldlab"
+description = "Slurm worker pool label written to slurm_worker_jobs."
+
+[service_config.slurm_worker_controller_allowed_nodes]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Comma-separated Slurm nodes the controller may target."
+
+[service_config.slurm_worker_controller_env_file]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Remote-worker env file path exported into elastic Slurm jobs."
+
+[service_config.slurm_worker_controller_repo_dir]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Repository directory path used by elastic Slurm worker jobs."
+
+[service_config.slurm_worker_controller_partition]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = ""
+description = "Optional Slurm partition for elastic worker jobs."
+
+[service_config.slurm_worker_controller_time_limit]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "7-00:00:00"
+description = "Slurm --time value for elastic worker jobs."
+
+[service_config.slurm_worker_controller_requested_cpus]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 12
+description = "CPU count requested per elastic Slurm worker job."
+
+[service_config.slurm_worker_controller_requested_memory_mib]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 58000
+description = "Memory requested per elastic Slurm worker job, in MiB."
+
+[service_config.slurm_worker_controller_requested_concurrency]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 6
+description = "LOOM_WORKER_MAX_CONCURRENT value requested per elastic worker job."
+
+[service_config.slurm_worker_controller_max_jobs]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 0
+description = "Maximum running plus pending elastic Slurm worker jobs."
+
+[service_config.slurm_worker_controller_pending_job_cap]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 1
+description = "Maximum pending elastic Slurm worker jobs allowed at once."
+
+[service_config.slurm_worker_controller_min_queued_trials]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 1
+description = "Queued trial threshold before the elastic Slurm controller submits jobs."
+
+[service_config.slurm_worker_controller_stale_after_seconds]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 300
+description = "Seconds before an unobserved active Slurm worker job is marked stale."
+
+[service_config.slurm_worker_controller_sbatch_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "sbatch"
+description = "Path to sbatch for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_squeue_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "squeue"
+description = "Path to squeue for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_sacct_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "sacct"
+description = "Path to sacct for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_scancel_path]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "scancel"
+description = "Path to scancel for the elastic Slurm controller."
+
+[service_config.slurm_worker_controller_command_timeout_seconds]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 20.0
+description = "Timeout for each Slurm command invoked by the elastic controller."
+
 # ─── llm-gateway only ───
 
 [service_config.anthropic_api_key]

@@ -102,3 +102,9 @@ def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
     assert hasattr(refresher_module, "SLURM_WORKER_DESIRED_SLOTS")
     assert hasattr(refresher_module, "SLURM_WORKER_ACTIVE_SLOTS")
     assert hasattr(refresher_module, "SLURM_WORKER_PENDING_SLOTS")
+
+
+def test_control_plane_app_imports_elastic_slurm_controller_loop() -> None:
+    import loom_control_plane.app as app_module
+
+    assert hasattr(app_module, "run_elastic_slurm_worker_controller_loop")
