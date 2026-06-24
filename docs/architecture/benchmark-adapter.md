@@ -256,6 +256,9 @@ has 500 tasks. Its converter emits per-instance bundles that run the upstream
 registered rows may have `config={}`, readiness must come from a republished
 schema-v3 manifest with embedded validated `TaskConfig` payloads, not from raw
 legacy task-row counts.
+SWE-Bench rows with no upstream test node ids must emit a self-contained script
+verifier that records a diagnostic check and numeric reward `0`; they should
+not fail the platform because an image lacks pytest or pip support.
 
 BFCL v4 tasks carry their evaluation contract inside the converted bundle:
 `ground_truth.json` stores either `possible_answer/` data or the official

@@ -25,6 +25,23 @@ if TYPE_CHECKING:
 _JUNIT_PATH = PurePosixPath("/loom/verifier/junit.xml")
 
 
+def build_pytest_install_command() -> str:
+    """Return a shell snippet that ensures pytest is importable.
+
+    Some SWE-Bench eval images ship an older pip that does not know
+    `--root-user-action`. Try the quieter modern form first, then fall back
+    to a plain install so those images still produce junit output.
+    """
+    return (
+        "python -c 'import pytest' 2>/dev/null || "
+        "{ "
+        "python -m pip install --quiet --root-user-action=ignore pytest "
+        "1>/dev/null 2>/dev/null || "
+        "python -m pip install --quiet pytest 1>/dev/null; "
+        "}"
+    )
+
+
 @dataclass
 class PytestVerifier:
     name: str = "pytest"
@@ -68,9 +85,7 @@ class PytestVerifier:
         # - `|| true` only wraps pytest itself, since non-zero is
         #   expected on failing tests; we read the XML for the truth.
         cmd = (
-            "{ python -c 'import pytest' 2>/dev/null || "
-            "pip install --quiet --root-user-action=ignore pytest "
-            "1>/dev/null; } && "
+            f"{{ {build_pytest_install_command()}; }} && "
             f"cd {self.tests_dir.as_posix()} && "
             "{ "
             f"pytest --junitxml={_JUNIT_PATH.as_posix()} "

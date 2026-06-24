@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import py_compile
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -11,6 +11,7 @@ from loom_benchmarks.adapters.swe_bench_verified import SWEBenchVerifiedAdapter
 from loom_benchmarks.base import BenchmarkInstance
 
 from loom.models.task import TaskConfig
+from loom.models.verifier import VerifierResult
 
 FIXTURE = (
     Path(__file__).parent
@@ -55,7 +56,9 @@ def test_solve_sh_is_executable(tmp_path: Path) -> None:
     assert (tmp_path / "solution" / "solve.sh").stat().st_mode & 0o111
 
 
-def test_empty_test_node_lists_emit_valid_pytest_file(tmp_path: Path) -> None:
+def test_empty_test_node_lists_emit_script_verifier_reward_zero(
+    tmp_path: Path,
+) -> None:
     rec = json.loads(FIXTURE.read_text())[0]
     rec["FAIL_TO_PASS"] = "[]"
     rec["PASS_TO_PASS"] = "[]"
@@ -64,9 +67,26 @@ def test_empty_test_node_lists_emit_valid_pytest_file(tmp_path: Path) -> None:
     )
     SWEBenchVerifiedAdapter().convert_instance(inst, out_dir=tmp_path)
 
-    test_py = tmp_path / "tests" / "test_swebench.py"
-    py_compile.compile(str(test_py), doraise=True)
-    assert "no SWE-Bench test node ids" in test_py.read_text()
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((tmp_path / "task.toml").read_text()),
+    )
+    assert cfg.verifier.name == "script"
+    assert cfg.verifier.args == {"script_path": "/workspace/verifier/run.sh"}
+    assert "\n[verifier]\nname = \"script\"\n" in (
+        tmp_path / "task.toml"
+    ).read_text()
+
+    output = tmp_path / "verifier-output.json"
+    subprocess.run(
+        [str(tmp_path / "verifier" / "run.sh")],
+        env={"LOOM_VERIFIER_OUTPUT": str(output)},
+        check=True,
+    )
+    result = VerifierResult.model_validate_json(output.read_text())
+    assert result.rewards["passed"] == 0.0
+    assert result.checks[0].message == (
+        "no SWE-Bench test node ids were provided by upstream"
+    )
 
 
 def test_image_slug_replaces_double_underscore() -> None:

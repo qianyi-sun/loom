@@ -85,8 +85,8 @@ SWE-Bench eval image. The generated `task.toml` points at
 `swebench/sweb.eval.x86_64.<instance>:latest`, so service-mode workers must be
 able to pull those per-instance images before executing the benchmark.
 Some SWE-Bench Multimodal rows ship empty upstream test-id lists; those bundles
-now emit a valid pytest file with an explicit failing check, producing numeric
-reward `0` instead of a platform-level verifier failure.
+now emit a self-contained script verifier with an explicit diagnostic check,
+producing numeric reward `0` instead of depending on image-local pytest.
 
 Republish this benchmark with the schema-v3 manifest path before treating it as
 ready. Older registered rows without `task_config` remain explicit legacy
