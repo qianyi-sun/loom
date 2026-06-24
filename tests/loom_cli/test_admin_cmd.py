@@ -355,6 +355,87 @@ def test_rotate_json_mode_skips_checklist(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# loom admin slurm-workers status
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = url
+        captured["headers"] = headers
+        return _StubResponse(
+            200,
+            json_data={
+                "summary": [
+                    {
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "desired_slots": 18,
+                        "active_slots": 12,
+                        "pending_slots": 6,
+                        "running_jobs": 2,
+                        "pending_jobs": 1,
+                        "failed_submissions": 0,
+                        "cancelled_pending_jobs": 0,
+                        "idle_exits": 1,
+                    },
+                ],
+                "jobs": [
+                    {
+                        "job_id": "13441",
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "state": "running",
+                        "nodelist": "oldlab-1",
+                        "requested_concurrency": 6,
+                        "redacted_env": {"LOOM_WORKER_TOKEN": "<redacted>"},
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main([
+        "admin", "slurm-workers", "status",
+        "--cp-url", "http://cp:8080/",
+    ])
+    assert rc == 0
+    assert captured["url"] == "http://cp:8080/admin/slurm-worker-jobs/status"
+    assert captured["headers"]["Authorization"] == "Bearer admin-secret"
+
+    out = capsys.readouterr().out
+    assert "production/oldlab" in out
+    assert "desired=18 active=12 pending=6" in out
+    assert "13441" in out
+    assert "loom_w_secret" not in out
+    assert "<redacted>" in out
+
+
+def test_slurm_workers_status_json_format_emits_raw_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {"summary": [], "jobs": []}
+
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(200, json_data=payload)
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(["admin", "slurm-workers", "status", "--format", "json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+# ──────────────────────────────────────────────────────────────────────
 # loom admin tokens team — uses loom_service /api/v1/tokens
 # ──────────────────────────────────────────────────────────────────────
 

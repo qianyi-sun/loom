@@ -1,6 +1,14 @@
 from loom_control_plane.metrics import (
     CLAIM_LATENCY_SEC,
     QUEUE_DEPTH,
+    SLURM_WORKER_ACTIVE_SLOTS,
+    SLURM_WORKER_CANCELLED_PENDING_JOBS,
+    SLURM_WORKER_DESIRED_SLOTS,
+    SLURM_WORKER_FAILED_SUBMISSIONS,
+    SLURM_WORKER_IDLE_EXITS,
+    SLURM_WORKER_PENDING_JOBS,
+    SLURM_WORKER_PENDING_SLOTS,
+    SLURM_WORKER_RUNNING_JOBS,
     STATE_PATCH_TOTAL,
     TRIALS_INFLIGHT,
     TRIALS_STATE_TOTAL,
@@ -21,3 +29,15 @@ def test_metrics_exist_unlabeled():
     assert QUEUE_DEPTH._labelnames == ("team_id",)
     assert WORKERS_ACTIVE._labelnames == ()
     assert WORKER_RECLAIM_TOTAL._labelnames == ()
+
+
+def test_slurm_worker_capacity_metrics_are_bounded_by_pool():
+    expected = ("environment", "pool_name")
+    assert SLURM_WORKER_DESIRED_SLOTS._labelnames == expected
+    assert SLURM_WORKER_ACTIVE_SLOTS._labelnames == expected
+    assert SLURM_WORKER_PENDING_SLOTS._labelnames == expected
+    assert SLURM_WORKER_RUNNING_JOBS._labelnames == expected
+    assert SLURM_WORKER_PENDING_JOBS._labelnames == expected
+    assert SLURM_WORKER_FAILED_SUBMISSIONS._labelnames == expected
+    assert SLURM_WORKER_CANCELLED_PENDING_JOBS._labelnames == expected
+    assert SLURM_WORKER_IDLE_EXITS._labelnames == expected

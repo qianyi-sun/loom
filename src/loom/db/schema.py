@@ -18,6 +18,7 @@ from sqlalchemy import (
     CheckConstraint,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     Numeric,
@@ -318,6 +319,89 @@ class Worker(Base):
     registered_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class SlurmWorkerJob(Base):
+    __tablename__ = "slurm_worker_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'stale')",
+            name="slurm_worker_jobs_state_check",
+        ),
+        CheckConstraint(
+            "requested_cpus IS NULL OR requested_cpus > 0",
+            name="slurm_worker_jobs_requested_cpus_positive_check",
+        ),
+        CheckConstraint(
+            "requested_memory_mib IS NULL OR requested_memory_mib > 0",
+            name="slurm_worker_jobs_requested_memory_positive_check",
+        ),
+        CheckConstraint(
+            "requested_concurrency > 0",
+            name="slurm_worker_jobs_requested_concurrency_positive_check",
+        ),
+        Index(
+            "slurm_worker_jobs_job_id_uidx",
+            "job_id",
+            unique=True,
+            postgresql_where=text("job_id IS NOT NULL"),
+        ),
+        Index(
+            "slurm_worker_jobs_active_capacity_uidx",
+            "environment",
+            "pool_name",
+            "nodelist",
+            text("coalesce(requested_cpus, -1)"),
+            text("coalesce(requested_memory_mib, -1)"),
+            "requested_concurrency",
+            unique=True,
+            postgresql_where=text("state IN ('pending', 'running')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    nodelist: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_cpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_memory_mib: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    slurm_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    pending_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    worker_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="SET NULL"), nullable=True,
+    )
+    redacted_env: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    submission_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    stale_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
 
 
 class Batch(Base):

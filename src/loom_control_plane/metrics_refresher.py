@@ -25,8 +25,20 @@ from sqlalchemy import text
 
 from loom_control_plane.metrics import (
     QUEUE_DEPTH,
+    SLURM_WORKER_ACTIVE_SLOTS,
+    SLURM_WORKER_CANCELLED_PENDING_JOBS,
+    SLURM_WORKER_DESIRED_SLOTS,
+    SLURM_WORKER_FAILED_SUBMISSIONS,
+    SLURM_WORKER_IDLE_EXITS,
+    SLURM_WORKER_PENDING_JOBS,
+    SLURM_WORKER_PENDING_SLOTS,
+    SLURM_WORKER_RUNNING_JOBS,
     TRIALS_INFLIGHT,
     WORKERS_ACTIVE,
+)
+from loom_control_plane.slurm_worker_jobs import (
+    fetch_slurm_worker_metric_rows,
+    summarize_jobs,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +68,17 @@ SELECT team_id::text, state, count(*) AS cnt
  WHERE state IN ('queued', 'claimed', 'running')
  GROUP BY team_id, state
 """)
+
+_SLURM_WORKER_GAUGES = (
+    SLURM_WORKER_DESIRED_SLOTS,
+    SLURM_WORKER_ACTIVE_SLOTS,
+    SLURM_WORKER_PENDING_SLOTS,
+    SLURM_WORKER_RUNNING_JOBS,
+    SLURM_WORKER_PENDING_JOBS,
+    SLURM_WORKER_FAILED_SUBMISSIONS,
+    SLURM_WORKER_CANCELLED_PENDING_JOBS,
+    SLURM_WORKER_IDLE_EXITS,
+)
 
 
 async def refresh_once(session: Any, *, expiry_sec: int) -> None:
@@ -91,6 +114,27 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
         QUEUE_DEPTH.labels(team_id=team_id).set(int(depth))
     for team_id, state, cnt in inflight_rows:
         TRIALS_INFLIGHT.labels(team_id=team_id, state=state).set(int(cnt))
+
+    slurm_summary = summarize_jobs(await fetch_slurm_worker_metric_rows(session))
+    for gauge in _SLURM_WORKER_GAUGES:
+        gauge.clear()
+    for capacity in slurm_summary.by_pool.values():
+        labels = {
+            "environment": capacity.environment,
+            "pool_name": capacity.pool_name,
+        }
+        SLURM_WORKER_DESIRED_SLOTS.labels(**labels).set(capacity.desired_slots)
+        SLURM_WORKER_ACTIVE_SLOTS.labels(**labels).set(capacity.active_slots)
+        SLURM_WORKER_PENDING_SLOTS.labels(**labels).set(capacity.pending_slots)
+        SLURM_WORKER_RUNNING_JOBS.labels(**labels).set(capacity.running_jobs)
+        SLURM_WORKER_PENDING_JOBS.labels(**labels).set(capacity.pending_jobs)
+        SLURM_WORKER_FAILED_SUBMISSIONS.labels(**labels).set(
+            capacity.failed_submissions,
+        )
+        SLURM_WORKER_CANCELLED_PENDING_JOBS.labels(**labels).set(
+            capacity.cancelled_pending_jobs,
+        )
+        SLURM_WORKER_IDLE_EXITS.labels(**labels).set(capacity.idle_exits)
 
 
 async def run_metrics_refresher_loop(

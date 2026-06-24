@@ -242,6 +242,42 @@ It requests the row's CPU and memory values and `--exclusive` so a
 remote worker can consume the node up to the measured stable boundary.
 Keep the env file untracked and available on each worker node.
 
+## Slurm Job Registry
+
+Elastic worker controllers should record every Loom-submitted Slurm job in the
+Control Plane before or immediately after `sbatch` returns. The registry stores
+the environment, pool name, nodelist, requested CPU, requested memory,
+requested concurrency, Slurm job id/state, optional worker id, timestamps, and
+a redacted copy of the submitted worker environment. Secret-looking env keys
+such as tokens, passwords, credentials, and keys are stored as `<redacted>`.
+
+Inspect the registry through the CP admin surface:
+
+```bash
+loom admin slurm-workers status \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token file:/secure/path/admin-token
+```
+
+For scripting, use `--format json`. The output is safe for issue comments and
+release evidence because it contains only redacted env values.
+
+The registry's normalized states are:
+
+| State | Meaning |
+|---|---|
+| `pending` | Slurm reports queued/configuring and no worker has usable capacity yet. |
+| `running` | Slurm reports running; capacity is counted as active slots. |
+| `completed` | Slurm completed the worker job. With idle-exit this is expected after queue drain. |
+| `failed` | Slurm reported failed, timed out, node failure, OOM, preempted, or submission failed before a job id existed. |
+| `cancelled` | Slurm reported cancellation. Use pending reason/logs to distinguish operator cancellation from policy preemption. |
+| `stale` | Loom had an active record, but the Slurm reconcile pass no longer saw the job after the stale window. |
+
+The future elastic controller should reconcile the table from `squeue`,
+`sacct`, or an equivalent Slurm query, including pending reasons. It must not
+submit another job for the same environment, pool, nodelist, CPU, memory, and
+concurrency while an active `pending` or `running` record already exists.
+
 ## Start A Remote Worker
 
 On the worker host, copy the example env file to an untracked file:
@@ -341,6 +377,10 @@ Recommended idle-exit values:
 Keep Slurm `--time` as a hard upper bound even when idle-exit is enabled.
 Idle-exit releases allocations after queue drain; `--time` still protects
 against stuck jobs, host leaks, or worker bugs.
+
+Idle-exit also appears in the Slurm capacity registry when the worker heartbeat
+status is `idle-exit`. Operators should treat `completed` Slurm jobs with
+`idle-exit` worker status as normal elastic shrink, not as capacity failure.
 
 The Worker also configures Python's default blocking-I/O executor for
 Docker, S3/MinIO, Hugging Face, and filesystem calls. Leave

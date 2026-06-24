@@ -1199,6 +1199,7 @@ the `groups` block into your `prometheus.yml`.
 | `LoomWorkerReclaimsSpiking` | warning | `rate(loom_worker_reclaim_total[5m]) > 0.5` for 10m | Crash detector is reclaiming > 30 trials/min. Workers are dying mid-trial. | `kubectl describe pod -n loom -l app=loom-worker \| grep -A2 "Last State\|OOMKilled\|Reason"`. |
 | `LoomStatePatchTimeouts` | warning | `rate(loom_state_patch_total{result="timeout"}[5m]) > 0` for 5m | Fenced state-PATCH is timing out; workers retry, eventually the crash detector reclaims. | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres`; check Postgres connections + active queries; consider rolling back recent CP image. |
 | `LoomClaimLatencyP95High` | warning | `histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m]))) > 1.0` for 15m | DRF claim scan p95 > 1 second. Workers spinning instead of running. | Verify `trials(state, submitted_at)` index is hot; check `pg_stat_statements` for the claim query. |
+| Slurm worker capacity low | warning | No default alert; inspect `loom_slurm_worker_desired_slots`, `loom_slurm_worker_active_slots`, and `loom_slurm_worker_pending_slots` by environment/pool. | Elastic Slurm jobs were requested but are pending, stale, failed, cancelled, or exited idle. | `loom admin slurm-workers status --cp-url <private-cp-url>`; inspect pending reasons, stale records, failed submissions, and `squeue`/`sacct` for the recorded job ids. |
 | `LoomLLMGatewayDown` | **critical** | `up{job=~".*loom-llm-gateway.*"} == 0` for 5m | Prometheus cannot scrape Gateway, so provider-call metrics are blind. | `kubectl get pods -n loom -l app=loom-llm-gateway`; `kubectl logs -n loom -l app=loom-llm-gateway --tail=200`. |
 | `LoomGatewayProviderErrorRate` | warning | provider-level `loom_gateway_llm_calls_total{result!="ok"}` ratio > 5% for 10m | A provider is failing calls; common causes are expired keys, provider outage, SSRF/egress policy, or dialect drift. | `kubectl logs -n loom -l app=loom-llm-gateway --since=15m`; run `loom providers test <connection-name>`; check provider status. |
 | `LoomGatewayCostSpike` | warning | `increase(loom_gateway_cost_usd_total[30m]) > 10` per team for 10m | A team accumulated more than $10 provider-attributed Gateway cost in 30 minutes. This is an alert only, not quota enforcement. | Inspect Gateway cost dashboard by `team_id`; check recent batches and provider configuration; disable the team or rotate provider secrets if spend is unintended. |
@@ -1585,6 +1586,19 @@ mock provider and browser automation job.
   `scripts/ops/worker_pool_slurm_submit.sh`. Raise per-node concurrency
   only after CPU, RAM, Docker cleanup, MinIO throughput, Gateway/provider
   error rate, and Control Plane state-patch health are clean.
+- For elastic Slurm pools, the Control Plane records submitted worker jobs in
+  `slurm_worker_jobs` and exposes safe capacity status with:
+
+  ```bash
+  loom admin slurm-workers status \
+    --cp-url http://control-node.lan:18081 \
+    --admin-token file:/secure/path/admin-token
+  ```
+
+  Use this before submitting more capacity. A pending or running job with the
+  same environment, pool, nodelist, CPU, memory, and concurrency is an active
+  capacity request and should not be duplicated. Use `--format json` for
+  release evidence or automation.
 - Fixed Kubernetes workers should leave `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS`
   unset. Elastic Slurm workers should set it in the remote-worker env file:
   use 300 seconds for dev/staging pools and 600-900 seconds for production

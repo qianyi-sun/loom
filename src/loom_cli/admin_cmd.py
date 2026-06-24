@@ -186,6 +186,75 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _slurm_workers_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    url = f"{args.cp_url.rstrip('/')}/admin/slurm-worker-jobs/status"
+    try:
+        resp = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach CP at {url}: {e}\n")
+        return 2
+
+    if resp.status_code != 200:
+        sys.stderr.write(
+            f"error: CP returned {resp.status_code}: {resp.text}\n",
+        )
+        return 1
+
+    data = resp.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    summary = data.get("summary", [])
+    jobs = data.get("jobs", [])
+    sys.stdout.write("Slurm worker capacity:\n")
+    if not summary:
+        sys.stdout.write("  no Slurm worker jobs recorded\n")
+    for row in summary:
+        sys.stdout.write(
+            f"  {row['environment']}/{row['pool_name']} "
+            f"desired={row['desired_slots']} "
+            f"active={row['active_slots']} "
+            f"pending={row['pending_slots']} "
+            f"jobs running={row['running_jobs']} "
+            f"pending={row['pending_jobs']} "
+            f"failed_submissions={row['failed_submissions']} "
+            f"cancelled_pending={row['cancelled_pending_jobs']} "
+            f"idle_exits={row['idle_exits']}\n",
+        )
+    if jobs:
+        sys.stdout.write("\nJobs:\n")
+    for job in jobs:
+        env_items = " ".join(
+            f"{key}={value}"
+            for key, value in sorted(job.get("redacted_env", {}).items())
+        )
+        sys.stdout.write(
+            f"  {job.get('job_id') or '-'} "
+            f"{job['environment']}/{job['pool_name']} "
+            f"{job['state']} nodelist={job['nodelist']} "
+            f"concurrency={job['requested_concurrency']}",
+        )
+        if env_items:
+            sys.stdout.write(f" env={env_items}")
+        pending_reason = job.get("pending_reason")
+        if pending_reason:
+            sys.stdout.write(f" reason={pending_reason}")
+        sys.stdout.write("\n")
+    return 0
+
+
 _KNOWN_TEAM_SCOPES = (
     "read:own",
     "submit",
@@ -587,6 +656,22 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_rotate.set_defaults(handler=_rotate_worker_token)
+
+    p_slurm = sub.add_parser(
+        "slurm-workers",
+        help="Inspect elastic Slurm worker capacity recorded by the CP.",
+    )
+    slurm_sub = p_slurm.add_subparsers(dest="slurm_op", required=True)
+    p_slurm_status = slurm_sub.add_parser(
+        "status",
+        help="Show recorded Slurm worker jobs and per-pool capacity.",
+    )
+    _add_common_args(p_slurm_status)
+    p_slurm_status.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="Output format.",
+    )
+    p_slurm_status.set_defaults(handler=_slurm_workers_status)
 
     p_team = tok_sub.add_parser(
         "team",

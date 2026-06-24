@@ -58,6 +58,14 @@ def test_metrics_objects_exposed_to_registry() -> None:
         "loom_workers_active",
         "loom_queue_depth",
         "loom_trials_inflight",
+        "loom_slurm_worker_desired_slots",
+        "loom_slurm_worker_active_slots",
+        "loom_slurm_worker_pending_slots",
+        "loom_slurm_worker_running_jobs",
+        "loom_slurm_worker_pending_jobs",
+        "loom_slurm_worker_failed_submissions",
+        "loom_slurm_worker_cancelled_pending_jobs",
+        "loom_slurm_worker_idle_exits",
         "loom_worker_reclaim",   # counter → exposed as ..._total
         "loom_state_patch",      # counter → exposed as ..._total
         "loom_trials_state",     # counter → exposed as ..._total
@@ -86,3 +94,11 @@ def test_workers_route_imports_claim_latency() -> None:
 def test_crash_detector_imports_worker_reclaim_total() -> None:
     import loom_control_plane.scheduler.crash_detector as cd_module
     assert hasattr(cd_module, "WORKER_RECLAIM_TOTAL")
+
+
+def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
+    import loom_control_plane.metrics_refresher as refresher_module
+
+    assert hasattr(refresher_module, "SLURM_WORKER_DESIRED_SLOTS")
+    assert hasattr(refresher_module, "SLURM_WORKER_ACTIVE_SLOTS")
+    assert hasattr(refresher_module, "SLURM_WORKER_PENDING_SLOTS")

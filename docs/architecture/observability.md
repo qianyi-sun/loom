@@ -27,6 +27,14 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Control Plane | `loom_claim_latency_sec` | Histogram | `result` (hit\|miss) |
 | Control Plane | `loom_state_patch_total` | Counter | `endpoint`, `result` (ok\|fenced\|timeout) |
 | Control Plane | `loom_workers_active` | Gauge | — |
+| Control Plane | `loom_slurm_worker_desired_slots` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_active_slots` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_pending_slots` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_running_jobs` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_pending_jobs` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_failed_submissions` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_cancelled_pending_jobs` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_idle_exits` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_worker_reclaim_total` | Counter | — |
 | LLM Gateway | `loom_gateway_llm_calls_total` | Counter | `provider`, `dialect`, `result` |
 | LLM Gateway | `loom_gateway_llm_call_latency_sec` | Histogram | `provider`, `dialect` |
@@ -82,6 +90,9 @@ Grafana sidecar auto-discovers and imports them.
 - State PATCH outcomes (ok / fenced / timeout)
 - Worker reclaim rate
 - Active workers gauge
+- Elastic Slurm worker desired, active, and pending slots by environment/pool
+- Elastic Slurm job counts for running, pending, failed submissions, cancelled
+  pending jobs, and idle exits
 
 **LLM Gateway** — drill in when `LoomGatewayProviderErrorRate` fires or cost anomalies appear:
 - Call rate by provider (stacked)
@@ -148,6 +159,11 @@ at least one panel in the dashboards above.
 1. Open **Control Plane** dashboard → Queue Depth per Team panel.
 2. Check `loom_workers_active`. If low, scale the worker Deployment: `kubectl scale deploy/loom-worker --replicas=N`.
 3. Check claim latency P95. If high, see `LoomClaimLatencyP95High` path.
+4. If this environment uses elastic Slurm capacity, run
+   `loom admin slurm-workers status --cp-url <private-cp-url>`. Pending slots
+   with pending reasons point to Slurm scheduling pressure; failed submissions
+   point to controller/config errors; stale records mean Loom expected capacity
+   that Slurm no longer reports.
 
 ### Claim latency (`LoomClaimLatencyP95High`)
 
