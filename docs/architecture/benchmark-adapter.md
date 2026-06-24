@@ -130,7 +130,7 @@ name = "pytest"
 timeout_sec = 300
 
 [verifier.args]      # per-verifier-kind kwargs
-# script_path = "/workspace/verifier/run.sh"   # ScriptVerifier
+# script_path = "/workspace/verifier/run.sh"   # required for ScriptVerifier
 # test_dir = "tests/"                      # PytestVerifier (default)
 
 [[steps]]
@@ -150,6 +150,11 @@ upstreams with their own convention should declare it explicitly. For example,
 Terminal-Bench-2 tasks use `/app`, so their script verifier path is
 `/app/verifier/run.sh` and their test tree lands under
 `/app/environment/tb2-tests`.
+
+Adapters that generate `verifier/run.sh` must also declare
+`[verifier.args].script_path`. Writing the script into the bundle is not enough:
+`ScriptVerifier` is constructed from task config and will fail before running
+the benchmark when `script_path` is absent.
 
 `environment.docker_build_context` lets an adapter keep Docker build-only
 files under a subdirectory such as `.loom-build/client`. The worker builds from

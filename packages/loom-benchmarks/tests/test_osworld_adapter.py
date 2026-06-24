@@ -22,6 +22,7 @@ def test_osworld_emits_structured_verifier(tmp_path: Path) -> None:
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.verifier.name == "script"
+    assert cfg.verifier.args["script_path"] == "/workspace/verifier/run.sh"
     assert (tmp_path / "verifier" / "run.sh").stat().st_mode & 0o111
     run_sh = (tmp_path / "verifier" / "run.sh").read_text()
     assert "/opt/osworld/eval/run.py" in run_sh

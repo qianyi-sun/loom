@@ -79,12 +79,18 @@ def test_skill_solution_runs(
     )
 
 
-def _write_real_bundle(root: Path, *, family: str, task: str) -> Path:
+def _write_real_bundle(
+    root: Path,
+    *,
+    family: str,
+    task: str,
+    base_image: str = "ubuntu:24.04",
+) -> Path:
     bundle = root / "repo" / "tasks" / family / task
     (bundle / "environment").mkdir(parents=True)
     (bundle / "tests").mkdir()
     (bundle / "environment" / "Dockerfile").write_text(
-        "FROM ubuntu:24.04\n"
+        f"FROM {base_image}\n"
         "RUN apt-get update && apt-get install -y python3\n"
         "WORKDIR /root\n"
         "COPY skills /root/.codex/skills\n",
@@ -162,6 +168,29 @@ def test_skilllearnbench_converts_real_bundle_to_loom_task_config(
     run_sh = (out_dir / "verifier" / "run.sh").read_text()
     assert "LOOM_VERIFIER_OUTPUT" in run_sh
     assert "/logs/verifier/reward.txt" in run_sh
+
+
+def test_skillflow_rewrites_unpublished_harbor_base_image(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="workflow",
+        task="base-image-task",
+        base_image="skillevlove/harbor-cli-openhands:ubuntu24.04",
+    )
+    adapter = SkillFlowAdapter()
+    inst = BenchmarkInstance(
+        instance_id="workflow/base-image-task",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+
+    dockerfile = (out_dir / "environment" / "Dockerfile").read_text()
+    assert dockerfile.startswith("FROM skillflow/harbor-cli-base:ubuntu24.04\n")
 
 
 def test_skillflow_points_at_published_task_dataset() -> None:

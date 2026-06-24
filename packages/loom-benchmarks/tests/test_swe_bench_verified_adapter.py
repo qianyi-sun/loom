@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import py_compile
 import tomllib
 from pathlib import Path
 
@@ -52,6 +53,20 @@ def test_solve_sh_is_executable(tmp_path: Path) -> None:
     )
     SWEBenchVerifiedAdapter().convert_instance(inst, out_dir=tmp_path)
     assert (tmp_path / "solution" / "solve.sh").stat().st_mode & 0o111
+
+
+def test_empty_test_node_lists_emit_valid_pytest_file(tmp_path: Path) -> None:
+    rec = json.loads(FIXTURE.read_text())[0]
+    rec["FAIL_TO_PASS"] = "[]"
+    rec["PASS_TO_PASS"] = "[]"
+    inst = BenchmarkInstance(
+        instance_id=rec["instance_id"], split="test", raw=rec,
+    )
+    SWEBenchVerifiedAdapter().convert_instance(inst, out_dir=tmp_path)
+
+    test_py = tmp_path / "tests" / "test_swebench.py"
+    py_compile.compile(str(test_py), doraise=True)
+    assert "no SWE-Bench test node ids" in test_py.read_text()
 
 
 def test_image_slug_replaces_double_underscore() -> None:

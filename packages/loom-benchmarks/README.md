@@ -41,7 +41,12 @@ publication should consume the official bundle directories.
 
 For official bundles, the adapter copies each task directory, preserves the
 upstream `environment/Dockerfile`, writes a Loom-owned `task.toml`, and adds a
-script-verifier shim at `verifier/run.sh`. The shim runs the upstream
+script-verifier shim at `verifier/run.sh`. Upstream SkillFlow task Dockerfiles
+currently reference an unpublished Harbor CLI image; the adapter normalizes
+that base to `skillflow/harbor-cli-base:ubuntu24.04`, matching the SkillFlow
+code repository's documented local base image. Operators must prebuild that
+base image on every Docker host that may build SkillFlow task images, or push
+it to a registry reachable under the same tag. The shim runs the upstream
 `tests/test.sh`, reads `/logs/verifier/reward.txt`, and converts that reward
 into Loom's structured `VerifierResult` JSON. Instance ids are derived from
 the relative bundle path and sanitized so spaces or shell-significant
@@ -76,6 +81,9 @@ the upstream `FAIL_TO_PASS` plus `PASS_TO_PASS` node ids inside the per-instance
 SWE-Bench eval image. The generated `task.toml` points at
 `swebench/sweb.eval.x86_64.<instance>:latest`, so service-mode workers must be
 able to pull those per-instance images before executing the benchmark.
+Some SWE-Bench Multimodal rows ship empty upstream test-id lists; those bundles
+now emit a valid pytest file with an explicit failing check, producing numeric
+reward `0` instead of a platform-level verifier failure.
 
 Republish this benchmark with the schema-v3 manifest path before treating it as
 ready. Older registered rows without `task_config` remain explicit legacy

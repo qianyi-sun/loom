@@ -24,6 +24,7 @@ def test_webarena_writes_eval_descriptor(tmp_path: Path) -> None:
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.verifier.name == "script"
+    assert cfg.verifier.args["script_path"] == "/workspace/verifier/run.sh"
     assert cfg.task.id == "webarena/42"
     assert "running shoes" in (tmp_path / "instruction.md").read_text()
     descriptor = json.loads(

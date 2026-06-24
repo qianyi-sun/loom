@@ -30,6 +30,10 @@ from loom_benchmarks.util import (
 )
 
 _SAFE_INSTANCE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._+\-]")
+_SKILLFLOW_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
+_UNPUBLISHED_HARBOR_BASE_IMAGES = {
+    "skillevlove/harbor-cli-openhands:ubuntu24.04",
+}
 
 
 class SkillFlowAdapter(CatalogBackedAdapter):
@@ -138,6 +142,7 @@ class SkillFlowAdapter(CatalogBackedAdapter):
     ) -> ConvertedTask:
         source_path = Path(str(instance.raw["__source_path"]))
         self._copy_bundle(source_path, out_dir)
+        self._rewrite_unpublished_base_images(out_dir)
         if (out_dir / "environment" / "Dockerfile").exists():
             skills_dir = out_dir / "skills"
             skills_dir.mkdir(exist_ok=True)
@@ -167,6 +172,23 @@ class SkillFlowAdapter(CatalogBackedAdapter):
                 shutil.copytree(child, target, ignore=ignore)
             else:
                 shutil.copy2(child, target)
+
+    @staticmethod
+    def _rewrite_unpublished_base_images(out_dir: Path) -> None:
+        dockerfile = out_dir / "environment" / "Dockerfile"
+        if not dockerfile.exists():
+            return
+
+        lines = dockerfile.read_text().splitlines()
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith("FROM "):
+                continue
+            parts = stripped.split()
+            if len(parts) >= 2 and parts[1] in _UNPUBLISHED_HARBOR_BASE_IMAGES:
+                lines[idx] = line.replace(parts[1], _SKILLFLOW_BASE_IMAGE, 1)
+                dockerfile.write_text("\n".join(lines) + "\n")
+            return
 
     def _write_loom_task_toml(
         self,

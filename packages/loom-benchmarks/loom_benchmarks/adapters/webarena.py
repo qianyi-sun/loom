@@ -92,6 +92,9 @@ class WebArenaAdapter(CatalogBackedAdapter):
             [verifier]
             name = "script"
 
+            [verifier.args]
+            script_path = "/workspace/verifier/run.sh"
+
             [[steps]]
             name = "main"
             artifacts = ["trace.zip"]
