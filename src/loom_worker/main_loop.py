@@ -21,8 +21,10 @@ import asyncio
 import logging
 import shutil
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -92,6 +94,38 @@ _DEFAULT_CAPS = [
         "resource_modes": ["auto", "limit", "guarantee"],
     }
 ]
+
+
+@dataclass
+class _IdleExitTracker:
+    after_seconds: float | None
+    now: Callable[[], float] = time.monotonic
+    _idle_started_at: float | None = None
+    _idle_for_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.after_seconds is not None and self.after_seconds < 0:
+            raise ValueError("idle_exit_after_seconds must be >= 0")
+
+    @property
+    def idle_for_seconds(self) -> float:
+        return self._idle_for_seconds
+
+    def observe(self, *, claimed: int, in_flight: int) -> bool:
+        if self.after_seconds is None:
+            self._idle_started_at = None
+            self._idle_for_seconds = 0.0
+            return False
+        if claimed > 0 or in_flight > 0:
+            self._idle_started_at = None
+            self._idle_for_seconds = 0.0
+            return False
+
+        current = self.now()
+        if self._idle_started_at is None:
+            self._idle_started_at = current
+        self._idle_for_seconds = current - self._idle_started_at
+        return self._idle_for_seconds >= self.after_seconds
 
 
 def _resolve_blocking_io_max_workers(settings: WorkerSettings) -> int:
@@ -181,6 +215,9 @@ async def run_worker(settings: WorkerSettings) -> None:
                 region=settings.minio_region,
             )
             await _ensure_runtime_buckets(object_store)
+            idle_exit = _IdleExitTracker(
+                after_seconds=settings.idle_exit_after_seconds,
+            )
             # PR-E: per-worker vLLM registry. Opt-in via settings; the
             # `enabled=False` path still constructs the object so the
             # trial runner gets a deterministic AgentError instead of
@@ -227,6 +264,23 @@ async def run_worker(settings: WorkerSettings) -> None:
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
                 )
+                should_idle_exit = idle_exit.observe(
+                    claimed=claimed,
+                    in_flight=pool.in_flight,
+                )
+                if should_idle_exit:
+                    idle_exit_after = settings.idle_exit_after_seconds
+                    if idle_exit_after is None:
+                        raise RuntimeError("idle exit triggered while disabled")
+                    logger.info(
+                        "worker_idle_exit worker_id=%s idle_for_seconds=%.3f "
+                        "idle_exit_after_seconds=%.3f",
+                        worker_id,
+                        idle_exit.idle_for_seconds,
+                        idle_exit_after,
+                    )
+                    await _report_worker_idle_exit(cp_client, worker_id)
+                    break
                 if claimed == 0 or pool.in_flight >= settings.max_concurrent:
                     await asyncio.sleep(settings.claim_poll_interval_sec)
 
@@ -251,6 +305,20 @@ async def run_worker(settings: WorkerSettings) -> None:
             # drain. Hard-kill via signal handlers in vllm_runner
             # covers crash paths.
             await vllm_registry.shutdown()
+
+
+async def _report_worker_idle_exit(
+    cp_client: HttpControlPlaneClient,
+    worker_id: UUID,
+) -> None:
+    try:
+        await cp_client.heartbeat(worker_id, status="idle-exit")
+    except Exception:
+        logger.warning(
+            "worker_idle_exit_heartbeat_failed worker_id=%s",
+            worker_id,
+            exc_info=True,
+        )
 
 
 def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:

@@ -368,6 +368,13 @@ used_by     = ["worker"]
 python_type = "float"
 default     = 1.0
 
+[service_config.idle_exit_after_seconds]
+used_by     = ["worker"]
+python_type = "float"
+# no default -> `float | None = None`; fixed workers stay long-running unless
+# elastic Slurm launchers opt in through LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS.
+description = "Optional idle window after which a worker exits successfully when no trials are in flight and repeated claims find no work."
+
 [service_config.heartbeat_interval_sec]
 used_by     = ["worker"]
 python_type = "float"

@@ -116,13 +116,22 @@ async def test_claim_returns_none_when_empty(cp_setup):  # type: ignore[no-untyp
         await http.aclose()
 
 
-async def test_heartbeat(cp_setup):  # type: ignore[no-untyped-def]
+async def test_heartbeat(cp_setup, postgres_url):  # type: ignore[no-untyped-def]
     app, raw = cp_setup
     cp, http = await _client(app, raw)
     try:
         info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
         wid = UUID(info["worker_id"])
         await cp.heartbeat(wid)
+        await cp.heartbeat(wid, status="idle-exit")
+
+        engine = create_engine(postgres_url)
+        with engine.connect() as conn:
+            status = conn.execute(
+                select(Worker.status).where(Worker.id == wid),
+            ).scalar_one()
+        engine.dispose()
+        assert status == "idle-exit"
     finally:
         await http.aclose()
 

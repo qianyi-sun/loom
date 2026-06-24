@@ -19,6 +19,8 @@ from loom_control_plane.scheduler.claim import claim_one
 
 router = APIRouter()
 
+_WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
+
 
 @router.post("/trials/claim")
 async def claim_trial(
@@ -133,15 +135,34 @@ async def register_worker(
 async def heartbeat(
     worker_id: UUID,
     request: Request,
+    payload: dict[str, Any] | None = None,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
     if ctx is None or "worker:report" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
+
+    status = None
+    if payload is not None:
+        raw_status = payload.get("status")
+        if raw_status is not None:
+            if raw_status not in _WORKER_HEARTBEAT_STATUSES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "invalid worker heartbeat status: "
+                        f"{raw_status!r}"
+                    ),
+                )
+            status = raw_status
+
+    values: dict[str, Any] = {"last_seen_at": datetime.now(UTC)}
+    if status is not None:
+        values["status"] = status
     async with request.app.state.session_factory() as session:
         await session.execute(update(Worker).where(Worker.id == worker_id).values(
-            last_seen_at=datetime.now(UTC),
+            **values,
         ))
         await session.commit()
     return {"status": "ok"}

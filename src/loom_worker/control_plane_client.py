@@ -96,11 +96,14 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
-    async def heartbeat(self, worker_id: UUID) -> None:
+    async def heartbeat(self, worker_id: UUID, *, status: str | None = None) -> None:
         client, owned = self._http()
         try:
+            kwargs: dict[str, Any] = {"headers": self._headers}
+            if status is not None:
+                kwargs["json"] = {"status": status}
             r = await client.post(
-                f"/workers/{worker_id}/heartbeat", headers=self._headers,
+                f"/workers/{worker_id}/heartbeat", **kwargs,
             )
             r.raise_for_status()
         finally:

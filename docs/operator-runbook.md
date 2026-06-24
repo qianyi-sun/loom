@@ -1585,6 +1585,11 @@ mock provider and browser automation job.
   `scripts/ops/worker_pool_slurm_submit.sh`. Raise per-node concurrency
   only after CPU, RAM, Docker cleanup, MinIO throughput, Gateway/provider
   error rate, and Control Plane state-patch health are clean.
+- Fixed Kubernetes workers should leave `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS`
+  unset. Elastic Slurm workers should set it in the remote-worker env file:
+  use 300 seconds for dev/staging pools and 600-900 seconds for production
+  OLDLAB capacity. Keep Slurm `--time` as the hard safety bound; idle-exit
+  only releases allocations after queue drain.
 - Until Docker sandbox CPU/RAM limits are enforced per trial, treat
   higher worker concurrency as an operator decision backed by load-test
   evidence, not just a CPU-count formula.

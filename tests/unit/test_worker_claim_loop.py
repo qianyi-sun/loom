@@ -49,6 +49,45 @@ def test_blocking_io_worker_count_accepts_operator_override() -> None:
     )
 
 
+def test_idle_exit_tracker_disabled_by_default() -> None:
+    tracker = ml._IdleExitTracker(after_seconds=None, now=lambda: 100.0)  # type: ignore[attr-defined]
+
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=0, in_flight=0) is False
+
+
+def test_idle_exit_tracker_exits_after_no_work_window() -> None:
+    now = iter([100.0, 104.0, 106.0])
+    tracker = ml._IdleExitTracker(after_seconds=5.0, now=lambda: next(now))  # type: ignore[attr-defined]
+
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=0, in_flight=0) is True
+    assert tracker.idle_for_seconds == 6.0
+
+
+def test_idle_exit_tracker_active_trial_prevents_exit() -> None:
+    now = iter([100.0, 106.0, 112.0])
+    tracker = ml._IdleExitTracker(after_seconds=5.0, now=lambda: next(now))  # type: ignore[attr-defined]
+
+    assert tracker.observe(claimed=0, in_flight=1) is False
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=0, in_flight=0) is True
+    assert tracker.idle_for_seconds == 6.0
+
+
+def test_idle_exit_tracker_claim_resets_idle_timer() -> None:
+    now = iter([100.0, 104.0, 109.0, 112.0, 115.0])
+    tracker = ml._IdleExitTracker(after_seconds=5.0, now=lambda: next(now))  # type: ignore[attr-defined]
+
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=1, in_flight=1) is False
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.observe(claimed=0, in_flight=0) is False
+    assert tracker.idle_for_seconds == 3.0
+
+
 def test_configure_blocking_io_executor_sets_loop_default(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]

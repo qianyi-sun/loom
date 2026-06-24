@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial, Worker
@@ -141,3 +141,40 @@ def test_heartbeat_updates_last_seen(app, claim_seed):  # type: ignore[no-untype
         )
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+
+
+def test_heartbeat_can_mark_intentional_idle_exit(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    worker_id, raw_worker, _ = claim_seed
+    with TestClient(app) as client:
+        r = client.post(
+            f"/workers/{worker_id}/heartbeat",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"status": "idle-exit"},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        status = session.execute(
+            select(Worker.status).where(Worker.id == worker_id),
+        ).scalar_one()
+    engine.dispose()
+
+    assert status == "idle-exit"
+
+
+def test_heartbeat_rejects_unknown_status(app, claim_seed):  # type: ignore[no-untyped-def]
+    worker_id, raw_worker, _ = claim_seed
+    with TestClient(app) as client:
+        r = client.post(
+            f"/workers/{worker_id}/heartbeat",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"status": "surprise"},
+        )
+        assert r.status_code == 400

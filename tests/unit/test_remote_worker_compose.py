@@ -46,6 +46,9 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
         "${LOOM_WORKER_MINIO_ENDPOINT:?",
     )
     assert env["LOOM_WORKER_MAX_CONCURRENT"] == "${LOOM_WORKER_MAX_CONCURRENT:-5}"
+    assert env["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == (
+        "${LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS:-}"
+    )
 
 
 def test_compose_workers_raise_nofile_limit_for_concurrent_sandboxes() -> None:

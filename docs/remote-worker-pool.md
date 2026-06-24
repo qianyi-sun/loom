@@ -265,6 +265,8 @@ LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
 LOOM_WORKER_MINIO_SECRET_KEY=...
 LOOM_WORKER_MAX_CONCURRENT=5
+# Fixed workers should leave this unset. Elastic Slurm workers should opt in.
+# LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=600
 # Optional: leave unset unless a capacity sweep says blocking I/O is the bottleneck.
 # LOOM_WORKER_BLOCKING_IO_MAX_WORKERS=128
 ```
@@ -318,6 +320,27 @@ the task dir empty — the trial then fails at agent start.
 Per-host trial concurrency is controlled by `LOOM_WORKER_MAX_CONCURRENT`.
 The remote-worker compose default is 5 for first contact, but production
 capacity should come from the inventory and capacity-plan flow above.
+
+Elastic Slurm workers should also set
+`LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` in the remote-worker env file. When
+the worker has no in-flight trials and repeated claim attempts find no
+work for that window, it logs `worker_idle_exit`, updates its Control
+Plane heartbeat status to `idle-exit`, drains, and exits with success so
+Slurm records the job as completed. Leave this value unset for fixed
+Kubernetes workers or manually managed remote workers that should stay
+online.
+
+Recommended idle-exit values:
+
+| Environment | Setting | Rationale |
+|---|---:|---|
+| Fixed Kubernetes worker | unset | Keep baseline capacity online. |
+| Dev or staging elastic Slurm | 300 seconds | Release idle allocations quickly while preserving short queue bursts. |
+| Production OLDLAB elastic Slurm | 600-900 seconds | Avoid churn during real batch bursts; use 900 seconds when submissions are bursty. |
+
+Keep Slurm `--time` as a hard upper bound even when idle-exit is enabled.
+Idle-exit releases allocations after queue drain; `--time` still protects
+against stuck jobs, host leaks, or worker bugs.
 
 The Worker also configures Python's default blocking-I/O executor for
 Docker, S3/MinIO, Hugging Face, and filesystem calls. Leave
