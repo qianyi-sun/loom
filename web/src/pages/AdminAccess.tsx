@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   api,
   type AdminAuditEvent,
+  type AdminTeam,
   type ApiTokenEntry,
   type ApiTokenReveal,
   type InviteEntry,
@@ -181,6 +182,10 @@ export default function AdminAccess(): JSX.Element {
   const [tokenExpiresDays, setTokenExpiresDays] = useState("30");
   const [tokenScopes, setTokenScopes] = useState<string[]>(["read:own", "submit"]);
   const [revealedToken, setRevealedToken] = useState<ApiTokenReveal | null>(null);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [teamNameEdits, setTeamNameEdits] = useState<Record<string, string>>({});
+  const [approvalTeamIds, setApprovalTeamIds] = useState<Record<string, string>>({});
+  const [approvalRoles, setApprovalRoles] = useState<Record<string, InviteRole>>({});
   const queryClient = useQueryClient();
   const currentRole = me?.current_team?.role ?? null;
   const canManageTeam = isAdmin || currentRole === "owner";
@@ -195,6 +200,11 @@ export default function AdminAccess(): JSX.Element {
     queryFn: () => api.listAdminAuditEvents(50),
     enabled: isAdmin,
   });
+  const adminTeams = useQuery({
+    queryKey: ["admin", "teams"],
+    queryFn: () => api.listAdminTeams(),
+    enabled: isAdmin,
+  });
   const invites = useQuery({
     queryKey: ["invites", inviteStatus],
     queryFn: () => api.listInvites({ status: inviteStatus }),
@@ -207,12 +217,45 @@ export default function AdminAccess(): JSX.Element {
   });
 
   const approve = useMutation({
-    mutationFn: (id: string) => api.approveTeamRegistration(id, actor.trim()),
+    mutationFn: ({
+      id,
+      teamId,
+      role,
+    }: {
+      id: string;
+      teamId: string;
+      role: InviteRole;
+    }) =>
+      api.approveTeamRegistration(id, actor.trim(), {
+        team_id: teamId,
+        role,
+      }),
     onSuccess: (data) => {
       setRevealed(data);
       queryClient.invalidateQueries({ queryKey: ["admin", "team-registrations"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
       queryClient.invalidateQueries({ queryKey: ["invites"] });
+    },
+  });
+  const createTeam = useMutation({
+    mutationFn: () => api.createAdminTeam({ name: newTeamName.trim() }, actor.trim()),
+    onSuccess: () => {
+      setNewTeamName("");
+      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const updateTeam = useMutation({
+    mutationFn: ({ team, name }: { team: AdminTeam; name: string }) =>
+      api.updateAdminTeam(team.id, { name: name.trim() }, actor.trim()),
+    onSuccess: (team) => {
+      setTeamNameEdits((current) => {
+        const next = { ...current };
+        delete next[team.id];
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
   });
   const reject = useMutation({
@@ -356,7 +399,7 @@ export default function AdminAccess(): JSX.Element {
         <Card className="border-emerald-200">
           <Card.Header
             title="Invite link"
-            description="Shown once; copy or download before leaving this page."
+            description={`Copy this invite link and share it manually with ${revealed.invite.email}. Loom will not send it by email.`}
           />
           <Card.Body className="space-y-3">
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm text-emerald-900">
@@ -403,6 +446,96 @@ export default function AdminAccess(): JSX.Element {
               Copy token
             </Button>
             <CliSetupCommands token={revealedToken.token} />
+          </Card.Body>
+        </Card>
+      ) : null}
+
+      {isAdmin ? (
+        <Card>
+          <Card.Header
+            title="Internal teams"
+            description="Maintain the fixed teams that new members can join during approval."
+          />
+          <Card.Body className="space-y-5">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
+              <Input
+                aria-label="New team name"
+                value={newTeamName}
+                onChange={(event) => setNewTeamName(event.target.value)}
+                placeholder="Team name"
+              />
+              <Button
+                variant="primary"
+                disabled={actorMissing || !newTeamName.trim() || createTeam.isPending}
+                onClick={() => createTeam.mutate()}
+              >
+                Create team
+              </Button>
+            </div>
+            {adminTeams.isPending ? <LoadingState /> : null}
+            {adminTeams.isError ? <ErrorState error={adminTeams.error} /> : null}
+            {adminTeams.data ? (
+              adminTeams.data.items.length === 0 ? (
+                <EmptyState label="No teams have been created yet." />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 font-semibold">Team</th>
+                        <th className="px-3 py-2 font-semibold">Members</th>
+                        <th className="px-3 py-2 font-semibold">Status</th>
+                        <th className="px-3 py-2 font-semibold">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {adminTeams.data.items.map((team) => {
+                        const editName = teamNameEdits[team.id] ?? team.name;
+                        const unchanged = editName.trim() === team.name;
+                        return (
+                          <tr key={team.id}>
+                            <td className="min-w-64 px-3 py-2">
+                              <Input
+                                aria-label={`Team name for ${team.name}`}
+                                value={editName}
+                                onChange={(event) =>
+                                  setTeamNameEdits((current) => ({
+                                    ...current,
+                                    [team.id]: event.target.value,
+                                  }))
+                                }
+                              />
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                              {team.user_members?.length ?? 0}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                              {team.disabled_at ? "Disabled" : "Active"}
+                            </td>
+                            <td className="px-3 py-2">
+                              <Button
+                                size="sm"
+                                disabled={
+                                  actorMissing ||
+                                  !editName.trim() ||
+                                  unchanged ||
+                                  updateTeam.isPending
+                                }
+                                onClick={() => updateTeam.mutate({ team, name: editName })}
+                              >
+                                Save {team.name}
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : null}
+            {createTeam.isError ? <ErrorState error={createTeam.error} /> : null}
+            {updateTeam.isError ? <ErrorState error={updateTeam.error} /> : null}
           </Card.Body>
         </Card>
       ) : null}
@@ -563,7 +696,7 @@ export default function AdminAccess(): JSX.Element {
         <Card>
           <Card.Header
             title="Pending registrations"
-            description="Approve creates an owner invite link for the requested contact."
+            description="Approve creates an invite link for the selected team and role. Copy it and share it manually; Loom does not send email."
           />
           <Card.Body>
             {registrations.isPending ? <LoadingState /> : null}
@@ -579,25 +712,77 @@ export default function AdminAccess(): JSX.Element {
                         <th className="px-3 py-2 font-semibold">Team</th>
                         <th className="px-3 py-2 font-semibold">Contact</th>
                         <th className="px-3 py-2 font-semibold">Requested</th>
+                        <th className="px-3 py-2 font-semibold">Assign to</th>
+                        <th className="px-3 py-2 font-semibold">Role</th>
                         <th className="px-3 py-2 font-semibold">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white">
-                      {registrations.data.items.map((item) => (
-                        <tr key={item.id}>
-                          <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
-                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
-                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
-                          <td className="px-3 py-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Button
-                                size="sm"
-                                variant="primary"
-                                disabled={actorMissing || approve.isPending}
-                                onClick={() => approve.mutate(item.id)}
+                      {registrations.data.items.map((item) => {
+                        const selectedTeamId =
+                          approvalTeamIds[item.id] ?? adminTeams.data?.items[0]?.id ?? "";
+                        const selectedRole = approvalRoles[item.id] ?? "member";
+                        return (
+                          <tr key={item.id}>
+                            <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
+                            <td className="min-w-48 px-3 py-2">
+                              <select
+                                aria-label={`Approval team for ${item.name}`}
+                                className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
+                                value={selectedTeamId}
+                                onChange={(event) =>
+                                  setApprovalTeamIds((current) => ({
+                                    ...current,
+                                    [item.id]: event.target.value,
+                                  }))
+                                }
                               >
-                                Approve
-                              </Button>
+                                {adminTeams.data?.items.map((team) => (
+                                  <option key={team.id} value={team.id}>
+                                    {team.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="px-3 py-2">
+                              <select
+                                aria-label={`Approval role for ${item.name}`}
+                                className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
+                                value={selectedRole}
+                                onChange={(event) =>
+                                  setApprovalRoles((current) => ({
+                                    ...current,
+                                    [item.id]: event.target.value as InviteRole,
+                                  }))
+                                }
+                              >
+                                <option value="member">member</option>
+                                <option value="viewer">viewer</option>
+                                <option value="owner">owner</option>
+                              </select>
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="primary"
+                                  disabled={
+                                    actorMissing ||
+                                    !selectedTeamId ||
+                                    approve.isPending
+                                  }
+                                  onClick={() =>
+                                    approve.mutate({
+                                      id: item.id,
+                                      teamId: selectedTeamId,
+                                      role: selectedRole,
+                                    })
+                                  }
+                                >
+                                  Approve
+                                </Button>
                               <Input
                                 aria-label={`Reject reason for ${item.name}`}
                                 className="w-48"
@@ -618,10 +803,11 @@ export default function AdminAccess(): JSX.Element {
                               >
                                 Reject
                               </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

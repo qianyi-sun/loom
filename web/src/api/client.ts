@@ -136,6 +136,7 @@ type Usage =
   paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
 type Team =
   paths["/api/v1/teams/{team_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type AdminTeam = Team;
 
 /** Plan 28 PR-3: backend catalog entry returned by GET /api/v1/backends.
  * Driven by the union of `capabilities.backend` reported by active workers. */
@@ -309,6 +310,11 @@ export interface TeamRegistrationEntry {
 export interface TeamRegistrationRequestBody {
   name: string;
   contact_email: string;
+}
+
+export interface TeamRegistrationApprovalBody {
+  team_id: string;
+  role: InviteRole;
 }
 
 export interface TeamRegistrationApproval {
@@ -700,12 +706,31 @@ export const api = {
     apiFetch<{ items: TeamRegistrationEntry[] }>(
       `/api/v1/admin/team-registrations${qs({ status })}`,
     ),
-  approveTeamRegistration: (id: string, actor: string) =>
+  listAdminTeams: () =>
+    apiFetch<{ items: AdminTeam[] }>("/api/v1/admin/teams"),
+  createAdminTeam: (body: { name: string }, actor: string) =>
+    apiFetch<AdminTeam>("/api/v1/admin/teams", {
+      method: "POST",
+      headers: { "X-Loom-Admin-Actor": actor },
+      body: JSON.stringify(body),
+    }),
+  updateAdminTeam: (id: string, body: { name: string }, actor: string) =>
+    apiFetch<AdminTeam>(`/api/v1/admin/teams/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "X-Loom-Admin-Actor": actor },
+      body: JSON.stringify(body),
+    }),
+  approveTeamRegistration: (
+    id: string,
+    actor: string,
+    body: TeamRegistrationApprovalBody,
+  ) =>
     apiFetch<TeamRegistrationApproval>(
       `/api/v1/admin/team-registrations/${encodeURIComponent(id)}/approve`,
       {
         method: "POST",
         headers: { "X-Loom-Admin-Actor": actor },
+        body: JSON.stringify(body),
       },
     ),
   rejectTeamRegistration: (id: string, actor: string, reason?: string) =>

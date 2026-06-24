@@ -80,7 +80,10 @@ describe("apiFetch", () => {
       }),
     );
 
-    await api.approveTeamRegistration("reg-1", "ops-owner");
+    await api.approveTeamRegistration("reg-1", "ops-owner", {
+      team_id: "team-1",
+      role: "member",
+    });
 
     expect(spy).toHaveBeenCalledWith(
       "/api/v1/admin/team-registrations/reg-1/approve",
@@ -90,6 +93,10 @@ describe("apiFetch", () => {
     expect((init.headers as Record<string, string>)["X-Loom-Admin-Actor"]).toBe(
       "ops-owner",
     );
+    expect(JSON.parse(String(init.body))).toEqual({
+      team_id: "team-1",
+      role: "member",
+    });
   });
 });
 

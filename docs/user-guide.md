@@ -97,11 +97,14 @@ plugin; on macOS, install and start Docker Desktop, then verify
 ## Web sessions and teams
 
 When Loom is served as a web platform, the SPA uses browser user sessions.
-Users sign in from Settings with an email/login challenge flow; the service sets
-an HttpOnly session cookie. Auth responses return a CSRF token that the SPA
-keeps in memory; the browser sends cookies automatically, and mutating requests
-include the CSRF header. You should not paste a raw bearer token into the
-production SPA.
+Users join from invite links or request access from Settings. Public beta does
+not send automatic email links: an admin reviews requests, chooses a fixed
+internal team and role, and manually shares the one-time invite link. If an
+operator or local development server gives you a one-time login code, Settings
+can also complete that browser sign-in. The service sets an HttpOnly session
+cookie. Auth responses return a CSRF token that the SPA keeps in memory; the
+browser sends cookies automatically, and mutating requests include the CSRF
+header. You should not paste a raw bearer token into the production SPA.
 
 Your current team controls execution, cost attribution, provider credentials,
 members, and team API tokens. Roles are enforced by the API:
@@ -114,8 +117,9 @@ members, and team API tokens. Roles are enforced by the API:
 
 Team Settings shows the signed-in user, current team, role, team switcher,
 joined browser users, and role-aware setup links. Team owners get Team access
-for invites and API tokens; members and viewers see only the actions their role
-allows.
+for invites and API tokens; platform admins also manage fixed internal teams
+and approve pending access requests into a selected team and role. Members and
+viewers see only the actions their role allows.
 
 Most web workflows now include contextual quickstarts directly on the page. Use
 the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,

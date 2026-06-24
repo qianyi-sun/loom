@@ -291,15 +291,17 @@ The SPA reduces the old mixed navigation into four primary entries:
   **All teams** scopes, owner-team labels, task/config summaries, artifact
   groups, safe shared artifact downloads, clone-config actions, reuse actions,
   and provenance.
-- **Settings** — signed-out sign-in/invite/request-access/CLI setup guidance;
-  signed-in current team, role, team switcher, joined browser members,
+- **Settings** — signed-out invite/request-access/manual-code/CLI setup
+  guidance; signed-in current team, role, team switcher, joined browser members,
   role-aware setup links, and API-token summaries. Token-paste login is no
-  longer the normal production SPA auth path.
+  longer the normal production SPA auth path, and public beta does not promise
+  automatic email delivery.
 - **InviteAccept** — invite lookup and acceptance states for pending, expired,
   revoked, and already-used links.
 - **Admin access** — team-owner invite create/list/revoke/resend, scoped
   CLI/API token lifecycle with one-time token reveal and setup commands, plus
-  platform-admin-only registration review and audit events.
+  platform-admin-only fixed-team management, access-request approval into a
+  selected team/role, one-time invite-link reveal, and audit events.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy

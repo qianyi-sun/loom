@@ -419,27 +419,43 @@ knob you need.
    separate MinIO tunnel. The CLI should print download commands rather than
    raw MinIO/S3 signed URLs.
 
-9. **Approve team registration requests.** Public registration is
-   default-closed. A researcher can submit a request without a bearer token:
+9. **Approve access requests into fixed teams.** Public registration is
+   default-closed. A researcher can submit an access request without a bearer
+   token; `name` is a requester/display label, not a new team name:
    ```bash
    curl -X POST https://loom.example.com/api/v1/teams/register \
      -H "Content-Type: application/json" \
-     -d '{"name":"latent-reasoning", "contact_email":"owner@example.com"}'
+     -d '{"name":"Mark Li", "contact_email":"owner@example.com"}'
    ```
-   An admin lists and approves pending requests through `loom_service`:
+   Internal teams are admin-managed ahead of time. List or create them before
+   approving a request:
+   ```bash
+   curl https://loom.example.com/api/v1/admin/teams \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+
+   curl -X POST https://loom.example.com/api/v1/admin/teams \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Loom-Admin-Actor: qianyi" \
+     -H "Content-Type: application/json" \
+     -d '{"name":"Research Platform"}'
+   ```
+   An admin lists and approves pending requests into one existing team and role:
    ```bash
    curl https://loom.example.com/api/v1/admin/team-registrations?status=pending \
      -H "Authorization: Bearer $ADMIN_TOKEN"
 
    curl -X POST https://loom.example.com/api/v1/admin/team-registrations/$REG_ID/approve \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Loom-Admin-Actor: qianyi"
+     -H "X-Loom-Admin-Actor: qianyi" \
+     -H "Content-Type: application/json" \
+     -d '{"team_id":"'"$TEAM_ID"'", "role":"member"}'
    ```
    The approval response reveals a raw `loom_invite_...` code and browser invite
    link exactly once. Deliver the link to the requested contact; the contact
-   accepts it to create their user session and owner membership without seeing a
-   raw team token. If the link is lost, resend the invite to rotate the stored
-   hash and reveal a replacement:
+   accepts it to create their user session and the selected team membership
+   without seeing a raw team token. Loom does not email the link in public beta.
+   If the link is lost, resend the invite to rotate the stored hash and reveal a
+   replacement:
    ```bash
    curl -X POST https://loom.example.com/api/v1/invites/$INVITE_ID/resend \
      -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -1362,11 +1378,12 @@ task-image/environment failures, and incomplete trial fan-out.
    ```
    This check is required after every rollout because a public ingress health
    check can pass while private worker tunnels are down.
-5. **Invite-only onboarding.** From the operator/admin browser session, create
-   an invite for a new Team A owner. Open the invite link in a fresh browser
-   profile, accept it, and confirm the user lands in Team A without seeing a raw
-   team token. Repeat for Team B. Capture the invite id/prefix only; do not
-   capture raw invite codes.
+5. **Invite-only onboarding.** From the operator/admin browser session, confirm
+   fixed teams such as Team A and Team B exist, then create an invite for the
+   desired role in each team. Open the invite link in a fresh browser profile,
+   accept it, and confirm the user lands in the selected team without seeing a
+   raw team token. Capture the invite id/prefix only; do not capture raw invite
+   codes.
 6. **Scoped CLI tokens.** In Team Settings -> Team access, each team owner
    creates a named API token with `read:own` and `submit`; Team A also needs
    `providers:manage` for provider setup. In a fresh shell:

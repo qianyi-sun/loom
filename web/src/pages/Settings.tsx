@@ -103,14 +103,11 @@ export default function Settings(): JSX.Element {
     authError,
     currentTeamId,
     teams,
-    loginStart,
     loginComplete,
     switchTeam,
     logout,
   } = useAuth();
-  const [email, setEmail] = useState("");
   const [loginToken, setLoginToken] = useState("");
-  const [loginStarted, setLoginStarted] = useState(false);
   const [requestTeamName, setRequestTeamName] = useState("");
   const [requestEmail, setRequestEmail] = useState("");
   const serverOrigin = currentServerOrigin();
@@ -135,14 +132,6 @@ export default function Settings(): JSX.Element {
     queryFn: () => api.getTeam(currentTeamId ?? ""),
     enabled: isAuthenticated && currentTeamId !== null,
     retry: false,
-  });
-
-  const start = useMutation({
-    mutationFn: (value: string) => loginStart(value),
-    onSuccess: (result) => {
-      setLoginStarted(true);
-      setLoginToken(result.login_token ?? "");
-    },
   });
 
   const complete = useMutation({
@@ -180,9 +169,11 @@ export default function Settings(): JSX.Element {
             Sign in to run and review evaluations
           </h1>
           <p className="mt-3 text-base text-slate-600">
-            Use an invited email address, an invite link, or a requested team
-            access approval. Browser sessions use HttpOnly cookies; CLI access
-            uses scoped API tokens created by a team owner.
+            Public beta access requests are reviewed by an admin. Use an invite
+            link, request access, or paste a one-time login code already issued
+            by an operator or development environment. Browser sessions use
+            HttpOnly cookies; CLI access uses scoped API tokens created by a
+            team owner.
           </p>
         </header>
 
@@ -194,62 +185,35 @@ export default function Settings(): JSX.Element {
                   Sign in
                 </h2>
                 <p className="mt-2 text-sm text-slate-500">
-                  Enter the email address attached to your Loom invite. We will
-                  send a one-time sign-in link for this browser session.
+                  Loom does not send automatic email in public beta. Open an
+                  invite link from an admin, or paste a one-time login code if
+                  an operator or local dev server already gave you one.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
                 <Input
-                  type="email"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  aria-label="email"
-                  title="Email address associated with your Loom invite."
+                  placeholder="One-time login code"
+                  value={loginToken}
+                  onChange={(e) => setLoginToken(e.target.value)}
+                  aria-label="login token"
+                  title="Paste a one-time login code from an operator or local dev response."
                 />
                 <Button
                   variant="primary"
                   className="w-full"
-                  onClick={() => start.mutate(email.trim())}
-                  disabled={!email.trim() || start.isPending}
-                  title="Request a one-time login link."
+                  onClick={() => complete.mutate(loginToken.trim())}
+                  disabled={!loginToken.trim() || complete.isPending}
+                  title="Complete sign-in and create a browser session."
                 >
-                  Continue
+                  Sign in
                 </Button>
               </div>
-              {loginStarted ? (
-                <div className="space-y-3 border-t border-slate-100 pt-5">
-                  <p className="text-sm text-slate-600">
-                    Check your email for the one-time sign-in link. Local dev
-                    servers may also return the code inline.
-                  </p>
-                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
-                    <Input
-                      placeholder="One-time login code"
-                      value={loginToken}
-                      onChange={(e) => setLoginToken(e.target.value)}
-                      aria-label="login token"
-                      title="Paste the one-time login code from your email or local dev response."
-                    />
-                    <Button
-                      variant="secondary"
-                      className="w-full"
-                      onClick={() => complete.mutate(loginToken.trim())}
-                      disabled={!loginToken.trim() || complete.isPending}
-                      title="Complete sign-in and create a browser session."
-                    >
-                      Sign in
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-              {authError || start.isError || complete.isError ? (
+              {authError || complete.isError ? (
                 <p
                   role="alert"
                   className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
                 >
                   {authError ??
-                    (start.error instanceof Error ? start.error.message : null) ??
                     (complete.error instanceof Error ? complete.error.message : null) ??
                     "Sign-in failed."}
                 </p>
@@ -264,7 +228,8 @@ export default function Settings(): JSX.Element {
               className="md:col-span-2 lg:col-span-1"
             >
               <ol className="list-decimal space-y-1 pl-4">
-                <li>Join with an invite link or request a team.</li>
+                <li>Open an invite link or request access.</li>
+                <li>Wait for an admin to review the request and share an invite link.</li>
                 <li>Ask a team owner for a scoped CLI token.</li>
                 <li>Log in with the CLI snippet below.</li>
                 <li>Create a provider, then launch a one-task smoke batch.</li>
@@ -321,7 +286,10 @@ export default function Settings(): JSX.Element {
                   Request access
                 </Button>
                 {requestAccess.isSuccess ? (
-                  <p className="text-sm text-emerald-700">Request submitted.</p>
+                  <p className="text-sm text-emerald-700">
+                    Request submitted. An admin will review it and share an
+                    invite link manually if approved.
+                  </p>
                 ) : null}
                 {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
               </Card.Body>

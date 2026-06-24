@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import PendingTeamRegistration, Team, TeamInvite, TeamQuota
+from loom.db.schema import PendingTeamRegistration, Team, TeamInvite
 from loom_service.admin_audit import (
     hash_optional,
     require_admin_actor,
@@ -58,6 +58,11 @@ class _RejectRegistrationReq(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class _ApproveRegistrationReq(BaseModel):
+    team_id: UUID
+    role: Literal["owner", "member", "viewer"] = "member"
+
+
 def _serialize_registration(row: PendingTeamRegistration) -> dict[str, Any]:
     return {
         "id": str(row.id),
@@ -78,27 +83,13 @@ def _serialize_registration(row: PendingTeamRegistration) -> dict[str, Any]:
 async def _active_registration_exists(
     session: AsyncSession,
     *,
-    name: str,
+    contact_email: str,
 ) -> bool:
-    normalized_name = name.lower()
+    normalized_email = contact_email.lower()
     return (await session.execute(
         select(PendingTeamRegistration.id)
-        .where(func.lower(PendingTeamRegistration.name) == normalized_name)
+        .where(func.lower(PendingTeamRegistration.contact_email) == normalized_email)
         .where(PendingTeamRegistration.status.in_(_ACTIVE_REGISTRATION_STATUSES))
-        .limit(1),
-    )).scalar_one_or_none() is not None
-
-
-async def _team_exists(
-    session: AsyncSession,
-    *,
-    name: str,
-) -> bool:
-    normalized_name = name.lower()
-
-    return (await session.execute(
-        select(Team.id)
-        .where(func.lower(Team.name) == normalized_name)
         .limit(1),
     )).scalar_one_or_none() is not None
 
@@ -118,19 +109,19 @@ async def register_team(
     async with request.app.state.session_factory() as session:
         active_registration = await _active_registration_exists(
             session,
-            name=payload.name,
+            contact_email=payload.contact_email,
         )
-        if active_registration or await _team_exists(session, name=payload.name):
+        if active_registration:
             raise HTTPException(
                 status_code=409,
-                detail="team name already has an active registration or team",
+                detail="contact email already has an active registration",
             )
 
         now = datetime.now(UTC)
         registration = PendingTeamRegistration(
             id=uuid4(),
             name=payload.name,
-            contact_email=payload.contact_email,
+            contact_email=payload.contact_email.lower(),
             status="pending",
             requested_at=now,
             source_ip_hash=hash_optional(
@@ -146,7 +137,7 @@ async def register_team(
             await session.rollback()
             raise HTTPException(
                 status_code=409,
-                detail="team name already has an active registration or team",
+                detail="contact email already has an active registration",
             ) from exc
 
     return _serialize_registration(registration)
@@ -171,6 +162,7 @@ async def approve_team_registration(
     request: Request,
     sc: AdminSessionAndCtx,
     registration_id: UUID,
+    payload: _ApproveRegistrationReq,
     x_loom_admin_actor: str | None = Header(default=None),
 ) -> dict[str, Any]:
     actor = require_admin_actor(x_loom_admin_actor)
@@ -187,25 +179,22 @@ async def approve_team_registration(
             status_code=409,
             detail=f"registration is already {registration.status}",
         )
-    if await _team_exists(session, name=registration.name):
-        raise HTTPException(
-            status_code=409,
-            detail="team name already exists",
-        )
+    team = (await session.execute(
+        select(Team)
+        .where(Team.id == payload.team_id)
+        .with_for_update(),
+    )).scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="team not found")
 
-    team_id = uuid4()
     now = datetime.now(UTC)
-    team = Team(id=team_id, name=registration.name, created_at=now)
-    session.add(team)
-    await session.flush()
-    session.add(TeamQuota(team_id=team_id))
     raw_invite, code_hash, code_prefix = _mint_invite_code()
-    owner_invite = TeamInvite(
+    invite = TeamInvite(
         id=uuid4(),
-        team_id=team_id,
+        team_id=team.id,
         email=registration.contact_email.lower(),
         allowed_domain=None,
-        role="owner",
+        role=payload.role,
         status="pending",
         code_hash=code_hash,
         code_prefix=code_prefix,
@@ -217,11 +206,11 @@ async def approve_team_registration(
         expires_at=now + timedelta(days=14),
         last_sent_at=now,
     )
-    session.add(owner_invite)
+    session.add(invite)
     registration.status = "approved"
     registration.reviewed_at = now
     registration.reviewed_by_actor = actor
-    registration.approved_team_id = team_id
+    registration.approved_team_id = team.id
     await write_admin_audit_event(
         session,
         actor=actor,
@@ -230,21 +219,18 @@ async def approve_team_registration(
         target_id=str(registration.id),
         request=request,
         metadata={
-            "team_id": str(team_id),
+            "team_id": str(team.id),
             "team_name": team.name,
-            "invite_prefix": owner_invite.code_prefix,
+            "invite_prefix": invite.code_prefix,
+            "invite_role": invite.role,
         },
     )
-    try:
-        await session.commit()
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=409, detail="team name already exists") from exc
+    await session.commit()
 
     return {
         "registration": _serialize_registration(registration),
-        "team": {"id": str(team_id), "name": team.name},
-        "invite": _serialize_invite(owner_invite, team=team, now=now),
+        "team": {"id": str(team.id), "name": team.name},
+        "invite": _serialize_invite(invite, team=team, now=now),
         "invite_code": raw_invite,
         "invite_link": _invite_link(request, raw_invite),
     }

@@ -109,7 +109,7 @@ async def test_closed_registration_creates_pending_row_without_auth(
     assert "token" not in body
 
 
-async def test_duplicate_pending_registration_names_conflict_case_insensitive(
+async def test_duplicate_pending_registration_contact_email_conflict_case_insensitive(
     registration_app: FastAPI,
 ) -> None:
     transport = httpx.ASGITransport(app=registration_app)
@@ -117,12 +117,26 @@ async def test_duplicate_pending_registration_names_conflict_case_insensitive(
         transport=transport,
         base_url="http://svc",
     ) as client:
-        first = await _post_registration(client, name="Latent-Reasoning")
-        second = await _post_registration(client, name="latent-reasoning")
+        first = await _post_registration(
+            client,
+            name="Mark Li",
+            contact_email="Mark@example.com",
+        )
+        same_name = await _post_registration(
+            client,
+            name="Mark Li",
+            contact_email="other@example.com",
+        )
+        duplicate_email = await _post_registration(
+            client,
+            name="Another Mark",
+            contact_email="mark@example.com",
+        )
 
     assert first.status_code == 202, first.text
-    assert second.status_code == 409, second.text
-    assert "already has an active registration" in second.json()["detail"]
+    assert same_name.status_code == 202, same_name.text
+    assert duplicate_email.status_code == 409, duplicate_email.text
+    assert "contact email already has an active registration" in duplicate_email.json()["detail"]
 
 
 async def test_open_registration_setting_fails_closed_until_challenge_hook(
@@ -140,7 +154,7 @@ async def test_open_registration_setting_fails_closed_until_challenge_hook(
     assert "challenge hook" in response.json()["detail"]
 
 
-async def test_admin_can_list_approve_and_accept_owner_invite(
+async def test_admin_can_list_approve_into_existing_team_and_accept_member_invite(
     registration_app: FastAPI,
 ) -> None:
     transport = httpx.ASGITransport(app=registration_app)
@@ -148,7 +162,14 @@ async def test_admin_can_list_approve_and_accept_owner_invite(
         transport=transport,
         base_url="http://svc",
     ) as client:
-        created = await _post_registration(client)
+        team_created = await client.post(
+            "/api/v1/admin/teams",
+            headers=_admin_headers(),
+            json={"name": "research-platform"},
+        )
+        assert team_created.status_code == 201, team_created.text
+        team_id = team_created.json()["id"]
+        created = await _post_registration(client, name="Mark Li")
         registration_id = created.json()["id"]
 
         listed = await client.get(
@@ -158,16 +179,17 @@ async def test_admin_can_list_approve_and_accept_owner_invite(
         approved = await client.post(
             f"/api/v1/admin/team-registrations/{registration_id}/approve",
             headers=_admin_headers(),
+            json={"team_id": team_id, "role": "member"},
         )
         second_approve = await client.post(
             f"/api/v1/admin/team-registrations/{registration_id}/approve",
             headers=_admin_headers(),
+            json={"team_id": team_id, "role": "member"},
         )
 
         assert approved.status_code == 200, approved.text
         approved_body = approved.json()
         invite_code = approved_body["invite_code"]
-        team_id = approved_body["team"]["id"]
         accepted = await client.post(
             "/api/v1/invites/accept",
             json={"code": invite_code, "email": "latent@example.com"},
@@ -177,13 +199,14 @@ async def test_admin_can_list_approve_and_accept_owner_invite(
     assert listed.status_code == 200, listed.text
     assert [item["id"] for item in listed.json()["items"]] == [registration_id]
     assert approved_body["registration"]["status"] == "approved"
-    assert approved_body["team"]["name"] == "latent-reasoning"
+    assert approved_body["registration"]["approved_team_id"] == team_id
+    assert approved_body["team"]["name"] == "research-platform"
     assert "team_token" not in approved_body
     assert invite_code.startswith("loom_invite_")
     assert approved_body["invite_link"].endswith(f"code={invite_code}")
-    assert approved_body["invite"]["role"] == "owner"
+    assert approved_body["invite"]["role"] == "member"
     assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["current_team"]["role"] == "owner"
+    assert accepted.json()["current_team"]["role"] == "member"
     assert second_approve.status_code == 409, second_approve.text
     assert team_detail.status_code == 200, team_detail.text
     assert team_detail.json()["id"] == team_id

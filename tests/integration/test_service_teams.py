@@ -324,6 +324,50 @@ async def test_admin_team_emergency_controls_update_state_and_audit(
         assert event["actor"] == "incident-commander" or event["actor"] == "ops-admin"
 
 
+async def test_admin_can_list_create_and_rename_internal_teams(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+) -> None:
+    app, _raw, _team_a_str, _team_a, _team_b = teams_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        initial = await ac.get("/api/v1/admin/teams", headers=_admin_headers())
+        created = await ac.post(
+            "/api/v1/admin/teams",
+            headers=_admin_headers("ops-admin"),
+            json={"name": "Research Platform"},
+        )
+        team_id = created.json().get("id")
+        renamed = await ac.patch(
+            f"/api/v1/admin/teams/{team_id}",
+            headers=_admin_headers("ops-admin"),
+            json={"name": "Research Platform Core"},
+        )
+        listed = await ac.get("/api/v1/admin/teams", headers=_admin_headers())
+        duplicate = await ac.post(
+            "/api/v1/admin/teams",
+            headers=_admin_headers("ops-admin"),
+            json={"name": "research platform core"},
+        )
+        audit = await ac.get(
+            "/api/v1/admin/audit-events?limit=10",
+            headers=_admin_headers(),
+        )
+
+    assert initial.status_code == 200, initial.text
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] == "Research Platform"
+    assert created.json()["quota"] is not None
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Research Platform Core"
+    assert duplicate.status_code == 409, duplicate.text
+    names = [item["name"] for item in listed.json()["items"]]
+    assert "Research Platform Core" in names
+    actions = {item["action"] for item in audit.json()["items"]}
+    assert {"team.create", "team.update"}.issubset(actions)
+
+
 async def test_cross_team_forbidden(
     teams_setup: tuple[FastAPI, str, str, UUID, UUID],
 ) -> None:

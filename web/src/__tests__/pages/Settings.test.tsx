@@ -67,11 +67,30 @@ describe("Settings", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows invite-only onboarding choices and CLI setup guidance when signed out", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+  it("shows admin-reviewed onboarding choices and CLI setup guidance when signed out", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
       const url = String(input);
       if (url.includes("/api/v1/auth/me")) {
         return jsonResponse({ detail: "unauthorized" }, 401);
+      }
+      if (url.endsWith("/api/v1/teams/register") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          name: "Mark Research",
+          contact_email: "mark@example.com",
+        });
+        return jsonResponse({
+          id: "reg-1",
+          name: "Mark Research",
+          contact_email: "mark@example.com",
+          status: "pending",
+          requested_at: "2026-06-24T00:00:00Z",
+          reviewed_at: null,
+          reviewed_by_actor: null,
+          approved_team_id: null,
+        }, 202);
       }
       return jsonResponse({ detail: `unhandled ${url}` }, 404);
     });
@@ -79,6 +98,9 @@ describe("Settings", () => {
     renderWithProviders(<Settings />, { route: "/settings" });
 
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByText(/send a one-time sign-in link/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Public beta access requests are reviewed by an admin/i)).toBeInTheDocument();
     expect(screen.getByText("Have an invite")).toBeInTheDocument();
     expect(screen.getAllByText("Request access").length).toBeGreaterThan(0);
     expect(screen.getByText("CLI setup")).toBeInTheDocument();
@@ -89,6 +111,17 @@ describe("Settings", () => {
     expect(cliCommand).toHaveTextContent(window.location.origin);
     expect(cliCommand).not.toHaveTextContent("<server-url>");
     expect(cliCommand.closest("pre")).toHaveClass("whitespace-pre-wrap");
+
+    await userEvent.type(screen.getByLabelText("Requested team name"), "Mark Research");
+    await userEvent.type(screen.getByLabelText("Request contact email"), "mark@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Request access" }));
+
+    expect(await screen.findByText(
+      "Request submitted. An admin will review it and share an invite link manually if approved.",
+    )).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([input, init]) =>
+      String(input).endsWith("/api/v1/teams/register") && init?.method === "POST",
+    )).toBe(true);
   });
 
   it("summarizes the current team, members, and owner setup actions", async () => {

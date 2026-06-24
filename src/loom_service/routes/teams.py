@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Team, TeamMembership, TeamQuota, Token, User
@@ -36,6 +37,24 @@ class _TeamControlRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class _AdminTeamCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=128)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class _AdminTeamUpdateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=128)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 async def _load_team(session: AsyncSession, team_id: UUID) -> Team:
     team = (await session.execute(
         select(Team).where(Team.id == team_id),
@@ -43,6 +62,18 @@ async def _load_team(session: AsyncSession, team_id: UUID) -> Team:
     if team is None:
         raise HTTPException(status_code=404, detail="team not found")
     return team
+
+
+async def _team_name_exists(
+    session: AsyncSession,
+    *,
+    name: str,
+    exclude_team_id: UUID | None = None,
+) -> bool:
+    query = select(Team.id).where(func.lower(Team.name) == name.lower())
+    if exclude_team_id is not None:
+        query = query.where(Team.id != exclude_team_id)
+    return (await session.execute(query.limit(1))).scalar_one_or_none() is not None
 
 
 async def _serialize_team(session: AsyncSession, team: Team) -> dict[str, Any]:
@@ -177,6 +208,82 @@ async def get_team(
     require_team_or_admin(ctx, team_id)
     team = await _load_team(s, team_id)
     return await _serialize_team(s, team)
+
+
+@router.get("/admin/teams")
+async def list_admin_teams(sc: AdminSessionAndCtx) -> dict[str, list[dict[str, Any]]]:
+    session, _ctx = sc
+    rows = (await session.execute(
+        select(Team).order_by(func.lower(Team.name).asc(), Team.id.asc()),
+    )).scalars().all()
+    return {"items": [await _serialize_team(session, team) for team in rows]}
+
+
+@router.post("/admin/teams", status_code=status.HTTP_201_CREATED)
+async def create_admin_team(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    payload: _AdminTeamCreateRequest,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> dict[str, Any]:
+    session, _ctx = sc
+    actor = require_admin_actor(x_loom_admin_actor)
+    if await _team_name_exists(session, name=payload.name):
+        raise HTTPException(status_code=409, detail="team name already exists")
+
+    now = datetime.now(UTC)
+    team = Team(id=uuid4(), name=payload.name, created_at=now)
+    session.add(team)
+    await session.flush()
+    session.add(TeamQuota(team_id=team.id))
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="team.create",
+        target_type="team",
+        target_id=str(team.id),
+        request=request,
+        metadata={"team_name": team.name},
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="team name already exists") from exc
+    return await _serialize_team(session, team)
+
+
+@router.patch("/admin/teams/{team_id}")
+async def update_admin_team(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    team_id: UUID,
+    payload: _AdminTeamUpdateRequest,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> dict[str, Any]:
+    session, _ctx = sc
+    actor = require_admin_actor(x_loom_admin_actor)
+    team = await _load_team(session, team_id)
+    if await _team_name_exists(session, name=payload.name, exclude_team_id=team_id):
+        raise HTTPException(status_code=409, detail="team name already exists")
+
+    old_name = team.name
+    team.name = payload.name
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action="team.update",
+        target_type="team",
+        target_id=str(team.id),
+        request=request,
+        metadata={"old_name": old_name, "new_name": team.name},
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="team name already exists") from exc
+    return await _serialize_team(session, team)
 
 
 @router.post("/admin/teams/{team_id}/disable")

@@ -55,12 +55,81 @@ describe("AdminAccess", () => {
         if (url.includes("/api/v1/auth/me")) {
           return jsonResponse(platformAdminMe);
         }
+        if (url.endsWith("/api/v1/admin/teams") && init?.method === "POST") {
+          expect(JSON.parse(String(init.body))).toEqual({ name: "Core AI" });
+          return jsonResponse({
+            id: "team-2",
+            name: "Core AI",
+            created_at: "2026-06-16T00:02:00Z",
+            disabled_at: null,
+            disabled_reason: null,
+            submissions_paused_at: null,
+            submissions_paused_reason: null,
+            quota: {
+              fair_share_weight: 1,
+              max_attempts: 3,
+              in_flight_count: 0,
+              license_allowlist: [],
+            },
+            members: [],
+            user_members: [],
+          }, 201);
+        }
+        if (url.endsWith("/api/v1/admin/teams/team-1") && init?.method === "PATCH") {
+          expect(JSON.parse(String(init.body))).toEqual({
+            name: "Research Platform Core",
+          });
+          return jsonResponse({
+            id: "team-1",
+            name: "Research Platform Core",
+            created_at: "2026-06-16T00:00:00Z",
+            disabled_at: null,
+            disabled_reason: null,
+            submissions_paused_at: null,
+            submissions_paused_reason: null,
+            quota: {
+              fair_share_weight: 1,
+              max_attempts: 3,
+              in_flight_count: 0,
+              license_allowlist: [],
+            },
+            members: [],
+            user_members: [],
+          });
+        }
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-1",
+                name: "research-platform",
+                created_at: "2026-06-16T00:00:00Z",
+                disabled_at: null,
+                disabled_reason: null,
+                submissions_paused_at: null,
+                submissions_paused_reason: null,
+                quota: {
+                  fair_share_weight: 1,
+                  max_attempts: 3,
+                  in_flight_count: 0,
+                  license_allowlist: [],
+                },
+                members: [],
+                user_members: [],
+              },
+            ],
+          });
+        }
         if (url.includes("/api/v1/admin/team-registrations")) {
           if (init?.method === "POST" && url.endsWith("/approve")) {
+            expect(JSON.parse(String(init.body))).toEqual({
+              team_id: "team-1",
+              role: "member",
+            });
             return jsonResponse({
               registration: {
                 id: "reg-1",
-                name: "latent-team",
+                name: "Mark Li",
                 contact_email: "latent@example.com",
                 status: "approved",
                 requested_at: "2026-06-16T00:00:00Z",
@@ -68,14 +137,14 @@ describe("AdminAccess", () => {
                 reviewed_by_actor: "qianyi",
                 approved_team_id: "team-1",
               },
-              team: { id: "team-1", name: "latent-team" },
+              team: { id: "team-1", name: "research-platform" },
               invite: {
                 id: "invite-1",
                 team_id: "team-1",
-                team_name: "latent-team",
+                team_name: "research-platform",
                 email: "latent@example.com",
                 allowed_domain: null,
-                role: "owner",
+                role: "member",
                 status: "pending",
                 code_prefix: "abc12345",
                 max_uses: 1,
@@ -95,7 +164,7 @@ describe("AdminAccess", () => {
             items: [
               {
                 id: "reg-1",
-                name: "latent-team",
+                name: "Mark Li",
                 contact_email: "latent@example.com",
                 status: "pending",
                 requested_at: "2026-06-16T00:00:00Z",
@@ -158,14 +227,31 @@ describe("AdminAccess", () => {
 
     renderWithProviders(<AdminAccess />);
 
-    expect((await screen.findAllByText("latent-team")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("research-platform")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Internal teams")).toBeInTheDocument();
+    expect(screen.getByText("Mark Li")).toBeInTheDocument();
     expect(screen.getAllByText("latent@example.com").length).toBeGreaterThan(0);
+    expect(screen.getByText(
+      "Approve creates an invite link for the selected team and role. Copy it and share it manually; Loom does not send email.",
+    )).toBeInTheDocument();
     expect(screen.getByText("team_registration.approve")).toBeInTheDocument();
 
     await userEvent.clear(screen.getByLabelText("Admin actor"));
     await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
+    await userEvent.type(screen.getByLabelText("New team name"), "Core AI");
+    await userEvent.click(screen.getByRole("button", { name: "Create team" }));
+    await userEvent.clear(screen.getByLabelText("Team name for research-platform"));
+    await userEvent.type(
+      screen.getByLabelText("Team name for research-platform"),
+      "Research Platform Core",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save research-platform" }));
+
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
 
+    expect(await screen.findByText(
+      "Copy this invite link and share it manually with latent@example.com. Loom will not send it by email.",
+    )).toBeInTheDocument();
     expect(await screen.findByText(
       "https://loom.example.com/invites/accept?code=loom_invite_revealed",
     )).toBeInTheDocument();
@@ -179,6 +265,10 @@ describe("AdminAccess", () => {
       expect((init.headers as Record<string, string>)["X-Loom-Admin-Actor"]).toBe(
         "qianyi",
       );
+      expect(JSON.parse(String(init.body))).toEqual({
+        team_id: "team-1",
+        role: "member",
+      });
     });
   });
 
@@ -190,6 +280,9 @@ describe("AdminAccess", () => {
           return jsonResponse(platformAdminMe);
         }
         if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/teams")) {
           return jsonResponse({ items: [] });
         }
         if (url.includes("/api/v1/admin/audit-events")) {
@@ -335,6 +428,9 @@ describe("AdminAccess", () => {
           return jsonResponse({ items: [] });
         }
         if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ detail: "platform admin required" }, 403);
+        }
+        if (url.includes("/api/v1/admin/teams")) {
           return jsonResponse({ detail: "platform admin required" }, 403);
         }
         if (url.includes("/api/v1/admin/audit-events")) {

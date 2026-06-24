@@ -422,12 +422,13 @@ running image.
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — signed-out invite/request-access/CLI onboarding; signed-in
-  current team, role, team switcher, joined browser members, role-aware setup
-  links, and API-token summaries
+- **Settings** — signed-out invite/request-access/manual-code/CLI onboarding;
+  signed-in current team, role, team switcher, joined browser members,
+  role-aware setup links, and API-token summaries
 - **Admin access** — owner/team-admin invite create/list/revoke/resend and
   one-time API-token reveal with CLI setup commands; platform-admin users also
-  see pending team registrations and admin audit review
+  manage fixed internal teams, approve pending access requests into a selected
+  team/role, and review admin audit events
 - **NotFound**
 
 Auth model: browser users sign in through `/api/v1/auth/*`. The service sets an
