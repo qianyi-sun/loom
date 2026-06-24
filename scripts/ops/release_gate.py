@@ -32,6 +32,7 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "secret_redaction": ("url",),
     "provider_smoke": ("url", "provider_path"),
     "benchmark_reward_gate": ("url", "batch_id", "benchmarks"),
+    "benchmark_score_alignment": ("url", "manifest", "benchmarks"),
     "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
     "rollback_plan": (
         "previous_production_image_digest",

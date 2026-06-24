@@ -69,6 +69,12 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "batch_id": "batch-reward-gate",
             "benchmarks": ["mbpp", "humaneval"],
         },
+        "benchmark_score_alignment": {
+            "status": "pass",
+            "url": "https://github.com/carinrc/loom/actions/runs/1010",
+            "manifest": "docs/benchmark-score-alignment.json",
+            "benchmarks": ["aime-24", "aime-25", "humaneval", "mbpp"],
+        },
         "worker_capacity_smoke": {
             "status": "pass",
             "url": "https://github.com/carinrc/loom/actions/runs/1009",
@@ -175,12 +181,14 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     markdown = markdown_out.read_text(encoding="utf-8")
     assert "Release Gate Evidence" in markdown
     assert "benchmark_reward_gate" in markdown
+    assert "benchmark_score_alignment" in markdown
     assert "worker_capacity_smoke" in markdown
 
 
 def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path: Path) -> None:
     manifest = _passing_evidence()
     manifest["checks"].pop("benchmark_reward_gate")
+    manifest["checks"].pop("benchmark_score_alignment")
     manifest["checks"]["public_api_spa_smoke"]["artifact_url"] = (
         "https://loom-minio.loom.svc.cluster.local/bucket/object"
         "?X-Amz-Signature=abc"
@@ -199,6 +207,7 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
 
     assert result.returncode == 1
     assert "missing required check 'benchmark_reward_gate'" in result.stderr
+    assert "missing required check 'benchmark_score_alignment'" in result.stderr
     assert "forbidden evidence value" in result.stderr
     assert "public_api_spa_smoke.artifact_url" in result.stderr
     assert "provider_smoke.notes" in result.stderr

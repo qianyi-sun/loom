@@ -67,15 +67,16 @@ Normal flow:
 3. Deploy that exact image tag to `staging` using the staging GitHub
    Environment.
 4. Run the staging smoke checklist below, including migration dry-run,
-   public API/SPA smoke, provider smoke, benchmark reward gate, redaction
-   scan, worker-capacity smoke, and rollback evidence.
+   public API/SPA smoke, provider smoke, benchmark reward gate, benchmark
+   score-alignment gate, redaction scan, worker-capacity smoke, and rollback
+   evidence.
 5. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
    `image_tag`, `staging_url`, image digests for every Loom image, and pass
    records for every required check:
    `repository_ci`, `image_build`, `cluster_render_audit`,
    `migration_dry_run`, `public_api_spa_smoke`, `secret_redaction`,
-   `provider_smoke`, `benchmark_reward_gate`, `worker_capacity_smoke`,
-   `rollback_plan`, and `release_owner_approval`.
+   `provider_smoke`, `benchmark_reward_gate`, `benchmark_score_alignment`,
+   `worker_capacity_smoke`, `rollback_plan`, and `release_owner_approval`.
 6. Run the release gate workflow:
    ```bash
    base64_manifest="$(base64 < release-gate-input.json | tr -d '\n')"
@@ -1368,6 +1369,19 @@ to match the runnable task count. Numeric rewards, including `0`, count as
 successful benchmark evaluation. Missing rewards, benchmark-side verifier
 errors, task-image/environment failures, incomplete fan-out, or missing
 allowlist benchmark coverage fail the gate.
+
+Score credibility has a separate Layer 1 gate that is independent of live model
+quality. Before using benchmark scores as release evidence, verify that every
+v1.0-supported benchmark has a canonical scoring reference, score-semantics
+contract, Harbor/upstream parity decision, and same-output replay case:
+
+```bash
+python scripts/benchmark_score_alignment_gate.py manifest \
+  --manifest docs/benchmark-score-alignment.json
+```
+
+Layer 1 answers whether Loom scores a fixed output correctly. Layer 2 matched
+Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 
 ### Checklist
 

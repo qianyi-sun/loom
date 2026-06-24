@@ -1,0 +1,427 @@
+{
+  "schema_version": 1,
+  "scope": "v1.0-supported benchmark Layer 1 score credibility",
+  "layer_definition": "Model-independent verifier/scoring credibility: given the same final answer, patch, or task artifact, Loom must assign the same task-level reward and aggregate metric semantics as the canonical reference.",
+  "benchmarks": [
+    {
+      "benchmark_id": "aime-24",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "AIME 2024 rows from AI-MO/aimo-validation-aime",
+        "url": "https://huggingface.co/datasets/AI-MO/aimo-validation-aime",
+        "version_or_revision": "year=2024",
+        "justification": "AIME is scored as exact integer answer matching over the year-specific task set."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "upstream exact-integer evaluator",
+        "decision": "Use Harbor as parity target only after support is confirmed; otherwise replay identical final answers against the upstream/canonical integer scorer."
+      },
+      "score_semantics": {
+        "task_set": "AIME 2024 I/II tasks imported into the aime-24 benchmark.",
+        "denominator": "number of runnable aime-24 task ids",
+        "task_reward": "1.0 when the normalized final integer equals the canonical integer answer; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "aime-24-exact-integer-correct",
+            "input_kind": "final_answer",
+            "reference": "canonical answer integer from aime-24 task metadata",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known correct final integer through the Loom verifier and the upstream/canonical integer scorer."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "aime-25",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "AIME 2025 I rows from MathArena/aime_2025_I",
+        "url": "https://huggingface.co/datasets/MathArena/aime_2025_I",
+        "version_or_revision": "train split",
+        "justification": "AIME 2025 is scored as exact integer answer matching over the published MathArena task set used by Loom."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "upstream exact-integer evaluator",
+        "decision": "Use Harbor as parity target only after support is confirmed; otherwise replay identical final answers against the upstream/canonical integer scorer."
+      },
+      "score_semantics": {
+        "task_set": "AIME 2025 I tasks imported into the aime-25 benchmark.",
+        "denominator": "number of runnable aime-25 task ids",
+        "task_reward": "1.0 when the normalized final integer equals the canonical integer answer; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "aime-25-boxed-answer-correct",
+            "input_kind": "final_answer",
+            "reference": "canonical answer integer from aime-25 task metadata",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known correct boxed or final-line integer through the Loom verifier and the upstream/canonical integer scorer."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "gpqa",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "GPQA Extended",
+        "url": "https://github.com/idavidrein/gpqa",
+        "version_or_revision": "56686c06f5e19865c153de0fdb11be3890014df7",
+        "justification": "GPQA Extended is a multiple-choice benchmark scored by exact choice accuracy."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "upstream GPQA choice evaluator",
+        "decision": "Use Harbor as parity target only after support is confirmed; otherwise replay identical selected choices against the upstream/canonical answer key."
+      },
+      "score_semantics": {
+        "task_set": "GPQA extended test rows imported into the gpqa benchmark.",
+        "denominator": "number of runnable gpqa task ids",
+        "task_reward": "1.0 when the normalized selected choice matches the canonical answer; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "gpqa-choice-correct",
+            "input_kind": "final_answer",
+            "reference": "canonical GPQA answer option from task metadata",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known correct answer choice through Loom and the canonical answer-key scorer."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "hendrycks-math",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "MATH test set",
+        "url": "https://huggingface.co/datasets/HuggingFaceTB/MATH",
+        "version_or_revision": "140a673f1f7182daf7923fdc7108e8cdbf97df46",
+        "justification": "Hendrycks MATH is scored by normalized final answer equivalence over the official test tasks."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "upstream/canonical MATH final-answer evaluator",
+        "decision": "Use Harbor as parity target only after support is confirmed; otherwise replay identical final answers through the canonical MATH answer-normalization path."
+      },
+      "score_semantics": {
+        "task_set": "HuggingFaceTB/MATH test rows imported into hendrycks-math.",
+        "denominator": "number of runnable hendrycks-math task ids",
+        "task_reward": "1.0 when the normalized final answer is equivalent to the canonical answer; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "hendrycks-math-normalized-answer-correct",
+            "input_kind": "final_answer",
+            "reference": "canonical MATH answer from task metadata",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known correct normalized final answer through Loom and the canonical MATH scorer."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "humaneval",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "OpenAI HumanEval",
+        "url": "https://github.com/openai/human-eval",
+        "version_or_revision": "openai/openai_humaneval dataset",
+        "justification": "HumanEval is scored by executing generated code against canonical tests and reporting pass@k; Loom v1 reports pass@1-style task reward for one submitted output."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "Harbor if supported, otherwise OpenAI HumanEval execution harness",
+        "decision": "Replay identical code artifacts through Loom and the confirmed Harbor/upstream execution harness before treating aggregate HumanEval accuracy as credible."
+      },
+      "score_semantics": {
+        "task_set": "openai/openai_humaneval test tasks imported into humaneval.",
+        "denominator": "number of runnable humaneval task ids",
+        "task_reward": "1.0 when canonical tests pass for the submitted solution; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids for the selected pass@1 run",
+        "displayed_metric": "pass@1 accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "humaneval-canonical-tests-pass",
+            "input_kind": "code_artifact",
+            "reference": "OpenAI HumanEval canonical test execution for one task",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known passing solution through Loom pytest/script verifier and the canonical HumanEval execution harness."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "livecodebench",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "LiveCodeBench code generation lite",
+        "url": "https://github.com/LiveCodeBench/LiveCodeBench",
+        "version_or_revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+        "justification": "LiveCodeBench code generation is scored by executing submitted code against hidden/public tests and reporting pass rate."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "LiveCodeBench upstream evaluator unless Harbor support is confirmed",
+        "decision": "Replay identical code artifacts through Loom and the upstream LiveCodeBench evaluator before reporting deltas."
+      },
+      "score_semantics": {
+        "task_set": "livecodebench/code_generation_lite test rows imported into livecodebench.",
+        "denominator": "number of runnable livecodebench task ids",
+        "task_reward": "1.0 when the submitted program passes the canonical tests for that task; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "pass@1 accuracy",
+        "partial_credit": "none for the current Loom per-task score"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "livecodebench-tests-pass",
+            "input_kind": "code_artifact",
+            "reference": "LiveCodeBench upstream evaluator for one code_generation_lite task",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known passing solution through Loom and the pinned upstream LiveCodeBench evaluator."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "mbpp",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "Google MBPP sanitized",
+        "url": "https://github.com/google-research/google-research/tree/master/mbpp",
+        "version_or_revision": "google-research-datasets/mbpp sanitized",
+        "justification": "MBPP is scored by executing generated Python against canonical tests and reporting pass@k; Loom v1 reports one-output pass@1-style reward."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "Harbor if supported, otherwise MBPP canonical tests",
+        "decision": "Replay identical code artifacts through Loom and the confirmed Harbor/upstream MBPP test harness."
+      },
+      "score_semantics": {
+        "task_set": "sanitized MBPP test rows imported into mbpp.",
+        "denominator": "number of runnable mbpp task ids",
+        "task_reward": "1.0 when canonical tests pass for the submitted solution; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids for the selected pass@1 run",
+        "displayed_metric": "pass@1 accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "mbpp-canonical-tests-pass",
+            "input_kind": "code_artifact",
+            "reference": "MBPP canonical test execution for one sanitized task",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known passing solution through Loom pytest/script verifier and the canonical MBPP tests."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "mmlu-pro",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "TIGER-Lab MMLU-Pro",
+        "url": "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro",
+        "version_or_revision": "b189ec765aa7ed75c8acfea42df31fdae71f97be",
+        "justification": "MMLU-Pro is scored as exact multiple-choice answer accuracy over the published test rows."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "MMLU-Pro upstream answer-key scorer unless Harbor support is confirmed",
+        "decision": "Replay identical selected answers through Loom and the canonical answer-key scorer."
+      },
+      "score_semantics": {
+        "task_set": "TIGER-Lab/MMLU-Pro test rows imported into mmlu-pro.",
+        "denominator": "number of runnable mmlu-pro task ids",
+        "task_reward": "1.0 when the normalized selected option equals the canonical answer; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "accuracy",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "mmlu-pro-choice-correct",
+            "input_kind": "final_answer",
+            "reference": "canonical MMLU-Pro answer option from task metadata",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known correct answer choice through Loom and the canonical MMLU-Pro answer-key scorer."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "skillflow",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "SkillFlow task bundle",
+        "url": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task",
+        "version_or_revision": "main",
+        "justification": "SkillFlow score credibility depends on replaying the same task artifact through the upstream task verifier semantics bundled with the dataset."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "upstream SkillFlow verifier unless Harbor support is confirmed",
+        "decision": "Replay identical produced artifacts through Loom and the upstream SkillFlow verifier path."
+      },
+      "score_semantics": {
+        "task_set": "SkillFlow tasks imported from the upstream task bundle.",
+        "denominator": "number of runnable skillflow task ids",
+        "task_reward": "numeric task verifier reward emitted by the upstream-compatible task harness",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "mean task reward",
+        "partial_credit": "allowed only when the upstream task verifier emits a fractional numeric reward"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "skillflow-upstream-verifier-success",
+            "input_kind": "task_artifact",
+            "reference": "SkillFlow upstream-compatible verifier output for one task",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known successful task artifact through Loom and the upstream-compatible SkillFlow verifier."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "skilllearnbench",
+      "canonical_reference": {
+        "source_type": "upstream_repository",
+        "title": "SkillLearnBench",
+        "url": "https://github.com/cxcscmu/SkillLearnBench",
+        "version_or_revision": "main",
+        "justification": "SkillLearnBench score credibility depends on replaying the same task artifact through the upstream verifier semantics."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "upstream SkillLearnBench verifier unless Harbor support is confirmed",
+        "decision": "Replay identical produced artifacts through Loom and the upstream SkillLearnBench verifier path."
+      },
+      "score_semantics": {
+        "task_set": "SkillLearnBench tasks imported from the upstream repository.",
+        "denominator": "number of runnable skilllearnbench task ids",
+        "task_reward": "numeric task verifier reward emitted by the upstream-compatible task harness",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "mean task reward",
+        "partial_credit": "allowed only when the upstream task verifier emits a fractional numeric reward"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "skilllearnbench-upstream-verifier-success",
+            "input_kind": "task_artifact",
+            "reference": "SkillLearnBench upstream-compatible verifier output for one task",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known successful task artifact through Loom and the upstream SkillLearnBench verifier."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "swe-bench-verified",
+      "canonical_reference": {
+        "source_type": "upstream_dataset",
+        "title": "SWE-Bench Verified",
+        "url": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified",
+        "version_or_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+        "justification": "SWE-Bench Verified is scored by applying a patch and running repository-specific tests to determine resolved/unresolved."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "Harbor if supported, otherwise official SWE-Bench harness",
+        "decision": "Replay identical patches through Loom and the confirmed Harbor/official SWE-Bench harness before treating resolved rate as credible."
+      },
+      "score_semantics": {
+        "task_set": "SWE-Bench Verified test instances imported into swe-bench-verified.",
+        "denominator": "number of runnable swe-bench-verified task ids",
+        "task_reward": "1.0 when the submitted patch resolves the instance according to canonical tests; 0.0 otherwise",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "resolved rate",
+        "partial_credit": "none"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "swe-bench-verified-patch-resolves",
+            "input_kind": "patch_artifact",
+            "reference": "official SWE-Bench harness result for one verified instance",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known resolving patch through Loom and the official or Harbor SWE-Bench verifier."
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "terminal-bench-2",
+      "canonical_reference": {
+        "source_type": "upstream_repository",
+        "title": "Terminal-Bench 2.0",
+        "url": "https://github.com/laude-institute/terminal-bench",
+        "version_or_revision": "91e10457 / v0.1.1 task set",
+        "justification": "Terminal-Bench 2.0 is scored by task-specific terminal verifier success under the pinned upstream task set."
+      },
+      "harbor_support": {
+        "status": "unknown",
+        "parity_target": "Terminal-Bench upstream evaluator unless Harbor support is confirmed",
+        "decision": "Replay identical terminal task outputs/artifacts through Loom and the pinned upstream Terminal-Bench evaluator."
+      },
+      "score_semantics": {
+        "task_set": "Terminal-Bench 2.0 tasks from the pinned sibling adapter package.",
+        "denominator": "number of runnable terminal-bench-2 task ids",
+        "task_reward": "1.0 when the task verifier reports success; 0.0 otherwise unless the upstream verifier emits a fractional numeric reward",
+        "aggregation": "arithmetic mean of task_reward over distinct task ids",
+        "displayed_metric": "accuracy / mean task reward",
+        "partial_credit": "allowed only when the upstream verifier emits a fractional numeric reward"
+      },
+      "layer1_evidence": {
+        "status": "replay_defined",
+        "cases": [
+          {
+            "case_id": "terminal-bench-2-task-success",
+            "input_kind": "terminal_artifact",
+            "reference": "pinned Terminal-Bench 2.0 evaluator output for one task",
+            "expected_reward": 1.0,
+            "replay_method": "Replay a known successful task artifact through Loom and the pinned Terminal-Bench evaluator."
+          }
+        ]
+      }
+    }
+  ]
+}

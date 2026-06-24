@@ -74,6 +74,11 @@ Attach these to the release issue or release PR:
   runnable task. A model answer scored `0` is a valid evaluator result; missing
   reward, verifier error, task-image failure, benchmark-side timeout, or missing
   allowlist coverage is not.
+- Layer 1 score-credibility transcript from
+  `scripts/benchmark_score_alignment_gate.py manifest --manifest
+  docs/benchmark-score-alignment.json`, proving that every v1.0-supported
+  benchmark has a canonical scoring reference, score semantics, Harbor/upstream
+  parity decision, and at least one same-output replay case definition.
 - If a remote-worker pool is attached, private tunnel evidence from
   `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
   Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the

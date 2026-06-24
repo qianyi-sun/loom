@@ -29,6 +29,9 @@ What you're looking for, where it lives:
 - **[public-beta-launch.md](public-beta-launch.md)** — invite-only public beta
   release gate, required evidence, two-team Run Library smoke, and launch
   decision checklist
+- **[benchmark-score-alignment.md](benchmark-score-alignment.md)** — v1.0
+  Layer 1 score-credibility manifest: canonical references, score semantics,
+  Harbor/upstream parity decisions, and same-output replay cases
 - **[remote-worker-pool.md](remote-worker-pool.md)** — join extra
   Docker-capable hosts to an existing control node for shared-dev or
   staging capacity before full Kubernetes cluster mode
