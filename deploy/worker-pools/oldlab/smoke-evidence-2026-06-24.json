@@ -1,0 +1,41 @@
+{
+  "evidence_date": "2026-06-24",
+  "evidence_path": "/shared_work/qianyi/loom-worker-capacity/issue435-20260624T164151Z/",
+  "batch_id": "a8e87938-6dc0-4646-97bd-c75b380e4719",
+  "batch_name": "issue426-final-litellm-bfcl-20260624T164339Z",
+  "benchmark_id": "bfcl",
+  "oldlab_workers": 2,
+  "runtime_seconds": 185,
+  "failures": 0,
+  "oldlab_worker_records": [
+    {
+      "node_name": "trt-eai-oldlab-4",
+      "slurm_job_id": "13516",
+      "worker_id": "7bea7626-7417-4b4a-87b0-e4c9d8260f80",
+      "concurrency": 2,
+      "trials_claimed": 112,
+      "trials_succeeded": 110,
+      "trials_failed": 0,
+      "trials_with_result": 110,
+      "trials_with_trajectory_index": 110,
+      "registered_at": "2026-06-24T16:44:29.579377+00:00",
+      "first_claimed_at": "2026-06-24T16:44:29.639854+00:00",
+      "last_finished_at": "2026-06-24T16:47:33.837755+00:00"
+    },
+    {
+      "node_name": "trt-eai-oldlab-5",
+      "slurm_job_id": "13517",
+      "worker_id": "451b14c5-3f3f-418d-a1b1-5a39aacbb644",
+      "concurrency": 2,
+      "trials_claimed": 103,
+      "trials_succeeded": 101,
+      "trials_failed": 0,
+      "trials_with_result": 101,
+      "trials_with_trajectory_index": 101,
+      "registered_at": "2026-06-24T16:44:30.030160+00:00",
+      "first_claimed_at": "2026-06-24T16:44:30.101119+00:00",
+      "last_finished_at": "2026-06-24T16:47:34.442026+00:00"
+    }
+  ],
+  "post_smoke_observation": "Later issue426 Hendrycks Math backlog processing saw one OLDLAB5 artifact_upload_failed trial while the MinIO tunnel restarted from 12:57:24 to 12:57:29 EDT; current tunnel health recovered. This is outside the BFCL capacity smoke failure count."
+}

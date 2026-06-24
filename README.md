@@ -262,9 +262,10 @@ To add extra Docker-capable hosts to a shared-dev or staging control
 node before full Kubernetes mode, see
 [`docs/remote-worker-pool.md`](docs/remote-worker-pool.md). That runbook
 includes host inventory, capacity planning, and Slurm submission helpers
-for OLDLAB-style pools that should consume every usable worker node near
-its stable CPU/RAM/Docker limit. To share the per-trial agent-install
-cache across workers via a Docker registry, see
+for OLDLAB-style pools. The committed OLDLAB staged plan starts with
+`12 CPU / 58000M / concurrency=6` per node and raises capacity only after
+separate load-test evidence. To share the per-trial agent-install cache across
+workers via a Docker registry, see
 [`docs/operator-runbook.md#trial-cache-per-trial-agent-install`](docs/operator-runbook.md#trial-cache-per-trial-agent-install).
 
 ---

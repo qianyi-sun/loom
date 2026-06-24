@@ -187,6 +187,11 @@ candidate worker node the operator is allowed to use. Exclude a node
 only with a recorded reason such as missing Docker, failed endpoint
 reachability, insufficient disk, or Slurm reservation policy.
 
+The staged OLDLAB public-beta plan is recorded under
+`deploy/worker-pools/oldlab/`. It intentionally requests only `12 CPU` and
+`58000M` per node with `LOOM_WORKER_MAX_CONCURRENT=6`, even when inventory
+shows more total host capacity.
+
 ## Capacity Plan
 
 Convert the inventory output into an initial per-node concurrency plan:
@@ -240,9 +245,14 @@ The script uses `--nodelist=<host>` for each included row and exports
 the row's `recommended_concurrency` as `LOOM_WORKER_MAX_CONCURRENT`.
 It requests the row's CPU and memory values and `--exclusive` so a
 remote worker can consume the node up to the measured stable boundary.
-Keep the env file untracked and available on each worker node. This script is
-for manual or staged launches. For elastic pools, prefer the Control Plane
-controller below so batch submission stays independent of Slurm latency.
+Keep the env file untracked and available on each worker node. The `--repo-dir`
+path must also exist with `deploy/docker-compose.remote-worker.yml` on every
+included node; prefer a shared checkout path such as
+`/shared_work/<operator>/loom-remote-worker` for OLDLAB-style pools. A
+control-node-local `/home/.../loom` checkout is not sufficient unless a Slurm
+job has verified it on each target node. This script is for manual or staged
+launches. For elastic pools, prefer the Control Plane controller below so batch
+submission stays independent of Slurm latency.
 
 ## Elastic Slurm Controller
 
@@ -271,6 +281,11 @@ LOOM_CP_SLURM_WORKER_CONTROLLER_TIME_LIMIT=7-00:00:00
 # LOOM_CP_SLURM_WORKER_CONTROLLER_PARTITION=cpu
 ```
 
+For OLDLAB 1-5, start from
+`deploy/worker-pools/oldlab/controller.env.example` and replace only the
+environment-specific remote-worker env file and repo directory paths. Both
+paths must be visible from every allowed node, not just from the control node.
+
 The controller submits at most one active Loom worker job per allowed node and
 relies on the registry's active-capacity uniqueness guard for dedupe. Existing
 pending jobs pause new submissions once `PENDING_JOB_CAP` is reached; running
@@ -282,6 +297,24 @@ remote-worker env file.
 Keep worker tokens, MinIO credentials, and provider credentials only in the
 remote-worker env file. The registry stores a redacted env snapshot for
 operator diagnostics.
+
+Operational controls:
+
+- Temporarily exclude a node by removing it from
+  `LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES`; mirror that exclusion in
+  `deploy/worker-pools/oldlab/worker-plan.csv` with a reason before the next
+  release evidence update.
+- Lower concurrency by changing
+  `LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY` and the
+  `recommended_concurrency` column in the matching plan.
+- Lower total elastic footprint with
+  `LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS`.
+- Cancel currently pending work by reading job ids from
+  `loom admin slurm-workers status --format json` and running `scancel` for the
+  pending Slurm jobs. The controller will also cancel pending jobs when the
+  Loom queue drains.
+- Disable the pool by setting
+  `LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=false` and rolling the Control Plane.
 
 ## Slurm Job Registry
 

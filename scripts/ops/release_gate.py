@@ -32,7 +32,7 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "secret_redaction": ("url",),
     "provider_smoke": ("url", "provider_path"),
     "benchmark_reward_gate": ("url", "batch_id", "benchmarks"),
-    "worker_capacity_smoke": ("url", "k8s_workers", "oldlab_workers"),
+    "worker_capacity_smoke": ("url", "batch_id", "k8s_workers", "oldlab_workers"),
     "rollback_plan": (
         "previous_production_image_digest",
         "rendered_manifest",
@@ -151,6 +151,53 @@ def _validate_checks(manifest: dict[str, Any]) -> list[str]:
             if not _is_non_empty_string(value):
                 errors.append(f"{check_name}.{field} must be a non-empty string")
 
+        if check_name == "worker_capacity_smoke":
+            errors.extend(_validate_worker_capacity_smoke(check))
+
+    return errors
+
+
+def _validate_worker_capacity_smoke(check: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    runtime_seconds = check.get("runtime_seconds")
+    if not isinstance(runtime_seconds, int | float) or runtime_seconds < 0:
+        errors.append("worker_capacity_smoke.runtime_seconds must be a non-negative number")
+    failures = check.get("failures")
+    if not isinstance(failures, int) or failures < 0:
+        errors.append("worker_capacity_smoke.failures must be a non-negative integer")
+
+    oldlab_workers = check.get("oldlab_workers")
+    if not isinstance(oldlab_workers, int) or oldlab_workers <= 0:
+        return errors
+
+    records = check.get("oldlab_worker_records")
+    if not isinstance(records, list) or len(records) < oldlab_workers:
+        errors.append(
+            "worker_capacity_smoke.oldlab_worker_records must include one "
+            "record per OLDLAB worker",
+        )
+        return errors
+
+    required_text_fields = ("node_name", "slurm_job_id", "worker_id")
+    required_int_fields = ("concurrency", "trials_claimed")
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            errors.append(f"worker_capacity_smoke.oldlab_worker_records[{index}] must be an object")
+            continue
+        for field in required_text_fields:
+            if not _is_non_empty_string(record.get(field)):
+                errors.append(
+                    f"worker_capacity_smoke.oldlab_worker_records[{index}].{field} "
+                    "must be a non-empty string",
+                )
+        for field in required_int_fields:
+            value = record.get(field)
+            minimum = 1 if field == "concurrency" else 0
+            if not isinstance(value, int) or value < minimum:
+                errors.append(
+                    f"worker_capacity_smoke.oldlab_worker_records[{index}].{field} "
+                    f"must be an integer >= {minimum}",
+                )
     return errors
 
 

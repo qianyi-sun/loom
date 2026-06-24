@@ -72,8 +72,34 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "worker_capacity_smoke": {
             "status": "pass",
             "url": "https://github.com/carinrc/loom/actions/runs/1009",
+            "batch_id": "batch-worker-capacity",
             "k8s_workers": 3,
             "oldlab_workers": 3,
+            "runtime_seconds": 120,
+            "failures": 0,
+            "oldlab_worker_records": [
+                {
+                    "node_name": "TRT-EAI-OLDLAB-1",
+                    "slurm_job_id": "13441",
+                    "worker_id": "worker-oldlab-1",
+                    "concurrency": 6,
+                    "trials_claimed": 4,
+                },
+                {
+                    "node_name": "trt-EAI-OLDLAB-2",
+                    "slurm_job_id": "13442",
+                    "worker_id": "worker-oldlab-2",
+                    "concurrency": 6,
+                    "trials_claimed": 4,
+                },
+                {
+                    "node_name": "trt-eai-oldlab-3",
+                    "slurm_job_id": "13443",
+                    "worker_id": "worker-oldlab-3",
+                    "concurrency": 6,
+                    "trials_claimed": 4,
+                },
+            ],
         },
         "rollback_plan": {
             "status": "pass",
@@ -176,6 +202,54 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
     assert "forbidden evidence value" in result.stderr
     assert "public_api_spa_smoke.artifact_url" in result.stderr
     assert "provider_smoke.notes" in result.stderr
+
+
+def test_release_gate_requires_oldlab_worker_records_when_enabled(
+    tmp_path: Path,
+) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["worker_capacity_smoke"].pop("oldlab_worker_records")
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "worker_capacity_smoke.oldlab_worker_records" in result.stderr
+
+
+def test_release_gate_rejects_incomplete_oldlab_worker_record(
+    tmp_path: Path,
+) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["worker_capacity_smoke"]["oldlab_workers"] = 1
+    manifest["checks"]["worker_capacity_smoke"]["oldlab_worker_records"] = [
+        {
+            "node_name": "trt-eai-oldlab-4",
+            "slurm_job_id": "14004",
+            "concurrency": 6,
+            "trials_claimed": 2,
+        },
+    ]
+
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "release-0123456789ab",
+    )
+
+    assert result.returncode == 1
+    assert "oldlab_worker_records[0].worker_id" in result.stderr
 
 
 def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(

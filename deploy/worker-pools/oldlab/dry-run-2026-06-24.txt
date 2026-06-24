@@ -1,0 +1,35 @@
+sbatch --job-name=loom-worker-TRT-EAI-OLDLAB-1 --nodelist=TRT-EAI-OLDLAB-1 --exclusive --time=7-00:00:00 --cpus-per-task=12 --mem=58000M --export=ALL\,LOOM_WORKER_MAX_CONCURRENT=6\,LOOM_REMOTE_WORKER_ENV_FILE=/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env\,LOOM_REMOTE_WORKER_REPO_DIR=/shared_work/qianyi/loom-remote-worker <<'SLURM'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /shared_work/qianyi/loom-remote-worker
+export LOOM_WORKER_MAX_CONCURRENT=6
+docker compose --env-file /shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env -f deploy/docker-compose.remote-worker.yml up --build
+SLURM
+sbatch --job-name=loom-worker-trt-EAI-OLDLAB-2 --nodelist=trt-EAI-OLDLAB-2 --exclusive --time=7-00:00:00 --cpus-per-task=12 --mem=58000M --export=ALL\,LOOM_WORKER_MAX_CONCURRENT=6\,LOOM_REMOTE_WORKER_ENV_FILE=/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env\,LOOM_REMOTE_WORKER_REPO_DIR=/shared_work/qianyi/loom-remote-worker <<'SLURM'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /shared_work/qianyi/loom-remote-worker
+export LOOM_WORKER_MAX_CONCURRENT=6
+docker compose --env-file /shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env -f deploy/docker-compose.remote-worker.yml up --build
+SLURM
+sbatch --job-name=loom-worker-trt-eai-oldlab-3 --nodelist=trt-eai-oldlab-3 --exclusive --time=7-00:00:00 --cpus-per-task=12 --mem=58000M --export=ALL\,LOOM_WORKER_MAX_CONCURRENT=6\,LOOM_REMOTE_WORKER_ENV_FILE=/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env\,LOOM_REMOTE_WORKER_REPO_DIR=/shared_work/qianyi/loom-remote-worker <<'SLURM'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /shared_work/qianyi/loom-remote-worker
+export LOOM_WORKER_MAX_CONCURRENT=6
+docker compose --env-file /shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env -f deploy/docker-compose.remote-worker.yml up --build
+SLURM
+sbatch --job-name=loom-worker-trt-eai-oldlab-4 --nodelist=trt-eai-oldlab-4 --exclusive --time=7-00:00:00 --cpus-per-task=12 --mem=58000M --export=ALL\,LOOM_WORKER_MAX_CONCURRENT=6\,LOOM_REMOTE_WORKER_ENV_FILE=/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env\,LOOM_REMOTE_WORKER_REPO_DIR=/shared_work/qianyi/loom-remote-worker <<'SLURM'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /shared_work/qianyi/loom-remote-worker
+export LOOM_WORKER_MAX_CONCURRENT=6
+docker compose --env-file /shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env -f deploy/docker-compose.remote-worker.yml up --build
+SLURM
+sbatch --job-name=loom-worker-trt-eai-oldlab-5 --nodelist=trt-eai-oldlab-5 --exclusive --time=7-00:00:00 --cpus-per-task=12 --mem=58000M --export=ALL\,LOOM_WORKER_MAX_CONCURRENT=6\,LOOM_REMOTE_WORKER_ENV_FILE=/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env\,LOOM_REMOTE_WORKER_REPO_DIR=/shared_work/qianyi/loom-remote-worker <<'SLURM'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /shared_work/qianyi/loom-remote-worker
+export LOOM_WORKER_MAX_CONCURRENT=6
+docker compose --env-file /shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env -f deploy/docker-compose.remote-worker.yml up --build
+SLURM

@@ -503,8 +503,10 @@ simpler than cross-process flock dances, and DRF claim is per-worker-id.
 For OLDLAB-style pools, inventory every candidate node, attach every
 usable node unless it has a recorded exclusion reason, and tune each
 node from measured CPU, RAM, Docker cleanup, object-store, gateway, and
-control-plane pressure. Do not treat a low default or an old four-node
-QA result as the production ceiling.
+control-plane pressure. The staged OLDLAB plan lives in
+`deploy/worker-pools/oldlab/` and starts with `12 CPU / 58000M /
+concurrency=6` per node. Do not treat either that conservative slice or an old
+four-node QA result as the permanent production ceiling.
 
 ## Multi-tenancy boundaries
 

@@ -1586,7 +1586,9 @@ mock provider and browser automation job.
   launches; use the Control Plane elastic Slurm controller for normal
   OLDLAB capacity so Slurm latency stays out of the batch submit path.
 - The default production shape is a fixed Kubernetes worker baseline plus
-  OLDLAB 1-5 as elastic capacity. Configure each environment independently:
+  OLDLAB 1-5 as elastic capacity. The staged OLDLAB inventory, launch plan,
+  and controller env example live in `deploy/worker-pools/oldlab/`. Configure
+  each environment independently:
 
   ```bash
   LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=true
@@ -1607,6 +1609,15 @@ mock provider and browser automation job.
   avoids piling up Slurm queue entries when OLDLAB is busy. Raise per-node
   concurrency only after CPU, RAM, Docker cleanup, MinIO throughput,
   Gateway/provider error rate, and Control Plane state-patch health are clean.
+  The remote-worker env file and `REPO_DIR` must be readable from every
+  included Slurm node. For OLDLAB public-beta capacity, use a shared checkout
+  path such as `/shared_work/<operator>/loom-remote-worker`; a control-node
+  `/home` checkout can be incomplete on OLDLAB 4/5 and must not be assumed
+  valid without a Slurm-side check.
+  Temporarily exclude a node by removing it from `ALLOWED_NODES`; lower
+  footprint with `MAX_JOBS`; lower per-node pressure with
+  `REQUESTED_CONCURRENCY`; disable the pool with
+  `LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=false`.
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
 
@@ -1619,7 +1630,14 @@ mock provider and browser automation job.
   Use this before submitting more capacity. A pending or running job with the
   same environment, pool, nodelist, CPU, memory, and concurrency is an active
   capacity request and should not be duplicated. Use `--format json` for
-  release evidence or automation.
+  release evidence or automation. If Loom backlog has drained but Slurm still
+  has pending elastic jobs, cancel those Slurm job ids with `scancel`; the
+  controller will record cancellation on its next reconcile.
+- When OLDLAB elastic workers are enabled for a staging or production release
+  candidate, the release gate `worker_capacity_smoke` evidence must include the
+  smoke batch id, runtime, failure count, and one record per OLDLAB worker with
+  node name, Slurm job id, Loom worker id, configured concurrency, and claimed
+  trial count.
 - Fixed Kubernetes workers should leave `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS`
   unset. Elastic Slurm workers should set it in the remote-worker env file:
   use 300 seconds for dev/staging pools and 600-900 seconds for production

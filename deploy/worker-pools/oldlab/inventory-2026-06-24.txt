@@ -1,0 +1,51 @@
+# OLDLAB staged elastic worker inventory
+#
+# Evidence date: 2026-06-24
+# Initial request per node: 12 CPU / 58000M / LOOM_WORKER_MAX_CONCURRENT=6
+# Policy: include all five nodes as opportunistic Slurm capacity; do not count
+# OLDLAB 4/5 as production capacity until a real Loom smoke records worker ids,
+# Slurm job ids, node names, claim/finalize, and artifact upload evidence.
+# Repo path: use a checkout shared by every included node. A control-node-local
+# /home checkout was not complete on OLDLAB 4/5 during issue #435 validation;
+# /shared_work/qianyi/loom-remote-worker at dev 9da0062 was validated.
+# Post-smoke note: the BFCL smoke batch a8e87938-6dc0-4646-97bd-c75b380e4719
+# finished 4696/4696. Later #426 backlog processing saw one OLDLAB5
+# hendrycks-math trial fail artifact upload during a five-second MinIO tunnel
+# restart; that is an in-flight infra retry/drain follow-up, not a BFCL smoke
+# failure.
+
+## TRT-EAI-OLDLAB-1
+host=TRT-EAI-OLDLAB-1
+status=include
+slurm_request_cpus=12 slurm_request_mem_mib=58000 concurrency=6
+reason=existing public-beta worker capacity job 13441 validated 2026-06-24
+
+## trt-EAI-OLDLAB-2
+host=trt-EAI-OLDLAB-2
+status=include
+slurm_request_cpus=12 slurm_request_mem_mib=58000 concurrency=6
+reason=existing public-beta worker capacity job 13442 validated 2026-06-24
+
+## trt-eai-oldlab-3
+host=trt-eai-oldlab-3
+status=include
+slurm_request_cpus=12 slurm_request_mem_mib=58000 concurrency=6
+reason=existing public-beta worker capacity job 13443 validated 2026-06-24
+
+## trt-eai-oldlab-4
+host=trt-eai-oldlab-4
+status=include
+slurm_request_cpus=12 slurm_request_mem_mib=58000 concurrency=6
+docker_version=29.1.3 mem_available_approx_gib=124 docker_root_free_approx_tib=6.8
+control_plane=ok gateway=ok minio=ok
+reason=revalidation on 2026-06-24 allocated 12 CPU 58000M and passed Docker plus Loom endpoint checks
+shared_smoke_2026_06_24=slurm_job=13516 reduced_slice=4CPU/16000M concurrency=2 worker_id=7bea7626-7417-4b4a-87b0-e4c9d8260f80 batch_id=a8e87938-6dc0-4646-97bd-c75b380e4719 trials_claimed=112 trials_succeeded=110 trials_failed=0 evidence=/shared_work/qianyi/loom-worker-capacity/issue435-20260624T164151Z
+
+## trt-eai-oldlab-5
+host=trt-eai-oldlab-5
+status=include
+slurm_request_cpus=12 slurm_request_mem_mib=58000 concurrency=6
+docker_version=29.1.3 mem_available_approx_gib=124 docker_root_free_approx_tib=6.8
+control_plane=ok gateway=ok minio=ok
+reason=revalidation on 2026-06-24 allocated 12 CPU 58000M and passed Docker plus Loom endpoint checks
+shared_smoke_2026_06_24=slurm_job=13517 reduced_slice=4CPU/16000M concurrency=2 worker_id=451b14c5-3f3f-418d-a1b1-5a39aacbb644 batch_id=a8e87938-6dc0-4646-97bd-c75b380e4719 trials_claimed=103 trials_succeeded=101 trials_failed=0 evidence=/shared_work/qianyi/loom-worker-capacity/issue435-20260624T164151Z

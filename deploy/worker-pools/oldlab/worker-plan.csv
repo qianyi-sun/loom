@@ -1,0 +1,6 @@
+host,status,cpus,mem_total_mib,docker_cpus,recommended_concurrency,reason
+TRT-EAI-OLDLAB-1,include,12,58000,,6,existing public-beta worker capacity 13441 validated 2026-06-24
+trt-EAI-OLDLAB-2,include,12,58000,,6,existing public-beta worker capacity 13442 validated 2026-06-24
+trt-eai-oldlab-3,include,12,58000,,6,existing public-beta worker capacity 13443 validated 2026-06-24
+trt-eai-oldlab-4,include,12,58000,,6,revalidation on 2026-06-24 allocated 12 CPU 58000M with Docker and Loom endpoints healthy
+trt-eai-oldlab-5,include,12,58000,,6,revalidation on 2026-06-24 allocated 12 CPU 58000M with Docker and Loom endpoints healthy

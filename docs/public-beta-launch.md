@@ -77,6 +77,10 @@ Attach these to the release issue or release PR:
   `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
   Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the
   control node and from at least one worker-host context.
+- If OLDLAB elastic workers are enabled, `worker_capacity_smoke` release-gate
+  evidence must include the smoke batch id, runtime, failure count, and one
+  `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
+  Loom worker id, configured concurrency, and claimed trial count.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
@@ -200,6 +204,13 @@ LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 The gate exits non-zero if any tunnel is down. This gate is separate from the
 public API smoke test: `https://loom.example.com` can be healthy while the
 remote-worker pool is detached.
+
+For OLDLAB 1-5, use the committed staged files in
+`deploy/worker-pools/oldlab/` as the source of truth for included nodes,
+requested Slurm slice, and controller env overrides. OLDLAB 4/5 must not be
+counted in production capacity until a real Loom batch records worker
+registration, heartbeat, claim/finalize, and artifact evidence from those
+nodes.
 
 ## Release Decision
 
