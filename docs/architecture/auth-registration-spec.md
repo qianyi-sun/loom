@@ -477,6 +477,13 @@ Settings is the session and team-settings surface:
   API tokens after they have joined a team;
 - signed-in users see their user, current team, role, platform-admin flag, team
   list, joined browser users, and role-derived capabilities;
+- the authenticated app shell shows the current team name and role in the
+  global navigation so users can identify the team context before submitting
+  work, managing providers, creating invites, or minting API tokens;
+- Home is the authenticated default route and reads `GET /api/v1/overview`,
+  a service-side summary of the current team's readiness, provider health,
+  benchmark readiness, worker capacity, recent activity, and role-appropriate
+  next actions;
 - team switching clears cached queries because the current-team context changes
   authorization and result scope;
 - owner users can navigate to Team access for invites and scoped CLI/API token
@@ -484,6 +491,12 @@ Settings is the session and team-settings surface:
   teams and approve pending access requests into a selected team/role;
   member/viewer users do not get owner-only UI affordances and still receive
   server-side 403s for forbidden mutations.
+
+Team access is organized into role-aware sections. Platform admins see Requests,
+Teams, Invites, API tokens, and Audit sections; team owners see Invites and API
+tokens only. Manual invite creation selects from visible team names for platform
+admins instead of requiring a pasted raw team id; team-owner invite creation uses
+the current team from the session context.
 
 The invite acceptance page at `/invites/accept?code=...` performs a safe lookup
 that displays team name, role, invite status, and code prefix. Pending invites

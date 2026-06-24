@@ -259,8 +259,8 @@ HttpOnly and never readable by frontend JavaScript.
 All existing execution/control views are scoped to the selected current team.
 Viewer users can read same-team resources, member users can submit work, and
 owner users can manage team API tokens/provider connections. Switching teams
-clears query cache so Monitor, Batch Detail, Trial Detail, Providers, Usage,
-and Settings reload against the new team context.
+clears query cache so Home, Monitor, Batch Detail, Trial Detail, Providers,
+Usage, and Settings reload against the new team context.
 
 The separate org-wide Run Library shows completed run metadata and safe shared
 artifacts across teams, with owner-team labels, provenance, and explicit share
@@ -273,8 +273,14 @@ team.
 
 ### Top-level navigation
 
-The SPA reduces the old mixed navigation into four primary entries:
+The SPA reduces the old mixed navigation into a role-aware primary set:
 
+- **Home** — the authenticated default route at `/`. It calls
+  `GET /api/v1/overview` for a service-side summary of current team readiness,
+  provider health, benchmark readiness, worker capacity, recent activity, and
+  next actions. User actions link to normal Loom pages; missing platform
+  prerequisites are grouped as operator actions rather than rendered as
+  commands for end users to run.
 - **New batch** — the submission form. Submit button text
   reflects the resolved fan-out (`Submit 1 trial` if one task
   × one sample × one combination; `Submit 984 trials` for 164
@@ -301,7 +307,10 @@ The SPA reduces the old mixed navigation into four primary entries:
 - **Admin access** — team-owner invite create/list/revoke/resend, scoped
   CLI/API token lifecycle with one-time token reveal and setup commands, plus
   platform-admin-only fixed-team management, access-request approval into a
-  selected team/role, one-time invite-link reveal, and audit events.
+  selected team/role, one-time invite-link reveal, and audit events. The route
+  is split into role-aware sections so Requests, Teams, Invites, API tokens, and
+  Audit are not presented as one long mixed form. Platform-admin invite creation
+  uses a team-name selector instead of a raw team id input.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy

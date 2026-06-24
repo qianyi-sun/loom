@@ -13,6 +13,7 @@ import { NavLink } from "react-router-dom";
 import { cn } from "../lib/cn";
 
 const NAV_ITEMS = [
+  { to: "/", label: "Home" },
   { to: "/batches/new", label: "New batch" },
   { to: "/monitor", label: "Monitor" },
   { to: "/library", label: "Run Library" },
@@ -30,16 +31,23 @@ const LINK_BASE =
 const LINK_INACTIVE = "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
 const LINK_ACTIVE = "bg-accent text-white hover:bg-accent-hover";
 
+function formatRole(role: string | null): string | null {
+  return role ? role.replace(/_/g, " ") : null;
+}
+
 export interface NavBarProps {
   isAdmin: boolean;
+  currentTeamName?: string | null;
   currentTeamRole?: string | null;
 }
 
 export default function NavBar({
   isAdmin,
+  currentTeamName = null,
   currentTeamRole = null,
 }: NavBarProps): JSX.Element {
   const canManageTeam = isAdmin || currentTeamRole === "owner";
+  const displayRole = formatRole(currentTeamRole);
   return (
     <nav
       aria-label="Primary"
@@ -91,6 +99,25 @@ export default function NavBar({
           </>
         ) : null}
       </div>
+
+      {currentTeamName || displayRole ? (
+        <div
+          aria-label="Current team"
+          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+        >
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Current team
+          </p>
+          <p className="mt-1 truncate font-medium text-slate-900">
+            {currentTeamName ?? "No team selected"}
+          </p>
+          {displayRole ? (
+            <p className="mt-0.5 text-xs capitalize text-slate-500">
+              {displayRole}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       <NavLink
         to="/settings"

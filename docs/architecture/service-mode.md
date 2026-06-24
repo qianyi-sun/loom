@@ -399,8 +399,13 @@ running image.
 ## SPA
 
 `web/` — React 18 + Vite + TypeScript + TanStack Query + React Router.
-11 pages:
+Core pages include:
 
+- **Home** — authenticated `/` overview backed by
+  `GET /api/v1/overview`. The service aggregates current-team readiness,
+  provider health, benchmark readiness, active workers, recent batch/trial
+  activity, and next actions so the SPA does not fan out across multiple
+  resources on first load.
 - **TrialsList** — keyset cursor pagination, state filter
 - **TrialDetail** — header + artifact download links + paginated
   trajectory viewer + EventTimeline (one row per event,
@@ -428,7 +433,9 @@ running image.
 - **Admin access** — owner/team-admin invite create/list/revoke/resend and
   one-time API-token reveal with CLI setup commands; platform-admin users also
   manage fixed internal teams, approve pending access requests into a selected
-  team/role, and review admin audit events
+  team/role, and review admin audit events. The page is split into role-aware
+  sections, and platform-admin invite creation uses a team selector rather than
+  requiring raw team ids.
 - **NotFound**
 
 Auth model: browser users sign in through `/api/v1/auth/*`. The service sets an

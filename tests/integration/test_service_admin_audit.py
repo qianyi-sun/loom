@@ -87,6 +87,36 @@ async def _register_team(
     return created.json()["id"]
 
 
+async def _create_internal_team(
+    client: httpx.AsyncClient,
+    *,
+    name: str,
+    actor: str = "security-owner",
+) -> str:
+    created = await client.post(
+        "/api/v1/admin/teams",
+        headers=_admin_headers(actor),
+        json={"name": name},
+    )
+    assert created.status_code == 201, created.text
+    return created.json()["id"]
+
+
+async def _approve_registration(
+    client: httpx.AsyncClient,
+    registration_id: str,
+    *,
+    team_id: str,
+    actor: str = "security-owner",
+    role: str = "member",
+) -> httpx.Response:
+    return await client.post(
+        f"/api/v1/admin/team-registrations/{registration_id}/approve",
+        headers=_admin_headers(actor),
+        json={"team_id": team_id, "role": role},
+    )
+
+
 async def test_registration_review_writes_safe_audit_events(
     audit_app: FastAPI,
 ) -> None:
@@ -103,11 +133,17 @@ async def test_registration_review_writes_safe_audit_events(
             client,
             name="memory-audit",
         )
+        team_id = await _create_internal_team(
+            client,
+            name="Audit Review Team",
+            actor="qianyi",
+        )
 
-        approved = await client.post(
-            "/api/v1/admin/team-registrations/"
-            f"{approved_registration_id}/approve",
-            headers=_admin_headers("qianyi"),
+        approved = await _approve_registration(
+            client,
+            approved_registration_id,
+            team_id=team_id,
+            actor="qianyi",
         )
         rejected = await client.post(
             "/api/v1/admin/team-registrations/"
@@ -125,7 +161,14 @@ async def test_registration_review_writes_safe_audit_events(
     assert audit.status_code == 200, audit.text
     body = audit.json()
     assert body["next_cursor"] is None
-    events = body["items"]
+    events = [
+        event for event in body["items"]
+        if event["target_type"] == "team_registration"
+        and event["target_id"] in {
+            approved_registration_id,
+            rejected_registration_id,
+        }
+    ]
     by_action = {event["action"]: event for event in events}
     assert set(by_action) == {
         "team_registration.approve",
@@ -139,6 +182,8 @@ async def test_registration_review_writes_safe_audit_events(
     assert approve_event["target_type"] == "team_registration"
     assert approve_event["target_id"] == approved_registration_id
     assert approve_event["metadata"]["team_id"] == approved_body["team"]["id"]
+    assert approve_event["metadata"]["team_name"] == "Audit Review Team"
+    assert approve_event["metadata"]["invite_role"] == "member"
     assert approve_event["metadata"]["invite_prefix"] == (
         approved_body["invite"]["code_prefix"]
     )
@@ -175,9 +220,16 @@ async def test_registration_review_rolls_back_when_audit_write_fails(
         base_url="http://svc",
     ) as client:
         registration_id = await _register_team(client, name="rollback-audit")
-        approved = await client.post(
-            f"/api/v1/admin/team-registrations/{registration_id}/approve",
-            headers=_admin_headers("qianyi"),
+        team_id = await _create_internal_team(
+            client,
+            name="Rollback Audit Team",
+            actor="qianyi",
+        )
+        approved = await _approve_registration(
+            client,
+            registration_id,
+            team_id=team_id,
+            actor="qianyi",
         )
         pending = await client.get(
             "/api/v1/admin/team-registrations?status=pending",
@@ -199,9 +251,16 @@ async def test_admin_token_mutations_require_actor_and_write_audit(
         base_url="http://svc",
     ) as client:
         registration_id = await _register_team(client, name="token-audit")
-        approved = await client.post(
-            f"/api/v1/admin/team-registrations/{registration_id}/approve",
-            headers=_admin_headers("bootstrap-admin"),
+        team_id_raw = await _create_internal_team(
+            client,
+            name="Token Audit Team",
+            actor="bootstrap-admin",
+        )
+        approved = await _approve_registration(
+            client,
+            registration_id,
+            team_id=team_id_raw,
+            actor="bootstrap-admin",
         )
         assert approved.status_code == 200, approved.text
         team_id = UUID(approved.json()["team"]["id"])
@@ -270,10 +329,18 @@ async def test_admin_audit_endpoint_rejects_team_tokens(
         base_url="http://svc",
     ) as client:
         registration_id = await _register_team(client, name=f"team-{uuid4()}")
-        approved = await client.post(
-            f"/api/v1/admin/team-registrations/{registration_id}/approve",
-            headers=_admin_headers("qianyi"),
+        team_id = await _create_internal_team(
+            client,
+            name=f"Audit Team {uuid4()}",
+            actor="qianyi",
         )
+        approved = await _approve_registration(
+            client,
+            registration_id,
+            team_id=team_id,
+            actor="qianyi",
+        )
+        assert approved.status_code == 200, approved.text
         token = await client.post(
             "/api/v1/tokens",
             headers=_admin_headers("qianyi"),
@@ -304,13 +371,22 @@ async def test_admin_audit_endpoint_pages_with_cursor(
     ) as client:
         first_registration_id = await _register_team(client, name="page-one")
         second_registration_id = await _register_team(client, name="page-two")
-        first_approval = await client.post(
-            f"/api/v1/admin/team-registrations/{first_registration_id}/approve",
-            headers=_admin_headers("qianyi"),
+        team_id = await _create_internal_team(
+            client,
+            name="Pagination Audit Team",
+            actor="qianyi",
         )
-        second_approval = await client.post(
-            f"/api/v1/admin/team-registrations/{second_registration_id}/approve",
-            headers=_admin_headers("qianyi"),
+        first_approval = await _approve_registration(
+            client,
+            first_registration_id,
+            team_id=team_id,
+            actor="qianyi",
+        )
+        second_approval = await _approve_registration(
+            client,
+            second_registration_id,
+            team_id=team_id,
+            actor="qianyi",
         )
         first_page = await client.get(
             "/api/v1/admin/audit-events?limit=1",
@@ -321,12 +397,20 @@ async def test_admin_audit_endpoint_pages_with_cursor(
             f"/api/v1/admin/audit-events?limit=1&cursor={next_cursor}",
             headers=_admin_headers(),
         )
+        third_cursor = second_page.json()["next_cursor"]
+        third_page = await client.get(
+            f"/api/v1/admin/audit-events?limit=1&cursor={third_cursor}",
+            headers=_admin_headers(),
+        )
 
     assert first_approval.status_code == 200, first_approval.text
     assert second_approval.status_code == 200, second_approval.text
     assert first_page.status_code == 200, first_page.text
     assert second_page.status_code == 200, second_page.text
+    assert third_page.status_code == 200, third_page.text
     assert len(first_page.json()["items"]) == 1
     assert len(second_page.json()["items"]) == 1
+    assert len(third_page.json()["items"]) == 1
     assert first_page.json()["items"][0]["id"] != second_page.json()["items"][0]["id"]
-    assert second_page.json()["next_cursor"] is None
+    assert second_page.json()["items"][0]["id"] != third_page.json()["items"][0]["id"]
+    assert third_page.json()["next_cursor"] is None

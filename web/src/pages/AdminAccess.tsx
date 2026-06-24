@@ -167,8 +167,24 @@ function CliSetupCommands({ token }: { token: string }): JSX.Element {
 
 type RevealedInvite = TeamRegistrationApproval | InviteReveal;
 
+type AccessSection = "requests" | "teams" | "invites" | "tokens" | "audit";
+
+const ADMIN_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
+  { value: "requests", label: "Requests" },
+  { value: "teams", label: "Teams" },
+  { value: "invites", label: "Invites" },
+  { value: "tokens", label: "API tokens" },
+  { value: "audit", label: "Audit" },
+];
+
+const TEAM_OWNER_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
+  { value: "invites", label: "Invites" },
+  { value: "tokens", label: "API tokens" },
+];
+
 export default function AdminAccess(): JSX.Element {
   const { isAdmin, isLoading, me } = useAuth();
+  const [section, setSection] = useState<AccessSection>("requests");
   const [actor, setActor] = useState("");
   const [rejectedReason, setRejectedReason] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<RevealedInvite | null>(null);
@@ -215,6 +231,14 @@ export default function AdminAccess(): JSX.Element {
     queryFn: () => api.listTokens(),
     enabled: canManageTeam,
   });
+  const adminTeamItems = adminTeams.data?.items ?? [];
+  const selectedInviteTeamId = isAdmin
+    ? inviteTeamId || adminTeamItems[0]?.id || ""
+    : "";
+  const visibleSections = isAdmin ? ADMIN_ACCESS_SECTIONS : TEAM_OWNER_ACCESS_SECTIONS;
+  const activeSection = visibleSections.some((item) => item.value === section)
+    ? section
+    : visibleSections[0].value;
 
   const approve = useMutation({
     mutationFn: ({
@@ -270,7 +294,7 @@ export default function AdminAccess(): JSX.Element {
       api.createInvite(
         {
           email: inviteEmail.trim(),
-          team_id: inviteTeamId.trim() || undefined,
+          team_id: isAdmin ? selectedInviteTeamId || undefined : undefined,
           role: inviteRole,
           expires_in_days: 7,
           max_uses: inviteMaxUses.trim() ? Number(inviteMaxUses) : null,
@@ -337,6 +361,11 @@ export default function AdminAccess(): JSX.Element {
     tokenNameInput.trim().length === 0 ||
     tokenScopes.length === 0 ||
     createToken.isPending;
+  const inviteCreateDisabled =
+    actorMissing ||
+    !inviteEmail.trim() ||
+    (isAdmin && !selectedInviteTeamId) ||
+    createInvite.isPending;
 
   function toggleTokenScope(scope: string, checked: boolean): void {
     setTokenScopes((current) => {
@@ -450,7 +479,33 @@ export default function AdminAccess(): JSX.Element {
         </Card>
       ) : null}
 
-      {isAdmin ? (
+      <div
+        role="tablist"
+        aria-label="Team access sections"
+        className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1"
+      >
+        {visibleSections.map((item) => {
+          const selected = activeSection === item.value;
+          return (
+            <button
+              key={item.value}
+              role="tab"
+              type="button"
+              aria-selected={selected}
+              className={`rounded-md px-3 py-2 text-sm font-medium ${
+                selected
+                  ? "bg-accent text-white"
+                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+              }`}
+              onClick={() => setSection(item.value)}
+            >
+              {item.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {isAdmin && activeSection === "teams" ? (
         <Card>
           <Card.Header
             title="Internal teams"
@@ -540,6 +595,7 @@ export default function AdminAccess(): JSX.Element {
         </Card>
       ) : null}
 
+      {activeSection === "tokens" ? (
       <Card>
         <Card.Header
           title="API tokens"
@@ -691,8 +747,9 @@ export default function AdminAccess(): JSX.Element {
           {revokeToken.isError ? <ErrorState error={revokeToken.error} /> : null}
         </Card.Body>
       </Card>
+      ) : null}
 
-      {isAdmin ? (
+      {isAdmin && activeSection === "requests" ? (
         <Card>
           <Card.Header
             title="Pending registrations"
@@ -819,6 +876,8 @@ export default function AdminAccess(): JSX.Element {
         </Card>
       ) : null}
 
+      {activeSection === "invites" ? (
+        <>
       <Card>
         <Card.Header
           title="Create invite"
@@ -831,12 +890,32 @@ export default function AdminAccess(): JSX.Element {
             onChange={(event) => setInviteEmail(event.target.value)}
             placeholder="person@example.com"
           />
-          <Input
-            aria-label="Invite team id"
-            value={inviteTeamId}
-            onChange={(event) => setInviteTeamId(event.target.value)}
-            placeholder="team id"
-          />
+          {isAdmin ? (
+            <select
+              aria-label="Invite team"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+              value={selectedInviteTeamId}
+              disabled={adminTeamItems.length === 0}
+              onChange={(event) => setInviteTeamId(event.target.value)}
+            >
+              {adminTeamItems.length === 0 ? (
+                <option value="">No team available</option>
+              ) : (
+                adminTeamItems.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))
+              )}
+            </select>
+          ) : (
+            <Input
+              aria-label="Invite team"
+              value={me?.current_team?.name ?? "Current team"}
+              readOnly
+              disabled
+            />
+          )}
           <select
             aria-label="Invite role"
             className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
@@ -864,7 +943,7 @@ export default function AdminAccess(): JSX.Element {
           <div className="md:col-span-5">
             <Button
               variant="primary"
-              disabled={actorMissing || !inviteEmail.trim() || createInvite.isPending}
+              disabled={inviteCreateDisabled}
               onClick={() => createInvite.mutate()}
             >
               Create invite
@@ -963,8 +1042,10 @@ export default function AdminAccess(): JSX.Element {
           {resendInvite.isError ? <ErrorState error={resendInvite.error} /> : null}
         </Card.Body>
       </Card>
+        </>
+      ) : null}
 
-      {isAdmin ? (
+      {isAdmin && activeSection === "audit" ? (
         <Card>
           <Card.Header
             title="Audit log"

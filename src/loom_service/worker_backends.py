@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Worker
@@ -83,3 +83,14 @@ async def get_active_backends(session: AsyncSession) -> set[str]:
         ),
     )).scalars().all()
     return parse_backends_from_capabilities(list(rows))
+
+
+async def get_active_worker_count(session: AsyncSession) -> int:
+    """Return the count of currently active, fresh-heartbeat workers."""
+    cutoff = datetime.now(UTC) - timedelta(seconds=_HEARTBEAT_FRESHNESS_SEC)
+    return int((await session.execute(
+        select(func.count()).select_from(Worker).where(
+            Worker.status == "active",
+            Worker.last_seen_at >= cutoff,
+        ),
+    )).scalar_one())

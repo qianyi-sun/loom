@@ -7,6 +7,7 @@ import ProviderCreate from "./pages/ProviderCreate";
 import ProviderDetail from "./pages/ProviderDetail";
 import ProvidersList from "./pages/ProvidersList";
 import BatchDetail from "./pages/BatchDetail";
+import Home from "./pages/Home";
 import InviteAccept from "./pages/InviteAccept";
 import Monitor from "./pages/Monitor";
 import NewBatch from "./pages/NewBatch";
@@ -24,7 +25,7 @@ export default function App(): JSX.Element {
   return (
     <Routes>
       <Route path="/" element={<Layout />}>
-        <Route index element={<Navigate to="/monitor" replace />} />
+        <Route index element={<Home />} />
         <Route path="monitor" element={<Monitor />} />
         <Route path="library" element={<RunLibrary />} />
         <Route path="library/batches/:batchId" element={<RunLibraryBatchDetail />} />

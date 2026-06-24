@@ -479,6 +479,81 @@ export interface CloneRunLibraryBatchResult {
   created_at: string;
 }
 
+export type OverviewStatus = "ready" | "needs_setup" | "blocked";
+export type OverviewActionKind = "user" | "operator";
+
+export interface OverviewAction {
+  id: string;
+  label: string;
+  to: string;
+  kind: OverviewActionKind;
+  priority: number;
+}
+
+export interface OverviewSummary {
+  status: OverviewStatus;
+  summary: string;
+  team_context: {
+    team_id: string | null;
+    team_name: string | null;
+    role: string | null;
+    scopes: string[];
+    is_platform_admin: boolean;
+    submissions_paused: boolean;
+  };
+  capabilities: {
+    can_read: boolean;
+    can_submit: boolean;
+    can_manage_providers: boolean;
+    can_manage_team: boolean;
+  };
+  provider_health: {
+    total: number;
+    ready: number;
+    needs_attention: number;
+    untested: number;
+    latest: {
+      id: string;
+      name: string;
+      type: string;
+      status: string;
+      last_validated_at: string | null;
+      last_validation_error: string | null;
+    }[];
+  };
+  benchmark_readiness: {
+    total: number;
+    runnable: number;
+    needs_attention: number;
+    blocked: {
+      id: string;
+      display_name: string;
+      readiness_state: string;
+      readiness_label: string;
+      blocker_reason: string | null;
+      task_count: number;
+    }[];
+  };
+  worker_health: {
+    active: number;
+    available_backends: string[];
+    has_default_backend: boolean;
+  };
+  run_activity: {
+    batches: Record<string, number>;
+    trials: Record<string, number>;
+    latest_batch: {
+      id: string;
+      name: string;
+      state: string;
+      result_status: string | null;
+      expected_trial_count: number;
+      created_at: string;
+    } | null;
+  };
+  next_actions: OverviewAction[];
+}
+
 export interface ReuseRunLibraryArtifactResult {
   batch_id: string;
   source_artifact: {
@@ -501,6 +576,7 @@ function qs(params: Record<string, string | number | undefined>): string {
 }
 
 export const api = {
+  getOverview: () => apiFetch<OverviewSummary>("/api/v1/overview"),
   authMe: () => apiFetch<AuthMe>("/api/v1/auth/me"),
   loginStart: (email: string) =>
     apiFetch<{ status: "sent"; login_token?: string }>(

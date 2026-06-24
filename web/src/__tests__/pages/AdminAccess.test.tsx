@@ -227,17 +227,23 @@ describe("AdminAccess", () => {
 
     renderWithProviders(<AdminAccess />);
 
-    expect((await screen.findAllByText("research-platform")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Internal teams")).toBeInTheDocument();
-    expect(screen.getByText("Mark Li")).toBeInTheDocument();
+    expect(await screen.findByRole("tablist", { name: "Team access sections" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Requests" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Teams" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Invites" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "API tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Audit" })).toBeInTheDocument();
+    expect(await screen.findByText("Mark Li")).toBeInTheDocument();
     expect(screen.getAllByText("latent@example.com").length).toBeGreaterThan(0);
     expect(screen.getByText(
       "Approve creates an invite link for the selected team and role. Copy it and share it manually; Loom does not send email.",
     )).toBeInTheDocument();
-    expect(screen.getByText("team_registration.approve")).toBeInTheDocument();
 
     await userEvent.clear(screen.getByLabelText("Admin actor"));
     await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
+    await userEvent.click(screen.getByRole("tab", { name: "Teams" }));
+    expect(await screen.findByDisplayValue("research-platform")).toBeInTheDocument();
+    expect(screen.getByText("Internal teams")).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("New team name"), "Core AI");
     await userEvent.click(screen.getByRole("button", { name: "Create team" }));
     await userEvent.clear(screen.getByLabelText("Team name for research-platform"));
@@ -247,6 +253,7 @@ describe("AdminAccess", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
+    await userEvent.click(screen.getByRole("tab", { name: "Requests" }));
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(await screen.findByText(
@@ -255,7 +262,10 @@ describe("AdminAccess", () => {
     expect(await screen.findByText(
       "https://loom.example.com/invites/accept?code=loom_invite_revealed",
     )).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Invites" }));
     expect(screen.getByText("Pending invites")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Audit" }));
+    expect(await screen.findByText("team_registration.approve")).toBeInTheDocument();
     await waitFor(() => {
       const approveCall = fetchSpy.mock.calls.find(([input]) =>
         String(input).endsWith("/reg-1/approve"),
@@ -269,6 +279,103 @@ describe("AdminAccess", () => {
         team_id: "team-1",
         role: "member",
       });
+    });
+  });
+
+  it("creates invites with a team selector instead of raw team ids", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-1",
+                name: "research-platform",
+                created_at: "2026-06-16T00:00:00Z",
+                disabled_at: null,
+                disabled_reason: null,
+                submissions_paused_at: null,
+                submissions_paused_reason: null,
+                quota: {
+                  fair_share_weight: 1,
+                  max_attempts: 3,
+                  in_flight_count: 0,
+                  license_allowlist: [],
+                },
+                members: [],
+                user_members: [],
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        if (url.endsWith("/api/v1/invites") && init?.method === "POST") {
+          expect(JSON.parse(String(init.body))).toMatchObject({
+            email: "new-user@example.com",
+            team_id: "team-1",
+            role: "member",
+          });
+          return jsonResponse({
+            invite: {
+              id: "invite-2",
+              team_id: "team-1",
+              team_name: "research-platform",
+              email: "new-user@example.com",
+              allowed_domain: null,
+              role: "member",
+              status: "pending",
+              code_prefix: "def67890",
+              max_uses: 1,
+              accepted_uses: 0,
+              created_by_actor: "qianyi",
+              created_at: "2026-06-16T00:01:00Z",
+              expires_at: "2026-06-30T00:01:00Z",
+              last_sent_at: "2026-06-16T00:01:00Z",
+              accepted_at: null,
+              revoked_at: null,
+            },
+            invite_code: "loom_invite_manual_create",
+            invite_link: "https://loom.example.com/invites/accept?code=loom_invite_manual_create",
+          }, 201);
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<AdminAccess />);
+
+    await userEvent.clear(await screen.findByLabelText("Admin actor"));
+    await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
+    await userEvent.click(screen.getByRole("tab", { name: "Invites" }));
+
+    expect(screen.queryByLabelText("Invite team id")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Invite team")).toHaveDisplayValue("research-platform");
+
+    await userEvent.type(screen.getByLabelText("Invite recipient email"), "new-user@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Create invite" }));
+
+    expect(await screen.findByText(
+      "https://loom.example.com/invites/accept?code=loom_invite_manual_create",
+    )).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).endsWith("/api/v1/invites") && init?.method === "POST",
+      )).toBe(true);
     });
   });
 
@@ -359,7 +466,9 @@ describe("AdminAccess", () => {
 
     renderWithProviders(<AdminAccess />);
 
-    expect(await screen.findByText("API tokens")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: "API tokens" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "API tokens" }));
+    expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
     expect(await screen.findByText("CLI submit")).toBeInTheDocument();
     expect(screen.getByText("abc12345")).toBeInTheDocument();
     expect(screen.queryByText("loom_api_revealed_create_secret")).not.toBeInTheDocument();
@@ -442,7 +551,8 @@ describe("AdminAccess", () => {
 
     renderWithProviders(<AdminAccess />);
 
-    expect(await screen.findByText("API tokens")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: "Invites" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "API tokens" })).toBeInTheDocument();
     expect(screen.getAllByText("Create invite").length).toBeGreaterThan(0);
     expect(screen.queryByText("Pending registrations")).not.toBeInTheDocument();
     expect(screen.queryByText("Admin actor")).not.toBeInTheDocument();

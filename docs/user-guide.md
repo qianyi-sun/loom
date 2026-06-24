@@ -115,18 +115,34 @@ members, and team API tokens. Roles are enforced by the API:
 - `owner` can manage team API tokens and provider connections.
 - `platform_admin` is an operator role with cross-team inspection/admin access.
 
-Team Settings shows the signed-in user, current team, role, team switcher,
-joined browser users, and role-aware setup links. Team owners get Team access
-for invites and API tokens; platform admins also manage fixed internal teams
-and approve pending access requests into a selected team and role. Members and
+The app shell always shows the current team and role beside the primary
+navigation, so users can confirm which team will own new batches, provider
+connections, invites, and API-token actions before they act. After sign-in,
+Home is the default landing page. It summarizes team readiness, provider
+health, benchmark readiness, active workers, recent batch/trial activity, and
+separates user-owned next actions from operator-owned prerequisites. Team
+Settings shows the signed-in user, current team, role, team switcher, joined
+browser users, and role-aware setup links. Team owners get Team access for
+invites and API tokens; platform admins also manage fixed internal teams and
+approve pending access requests into a selected team and role. Members and
 viewers see only the actions their role allows.
+
+Team access is split into task-focused sections. Platform admins start on
+pending requests, can switch to fixed-team maintenance, create/list invites,
+manage API tokens, or inspect the audit log. Team owners see only invite and
+API-token sections. Invite creation uses the visible team selector instead of a
+raw team id field; the raw invite link is still revealed only once and must be
+shared manually.
 
 Most web workflows now include contextual quickstarts directly on the page. Use
 the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
 Batch Detail, Trial Detail, Run Library, Usage, Rate cards, Tasks, and
 Benchmarks when you want the CLI/API equivalent for the page you are viewing.
-The examples use safe placeholders and `env:`/`file:` secret references so
-users do not need to switch back to this guide for the common path.
+Home intentionally avoids telling users to run operator import or worker
+commands from the browser; those items appear as operator actions when the
+service reports that platform prerequisites are missing. The examples use safe
+placeholders and `env:`/`file:` secret references so users do not need to switch
+back to this guide for the common path.
 
 The CLI uses named team API tokens for service workflows. Create, rotate, or
 revoke those tokens from Team access only as a team owner. The one-time reveal

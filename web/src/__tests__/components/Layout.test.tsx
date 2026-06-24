@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../../App";
@@ -14,6 +14,46 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe("Layout", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("passes current team context into the authenticated app shell", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/auth/me")) {
+        return jsonResponse({
+          user: {
+            id: "user-1",
+            email: "owner@example.com",
+            display_name: "Owner Example",
+            is_platform_admin: false,
+          },
+          teams: [{ id: "team-eai", name: "EAI", role: "owner" }],
+          current_team: { id: "team-eai", name: "EAI", role: "owner" },
+          role: "owner",
+          scopes: ["read:own", "submit", "team:manage"],
+          is_platform_admin: false,
+          csrf_token: "csrf-owner",
+        });
+      }
+      if (url.endsWith("/api/v1/teams/team-eai")) {
+        return jsonResponse({
+          id: "team-eai",
+          name: "EAI",
+          created_at: "2026-06-24T00:00:00Z",
+          quota: null,
+          members: [],
+          user_members: [],
+        });
+      }
+      return jsonResponse({ detail: `unhandled ${url}` }, 404);
+    });
+
+    renderWithProviders(<App />, { route: "/settings" });
+
+    const nav = await screen.findByRole("navigation", { name: "Primary" });
+    const teamContext = within(nav).getByLabelText("Current team");
+    expect(teamContext).toHaveTextContent("EAI");
+    expect(teamContext).toHaveTextContent("owner");
   });
 
   it("gives the signed-out settings page a wide public onboarding shell", async () => {
