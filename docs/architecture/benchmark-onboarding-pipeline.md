@@ -251,6 +251,8 @@ New Batch behavior:
   before the benchmark can be selected.
 - `Deferred`: disabled; show the tracked product or data-access blocker that
   must land before the benchmark can enter the supported catalog.
+- `Not in v1.0`: disabled; show that the built-in benchmark is outside the
+  current v1.0 allowlist and needs a support issue before it can be selected.
 - `Smoke failed`: disabled by default; allow operator override later if needed.
 - `Heavy/special requirements`: disabled unless worker capabilities and runtime
   requirements are satisfied.

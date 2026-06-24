@@ -94,6 +94,26 @@ def test_readiness_marks_known_unsupported_ui_benchmarks_as_blocked() -> None:
         assert item.license_allowed_task_count == 0
 
 
+def test_readiness_marks_known_non_v1_benchmarks_as_blocked() -> None:
+    item = build_readiness_item(
+        _benchmark("browsecomp"),
+        tasks=[
+            TaskAuditSource(
+                id="browsecomp/task-001",
+                config=_valid_task_config("browsecomp/task-001"),
+                source="s3://benchmarks/browsecomp/task-001/",
+            ),
+        ],
+        registry_names={"browsecomp"},
+    )
+
+    assert item.readiness_state == "blocked"
+    assert item.blocker_reason == "not_v1_supported"
+    assert item.raw_task_count == 1
+    assert item.valid_task_config_count == 1
+    assert item.license_allowed_task_count == 0
+
+
 def test_readiness_marks_deferred_gaia_as_blocked_without_manifest() -> None:
     item = build_readiness_item(
         _benchmark("gaia"),

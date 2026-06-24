@@ -305,6 +305,80 @@ async def test_list_benchmarks_keeps_deferred_gaia_visible_but_disabled(
     assert "GAIA-authorized" in gaia["readiness_message"]
 
 
+async def test_list_benchmarks_keeps_non_v1_builtin_visible_but_disabled(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """Built-in benchmarks outside the v1.0 allowlist stay visible for
+    transparency but are not selectable, even when they have valid tasks."""
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark).values(
+                id="browsecomp",
+                display_name="BrowseComp",
+                upstream_kind="huggingface",
+                upstream_locator="upstream/browsecomp",
+                upstream_revision="",
+                license_spdx="CC-BY-4.0",
+                license_url="https://example/browsecomp",
+                splits=["test"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="browsecomp/task-001",
+                benchmark_id="browsecomp",
+                config=_valid_task_config("browsecomp/task-001"),
+                checksum="b" * 64,
+                source="s3://bucket/browsecomp/task-001/",
+                license="CC-BY-4.0",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r_default = await ac.get(
+            "/api/v1/benchmarks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_all = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r_default.status_code == 200
+    assert "browsecomp" not in {item["id"] for item in r_default.json()["items"]}
+
+    assert r_all.status_code == 200
+    browsecomp = {
+        item["id"]: item for item in r_all.json()["items"]
+    }["browsecomp"]
+    assert (
+        browsecomp
+        | {
+            "task_count": 0,
+            "raw_task_count": 1,
+            "valid_task_config_count": 1,
+            "license_allowed_task_count": 0,
+            "readiness_state": "blocked",
+            "readiness_label": "Not in v1.0",
+            "selectable": False,
+            "blocker_reason": "not_v1_supported",
+        }
+        == browsecomp
+    )
+    assert "v1.0 benchmark support set" in browsecomp["readiness_message"]
+
+
 async def test_list_benchmarks_counts_only_runnable_task_configs(
     benchmarks_setup: tuple[FastAPI, str],
     postgres_url: str,

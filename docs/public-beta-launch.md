@@ -170,6 +170,10 @@ are skipped by this readiness gate until their runtime follow-up is delivered.
 Rows marked `Deferred` with `blocker_reason="deferred_support"` use the same
 gate behavior for benchmarks that need a tracked product or data-access
 follow-up before they can be supported.
+Rows marked `Not in v1.0` with `blocker_reason="not_v1_supported"` are built-in
+catalog benchmarks outside the current allowlist; they stay visible,
+unselectable, excluded from supported task counts, and skipped by this
+readiness gate until a support issue promotes them into scope.
 
 ## Remote Worker Tunnel Gate
 

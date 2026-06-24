@@ -247,6 +247,9 @@ OSWorld and WebArena are intentionally visible but marked `Not supported yet`
 until Loom has the required UI benchmark runtime and agent/evaluator contract.
 GAIA is intentionally visible but marked `Deferred` until operators can publish
 the gated dataset through a GAIA-authorized Hugging Face access path.
+Built-in benchmarks outside the v1.0 allowlist are intentionally visible but
+marked `Not in v1.0`; they are not selectable or countable until a support
+issue promotes them into the supported set.
 
 LiveCodeBench is pinned to `livecodebench/code_generation_lite` revision
 `0fe84c3912ea0c4d4a78037083943e8f0c4dd505`. The selected official split has

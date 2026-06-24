@@ -678,7 +678,10 @@ or repair a benchmark. `Not supported yet` means the benchmark is intentionally
 visible but excluded from the current supported runtime surface; it cannot be
 selected until the listed runtime work lands. `Deferred` means the benchmark is
 visible for roadmap transparency but intentionally outside the current
-supported scope until the listed product or data-access follow-up lands.
+supported scope until the listed product or data-access follow-up lands. `Not
+in v1.0` means the built-in benchmark is outside the current v1.0 allowlist; it
+is visible, disabled, and excluded from supported task counts until a support
+issue promotes it into scope.
 Required public benchmarks should move from publish/repair pending states to
 `Ready`; hiding a needed benchmark is not a substitute for publishing it.
 

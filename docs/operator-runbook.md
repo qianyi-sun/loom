@@ -1342,6 +1342,11 @@ Rows with `readiness_label="Deferred"` and
 `blocker_reason="deferred_support"` follow the same gate semantics for
 benchmarks that need an explicit product/data-access follow-up before they can
 enter the supported catalog.
+Rows with `readiness_label="Not in v1.0"` and
+`blocker_reason="not_v1_supported"` are built-in catalog benchmarks outside the
+v1.0 allowlist; they remain visible for transparency, are not selectable, and
+are skipped by the supported-benchmark readiness gate until a support issue
+adds them to scope.
 
 For release acceptance, submit a supported-benchmark batch with the intended
 production runner/provider mix and wait for it to finish. Then verify every

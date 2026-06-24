@@ -143,7 +143,9 @@ Required changes:
   create a blocker. `Not supported yet` rows are visible current-scope
   exclusions, not publish failures. `Deferred` rows are visible tracked
   follow-ups that remain outside the supported scope until their product or
-  data-access blocker is resolved.
+  data-access blocker is resolved. `Not in v1.0` rows are built-in catalog
+  benchmarks outside the current allowlist; they are visible, disabled, and
+  excluded from supported task counts until a support issue adds them to scope.
 - Add one-line explanations for each subset option:
   - `All tasks`: run every runnable task in the selected benchmarks.
   - `First N`: deterministic smoke slice from the start of the sorted task list.

@@ -439,6 +439,61 @@ async def test_count_excludes_unsupported_ui_benchmarks(
     assert all_count.json() == {"count": 3}
 
 
+async def test_count_excludes_non_v1_builtin_benchmarks(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = tasks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark).values(
+                id="browsecomp",
+                display_name="BrowseComp",
+                upstream_kind="huggingface",
+                upstream_locator="upstream/browsecomp",
+                upstream_revision="",
+                license_spdx="CC-BY-4.0",
+                license_url="https://example/browsecomp",
+                splits=["test"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="browsecomp/task-001",
+                checksum="b" * 64,
+                config=_valid_task_config("browsecomp/task-001"),
+                source="s3://bucket/browsecomp/task-001/",
+                license="CC-BY-4.0",
+                benchmark_id="browsecomp",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        browsecomp_count = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"benchmark_id": "browsecomp"}},
+        )
+        all_count = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {}},
+        )
+
+    assert browsecomp_count.status_code == 200
+    assert browsecomp_count.json() == {"count": 0}
+    assert all_count.status_code == 200
+    assert all_count.json() == {"count": 3}
+
+
 async def test_count_ignores_team_license_allowlist(
     tasks_setup: tuple[FastAPI, str],
     postgres_url: str,

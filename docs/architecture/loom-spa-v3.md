@@ -427,7 +427,10 @@ close to what PR J shipped, with three deliberate changes:
    remain visible but are excluded from supported task counts and submit. A
    benchmark with a tracked product or data-access follow-up can surface as
    `Deferred`; it is also visible, unselectable, and excluded from supported
-   task counts until that follow-up lands.
+   task counts until that follow-up lands. Built-in benchmarks outside the
+   current v1.0 allowlist surface as `Not in v1.0`; they are visible,
+   unselectable, excluded from supported task counts, and skipped by the
+   readiness gate until a support issue promotes them into scope.
    License metadata is visible but does not affect selectability. The picker uses
    the API-provided `readiness_label`, `readiness_message`, and `selectable`
    fields rather than hard-coded benchmark names. The real

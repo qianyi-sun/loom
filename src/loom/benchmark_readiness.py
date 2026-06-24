@@ -15,6 +15,39 @@ ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked
 
 UNSUPPORTED_RUNTIME_BLOCKER_REASON = "unsupported_runtime"
 DEFERRED_SUPPORT_BLOCKER_REASON = "deferred_support"
+NON_V1_SUPPORTED_BLOCKER_REASON = "not_v1_supported"
+
+V1_SUPPORTED_BENCHMARK_IDS = frozenset(
+    {
+        "aime-24",
+        "aime-25",
+        "humaneval",
+        "livecodebench",
+        "mbpp",
+        "mmlu-pro",
+        "hendrycks-math",
+        "gpqa",
+        "skillflow",
+        "skilllearnbench",
+        "swe-bench-verified",
+        "terminal-bench-2",
+    }
+)
+
+KNOWN_BUILTIN_BENCHMARK_IDS = V1_SUPPORTED_BENCHMARK_IDS | frozenset(
+    {
+        "aime-22",
+        "aime-23",
+        "bfcl",
+        "browsecomp",
+        "gaia",
+        "osworld",
+        "swe-bench",
+        "swe-bench-multimodal",
+        "tau2-bench",
+        "webarena",
+    }
+)
 
 UNSUPPORTED_RUNTIME_BENCHMARKS: dict[str, str] = {
     "osworld": (
@@ -35,10 +68,26 @@ DEFERRED_SUPPORT_BENCHMARKS: dict[str, str] = {
     ),
 }
 
+NON_V1_SUPPORTED_BENCHMARKS: dict[str, str] = {
+    benchmark_id: (
+        "This benchmark is outside the current v1.0 benchmark support set. "
+        "It is visible for catalog transparency but cannot be selected yet."
+    )
+    for benchmark_id in sorted(
+        KNOWN_BUILTIN_BENCHMARK_IDS
+        - V1_SUPPORTED_BENCHMARK_IDS
+        - frozenset(UNSUPPORTED_RUNTIME_BENCHMARKS)
+        - frozenset(DEFERRED_SUPPORT_BENCHMARKS)
+    )
+}
+
 UNSUPPORTED_RUNTIME_BENCHMARK_IDS = frozenset(UNSUPPORTED_RUNTIME_BENCHMARKS)
 DEFERRED_SUPPORT_BENCHMARK_IDS = frozenset(DEFERRED_SUPPORT_BENCHMARKS)
+NON_V1_SUPPORTED_BENCHMARK_IDS = frozenset(NON_V1_SUPPORTED_BENCHMARKS)
 CURRENTLY_UNSUPPORTED_BENCHMARK_IDS = (
-    UNSUPPORTED_RUNTIME_BENCHMARK_IDS | DEFERRED_SUPPORT_BENCHMARK_IDS
+    UNSUPPORTED_RUNTIME_BENCHMARK_IDS
+    | DEFERRED_SUPPORT_BENCHMARK_IDS
+    | NON_V1_SUPPORTED_BENCHMARK_IDS
 )
 
 # `none` covers inline task rows whose validated TaskConfig is already stored in
@@ -101,6 +150,10 @@ def is_deferred_support_benchmark(benchmark_id: str | None) -> bool:
     return bool(benchmark_id and benchmark_id in DEFERRED_SUPPORT_BENCHMARK_IDS)
 
 
+def is_non_v1_supported_benchmark(benchmark_id: str | None) -> bool:
+    return bool(benchmark_id and benchmark_id in NON_V1_SUPPORTED_BENCHMARK_IDS)
+
+
 def build_readiness_item(
     benchmark: BenchmarkAuditSource,
     *,
@@ -119,8 +172,11 @@ def build_readiness_item(
     invalid_count = raw_count - valid_count
     unsupported_runtime = is_unsupported_runtime_benchmark(benchmark.id)
     deferred_support = is_deferred_support_benchmark(benchmark.id)
+    non_v1_supported = is_non_v1_supported_benchmark(benchmark.id)
     license_allowed_count = (
-        0 if unsupported_runtime or deferred_support else valid_count
+        0
+        if unsupported_runtime or deferred_support or non_v1_supported
+        else valid_count
     )
     license_blocked_count = 0
 
@@ -140,6 +196,9 @@ def build_readiness_item(
     elif deferred_support:
         readiness_state = "blocked"
         blocker_reason = DEFERRED_SUPPORT_BLOCKER_REASON
+    elif non_v1_supported:
+        readiness_state = "blocked"
+        blocker_reason = NON_V1_SUPPORTED_BLOCKER_REASON
     elif raw_count == 0:
         readiness_state = "blocked"
         blocker_reason = "manifest_missing"
@@ -226,6 +285,13 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         message = DEFERRED_SUPPORT_BENCHMARKS.get(
             item.id,
             "This benchmark is intentionally outside the current supported scope.",
+        )
+        selectable = False
+    elif item.blocker_reason == NON_V1_SUPPORTED_BLOCKER_REASON:
+        label = "Not in v1.0"
+        message = NON_V1_SUPPORTED_BENCHMARKS.get(
+            item.id,
+            "This benchmark is outside the current v1.0 benchmark support set.",
         )
         selectable = False
     else:

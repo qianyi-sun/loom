@@ -36,6 +36,7 @@ BENCHMARK_SIDE_FAILURE_REASONS = frozenset({
 EXPLICIT_SCOPE_BLOCKER_REASONS = frozenset({
     "unsupported_runtime",
     "deferred_support",
+    "not_v1_supported",
 })
 
 
