@@ -183,6 +183,7 @@ def _serialize(
         "source_provenance": b.source_provenance,
     }
     if owner_team is not None:
+        out["team_name"] = owner_team.name
         out["owner_team"] = {
             "id": str(owner_team.id),
             "name": owner_team.name,
@@ -453,6 +454,9 @@ async def list_batches(
     request: Request,
     sc: SessionAndCtx,
     team_id: Annotated[UUID | None, Query()] = None,
+    benchmark_id: Annotated[str | None, Query()] = None,
+    agent: Annotated[str | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
     state: Annotated[
         str | None,
         Query(description="comma-separated state filter"),
@@ -474,6 +478,23 @@ async def list_batches(
     )
     if target_team is not None:
         stmt = stmt.where(Batch.team_id == target_team)
+    if benchmark_id:
+        stmt = stmt.where(or_(
+            Batch.task_filter.contains({"benchmark_id": benchmark_id}),
+            Batch.task_filter.contains({"benchmark_ids": [benchmark_id]}),
+        ))
+    if agent:
+        stmt = stmt.where(or_(
+            Batch.trial_config.contains({"agent_name": agent}),
+            Batch.trial_config.contains({"agent": {"name": agent}}),
+            Batch.combinations.contains([{"agent_name": agent}]),
+        ))
+    if model:
+        stmt = stmt.where(or_(
+            Batch.trial_config.contains({"agent_model": {"name": model}}),
+            Batch.trial_config.contains({"agent": {"model": {"name": model}}}),
+            Batch.combinations.contains([{"agent_model": {"name": model}}]),
+        ))
     if state:
         wanted = [x.strip() for x in state.split(",") if x.strip()]
         if wanted:
@@ -509,9 +530,20 @@ async def list_batches(
     else:
         next_cursor = None
     usage_by_batch = await _usage_by_batch_ids(s, [r.id for r in items])
+    teams_by_id: dict[UUID, Team] = {}
+    if items:
+        team_rows = (await s.execute(
+            select(Team).where(Team.id.in_({r.team_id for r in items})),
+        )).scalars().all()
+        teams_by_id = {team.id: team for team in team_rows}
     return {
         "items": [
-            _serialize(r, usage=usage_by_batch.get(r.id)) for r in items
+            _serialize(
+                r,
+                usage=usage_by_batch.get(r.id),
+                owner_team=teams_by_id.get(r.team_id),
+            )
+            for r in items
         ],
         "next_cursor": next_cursor,
     }

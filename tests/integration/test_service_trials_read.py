@@ -26,7 +26,16 @@ from sqlalchemy import create_engine, delete, insert, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, LlmCall, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import (
+    Batch,
+    Benchmark,
+    LlmCall,
+    Task,
+    Team,
+    TeamQuota,
+    Token,
+    Trial,
+)
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -150,6 +159,7 @@ async def trials_setup(
             s.execute(delete(Batch))
             s.execute(delete(Token))
             s.execute(delete(Task))
+            s.execute(delete(Benchmark))
             s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.commit()
@@ -159,7 +169,7 @@ async def trials_setup(
 async def test_list_my_trials(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:
-    app, raw, _team_id, trial_ids = trials_setup
+    app, raw, team_id, trial_ids = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -174,6 +184,12 @@ async def test_list_my_trials(
     assert len(items) == 3
     # Newest first (submitted_at desc). trial_ids[0] is newest in the fixture.
     assert items[0]["id"] == str(trial_ids[0])
+    assert items[0]["team_id"] == str(team_id)
+    assert items[0]["team_name"] == f"t-{team_id}"
+    assert items[0]["owner_team"] == {
+        "id": str(team_id),
+        "name": f"t-{team_id}",
+    }
     # Reward stays projected from result, but LLM usage is derived from
     # llm_calls so stale/frozen cost values are not exposed.
     assert items[0]["aggregate_reward"] == 1.0
@@ -865,3 +881,101 @@ async def test_filter_by_batch_id(
     items = r.json()["items"]
     returned_ids = {it["id"] for it in items}
     assert returned_ids == {str(trial_ids[0]), str(trial_ids[1])}
+
+
+async def test_filter_by_benchmark_agent_and_model(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    wanted_model = {"provider": "openai-compatible", "name": "qwen2.5-coder"}
+    other_model = {"provider": "openai-compatible", "name": "gpt-4o-mini"}
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark),
+            [
+                {
+                    "id": "mbpp",
+                    "display_name": "MBPP",
+                    "upstream_kind": "fixture",
+                    "upstream_locator": "fixture://mbpp",
+                    "upstream_revision": "test",
+                    "license_spdx": "MIT",
+                    "license_url": "https://example.invalid/mit",
+                    "splits": ["test"],
+                },
+                {
+                    "id": "humaneval",
+                    "display_name": "HumanEval",
+                    "upstream_kind": "fixture",
+                    "upstream_locator": "fixture://humaneval",
+                    "upstream_revision": "test",
+                    "license_spdx": "MIT",
+                    "license_url": "https://example.invalid/mit",
+                    "splits": ["test"],
+                },
+            ],
+        )
+        s.execute(
+            insert(Task).values(
+                id="mbpp/1",
+                checksum="m" * 64,
+                config={"task": {"id": "mbpp/1", "name": "mbpp"}},
+                source="local",
+                license="MIT",
+                benchmark_id="mbpp",
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="humaneval/1",
+                checksum="h" * 64,
+                config={"task": {"id": "humaneval/1", "name": "humaneval"}},
+                source="local",
+                license="MIT",
+                benchmark_id="humaneval",
+            )
+        )
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[0])
+            .values(
+                task_id="mbpp/1",
+                config={"agent_name": "litellm", "agent_model": wanted_model},
+            )
+        )
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[1])
+            .values(
+                task_id="mbpp/1",
+                config={"agent_name": "swe-agent", "agent_model": wanted_model},
+            )
+        )
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[2])
+            .values(
+                task_id="humaneval/1",
+                config={"agent_name": "litellm", "agent_model": other_model},
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/trials?benchmark_id=mbpp&agent=litellm&model=qwen2.5-coder",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [item["id"] for item in items] == [str(trial_ids[0])]

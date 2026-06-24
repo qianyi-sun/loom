@@ -15,6 +15,7 @@ import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
+import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import DocsCallout from "../components/DocsCallout";
@@ -121,6 +122,9 @@ function SkeletonRows({
 
 interface BatchRow {
   id: string;
+  team_id?: string;
+  team_name?: string | null;
+  owner_team?: { id: string; name: string } | null;
   name: string;
   state: string;
   expected_trial_count: number;
@@ -129,9 +133,13 @@ interface BatchRow {
 }
 interface TrialRow {
   id: string;
+  team_id?: string;
+  team_name?: string | null;
+  owner_team?: { id: string; name: string } | null;
   task_id: string;
   state: string;
   agent_name: string | null;
+  model?: { provider?: string; name?: string } | null;
   aggregate_reward: number | null;
   total_prompt_tokens: number;
   total_completion_tokens: number;
@@ -142,9 +150,17 @@ interface TrialRow {
 function BatchesView({
   search,
   stateFilter,
+  teamFilter,
+  benchmarkFilter,
+  agentFilter,
+  modelFilter,
 }: {
   search: string;
   stateFilter: string;
+  teamFilter: string;
+  benchmarkFilter: string;
+  agentFilter: string;
+  modelFilter: string;
 }): JSX.Element {
   const [page, setPage] = useState<PageState>(initialPage);
   const debouncedSearch = useDebouncedValue(search, 300);
@@ -163,6 +179,10 @@ function BatchesView({
       api.listBatches({
         state: stateFilter || undefined,
         q: debouncedSearch || undefined,
+        team_id: teamFilter || undefined,
+        benchmark_id: benchmarkFilter || undefined,
+        agent: agentFilter || undefined,
+        model: modelFilter || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
       }),
@@ -188,7 +208,7 @@ function BatchesView({
     );
   }, [query.data, debouncedSearch]);
 
-  const COLS = 5;
+  const COLS = 6;
   return (
     <div className="space-y-3">
       {items.length > 0 ? (
@@ -208,6 +228,7 @@ function BatchesView({
               <tr className="bg-slate-50/50">
                 {[
                   "Name",
+                  "Team",
                   "State",
                   "Planned trials",
                   "Created",
@@ -256,6 +277,9 @@ function BatchesView({
                         {c.name}
                       </Link>
                     </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {c.owner_team?.name ?? c.team_name ?? "—"}
+                    </td>
                     <td className="px-4 py-3">
                       <StatusPill variant={batchStateVariant(c.state)}>
                         {c.state}
@@ -300,10 +324,18 @@ function TrialsView({
   search,
   stateFilter,
   batchId,
+  teamFilter,
+  benchmarkFilter,
+  agentFilter,
+  modelFilter,
 }: {
   search: string;
   stateFilter: string;
   batchId?: string;
+  teamFilter: string;
+  benchmarkFilter: string;
+  agentFilter: string;
+  modelFilter: string;
 }): JSX.Element {
   const [page, setPage] = useState<PageState>(initialPage);
   const debouncedSearch = useDebouncedValue(search, 300);
@@ -317,11 +349,25 @@ function TrialsView({
   });
 
   const query = useQuery({
-    queryKey: ["trials", stateFilter, debouncedSearch, batchId, page.current],
+    queryKey: [
+      "trials",
+      stateFilter,
+      debouncedSearch,
+      batchId,
+      teamFilter,
+      benchmarkFilter,
+      agentFilter,
+      modelFilter,
+      page.current,
+    ],
     queryFn: () =>
       api.listTrials({
         state: stateFilter || undefined,
         batch_id: batchId,
+        team_id: teamFilter || undefined,
+        benchmark_id: benchmarkFilter || undefined,
+        agent: agentFilter || undefined,
+        model: modelFilter || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
       }),
@@ -341,11 +387,13 @@ function TrialsView({
     if (!q) return raw;
     return raw.filter(
       (t) =>
-        t.task_id.toLowerCase().includes(q) || t.id.toLowerCase().includes(q),
+        t.task_id.toLowerCase().includes(q) ||
+        t.id.toLowerCase().includes(q) ||
+        (t.owner_team?.name ?? t.team_name ?? "").toLowerCase().includes(q),
     );
   }, [query.data, debouncedSearch]);
 
-  const COLS = 7;
+  const COLS = 8;
   return (
     <Card>
       <Card.Body className="p-0">
@@ -356,6 +404,7 @@ function TrialsView({
                 {[
                   "ID",
                   "Task",
+                  "Team",
                   "State",
                   "Agent",
                   "Evaluator score",
@@ -415,6 +464,9 @@ function TrialsView({
                     <td className="px-4 py-3 font-mono text-xs text-slate-700">
                       {t.task_id}
                     </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {t.owner_team?.name ?? t.team_name ?? "—"}
+                    </td>
                     <td className="px-4 py-3">
                       <StatusPill variant={trialStateVariant(t.state)}>
                         {t.state}
@@ -465,17 +517,36 @@ function TrialsView({
 
 export default function Monitor(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
+  const auth = useAuth();
   const view: View = searchParams.get("view") === "trials" ? "trials" : "batches";
   const batchIdFilter = searchParams.get("batch_id") ?? undefined;
+  const search = searchParams.get("q") ?? "";
+  const stateFilter = searchParams.get("state") ?? "";
+  const teamFilter = searchParams.get("team_id") ?? "";
+  const benchmarkFilter = searchParams.get("benchmark_id") ?? "";
+  const agentFilter = searchParams.get("agent") ?? "";
+  const modelFilter = searchParams.get("model") ?? "";
+
+  const teamsQuery = useQuery({
+    queryKey: ["admin-teams", auth.isAdmin],
+    queryFn: () => api.listAdminTeams(),
+    enabled: auth.isAdmin,
+  });
+  const adminTeams = teamsQuery.data?.items ?? [];
+  const selectedTeamKnown = adminTeams.some((team) => team.id === teamFilter);
+
+  const updateParam = (key: string, value: string): void => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    setSearchParams(next);
+  };
 
   const setView = (v: View): void => {
     const next = new URLSearchParams(searchParams);
     next.set("view", v);
     setSearchParams(next);
   };
-
-  const [search, setSearch] = useState("");
-  const [stateFilter, setStateFilter] = useState("");
 
   const stateOptions = view === "batches" ? BATCH_STATE_OPTIONS : TRIAL_STATE_OPTIONS;
 
@@ -494,7 +565,7 @@ export default function Monitor(): JSX.Element {
       <div className="flex flex-wrap items-center gap-3">
         <Input
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => updateParam("q", e.target.value)}
           placeholder={
             view === "batches"
               ? "Search batches by name or ID..."
@@ -512,7 +583,7 @@ export default function Monitor(): JSX.Element {
           <span className="text-xs uppercase tracking-wider text-slate-400">State</span>
           <select
             value={stateFilter}
-            onChange={(e) => setStateFilter(e.target.value)}
+            onChange={(e) => updateParam("state", e.target.value)}
             className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
             aria-label="filter by state"
             title="Limit the table to one lifecycle state, or choose all."
@@ -525,6 +596,52 @@ export default function Monitor(): JSX.Element {
             ))}
           </select>
         </label>
+        {auth.isAdmin ? (
+          <label className="flex items-center gap-2 text-sm text-slate-600">
+            <span className="text-xs uppercase tracking-wider text-slate-400">Team</span>
+            <select
+              value={teamFilter}
+              onChange={(e) => updateParam("team_id", e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              aria-label="filter by team"
+              title="Limit results to one internal team. Platform admins can inspect all teams."
+            >
+              <option value="">All teams</option>
+              {teamFilter && !selectedTeamKnown ? (
+                <option value={teamFilter}>{teamFilter}</option>
+              ) : null}
+              {adminTeams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <Input
+          value={benchmarkFilter}
+          onChange={(e) => updateParam("benchmark_id", e.target.value)}
+          placeholder="Benchmark"
+          className="max-w-[10rem]"
+          aria-label="filter by benchmark"
+          title="Filter by benchmark id when the API can resolve it."
+        />
+        <Input
+          value={agentFilter}
+          onChange={(e) => updateParam("agent", e.target.value)}
+          placeholder="Agent"
+          className="max-w-[10rem]"
+          aria-label="filter by agent"
+          title="Filter by agent adapter name."
+        />
+        <Input
+          value={modelFilter}
+          onChange={(e) => updateParam("model", e.target.value)}
+          placeholder="Model"
+          className="max-w-[10rem]"
+          aria-label="filter by model"
+          title="Filter by model id or model name."
+        />
         {view === "trials" && batchIdFilter ? (
           <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
             batch_id = <code className="font-mono">{batchIdFilter.slice(0, 8)}</code>
@@ -545,12 +662,23 @@ export default function Monitor(): JSX.Element {
       </div>
 
       {view === "batches" ? (
-        <BatchesView search={search} stateFilter={stateFilter} />
+        <BatchesView
+          search={search}
+          stateFilter={stateFilter}
+          teamFilter={teamFilter}
+          benchmarkFilter={benchmarkFilter}
+          agentFilter={agentFilter}
+          modelFilter={modelFilter}
+        />
       ) : (
         <TrialsView
           search={search}
           stateFilter={stateFilter}
           batchId={batchIdFilter}
+          teamFilter={teamFilter}
+          benchmarkFilter={benchmarkFilter}
+          agentFilter={agentFilter}
+          modelFilter={modelFilter}
         />
       )}
     </div>

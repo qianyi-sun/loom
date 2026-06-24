@@ -292,7 +292,12 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   to drill into a specific batch's trials). Same filter bar
   layout under both. Harbor's pattern: route is
   `/monitor?view=batches|trials` and switching the toggle
-  preserves filters.
+  preserves filters. Monitor filter state is URL-backed for
+  shareable support links: `state`, `q`, `batch_id`, `team_id`,
+  `benchmark_id`, `agent`, and `model` round-trip through the query
+  string. Batch and Trial rows render an owner-team label from
+  `owner_team.name`/`team_name`; platform-admin sessions also expose a
+  team selector.
 - **Run Library** — org-wide completed-result browser with **My team** and
   **All teams** scopes, owner-team labels, task/config summaries, artifact
   groups, safe shared artifact downloads, clone-config actions, reuse actions,
@@ -311,6 +316,9 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   is split into role-aware sections so Requests, Teams, Invites, API tokens, and
   Audit are not presented as one long mixed form. Platform-admin invite creation
   uses a team-name selector instead of a raw team id input.
+- **Providers** — provider detail tabs are URL-addressable. `/providers/:id`
+  defaults to Overview, while `?tab=models` and `?tab=settings` open those tabs
+  on first render and keep accessible tab/panel relationships intact.
 
 A Batch detail page lives at `/batches/:id` for drill-down from
 either monitor view. It surfaces the config snapshot + lazy
@@ -412,6 +420,7 @@ Renamed from the current "Campaigns" list. Each row represents
 one Batch and surfaces:
 
 - Batch name (user-given at submit)
+- Owner team label
 - Agent + Model + Backend badges
 - Total / Done / In flight / Failed (4 small counters)
 - State (submitted / running / finished / cancelled)
@@ -798,6 +807,23 @@ Described above.
 Adds `backend` and the resolved `task_filter` (so the Batch
 detail can render "ran 50 random tasks (seed 42) on docker"
 without re-running the selection).
+
+### GET /api/v1/batches
+
+List responses include both the stable `team_id` and display-ready owner-team
+metadata: `team_name` plus `owner_team` when the team row can be resolved. The
+SPA uses these fields for Monitor team columns and platform-admin team filters.
+The route accepts `team_id`, `state`, `benchmark_id`, `agent`, and `model`
+filters so the Batches view follows the same shareable Monitor URL contract as
+the Trials view.
+
+### GET /api/v1/trials
+
+Trial list responses include `team_id`, `team_name`, and `owner_team` for the
+same Monitor display contract. In addition to `batch_id`, `team_id`, and
+`state`, the route accepts `benchmark_id`, `agent`, and `model` filters so
+shared Monitor URLs can drill into a benchmark or agent/model slice without
+client-side overfetching.
 
 ### DELETE — Workflow routes are gone
 

@@ -154,6 +154,13 @@ shared across teams through the Run Library; ordinary batch, trial, trajectory,
 ATIF, artifact, cancellation, rerun, and provider routes remain current-team
 scoped.
 
+Monitor lists show the owning team for each batch and trial. Ordinary users see
+their current team's work; platform admins can use the team filter to inspect
+cross-team queues without losing context. Monitor filters are reflected in the
+URL so support links can preserve `view`, `state`, `q`, `batch_id`, `team_id`,
+`benchmark_id`, `agent`, and `model` while switching between batch and trial
+views.
+
 ### Public server CLI flow
 
 From a fresh shell, authenticate with a scoped team API token from Team access:
@@ -260,7 +267,9 @@ the last provider test passed. `Needs attention` means the last test
 failed and batches using that connection may fail. `Untested` means
 the connection has been saved but should be tested before real runs.
 Allowed-model summaries distinguish unrestricted discovered models
-from explicit allow-lists.
+from explicit allow-lists. Provider tabs are URL-addressable with
+`?tab=overview`, `?tab=models`, and `?tab=settings`, so operators can link
+directly to the relevant setup or debugging view.
 
 Contextual snippets are not a substitute for diagnostics. If a quickstart
 command fails, open the same page's diagnostic panel or detail view, then copy

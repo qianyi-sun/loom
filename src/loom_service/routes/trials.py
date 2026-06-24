@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 
-from loom.db.schema import LlmCall, Team, Trial
+from loom.db.schema import LlmCall, Task, Team, Trial
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
     known_names,
@@ -137,10 +137,11 @@ def _trial_row(
     t: Trial,
     *,
     usage: dict[str, int] | None = None,
+    owner_team: Team | None = None,
 ) -> dict[str, Any]:
     agent_name, model = _extract_agent_projection(t.config)
     usage_projection = usage or _empty_usage_projection()
-    return {
+    out: dict[str, Any] = {
         "id": str(t.id),
         "task_id": t.task_id,
         "team_id": str(t.team_id),
@@ -163,6 +164,13 @@ def _trial_row(
         "share_status": t.share_status,
         "source_provenance": t.source_provenance,
     }
+    if owner_team is not None:
+        out["team_name"] = owner_team.name
+        out["owner_team"] = {
+            "id": str(owner_team.id),
+            "name": owner_team.name,
+        }
+    return out
 
 
 @router.get("/trials")
@@ -172,6 +180,9 @@ async def list_trials(
     team_id: Annotated[UUID | None, Query()] = None,
     task_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
+    benchmark_id: Annotated[str | None, Query()] = None,
+    agent: Annotated[str | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
     state: Annotated[
         str | None,
         Query(description="comma-separated state filter"),
@@ -200,8 +211,26 @@ async def list_trials(
         stmt = stmt.where(Trial.team_id == target_team)
     if task_id is not None:
         stmt = stmt.where(Trial.task_id == task_id)
+    if benchmark_id is not None:
+        stmt = stmt.join(Task, Task.id == Trial.task_id).where(
+            Task.benchmark_id == benchmark_id,
+        )
     if batch_id is not None:
         stmt = stmt.where(Trial.batch_id == batch_id)
+    if agent:
+        stmt = stmt.where(or_(
+            func.jsonb_extract_path_text(Trial.config, "agent_name") == agent,
+            func.jsonb_extract_path_text(Trial.config, "agent", "name") == agent,
+        ))
+    if model:
+        stmt = stmt.where(or_(
+            func.jsonb_extract_path_text(
+                Trial.config, "agent_model", "name",
+            ) == model,
+            func.jsonb_extract_path_text(
+                Trial.config, "agent", "model", "name",
+            ) == model,
+        ))
     if state:
         wanted = [x.strip() for x in state.split(",") if x.strip()]
         if wanted:
@@ -237,9 +266,20 @@ async def list_trials(
     else:
         next_c = None
     usage_by_trial = await _usage_by_trial_ids(s, [r.id for r in rows])
+    teams_by_id: dict[UUID, Team] = {}
+    if rows:
+        team_rows = (await s.execute(
+            select(Team).where(Team.id.in_({r.team_id for r in rows})),
+        )).scalars().all()
+        teams_by_id = {team.id: team for team in team_rows}
     return {
         "items": [
-            _trial_row(r, usage=usage_by_trial.get(r.id)) for r in rows
+            _trial_row(
+                r,
+                usage=usage_by_trial.get(r.id),
+                owner_team=teams_by_id.get(r.team_id),
+            )
+            for r in rows
         ],
         "next_cursor": next_c,
     }
@@ -348,15 +388,14 @@ async def get_trial(
     require_team_or_admin(ctx, trial.team_id)
 
     usage_by_trial = await _usage_by_trial_ids(s, [trial.id])
-    base = _trial_row(trial, usage=usage_by_trial.get(trial.id))
     owner_team = (await s.execute(
         select(Team).where(Team.id == trial.team_id),
     )).scalar_one_or_none()
-    if owner_team is not None:
-        base["owner_team"] = {
-            "id": str(owner_team.id),
-            "name": owner_team.name,
-        }
+    base = _trial_row(
+        trial,
+        usage=usage_by_trial.get(trial.id),
+        owner_team=owner_team,
+    )
     trajectory_index = trial.trajectory_index or {}
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;

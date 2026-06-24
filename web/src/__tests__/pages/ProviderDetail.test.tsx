@@ -104,6 +104,38 @@ describe("ProviderDetail", () => {
     });
   });
 
+  it("opens the URL-selected Models tab on first render", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string) => {
+        if (_url.includes("/models")) {
+          return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify(CONN), { status: 200 }));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/providers/abc?tab=models"]}>
+          <Routes>
+            <Route path="/providers/:id" element={<ProviderDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /models/i })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+    expect(
+      await screen.findByRole("button", { name: /add manual model/i }),
+    ).toBeInTheDocument();
+  });
+
   it("404 response shows not-found message", async () => {
     vi.stubGlobal(
       "fetch",

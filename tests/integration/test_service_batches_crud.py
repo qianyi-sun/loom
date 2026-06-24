@@ -856,6 +856,12 @@ async def test_list_batches(
     assert len(items) == 2
     # Newest first.
     assert items[0]["name"] == "C2"
+    assert items[0]["team_id"] == str(team_id)
+    assert items[0]["team_name"] == f"t-{team_id}"
+    assert items[0]["owner_team"] == {
+        "id": str(team_id),
+        "name": f"t-{team_id}",
+    }
     assert "total_cost_usd" not in items[0]
     assert items[0]["total_prompt_tokens"] == 4
     assert items[0]["total_completion_tokens"] == 2
@@ -863,6 +869,78 @@ async def test_list_batches(
     assert items[1]["total_prompt_tokens"] == 0
     assert items[1]["total_completion_tokens"] == 0
     assert items[1]["llm_calls_count"] == 0
+
+
+async def test_list_batches_filters_by_benchmark_agent_and_model(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    wanted_id = uuid4()
+    wrong_agent_id = uuid4()
+    wrong_benchmark_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch),
+            [
+                {
+                    "id": wanted_id,
+                    "team_id": team_id,
+                    "name": "wanted",
+                    "task_filter": {"benchmark_ids": ["mbpp"]},
+                    "trial_config": {
+                        "agent_name": "litellm",
+                        "agent_model": {"provider": "openai-compatible", "name": "qwen"},
+                    },
+                    "state": "submitted",
+                    "created_by_token_prefix": "abcdef12",
+                    "expected_trial_count": 1,
+                },
+                {
+                    "id": wrong_agent_id,
+                    "team_id": team_id,
+                    "name": "wrong-agent",
+                    "task_filter": {"benchmark_ids": ["mbpp"]},
+                    "trial_config": {
+                        "agent_name": "swe-agent",
+                        "agent_model": {"provider": "openai-compatible", "name": "qwen"},
+                    },
+                    "state": "submitted",
+                    "created_by_token_prefix": "abcdef12",
+                    "expected_trial_count": 1,
+                },
+                {
+                    "id": wrong_benchmark_id,
+                    "team_id": team_id,
+                    "name": "wrong-benchmark",
+                    "task_filter": {"benchmark_id": "humaneval"},
+                    "trial_config": {
+                        "agent_name": "litellm",
+                        "agent_model": {"provider": "openai-compatible", "name": "qwen"},
+                    },
+                    "state": "submitted",
+                    "created_by_token_prefix": "abcdef12",
+                    "expected_trial_count": 1,
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            "/api/v1/batches?benchmark_id=mbpp&agent=litellm&model=qwen",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [item["id"] for item in items] == [str(wanted_id)]
 
 
 async def test_get_batch_detail_with_rollup(

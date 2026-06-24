@@ -4,7 +4,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { Button } from "../components/Button";
@@ -33,11 +33,23 @@ import { providerSmokeBatchCommand } from "../lib/quickstartSnippets";
 
 type TabName = "overview" | "models" | "settings";
 type TestResult = { status: "valid" | "invalid"; last_validation_error?: string | null };
+const TAB_NAMES: TabName[] = ["overview", "models", "settings"];
+
+function parseTab(raw: string | null): TabName {
+  return TAB_NAMES.includes(raw as TabName) ? (raw as TabName) : "overview";
+}
 
 export default function ProviderDetail(): JSX.Element {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<TabName>("overview");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = parseTab(searchParams.get("tab"));
+  const setTab = (nextTab: TabName): void => {
+    const next = new URLSearchParams(searchParams);
+    if (nextTab === "overview") next.delete("tab");
+    else next.set("tab", nextTab);
+    setSearchParams(next);
+  };
   const { data, isLoading, error } = useQuery({
     queryKey: ["providers", id],
     queryFn: () => api.getProviderConnection(id),
@@ -91,11 +103,13 @@ export default function ProviderDetail(): JSX.Element {
         <p className="text-sm text-slate-500">{conn.type}</p>
       </header>
       <div role="tablist" className="flex gap-2 border-b border-slate-200">
-        {(["overview", "models", "settings"] as TabName[]).map((t) => (
+        {TAB_NAMES.map((t) => (
           <button
             key={t}
+            id={`provider-tab-${t}`}
             role="tab"
             aria-selected={tab === t}
+            aria-controls={`provider-panel-${t}`}
             onClick={() => setTab(t)}
             className={
               tab === t
@@ -107,14 +121,24 @@ export default function ProviderDetail(): JSX.Element {
           </button>
         ))}
       </div>
-      {tab === "overview" && <OverviewTab conn={conn} id={id} />}
-      {tab === "models" && <ModelsTab id={id} connectionName={conn.name} />}
+      {tab === "overview" && (
+        <div id="provider-panel-overview" role="tabpanel" aria-labelledby="provider-tab-overview">
+          <OverviewTab conn={conn} id={id} />
+        </div>
+      )}
+      {tab === "models" && (
+        <div id="provider-panel-models" role="tabpanel" aria-labelledby="provider-tab-models">
+          <ModelsTab id={id} connectionName={conn.name} />
+        </div>
+      )}
       {tab === "settings" && (
-        <SettingsTab
-          conn={conn}
-          id={id}
-          onDeleted={() => navigate("/providers")}
-        />
+        <div id="provider-panel-settings" role="tabpanel" aria-labelledby="provider-tab-settings">
+          <SettingsTab
+            conn={conn}
+            id={id}
+            onDeleted={() => navigate("/providers")}
+          />
+        </div>
       )}
     </div>
   );
