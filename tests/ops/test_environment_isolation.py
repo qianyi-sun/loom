@@ -93,3 +93,15 @@ def test_repository_checks_run_environment_isolation_tests() -> None:
         if "run" in step and "uv run pytest" in str(step["run"])
     ]
     assert any("tests/ops" in str(step["run"]) for step in pytest_steps)
+
+
+def test_dockerignore_excludes_operator_local_artifacts_from_image_context() -> None:
+    patterns = {
+        line.strip()
+        for line in (REPO_ROOT / ".dockerignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+
+    assert ".public-beta-staging" in patterns
+    assert ".worktrees" in patterns
+    assert "worktrees" in patterns

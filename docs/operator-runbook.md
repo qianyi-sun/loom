@@ -249,6 +249,10 @@ knob you need.
    docker build -f deploy/Dockerfile.worker        -t loom-worker:0.7        .
    docker build -f deploy/Dockerfile.web           -t loom-web:0.7           .
    ```
+   Keep operator-local directories such as `.public-beta-staging` and
+   `.worktrees` out of the Docker context; the repository `.dockerignore`
+   excludes them so public-beta evidence, benchmark caches, and local worktrees
+   do not make image builds hang while sending context.
    `Dockerfile.web` is multi-stage (node-slim builds the Vite bundle
    → nginx-alpine serves it). Push to your registry, then update
    `image:` refs in `deploy/k8s/*.yaml`.
