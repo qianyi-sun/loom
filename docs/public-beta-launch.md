@@ -143,9 +143,10 @@ python scripts/benchmark_reward_gate.py batch \
   --batch-id "$SUPPORTED_BENCHMARK_ACCEPTANCE_BATCH_ID"
 ```
 
-The readiness command uses the same default benchmark API surface as New Batch;
-it does not inspect the hidden operator catalog view that includes
-`include_empty=true` diagnostic rows.
+The readiness command uses the same full benchmark surface as New Batch,
+including `include_empty=true` pending rows. It must fail while required
+user-facing benchmarks are still `Needs publish` / `Needs republish`; the
+release answer is to publish and prove them, not to hide them.
 
 ## Remote Worker Tunnel Gate
 

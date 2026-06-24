@@ -1118,15 +1118,17 @@ Verify the target before continuing:
 ```bash
 loom datasets audit --all --db-url "$LOOM_DB_URL"
 curl -sf -H "Authorization: Bearer $TEAM_A_TOKEN" \
-  "$PUBLIC_SERVER_URL/api/v1/benchmarks?limit=200"
+  "$PUBLIC_SERVER_URL/api/v1/benchmarks?limit=200&include_empty=true"
 python scripts/benchmark_reward_gate.py readiness \
   --server-url "$PUBLIC_SERVER_URL" \
   --token env:TEAM_A_TOKEN
 ```
 
 The public API response must include at least one benchmark with
-`task_count > 0`, and the New Batch page must show selectable benchmark
-choices after sign-in.
+`task_count > 0`, must not include required user-facing benchmarks stuck in
+`Needs publish` / `Needs republish`, and the New Batch page must show
+selectable benchmark choices after sign-in. Required pending benchmarks should
+be published/republished and proven, not hidden from the user path.
 
 For release acceptance, submit a supported-benchmark batch with the intended
 production runner/provider mix and wait for it to finish. Then verify every

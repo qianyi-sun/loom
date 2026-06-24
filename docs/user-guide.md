@@ -621,13 +621,15 @@ configs are not valid `TaskConfig` objects. Source license metadata is visible
 on catalog/task rows but does not disable benchmarks or block submit. Disabled
 rows show the API-provided readiness message and
 raw-versus-runnable counts so operators know whether to publish, republish,
-or repair a benchmark.
+or repair a benchmark. Required public benchmarks should move from these
+pending states to `Ready`; hiding a needed benchmark is not a substitute for
+publishing it.
 
 The hidden `/benchmarks` route remains a power-user diagnostic view rather
-than the normal submission path. It includes the full registry, including rows
-New Batch may disable, plus copyable `loom datasets list --remote`,
-`loom datasets audit`, and `loom datasets sync-config --dry-run` snippets that
-use token and database environment references instead of raw secrets.
+than the normal submission path. It includes the same registry readiness states
+plus operator-oriented `loom datasets list --remote`, `loom datasets audit`,
+and `loom datasets sync-config --dry-run` snippets that use token and database
+environment references instead of raw secrets.
 
 After a supported-benchmark acceptance batch finishes, operators can verify the
 reward contract from the public API:

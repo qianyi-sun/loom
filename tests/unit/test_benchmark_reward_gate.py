@@ -185,7 +185,7 @@ def test_cli_reports_api_errors_without_traceback(monkeypatch, capsys) -> None:
     assert "Traceback" not in captured.err
 
 
-def test_readiness_cli_checks_user_visible_runnable_catalog(monkeypatch) -> None:
+def test_readiness_cli_checks_full_user_visible_catalog(monkeypatch) -> None:
     gate = _load_module()
     paths: list[str] = []
 
@@ -219,4 +219,4 @@ def test_readiness_cli_checks_user_visible_runnable_catalog(monkeypatch) -> None
     )
 
     assert exit_code == 0
-    assert paths == ["/api/v1/benchmarks?limit=200"]
+    assert paths == ["/api/v1/benchmarks?limit=200&include_empty=true"]

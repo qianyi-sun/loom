@@ -631,11 +631,12 @@ export default function NewBatch(): JSX.Element {
   const navigate = useNavigate();
 
   const benchmarks = useQuery({
-    queryKey: ["benchmarks", "runnable"],
-    // New Batch is a submission path. It should show only benchmarks the
-    // backend says are runnable instead of mixing in operator-only catalog rows
-    // that need publish/repair work.
-    queryFn: () => api.listBenchmarks({ limit: "200" }),
+    queryKey: ["benchmarks", "with-pending"],
+    // New Batch is the user-facing benchmark surface. Keep pending benchmark
+    // rows visible with backend readiness diagnostics so users can see the
+    // supported catalog roadmap, while disabled checkboxes still prevent
+    // submitting rows that need publish/repair work.
+    queryFn: () => api.listBenchmarks({ limit: "200", include_empty: "true" }),
     staleTime: 5 * 60 * 1000,
   });
   const agents = useQuery({

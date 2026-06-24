@@ -433,7 +433,7 @@ describe("NewBatch", () => {
     expect(dropdown.value).toBe("docker");
   });
 
-  it("requests only runnable benchmarks for the submission picker", async () => {
+  it("requests the full catalog so pending benchmarks stay visible", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
@@ -442,7 +442,7 @@ describe("NewBatch", () => {
       String(c[0]).includes("/api/v1/benchmarks"),
     );
 
-    expect(String(benchmarkCall?.[0])).not.toContain("include_empty=true");
+    expect(String(benchmarkCall?.[0])).toContain("include_empty=true");
   });
 
   it("marks agents without service runtime as setup-needed", async () => {
@@ -484,26 +484,36 @@ describe("NewBatch", () => {
     ).toBeInTheDocument();
   });
 
-  it("omits unpublished benchmarks from the submission picker", async () => {
+  it("shows unpublished benchmarks disabled while publish work is pending", async () => {
     mockEndpoints({ emptyBenchmark: true });
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
 
-    expect(screen.queryByText(/Needs publish/i)).not.toBeInTheDocument();
+    const marker = await screen.findByText(/Needs publish/i);
+    expect(marker.closest("label")).toHaveAttribute(
+      "title",
+      "Publish/register tasks before selecting this benchmark.",
+    );
     expect(
-      screen.queryByRole("checkbox", { name: /Select benchmark mbpp/i }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("checkbox", { name: /Select benchmark mbpp/i }),
+    ).toBeDisabled();
   });
 
-  it("omits legacy republish-needed benchmarks from the submission picker", async () => {
+  it("shows legacy republish-needed benchmarks disabled with diagnostics", async () => {
     mockEndpoints({ legacyBenchmark: true });
     renderWithProviders(<NewBatch />);
     await screen.findByText(/Runs solution\/solve.sh/i);
 
-    expect(screen.queryByText(/Needs republish/i)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", { name: /Select benchmark mbpp/i }),
-    ).not.toBeInTheDocument();
+    const legacy = await screen.findByRole("checkbox", {
+      name: /Select benchmark mbpp/i,
+    });
+    expect(legacy).toBeDisabled();
+    expect(legacy.closest("label")).toHaveTextContent(/Needs republish/i);
+    expect(legacy.closest("label")).toHaveTextContent(/0\/3 runnable/i);
+    expect(legacy.closest("label")).toHaveAttribute(
+      "title",
+      "3 task rows exist, but none have a valid TaskConfig. Re-publish/register this benchmark before selecting it.",
+    );
   });
 
   it("shows deployment-facing guidance instead of an operator import command when no benchmarks are provisioned", async () => {

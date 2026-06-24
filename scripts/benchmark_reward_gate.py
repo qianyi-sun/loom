@@ -249,7 +249,10 @@ def _print_results(results: list[CheckResult]) -> int:
 
 def _run_readiness(args: argparse.Namespace) -> int:
     client = ApiClient(args.server_url, _read_token(args.token))
-    payload = client.get_json("/api/v1/benchmarks?" + urlencode({"limit": args.limit}))
+    payload = client.get_json(
+        "/api/v1/benchmarks?"
+        + urlencode({"limit": args.limit, "include_empty": "true"}),
+    )
     return _print_results(check_benchmark_readiness(payload.get("items") or []))
 
 
