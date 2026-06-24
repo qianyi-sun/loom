@@ -523,7 +523,7 @@ export default function AdminAccess(): JSX.Element {
                                 }
                                 onClick={() => updateTeam.mutate({ team, name: editName })}
                               >
-                                Save {team.name}
+                                Save
                               </Button>
                             </td>
                           </tr>

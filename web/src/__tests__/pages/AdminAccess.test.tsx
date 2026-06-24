@@ -245,7 +245,7 @@ describe("AdminAccess", () => {
       screen.getByLabelText("Team name for research-platform"),
       "Research Platform Core",
     );
-    await userEvent.click(screen.getByRole("button", { name: "Save research-platform" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
 
