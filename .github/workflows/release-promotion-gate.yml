@@ -1,0 +1,107 @@
+name: release-promotion-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "40-character SHA from dev being promoted."
+        required: true
+        type: string
+      image_tag:
+        description: "Already-built image tag or digest suffix deployed to staging."
+        required: true
+        type: string
+      evidence_manifest_b64:
+        description: "Base64-encoded release gate evidence JSON manifest."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-promotion-gate-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release-gate:
+    name: Release promotion gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Sync release gate dependencies
+        run: uv sync --extra cluster --extra dev --python 3.11
+
+      - name: Decode release evidence manifest
+        env:
+          EVIDENCE_MANIFEST_B64: ${{ inputs.evidence_manifest_b64 }}
+        run: |
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          raw = os.environ["EVIDENCE_MANIFEST_B64"].strip()
+          Path("release-gate-input.json").write_bytes(base64.b64decode(raw, validate=True))
+          PY
+
+      - name: Validate environment isolation policy
+        run: |
+          uv run python scripts/validate_environment_isolation.py \
+            --profiles-dir deploy/environments \
+            --workflow .github/workflows/deploy-environment.yml
+
+      - name: Render and audit staging manifests
+        run: |
+          uv run loom cluster render \
+            --config deploy/environments/staging.cluster.toml \
+            > staging-rendered.yaml
+          uv run loom cluster audit \
+            --config deploy/environments/staging.cluster.toml
+
+      - name: Render and audit production manifests
+        run: |
+          uv run loom cluster render \
+            --config deploy/environments/production.cluster.toml \
+            > production-rendered.yaml
+          uv run loom cluster audit \
+            --config deploy/environments/production.cluster.toml
+
+      - name: Validate release gate evidence
+        run: |
+          uv run python scripts/ops/release_gate.py validate \
+            --manifest release-gate-input.json \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --image-tag "${{ inputs.image_tag }}" \
+            --output-json release-gate-evidence.json \
+            --output-markdown release-gate-evidence.md
+          cat release-gate-evidence.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release gate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-evidence
+          path: |
+            release-gate-evidence.json
+            release-gate-evidence.md
+            release-gate-input.json
+            staging-rendered.yaml
+            production-rendered.yaml
+          if-no-files-found: error

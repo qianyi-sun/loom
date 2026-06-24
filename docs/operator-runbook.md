@@ -52,6 +52,65 @@ database names, object buckets, SecretStore key refs, worker-token refs,
 provider-connection namespaces, cluster render inputs, and workflow branch
 guards. The same check runs in repository CI through `tests/ops`.
 
+### Release promotion gate
+
+A production release is a promotion from a pinned `dev` candidate to `main`,
+not an automatic deploy of every `dev` merge. The release owner must collect
+the heavy staging evidence, encode it as a release gate manifest, and run
+`.github/workflows/release-promotion-gate.yml` before opening or merging the
+release PR.
+
+Normal flow:
+
+1. Pick a 40-character candidate SHA from `dev`.
+2. Build or identify the image tag/digests for that candidate.
+3. Deploy that exact image tag to `staging` using the staging GitHub
+   Environment.
+4. Run the staging smoke checklist below, including migration dry-run,
+   public API/SPA smoke, provider smoke, benchmark reward gate, redaction
+   scan, worker-capacity smoke, and rollback evidence.
+5. Write a JSON manifest with `schema_version=1`, `candidate_sha`,
+   `image_tag`, `staging_url`, image digests for every Loom image, and pass
+   records for every required check:
+   `repository_ci`, `image_build`, `cluster_render_audit`,
+   `migration_dry_run`, `public_api_spa_smoke`, `secret_redaction`,
+   `provider_smoke`, `benchmark_reward_gate`, `worker_capacity_smoke`,
+   `rollback_plan`, and `release_owner_approval`.
+6. Run the release gate workflow:
+   ```bash
+   base64_manifest="$(base64 < release-gate-input.json | tr -d '\n')"
+   gh workflow run release-promotion-gate.yml \
+     --ref dev \
+     -f candidate_sha="$CANDIDATE_SHA" \
+     -f image_tag="$IMAGE_TAG" \
+     -f evidence_manifest_b64="$base64_manifest"
+   ```
+7. Attach the workflow run, `release-gate-evidence` artifact, staging URL,
+   candidate SHA, image digests, and rollback notes to the release PR from
+   `dev` to `main`.
+8. Merge the release PR only after the release owner accepts the evidence.
+9. Deploy production from `main` with the same candidate SHA, image tag, and
+   release gate workflow run id. The production deploy preflight downloads the
+   `release-gate-evidence` artifact, verifies the candidate/image match, scans
+   for leaked bearer/provider keys, signed URLs, internal service URLs, and
+   secret refs, and confirms the candidate SHA is an ancestor of the
+   production ref before it can reach `loom cluster up`.
+
+Failed gate path: keep the release on `dev`, record the failing check and
+evidence link on the release issue or PR, fix the owning subsystem, rerun the
+staging gate with a new manifest, and only then retry promotion.
+
+Failed deploy path: do not edit production secrets or reuse staging
+credentials. Inspect the failed deployment logs, keep the release gate artifact
+attached, and either rerun the production deploy with the same validated gate
+artifact after fixing an operator error, or execute the rollback plan recorded
+in the manifest.
+
+Hotfix path: branch from `main`, apply the minimal fix, run repository CI plus
+the same release gate against staging for the hotfix SHA, open a hotfix PR to
+`main`, and deploy production with that hotfix candidate SHA and gate run id.
+Back-merge or cherry-pick the hotfix to `dev` after production is stable.
+
 ### Deploy, inspect, and rollback by environment
 
 Deploys run through the GitHub Actions workflow:
@@ -73,13 +132,17 @@ gh workflow run deploy-environment.yml \
   --ref main \
   -f environment=production \
   -f image_tag="$IMAGE_TAG" \
+  -f candidate_sha="$CANDIDATE_SHA" \
+  -f release_gate_run_id="$RELEASE_GATE_RUN_ID" \
   -f dry_run=false
 ```
 
 Use `dry_run=true` to render and audit with the environment secret config
 without applying. Production deploys from any ref other than `main` or a
 `release-*` tag are skipped by the workflow condition and still require the
-protected `production` environment approval when they do run.
+protected `production` environment approval when they do run. Production
+deploys also refuse to run without a successful release gate artifact for the
+candidate SHA and image tag being deployed.
 
 Inspect a live environment with its own kubeconfig:
 

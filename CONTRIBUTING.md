@@ -149,8 +149,17 @@ worker-token secrets.
    `packages/<name>/pyproject.toml`); the GitHub release notes are
    the user-facing changelog (auto-generated from squash-merge PR
    titles between tags)
-3. Open a PR from `dev` to `main`
-4. Merge the release PR only after the release owner confirms the staging
+3. Pick the exact `dev` candidate SHA, deploy that image tag to staging, and
+   run `.github/workflows/release-promotion-gate.yml` with the structured
+   release evidence manifest
+4. Open a PR from `dev` to `main`; complete the template's Release Promotion
+   section with the candidate SHA, staging URL, image digests, gate workflow
+   run, gate artifact, and rollback notes
+5. Merge the release PR only after the release owner confirms the staging
    evidence; production release PRs do not rely on routine `dev` auto-merge
-5. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
+6. Deploy production from `main` with `candidate_sha`, `image_tag`, and
+   `release_gate_run_id`. The production deployment workflow rejects missing
+   or mismatched gate evidence before it can use production environment
+   secrets.
+7. After merge, tag the `main` commit `vX.Y.Z` to create the GitHub
    release

@@ -20,9 +20,18 @@ on:
         required: false
         type: boolean
         default: false
+      candidate_sha:
+        description: "Required for production: dev candidate SHA with successful release gate evidence."
+        required: false
+        type: string
+      release_gate_run_id:
+        description: "Required for production: release-promotion-gate workflow run id."
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: deploy-${{ inputs.environment }}
@@ -108,13 +117,21 @@ jobs:
       LOOM_DEPLOY_ENVIRONMENT: production
       LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
       LOOM_DRY_RUN: ${{ inputs.dry_run }}
+      LOOM_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      LOOM_RELEASE_GATE_RUN_ID: ${{ inputs.release_gate_run_id }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: |
             pyproject.toml
             uv.lock
+      - name: Verify release gate evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ops/verify_production_release_gate.sh
       - name: Deploy production
         run: bash scripts/ops/deploy_environment.sh

@@ -46,6 +46,21 @@
 - [ ] PR workflows do not require protected publish/deploy/provider secrets
 - [ ] Rollback path is clear
 
+## Release Promotion
+
+Complete this section only for PRs targeting `main`.
+
+- Candidate SHA:
+- Staging URL:
+- Image digests:
+- Release gate workflow run:
+- Gate evidence artifact:
+- Rollback notes:
+- Previous production image digest:
+- Rendered production manifest:
+- DB recovery point:
+- Production deploy approver:
+
 ## Deployment Notes
 
 - 

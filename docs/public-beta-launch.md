@@ -45,6 +45,10 @@ evidence needed before `dev` can be promoted to `main`.
 
 Attach these to the release issue or release PR:
 
+- Release promotion gate workflow run from
+  `.github/workflows/release-promotion-gate.yml`, plus its
+  `release-gate-evidence` artifact. Production deploys require the same
+  candidate SHA, image tag, and gate run id.
 - Environment isolation transcript from
   `python scripts/validate_environment_isolation.py --profiles-dir deploy/environments --workflow .github/workflows/deploy-environment.yml`,
   plus the exact `deploy/environments/staging.cluster.toml` and
@@ -81,6 +85,11 @@ Attach these to the release issue or release PR:
   default certificate.
 - Leak-scan note showing seeded fake secrets and internal service URLs were not
   found in API responses, audit excerpts, or downloaded safe artifacts.
+
+The release gate manifest is the machine-readable index for those items. Keep
+it free of raw bearer tokens, provider keys, signed object-store URLs, internal
+service URLs, and secret refs; `scripts/ops/release_gate.py` fails the gate if
+any of those patterns appear.
 
 ## Automated Gate
 
