@@ -150,7 +150,10 @@ python scripts/benchmark_reward_gate.py batch \
 The readiness command uses the same full benchmark surface as New Batch,
 including `include_empty=true` pending rows. It must fail while required
 user-facing benchmarks are still `Needs publish` / `Needs republish`; the
-release answer is to publish and prove them, not to hide them.
+release answer is to publish and prove them, not to hide them. Rows marked
+`Not supported yet` with `blocker_reason="unsupported_runtime"` are explicit
+current-scope exclusions: they stay visible to users, remain unselectable, and
+are skipped by this readiness gate until their runtime follow-up is delivered.
 
 ## Remote Worker Tunnel Gate
 

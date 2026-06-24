@@ -140,7 +140,8 @@ Required changes:
 - Show benchmark readiness badges from `/api/v1/benchmarks`: `Ready` rows are
   selectable, blocked rows are disabled with API-provided guidance and
   raw-versus-runnable counts. License metadata is informational and does not
-  create a blocker.
+  create a blocker. `Not supported yet` rows are visible current-scope
+  exclusions, not publish failures.
 - Add one-line explanations for each subset option:
   - `All tasks`: run every runnable task in the selected benchmarks.
   - `First N`: deterministic smoke slice from the start of the sorted task list.

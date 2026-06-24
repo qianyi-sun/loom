@@ -21,6 +21,17 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
 
+def _valid_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
 @pytest.fixture
 async def tasks_setup(
     monkeypatch: pytest.MonkeyPatch,
@@ -371,6 +382,61 @@ async def test_count_benchmark_id_filter(
         )
     assert r.status_code == 200
     assert r.json() == {"count": 2}
+
+
+async def test_count_excludes_unsupported_ui_benchmarks(
+    tasks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = tasks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark).values(
+                id="osworld",
+                display_name="OSWorld",
+                upstream_kind="git",
+                upstream_locator="https://github.com/xlang-ai/OSWorld.git",
+                upstream_revision="main",
+                license_spdx="Apache-2.0",
+                license_url="https://example/osworld",
+                splits=["test"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="osworld/task-001",
+                checksum="o" * 64,
+                config=_valid_task_config("osworld/task-001"),
+                source="s3://bucket/osworld/task-001/",
+                license="Apache-2.0",
+                benchmark_id="osworld",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        osworld_count = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {"benchmark_id": "osworld"}},
+        )
+        all_count = await ac.post(
+            "/api/v1/tasks/count",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"task_filter": {}},
+        )
+
+    assert osworld_count.status_code == 200
+    assert osworld_count.json() == {"count": 0}
+    assert all_count.status_code == 200
+    assert all_count.json() == {"count": 3}
 
 
 async def test_count_ignores_team_license_allowlist(

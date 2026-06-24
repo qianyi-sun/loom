@@ -621,9 +621,11 @@ configs are not valid `TaskConfig` objects. Source license metadata is visible
 on catalog/task rows but does not disable benchmarks or block submit. Disabled
 rows show the API-provided readiness message and
 raw-versus-runnable counts so operators know whether to publish, republish,
-or repair a benchmark. Required public benchmarks should move from these
-pending states to `Ready`; hiding a needed benchmark is not a substitute for
-publishing it.
+or repair a benchmark. `Not supported yet` means the benchmark is intentionally
+visible but excluded from the current supported runtime surface; it cannot be
+selected until the listed runtime work lands. Required public benchmarks should
+move from publish/repair pending states to `Ready`; hiding a needed benchmark
+is not a substitute for publishing it.
 
 The hidden `/benchmarks` route remains a power-user diagnostic view rather
 than the normal submission path. It includes the same registry readiness states

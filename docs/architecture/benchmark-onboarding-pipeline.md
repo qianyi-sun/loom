@@ -37,7 +37,10 @@ tasks instead of placeholders.
   with the current object-store abstraction and leave MinIO/SeaweedFS/S3
   replaceable.
 - Do not make heavy benchmarks such as SWE-Bench or OSWorld appear ready until
-  their runtime, image, verifier, and smoke requirements are validated.
+  their runtime, image, verifier, and smoke requirements are validated. If a
+  benchmark is intentionally outside the current supported runtime surface,
+  mark it `Not supported yet` instead of hiding it or treating raw task rows as
+  runnable.
 
 ## Current State
 
@@ -244,6 +247,8 @@ New Batch behavior:
 - `Needs publish`: disabled; show publish/register guidance.
 - `Needs republish` or `Needs repair`: disabled; show raw-versus-runnable
   count and the stored `TaskConfig` blocker.
+- `Not supported yet`: disabled; show the runtime contract that must land
+  before the benchmark can be selected.
 - `Smoke failed`: disabled by default; allow operator override later if needed.
 - `Heavy/special requirements`: disabled unless worker capabilities and runtime
   requirements are satisfied.

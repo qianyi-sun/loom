@@ -491,6 +491,58 @@ async def test_post_rejects_empty_filter_match(
     assert "zero tasks" in r.json()["detail"]
 
 
+async def test_post_rejects_unsupported_ui_benchmark_filter(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Benchmark).values(
+                id="osworld",
+                display_name="OSWorld",
+                upstream_kind="git",
+                upstream_locator="https://github.com/xlang-ai/OSWorld.git",
+                upstream_revision="main",
+                license_spdx="Apache-2.0",
+                license_url="https://example/osworld",
+                splits=["test"],
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id="osworld/task-001",
+                checksum="o" * 64,
+                config=_valid_task_config("osworld/task-001"),
+                source="s3://bucket/osworld/task-001/",
+                license="Apache-2.0",
+                benchmark_id="osworld",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "unsupported-ui-benchmark",
+                "task_filter": {"benchmark_id": "osworld"},
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    assert r.status_code == 400
+    assert "zero tasks" in r.json()["detail"]
+
+
 async def test_post_rejects_invalid_task_config(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

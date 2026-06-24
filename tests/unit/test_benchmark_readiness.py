@@ -73,6 +73,27 @@ def test_readiness_marks_valid_hf_tasks_as_runnable() -> None:
     assert item.valid_task_config_count == 1
 
 
+def test_readiness_marks_known_unsupported_ui_benchmarks_as_blocked() -> None:
+    for benchmark_id in ("osworld", "webarena"):
+        item = build_readiness_item(
+            _benchmark(benchmark_id),
+            tasks=[
+                TaskAuditSource(
+                    id=f"{benchmark_id}/task-001",
+                    config=_valid_task_config(f"{benchmark_id}/task-001"),
+                    source=f"s3://benchmarks/{benchmark_id}/task-001/",
+                ),
+            ],
+            registry_names={benchmark_id},
+        )
+
+        assert item.readiness_state == "blocked"
+        assert item.blocker_reason == "unsupported_runtime"
+        assert item.raw_task_count == 1
+        assert item.valid_task_config_count == 1
+        assert item.license_allowed_task_count == 0
+
+
 def test_readiness_blocks_unknown_source_scheme() -> None:
     item = build_readiness_item(
         _benchmark(),

@@ -71,6 +71,32 @@ def test_readiness_gate_passes_when_all_displayed_benchmarks_are_runnable() -> N
     assert "2 runnable benchmarks" in results[0].detail
 
 
+def test_readiness_gate_skips_explicitly_unsupported_benchmarks() -> None:
+    gate = _load_module()
+
+    results = gate.check_benchmark_readiness(
+        [
+            {
+                "id": "osworld",
+                "readiness_state": "blocked",
+                "readiness_label": "Not supported yet",
+                "blocker_reason": "unsupported_runtime",
+                "task_count": 0,
+            },
+            {
+                "id": "mbpp",
+                "readiness_state": "runnable",
+                "readiness_label": "Ready",
+                "task_count": 257,
+            },
+        ],
+    )
+
+    assert [r.status for r in results] == ["pass"]
+    assert "1 runnable benchmarks" in results[0].detail
+    assert "1 unsupported benchmarks skipped" in results[0].detail
+
+
 def test_batch_reward_gate_requires_numeric_reward_for_every_trial() -> None:
     gate = _load_module()
 

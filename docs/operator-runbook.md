@@ -1249,7 +1249,11 @@ The public API response must include at least one benchmark with
 `task_count > 0`, must not include required user-facing benchmarks stuck in
 `Needs publish` / `Needs republish`, and the New Batch page must show
 selectable benchmark choices after sign-in. Required pending benchmarks should
-be published/republished and proven, not hidden from the user path.
+be published/republished and proven, not hidden from the user path. Benchmarks
+with `readiness_label="Not supported yet"` and
+`blocker_reason="unsupported_runtime"` are explicit product exclusions: they
+remain visible with guidance but are skipped by the supported-benchmark
+readiness gate and cannot be selected until their runtime follow-up lands.
 
 For release acceptance, submit a supported-benchmark batch with the intended
 production runner/provider mix and wait for it to finish. Then verify every

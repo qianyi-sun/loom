@@ -10,13 +10,15 @@ ollama, llama.cpp, lm-studio). See
 workflow. Tasks and agents are **pluggable infrastructure**, not
 assumptions:
 
-- **Tasks** — 21 core benchmark adapters ship out of the box (HumanEval,
+- **Tasks** — 21 catalog benchmark adapters ship out of the box (HumanEval,
   SWE-Bench Verified/full/Multimodal, MBPP, LiveCodeBench, BFCL,
   BrowseComp, GPQA, Hendrycks MATH, MMLU-Pro, tau2-bench, GAIA,
   AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench), plus the
-  optional Terminal-Bench-2.0 package. Add your own by implementing a
-  `BenchmarkAdapter` Protocol — your task isn't locked to anyone
-  else's leaderboard.
+  optional Terminal-Bench-2.0 package. Catalog presence is separate from
+  current runtime support: OSWorld and WebArena remain visible but disabled
+  until Loom has the required UI benchmark runtime. Add your own by
+  implementing a `BenchmarkAdapter` Protocol — your task isn't locked to
+  anyone else's leaderboard.
 - **Agents** — 11 pick-up-and-use harnesses for popular CLI agents
   (Claude Code, Codex, OpenHands, Aider, Gemini, Qwen, Kimi, ...)
   plus an `oracle` baseline. Bring your own by implementing

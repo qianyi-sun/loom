@@ -85,6 +85,7 @@ async def benchmarks_setup(
             ("aime", "AIME", "proprietary-MAA"),
             ("humaneval", "HumanEval", "MIT"),
             ("mbpp", "MBPP", "CC-BY-4.0"),
+            ("osworld", "OSWorld", "Apache-2.0"),
         ):
             s.execute(
                 insert(Benchmark).values(
@@ -138,12 +139,13 @@ async def test_list_benchmarks(
     assert r_default.json()["items"] == []
     assert r_all.status_code == 200
     items = r_all.json()["items"]
-    assert len(items) == 3
+    assert len(items) == 4
     # Sorted by display_name: AIME < HumanEval < MBPP
     assert [it["display_name"] for it in items] == [
         "AIME",
         "HumanEval",
         "MBPP",
+        "OSWorld",
     ]
     # Every row reports task_count=0 (no tasks linked to these
     # benchmark ids in the fixture).
@@ -195,6 +197,68 @@ async def test_list_benchmarks_shows_imported(
         s.execute(delete(Task))
         s.commit()
     sync_engine.dispose()
+
+
+async def test_list_benchmarks_keeps_unsupported_ui_benchmark_visible_but_disabled(
+    benchmarks_setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """OSWorld/WebArena are visible catalog rows, but not currently
+    launchable until Loom has a real UI benchmark runtime contract."""
+    app, raw = benchmarks_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="osworld/task-001",
+                benchmark_id="osworld",
+                config=_valid_task_config("osworld/task-001"),
+                checksum="9" * 64,
+                source="s3://bucket/osworld/task-001/",
+                license="Apache-2.0",
+                registered_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r_default = await ac.get(
+            "/api/v1/benchmarks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_all = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r_default.status_code == 200
+    assert "osworld" not in {item["id"] for item in r_default.json()["items"]}
+
+    assert r_all.status_code == 200
+    osworld = {
+        item["id"]: item for item in r_all.json()["items"]
+    }["osworld"]
+    assert (
+        osworld
+        | {
+            "task_count": 0,
+            "raw_task_count": 1,
+            "valid_task_config_count": 1,
+            "license_allowed_task_count": 0,
+            "readiness_state": "blocked",
+            "readiness_label": "Not supported yet",
+            "selectable": False,
+            "blocker_reason": "unsupported_runtime",
+        }
+        == osworld
+    )
+    assert "UI benchmark runtime" in osworld["readiness_message"]
 
 
 async def test_list_benchmarks_counts_only_runnable_task_configs(
@@ -437,8 +501,8 @@ async def test_pagination(
             headers={"Authorization": f"Bearer {raw}"},
         )
     j2 = r2.json()
-    assert len(j2["items"]) == 1
-    assert j2["items"][0]["id"] == "mbpp"
+    assert len(j2["items"]) == 2
+    assert [item["id"] for item in j2["items"]] == ["mbpp", "osworld"]
     assert j2["next_cursor"] is None
 
 

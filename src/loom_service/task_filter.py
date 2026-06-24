@@ -32,6 +32,7 @@ from sqlalchemy import cast, false, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.benchmark_readiness import UNSUPPORTED_RUNTIME_BENCHMARK_IDS
 from loom.db.schema import Task
 
 # Recognized task_filter keys. Anything else is rejected so a typo
@@ -111,6 +112,13 @@ async def resolve_task_filter_with_diagnostics(
     stmt = select(Task.id).order_by(
         Task.id.asc(),
     )
+    if UNSUPPORTED_RUNTIME_BENCHMARK_IDS:
+        stmt = stmt.where(
+            or_(
+                Task.benchmark_id.is_(None),
+                ~Task.benchmark_id.in_(sorted(UNSUPPORTED_RUNTIME_BENCHMARK_IDS)),
+            ),
+        )
     if "license" in task_filter:
         stmt = stmt.where(Task.license == task_filter["license"])
     if "task_ids" in task_filter:

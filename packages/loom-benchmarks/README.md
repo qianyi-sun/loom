@@ -92,6 +92,17 @@ Republish this benchmark with the schema-v3 manifest path before treating it as
 ready. Older registered rows without `task_config` remain explicit legacy
 placeholders and should audit as `Needs republish`, not runnable tasks.
 
+## UI-agent adapters
+
+OSWorld and WebArena adapters can convert upstream task metadata into Loom task
+bundles, but those rows are intentionally marked `Not supported yet` by the
+service readiness layer. They require a UI benchmark runtime rather than the
+normal single Docker image contract: OSWorld needs desktop VM/DesktopEnv
+support, and WebArena needs browser-agent control plus self-hosted site/auth
+reset and URL/HTML evaluators. Keep them visible in the catalog, but do not
+treat converted rows as supported runnable tasks until the runtime follow-ups
+land.
+
 ## BFCL output contract
 
 The BFCL adapter targets the upstream v4 task layout under

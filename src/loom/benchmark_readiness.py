@@ -13,6 +13,22 @@ from loom.models.task import TaskConfig
 
 ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked"]
 
+UNSUPPORTED_RUNTIME_BLOCKER_REASON = "unsupported_runtime"
+
+UNSUPPORTED_RUNTIME_BENCHMARKS: dict[str, str] = {
+    "osworld": (
+        "OSWorld requires a UI benchmark runtime with desktop VM/DesktopEnv "
+        "support before it can be selected."
+    ),
+    "webarena": (
+        "WebArena requires a UI benchmark runtime with browser-agent control, "
+        "self-hosted sites, auth reset, and URL/HTML evaluators before it can "
+        "be selected."
+    ),
+}
+
+UNSUPPORTED_RUNTIME_BENCHMARK_IDS = frozenset(UNSUPPORTED_RUNTIME_BENCHMARKS)
+
 # `none` covers inline task rows whose validated TaskConfig is already stored in
 # Postgres and does not require fetching an external bundle before launch.
 KNOWN_MATERIALIZER_SCHEMES = frozenset({"fixture", "hf", "none", "s3"})
@@ -65,6 +81,10 @@ def _source_scheme(source: str | None) -> str:
     return source.split("://", 1)[0]
 
 
+def is_unsupported_runtime_benchmark(benchmark_id: str | None) -> bool:
+    return bool(benchmark_id and benchmark_id in UNSUPPORTED_RUNTIME_BENCHMARK_IDS)
+
+
 def build_readiness_item(
     benchmark: BenchmarkAuditSource,
     *,
@@ -81,7 +101,8 @@ def build_readiness_item(
             continue
         valid_count += 1
     invalid_count = raw_count - valid_count
-    license_allowed_count = valid_count
+    unsupported_runtime = is_unsupported_runtime_benchmark(benchmark.id)
+    license_allowed_count = 0 if unsupported_runtime else valid_count
     license_blocked_count = 0
 
     source_schemes = sorted({_source_scheme(task.source) for task in tasks})
@@ -94,7 +115,10 @@ def build_readiness_item(
 
     blocker_reason: str | None = None
     readiness_state: ReadinessState
-    if raw_count == 0:
+    if unsupported_runtime:
+        readiness_state = "blocked"
+        blocker_reason = UNSUPPORTED_RUNTIME_BLOCKER_REASON
+    elif raw_count == 0:
         readiness_state = "blocked"
         blocker_reason = "manifest_missing"
     elif missing_materializer:
@@ -166,6 +190,13 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         message = (
             f"Task sources use unsupported materializer scheme(s): {schemes}. "
             "Add a materializer before selecting this benchmark."
+        )
+        selectable = False
+    elif item.blocker_reason == UNSUPPORTED_RUNTIME_BLOCKER_REASON:
+        label = "Not supported yet"
+        message = UNSUPPORTED_RUNTIME_BENCHMARKS.get(
+            item.id,
+            "This benchmark requires runtime support before it can be selected.",
         )
         selectable = False
     else:

@@ -114,7 +114,11 @@ def check_benchmark_readiness(items: list[dict[str, Any]]) -> list[CheckResult]:
 
     blocked: list[str] = []
     runnable = 0
+    unsupported = 0
     for item in items:
+        if item.get("blocker_reason") == "unsupported_runtime":
+            unsupported += 1
+            continue
         task_count = item.get("task_count")
         is_runnable = (
             item.get("readiness_state") == "runnable"
@@ -143,11 +147,27 @@ def check_benchmark_readiness(items: list[dict[str, Any]]) -> list[CheckResult]:
             )
         ]
 
+    if runnable == 0:
+        return [
+            CheckResult(
+                check_id="benchmarks.all_displayed_runnable",
+                status="fail",
+                detail=(
+                    "benchmark API returned no currently supported runnable "
+                    "benchmarks"
+                ),
+                remediation="Provision at least one supported runnable benchmark.",
+            )
+        ]
+
+    detail = f"{runnable} runnable benchmarks displayed"
+    if unsupported:
+        detail += f"; {unsupported} unsupported benchmarks skipped"
     return [
         CheckResult(
             check_id="benchmarks.all_displayed_runnable",
             status="pass",
-            detail=f"{runnable} runnable benchmarks displayed",
+            detail=detail,
             remediation="",
         )
     ]
