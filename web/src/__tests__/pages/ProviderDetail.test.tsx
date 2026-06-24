@@ -35,6 +35,7 @@ function renderPage(conn: unknown, initialPath = "/providers/abc") {
         <Routes>
           <Route path="/providers/:id" element={<ProviderDetail />} />
           <Route path="/providers" element={<div>providers-list</div>} />
+          <Route path="/batches/new" element={<div>new-batch-page</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -134,6 +135,41 @@ describe("ProviderDetail", () => {
     expect(
       await screen.findByRole("button", { name: /add manual model/i }),
     ).toBeInTheDocument();
+  });
+
+  it("shows a return-to-New-Batch action from the Models recovery loop", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string) => {
+        if (_url.includes("/models")) {
+          return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify(CONN), { status: 200 }));
+      }),
+    );
+    const user = userEvent.setup();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/providers/abc?tab=models&returnTo=/batches/new"]}>
+          <Routes>
+            <Route path="/providers/:id" element={<ProviderDetail />} />
+            <Route path="/batches/new" element={<div>new-batch-page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /models/i })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+    await user.click(
+      await screen.findByRole("link", { name: /Back to New Batch/i }),
+    );
+    expect(await screen.findByText("new-batch-page")).toBeInTheDocument();
   });
 
   it("404 response shows not-found message", async () => {

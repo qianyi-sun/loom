@@ -4,7 +4,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { Button } from "../components/Button";
@@ -44,6 +44,11 @@ export default function ProviderDetail(): JSX.Element {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = parseTab(searchParams.get("tab"));
+  const rawReturnTo = searchParams.get("returnTo");
+  const returnTo =
+    rawReturnTo && rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//")
+      ? rawReturnTo
+      : null;
   const setTab = (nextTab: TabName): void => {
     const next = new URLSearchParams(searchParams);
     if (nextTab === "overview") next.delete("tab");
@@ -128,6 +133,19 @@ export default function ProviderDetail(): JSX.Element {
       )}
       {tab === "models" && (
         <div id="provider-panel-models" role="tabpanel" aria-labelledby="provider-tab-models">
+          {returnTo ? (
+            <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
+              <Link
+                to={returnTo}
+                className="font-medium text-accent hover:text-accent-hover"
+              >
+                Back to New Batch
+              </Link>
+              <span className="ml-2 text-indigo-700">
+                after refreshing, preflighting, or adding the missing model.
+              </span>
+            </div>
+          ) : null}
           <ModelsTab id={id} connectionName={conn.name} />
         </div>
       )}

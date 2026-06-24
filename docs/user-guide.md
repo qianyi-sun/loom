@@ -87,6 +87,9 @@ refresh or manually add its model ids, then launch from the SPA. The
 SPA hides obvious tool/API entries by default and submits
 `provider_connection_id` + `provider_model_id` with the trial or batch;
 operators can use the raw model view for debugging noisy catalogs.
+When New Batch links you to a provider's Models tab to refresh,
+preflight, or manually add a model, use the "Back to New Batch" link on
+that page to return to the batch form after the model catalog is ready.
 For complete setup recipes, including hosted third-party APIs and
 Slurm/vLLM checkpoint deployment on a GPU cluster, see
 [`provider-onboarding.md`](provider-onboarding.md).
@@ -159,7 +162,15 @@ their current team's work; platform admins can use the team filter to inspect
 cross-team queues without losing context. Monitor filters are reflected in the
 URL so support links can preserve `view`, `state`, `q`, `batch_id`, `team_id`,
 `benchmark_id`, `agent`, and `model` while switching between batch and trial
-views.
+views. Failed trial lists include a Failure diagnostics summary grouped by
+platform `failure_reason`, with representative messages and links to the first
+affected trial so provider, sandbox, verifier, and artifact failures can be
+triaged before opening individual logs.
+
+New Batch includes a Release review card before submit. Check that it shows the
+intended task scope, planned trial count, selected backend worker availability,
+provider connection status, and model preflight state before launching a
+release-blocking batch.
 
 Usage follows the same team-context model. Ordinary users see usage scoped to
 their current team and do not enter raw team ids. Platform admins can leave the

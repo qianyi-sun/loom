@@ -149,6 +149,11 @@ monitoring and submission flows. A read of the reference
   to the agents view. Loom equivalent: "View trials" button on
   each Batch row pre-populates the Trials view's `batch_id`
   filter and switches the segmented toggle.
+- **Failure diagnostics summary.** When the Trials view contains failed
+  rows, the table is preceded by a small diagnostic summary grouped by
+  `failure_reason`, with representative failure messages and links to the
+  first affected trial. The table remains the source of individual rows;
+  the summary is a triage layer for provider, sandbox, and verifier failures.
 - **Two-status taxonomy** (lifecycle + outcome) split as
   separate fields with separate colour scales.
 - **Inline error inside the table cell** with a retry button
@@ -177,6 +182,13 @@ monitoring and submission flows. A read of the reference
   per-combination chip showing `combo / agent / model / n=K`,
   validation hints (missing model, invalid n) rendered in
   amber/red within the same banner.
+- **Release review before submit.** New Batch also renders a concise
+  readiness card before the submit button with the selected task scope
+  (full benchmark, subset, or explicit ids), planned trial count, backend
+  worker availability, provider connection status, and selected model
+  preflight state. This gives the browser flow the same release-blocking
+  evidence users need from CLI/API-first validation without turning submit
+  into a multi-step wizard.
 - **Two-phase upload progress** (when files are involved):
   indigo bar driven by axios `onUploadProgress` events, then
   switches to amber at 100% with "server is importing tasks…"
@@ -237,6 +249,11 @@ examples:
 - Provider pages translate `valid`, `invalid`, and `untested` into
   readiness language, and summarize allowed models as all discovered,
   N allowed, or none.
+- Provider model recovery preserves the caller context. When New Batch sends
+  a user to a provider's Models tab to refresh, preflight, or manually add a
+  missing model, the page renders an internal "Back to New Batch" link from
+  the `returnTo` query parameter after validating that the target is a local
+  route.
 - Rate Cards show provider/model pricing rows before raw published
   payloads.
 - Settings, Admin Access, and Usage define token scope, approve/reject

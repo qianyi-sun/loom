@@ -533,6 +533,43 @@ describe("NewBatch", () => {
     ).toBeInTheDocument();
   });
 
+  it("summarizes release-readiness evidence before submit", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+
+    expect(
+      await screen.findByText(/Release review/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Full benchmark run: 12 tasks selected/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/12 trials planned/i)).toBeInTheDocument();
+    expect(screen.getByText(/docker.*live worker/i)).toBeInTheDocument();
+    expect(screen.getByText(/Lab vLLM.*valid/i)).toBeInTheDocument();
+    expect(screen.getByText(/deepseek-chat.*not preflighted/i)).toBeInTheDocument();
+  });
+
+  it("does not ask for provider evidence when the selected agent needs no model", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await pickOracleAgent(user);
+
+    expect(await screen.findByText(/Release review/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/No provider connection required/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/No model required/i)).toBeInTheDocument();
+  });
+
   it("shows unpublished benchmarks disabled while publish work is pending", async () => {
     mockEndpoints({ emptyBenchmark: true });
     renderWithProviders(<NewBatch />);

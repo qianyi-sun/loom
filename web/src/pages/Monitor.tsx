@@ -144,7 +144,16 @@ interface TrialRow {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   llm_calls_count: number;
+  failure_reason?: string | null;
+  failure_message?: string | null;
   submitted_at: string;
+}
+
+interface FailureGroup {
+  reason: string;
+  count: number;
+  firstTrialId: string;
+  messages: string[];
 }
 
 function BatchesView({
@@ -392,10 +401,74 @@ function TrialsView({
         (t.owner_team?.name ?? t.team_name ?? "").toLowerCase().includes(q),
     );
   }, [query.data, debouncedSearch]);
+  const failureGroups: FailureGroup[] = useMemo(() => {
+    const groups = new Map<string, FailureGroup>();
+    for (const item of items) {
+      if (item.state !== "failed") continue;
+      const reason = item.failure_reason || "unknown_failure";
+      const group = groups.get(reason) ?? {
+        reason,
+        count: 0,
+        firstTrialId: item.id,
+        messages: [],
+      };
+      group.count += 1;
+      if (item.failure_message && !group.messages.includes(item.failure_message)) {
+        group.messages.push(item.failure_message);
+      }
+      groups.set(reason, group);
+    }
+    return Array.from(groups.values()).sort((a, b) =>
+      b.count === a.count ? a.reason.localeCompare(b.reason) : b.count - a.count,
+    );
+  }, [items]);
 
   const COLS = 8;
   return (
-    <Card>
+    <div className="space-y-3">
+      {failureGroups.length > 0 ? (
+        <Card>
+          <Card.Header
+            title="Failure diagnostics"
+            description="Failed trials grouped by the platform diagnostic reason returned by the API."
+          />
+          <Card.Body className="space-y-3">
+            {failureGroups.map((group) => (
+              <div
+                key={group.reason}
+                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-semibold text-slate-900">{group.reason}</p>
+                    <p className="text-xs text-slate-500">
+                      {group.count} failed trial{group.count === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <Link
+                    to={`/trials/${group.firstTrialId}`}
+                    className="text-sm font-medium text-accent hover:text-accent-hover"
+                  >
+                    Open {group.firstTrialId}
+                  </Link>
+                </div>
+                {group.messages.length > 0 ? (
+                  <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                    {group.messages.slice(0, 3).map((message) => (
+                      <li key={message}>{message}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-500">
+                    No failure message was reported; open the trial for logs and artifacts.
+                  </p>
+                )}
+              </div>
+            ))}
+          </Card.Body>
+        </Card>
+      ) : null}
+      <Card>
       <Card.Body className="p-0">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -511,7 +584,8 @@ function TrialsView({
           />
         </Card.Footer>
       ) : null}
-    </Card>
+      </Card>
+    </div>
   );
 }
 

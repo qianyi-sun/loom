@@ -108,6 +108,90 @@ function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
     });
 }
 
+function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
+  return vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/v1/auth/me")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              user: {
+                id: "admin",
+                email: "admin@example.com",
+                display_name: "Admin",
+                is_platform_admin: true,
+              },
+              teams: [],
+              current_team: null,
+              role: "platform_admin",
+              scopes: ["admin:platform"],
+              is_platform_admin: true,
+              csrf_token: "csrf",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      if (url.includes("/api/v1/admin/teams")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.includes("/api/v1/trials")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: "trial-provider",
+                  task_id: "mbpp/1",
+                  state: "failed",
+                  agent_name: "litellm",
+                  aggregate_reward: null,
+                  total_prompt_tokens: 1,
+                  total_completion_tokens: 2,
+                  llm_calls_count: 1,
+                  submitted_at: "2026-06-19T20:23:00Z",
+                  failure_reason: "gateway_error",
+                  failure_message: "provider returned HTTP 502",
+                  team_id: "team-a",
+                  team_name: "EAI",
+                  owner_team: { id: "team-a", name: "EAI" },
+                  model: { provider: "openai-compatible", name: "qwen" },
+                },
+                {
+                  id: "trial-sandbox",
+                  task_id: "mbpp/2",
+                  state: "failed",
+                  agent_name: "litellm",
+                  aggregate_reward: null,
+                  total_prompt_tokens: 0,
+                  total_completion_tokens: 0,
+                  llm_calls_count: 0,
+                  submitted_at: "2026-06-19T20:24:00Z",
+                  failure_reason: "task_image_build_failed",
+                  failure_message: "Docker build failed",
+                  team_id: "team-a",
+                  team_name: "EAI",
+                  owner_team: { id: "team-a", name: "EAI" },
+                  model: { provider: "openai-compatible", name: "qwen" },
+                },
+              ],
+              next_cursor: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    });
+}
+
 describe("Monitor human-readable labels", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -160,5 +244,21 @@ describe("Monitor human-readable labels", () => {
       expect(url.searchParams.get("agent")).toBe("litellm");
       expect(url.searchParams.get("model")).toBe("qwen");
     });
+  });
+
+  it("groups failed trials by diagnostic reason with next-step links", async () => {
+    mockFailureMonitorEndpoints();
+    renderWithProviders(<Monitor />, {
+      route: "/monitor?view=trials&state=failed",
+    });
+
+    expect(await screen.findByText("Failure diagnostics")).toBeInTheDocument();
+    expect(screen.getByText(/gateway_error/i)).toBeInTheDocument();
+    expect(screen.getByText(/provider returned HTTP 502/i)).toBeInTheDocument();
+    expect(screen.getByText(/task_image_build_failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Docker build failed/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Open trial-provider/i }),
+    ).toHaveAttribute("href", "/trials/trial-provider");
   });
 });

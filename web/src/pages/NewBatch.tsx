@@ -31,6 +31,8 @@ import {
   type BenchmarkTagsResponse,
   type Combination,
   type CreateBatchBody,
+  type ModelEntry,
+  type ProviderConnectionEntry,
 } from "../api/client";
 import {
   AgentModelPicker,
@@ -258,6 +260,12 @@ function buildAdvancedConfig(
 
 function Help({ children }: { children: React.ReactNode }): JSX.Element {
   return <p className="mt-1 text-xs text-slate-500">{children}</p>;
+}
+
+function preflightLabel(status?: string | null): string {
+  if (status === "valid") return "preflight valid";
+  if (status === "failed") return "preflight failed";
+  return "not preflighted";
 }
 
 function FieldLabel({
@@ -647,6 +655,16 @@ export default function NewBatch(): JSX.Element {
   const backends = useQuery({
     queryKey: ["backends"],
     queryFn: () => api.listBackends(),
+    staleTime: 5 * 60 * 1000,
+  });
+  const providerConnections = useQuery({
+    queryKey: ["provider-connections"],
+    queryFn: () => api.listProviderConnections(),
+    staleTime: 5 * 60 * 1000,
+  });
+  const models = useQuery({
+    queryKey: ["models", "default"],
+    queryFn: () => api.listModels("default"),
     staleTime: 5 * 60 * 1000,
   });
 
@@ -1095,6 +1113,63 @@ export default function NewBatch(): JSX.Element {
     const benchN = selectedBenchmarks.size;
     countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${benchN} benchmark${benchN === 1 ? "" : "s"}.`;
   }
+
+  const selectedBackend = backends.data?.items.find((b) => b.name === backend);
+  const firstProviderConnectionId = rows.find(
+    (r) => r.picker.providerConnectionId,
+  )?.picker.providerConnectionId;
+  const selectedProviderConnection: ProviderConnectionEntry | undefined =
+    providerConnections.data?.items.find(
+      (c) => c.id === firstProviderConnectionId,
+    );
+  const firstSelectedModel = rows.find(
+    (r) => r.picker.modelName && r.picker.modelProvider,
+  )?.picker;
+  const selectedModel: ModelEntry | undefined =
+    firstSelectedModel && models.data
+      ? models.data.items.find(
+          (m) =>
+            m.name === firstSelectedModel.modelName &&
+            m.provider === firstSelectedModel.modelProvider &&
+            (m.provider_connection_id ?? undefined) ===
+              (firstSelectedModel.providerConnectionId ?? undefined),
+        )
+      : undefined;
+  const releaseNeedsProvider = rows.some((row) => {
+    const agent = agents.data?.items.find((a) => a.name === row.picker.agentName);
+    return agent?.needs_model !== false;
+  });
+  const releaseScopeText =
+    subsetKind === "all"
+      ? `Full benchmark run: ${matchedTaskCount ?? 0} tasks selected.`
+      : subsetKind === "explicit"
+        ? `Explicit task-id run: ${matchedTaskCount ?? 0} tasks selected.`
+        : `Subset run: ${matchedTaskCount ?? 0} tasks selected.`;
+  const releaseTrialText =
+    totalTrials === undefined
+      ? "Trial count is still being calculated."
+      : `${totalTrials} trials planned.`;
+  const releaseBackendText = backend
+    ? selectedBackend?.available === false
+      ? `Backend ${backend} has no live worker.`
+      : selectedBackend?.available === true
+        ? `Backend ${backend} has a live worker.`
+        : `Backend ${backend} availability is not loaded yet.`
+    : "Pick a backend before submitting.";
+  const releaseProviderText = releaseNeedsProvider
+    ? selectedProviderConnection
+      ? `${selectedProviderConnection.name} provider status is ${selectedProviderConnection.status}.`
+      : "Pick a provider connection before submitting."
+    : "No provider connection required for the selected agent.";
+  const releaseModelText = releaseNeedsProvider
+    ? firstSelectedModel?.modelName
+      ? `${firstSelectedModel.modelName} ${
+          selectedModel
+            ? preflightLabel(selectedModel.last_preflight_status)
+            : "not preflighted"
+        }.`
+      : "Pick a model before submitting."
+    : "No model required for the selected agent.";
 
   return (
     <div className="space-y-6">
@@ -1736,6 +1811,19 @@ export default function NewBatch(): JSX.Element {
               </p>
             ) : null}
           </div>
+          <Card>
+            <Card.Header
+              title="Release review"
+              description="Check the planned task slate and execution readiness before submitting."
+            />
+            <Card.Body className="space-y-2 text-sm text-slate-700">
+              <p>{releaseScopeText}</p>
+              <p>{releaseTrialText}</p>
+              <p>{releaseBackendText}</p>
+              <p>{releaseProviderText}</p>
+              <p>{releaseModelText}</p>
+            </Card.Body>
+          </Card>
         </div>
       </div>
 
