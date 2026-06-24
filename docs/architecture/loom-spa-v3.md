@@ -302,6 +302,10 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   **All teams** scopes, owner-team labels, task/config summaries, artifact
   groups, safe shared artifact downloads, clone-config actions, reuse actions,
   and provenance.
+- **Usage** — cost/token/trial rollups scoped to the selected current team for
+  ordinary users. Platform-admin sessions use the fixed internal-team registry
+  for a team-name selector and can leave the filter blank for platform-wide
+  rollups; the UI does not ask users to paste raw team UUIDs.
 - **Settings** — signed-out invite/request-access/manual-code/CLI setup
   guidance; signed-in current team, role, team switcher, joined browser members,
   role-aware setup links, and API-token summaries. Token-paste login is no

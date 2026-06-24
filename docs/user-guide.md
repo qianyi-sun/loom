@@ -161,6 +161,12 @@ URL so support links can preserve `view`, `state`, `q`, `batch_id`, `team_id`,
 `benchmark_id`, `agent`, and `model` while switching between batch and trial
 views.
 
+Usage follows the same team-context model. Ordinary users see usage scoped to
+their current team and do not enter raw team ids. Platform admins can leave the
+team filter blank for platform-wide usage or choose an internal team by name;
+the copyable CLI command still includes the stable `--team-id` value when a
+team is selected.
+
 ### Public server CLI flow
 
 From a fresh shell, authenticate with a scoped team API token from Team access:

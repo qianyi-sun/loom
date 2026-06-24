@@ -7,11 +7,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
+import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
-import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { usageCommand } from "../lib/quickstartSnippets";
@@ -31,10 +31,21 @@ function defaultEnd(): string {
 }
 
 export default function UsageDashboard(): JSX.Element {
+  const auth = useAuth();
   const [start, setStart] = useState(defaultStart());
   const [end, setEnd] = useState(defaultEnd());
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [teamId, setTeamId] = useState("");
+
+  const teamsQuery = useQuery({
+    queryKey: ["admin-teams", auth.isAdmin],
+    queryFn: () => api.listAdminTeams(),
+    enabled: auth.isAdmin,
+  });
+  const adminTeams = teamsQuery.data?.items ?? [];
+  const selectedTeamKnown = adminTeams.some((team) => team.id === teamId);
+  const currentTeam = auth.teams.find((team) => team.id === auth.currentTeamId);
+  const currentTeamName = currentTeam?.name ?? "Current team";
 
   const query = useQuery({
     queryKey: ["usage", start, end, groupBy, teamId],
@@ -96,25 +107,49 @@ export default function UsageDashboard(): JSX.Element {
             <option value="month">month</option>
           </select>
         </label>
-        <label className="block min-w-[260px] flex-1">
-          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-            Team
-          </span>
-          <Input
-            placeholder="UUID, blank for own team"
-            value={teamId}
-            onChange={(e) => setTeamId(e.target.value)}
-          />
-        </label>
+        {auth.isAdmin ? (
+          <label className="block min-w-[260px] flex-1">
+            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Team
+            </span>
+            <select
+              value={teamId}
+              onChange={(e) => setTeamId(e.target.value)}
+              className={SELECT_CLASSES + " w-full"}
+              title="Limit usage to one internal team. Leave blank for platform-wide usage."
+            >
+              <option value="">All teams</option>
+              {teamId && !selectedTeamKnown ? (
+                <option value={teamId}>{teamId}</option>
+              ) : null}
+              {adminTeams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <div className="min-w-[220px] flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <span className="block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Current team
+            </span>
+            <p className="mt-1 text-sm font-medium text-slate-800">
+              {currentTeamName}
+            </p>
+          </div>
+        )}
       </div>
 
       <CommandSnippet
         label="Usage CLI"
         command={usageCommand(start, end, teamId)}
         helperText={
-          teamId
-            ? "The web filter is scoped to the entered team ID when your role can read it."
-            : "Leave the team filter blank to inspect your current team."
+          auth.isAdmin
+            ? teamId
+              ? "The web filter is scoped to the selected internal team."
+              : "Leave the team filter blank to inspect platform-wide usage."
+            : `Usage is scoped to ${currentTeamName}.`
         }
       />
 
