@@ -85,16 +85,22 @@ def _write_real_bundle(
     family: str,
     task: str,
     base_image: str = "ubuntu:24.04",
+    copy_skills: bool = True,
 ) -> Path:
     bundle = root / "repo" / "tasks" / family / task
     (bundle / "environment").mkdir(parents=True)
     (bundle / "tests").mkdir()
-    (bundle / "environment" / "Dockerfile").write_text(
+    dockerfile = (
         f"FROM {base_image}\n"
         "RUN apt-get update && apt-get install -y python3\n"
         "WORKDIR /root\n"
-        "COPY skills /root/.codex/skills\n",
     )
+    if copy_skills:
+        dockerfile += "COPY skills /root/.codex/skills\n"
+    else:
+        dockerfile += "COPY task_input.txt /root/task_input.txt\n"
+        (bundle / "environment" / "task_input.txt").write_text("input\n")
+    (bundle / "environment" / "Dockerfile").write_text(dockerfile)
     (bundle / "task.toml").write_text(
         "[task]\n"
         f"id = \"{task}\"\n"
@@ -168,6 +174,33 @@ def test_skilllearnbench_converts_real_bundle_to_loom_task_config(
     run_sh = (out_dir / "verifier" / "run.sh").read_text()
     assert "LOOM_VERIFIER_OUTPUT" in run_sh
     assert "/logs/verifier/reward.txt" in run_sh
+
+
+def test_skillflow_uses_environment_build_context_for_environment_assets(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="workflow",
+        task="environment-context-task",
+        copy_skills=False,
+    )
+    adapter = SkillFlowAdapter()
+    inst = BenchmarkInstance(
+        instance_id="workflow/environment-context-task",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out_dir / "task.toml").read_text()),
+    )
+
+    assert cfg.environment.dockerfile.as_posix() == "environment/Dockerfile"
+    assert cfg.environment.docker_build_context.as_posix() == "environment"
+    assert not (out_dir / "skills" / ".keep").exists()
 
 
 def test_skillflow_rewrites_unpublished_harbor_base_image(

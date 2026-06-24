@@ -46,7 +46,10 @@ currently reference an unpublished Harbor CLI image; the adapter normalizes
 that base to `skillflow/harbor-cli-base:ubuntu24.04`, matching the SkillFlow
 code repository's documented local base image. Operators must prebuild that
 base image on every Docker host that may build SkillFlow task images, or push
-it to a registry reachable under the same tag. The shim runs the upstream
+it to a registry reachable under the same tag. The adapter also chooses the
+Docker build context from the Dockerfile's `COPY`/`ADD` sources: ordinary
+SkillFlow bundles build from `environment/`, while bundles that copy `skills`
+build from the bundle root. The shim runs the upstream
 `tests/test.sh`, reads `/logs/verifier/reward.txt`, and converts that reward
 into Loom's structured `VerifierResult` JSON. Instance ids are derived from
 the relative bundle path and sanitized so spaces or shell-significant

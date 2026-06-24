@@ -143,7 +143,7 @@ class SkillFlowAdapter(CatalogBackedAdapter):
         source_path = Path(str(instance.raw["__source_path"]))
         self._copy_bundle(source_path, out_dir)
         self._rewrite_unpublished_base_images(out_dir)
-        if (out_dir / "environment" / "Dockerfile").exists():
+        if self._dockerfile_uses_root_build_context(out_dir):
             skills_dir = out_dir / "skills"
             skills_dir.mkdir(exist_ok=True)
             (skills_dir / ".keep").touch()
@@ -190,6 +190,27 @@ class SkillFlowAdapter(CatalogBackedAdapter):
                 dockerfile.write_text("\n".join(lines) + "\n")
             return
 
+    @classmethod
+    def _dockerfile_uses_root_build_context(cls, out_dir: Path) -> bool:
+        dockerfile = out_dir / "environment" / "Dockerfile"
+        if not dockerfile.exists():
+            return False
+        for source in cls._dockerfile_copy_sources(dockerfile):
+            if source == "skills" or source.startswith("skills/"):
+                return True
+        return False
+
+    @staticmethod
+    def _dockerfile_copy_sources(dockerfile: Path) -> Iterator[str]:
+        for line in dockerfile.read_text().splitlines():
+            parts = line.strip().split()
+            if not parts or parts[0] not in {"COPY", "ADD"}:
+                continue
+            sources = parts[1:-1]
+            while sources and sources[0].startswith("--"):
+                sources = sources[1:]
+            yield from sources
+
     def _write_loom_task_toml(
         self,
         instance: BenchmarkInstance,
@@ -213,9 +234,14 @@ class SkillFlowAdapter(CatalogBackedAdapter):
             "build_timeout_sec = 1800",
         ]
         if dockerfile.exists():
+            build_context = (
+                "."
+                if self._dockerfile_uses_root_build_context(out_dir)
+                else "environment"
+            )
             environment_lines.extend([
                 'dockerfile = "environment/Dockerfile"',
-                'docker_build_context = "."',
+                f'docker_build_context = "{build_context}"',
             ])
         else:
             environment_lines.append('docker_image = "python:3.11-slim"')
