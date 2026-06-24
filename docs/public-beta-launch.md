@@ -59,6 +59,10 @@ Attach these to the release issue or release PR:
   `loom datasets provision-public-beta-catalog` with non-zero
   `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, plus
   `/api/v1/benchmarks` evidence with at least one runnable entry.
+- If a remote-worker pool is attached, private tunnel evidence from
+  `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
+  Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the
+  control node and from at least one worker-host context.
 - `scripts/public_beta_smoke_gate.py` Markdown evidence with `--fail-on-skip`
   and `--allow-mutating-checks` against disposable staging data.
 - For IP-address staging hosts, note the hostless Ingress rendering, attach
@@ -119,11 +123,47 @@ The script intentionally redacts raw tokens, provider-key-like values, seeded
 fake secrets, signed object-store URLs, and internal service URLs from its
 Markdown and JSON output.
 
+## Remote Worker Tunnel Gate
+
+If the public beta uses extra remote workers outside the Kubernetes cluster,
+run this private gate after every rollout and before load testing:
+
+```bash
+scripts/ops/worker_service_tunnels.py check \
+  --env-file .env.remote-worker
+
+scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
+  --env-file .env.remote-worker
+```
+
+For Slurm-only worker hosts, use the same generated check script inside each
+worker allocation:
+
+```bash
+scripts/ops/worker_service_tunnels.py print-check-script \
+  --env-file .env.remote-worker \
+  | srun --jobid "$REMOTE_WORKER_JOB_ID" --overlap --ntasks=1 bash -s
+```
+
+The env file supplies the same worker-facing URLs used by remote workers:
+
+```bash
+LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
+LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
+LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
+```
+
+The gate exits non-zero if any tunnel is down. This gate is separate from the
+public API smoke test: `https://loom.example.com` can be healthy while the
+remote-worker pool is detached.
+
 ## Release Decision
 
 The public beta launch gate passes only when:
 
 - every required manual evidence item is attached;
+- any attached remote-worker pool has passing private tunnel checks from both
+  the control node and a worker-host context;
 - the ready benchmark catalog has been provisioned with `missing=0`;
 - `scripts/public_beta_smoke_gate.py` exits 0 with `--fail-on-skip`;
 - no response, audit excerpt, log excerpt, or safe downloaded artifact contains

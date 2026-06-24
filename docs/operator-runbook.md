@@ -1075,6 +1075,9 @@ separate product policy exists.
 - A ready benchmark catalog provisioned into the staging/public-beta database
   and object store. This is release data, not test fixture data, and must not
   be created through `scripts/seed_test_data.py`.
+- If the staging/public-beta deployment has a remote-worker pool outside the
+  Kubernetes cluster, durable private tunnels are installed for Control Plane,
+  Gateway, and MinIO. See [remote-worker-pool.md](remote-worker-pool.md).
 - One seeded blocked artifact on the source trial, marked
   `share_status=blocked`, whose raw object body contains a fake secret such as
   `seeded-public-beta-secret`. The release evidence should prove Team B cannot
@@ -1135,12 +1138,24 @@ choices after sign-in.
    `loom-web` at `/`. `loom-llm-gateway`, Control Plane, Postgres, MinIO,
    workers, worker-token admin routes, and batch-runner bootstrap routes stay
    internal-only.
-4. **Invite-only onboarding.** From the operator/admin browser session, create
+4. **Remote-worker private tunnels hold.** If remote workers are attached,
+   verify the exact worker-facing URLs from the control node and at least one
+   worker host:
+   ```bash
+   scripts/ops/worker_service_tunnels.py check \
+     --env-file .env.remote-worker
+
+   scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
+     --env-file .env.remote-worker
+   ```
+   This check is required after every rollout because a public ingress health
+   check can pass while private worker tunnels are down.
+5. **Invite-only onboarding.** From the operator/admin browser session, create
    an invite for a new Team A owner. Open the invite link in a fresh browser
    profile, accept it, and confirm the user lands in Team A without seeing a raw
    team token. Repeat for Team B. Capture the invite id/prefix only; do not
    capture raw invite codes.
-5. **Scoped CLI tokens.** In Team Settings -> Team access, each team owner
+6. **Scoped CLI tokens.** In Team Settings -> Team access, each team owner
    creates a named API token with `read:own` and `submit`; Team A also needs
    `providers:manage` for provider setup. In a fresh shell:
    ```bash
@@ -1150,7 +1165,7 @@ choices after sign-in.
    ```
    Repeat with Team B's token. Evidence should show token names/scopes/prefixes,
    never raw token values.
-6. **Provider connection create + test.** As Team A, create a connection through
+7. **Provider connection create + test.** As Team A, create a connection through
    the CLI (or `POST /api/v1/provider-connections`), then probe:
    ```bash
    loom providers create --name smoke-openai --type openai-compatible \
@@ -1159,15 +1174,15 @@ choices after sign-in.
    ```
    `test` must return `status=valid`; `http_status` shows the upstream
    HTTP response code. Exit code is 0 for valid, 1 for invalid.
-7. **Model discovery.** `loom providers models smoke-openai --refresh`
+8. **Model discovery.** `loom providers models smoke-openai --refresh`
    followed by `loom providers models smoke-openai` returns a
    non-empty catalog. `curl /api/v1/models` from a team token shows
    the agent-capable view.
-8. **Model preflight.** Run
+9. **Model preflight.** Run
    `loom providers models smoke-openai --preflight gpt-4o-mini`. The model row
    should show `preflight=valid`. A 401/403 should show `access-denied` without
    raw provider keys.
-9. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
+10. **Submit small batches from SPA and CLI.** Pick `hello-world` (or another
    canonical fixture). Submit once from the SPA New Batch page and once from the
    CLI. The CLI commands below keep the no-model canary separate from the
    provider-backed path:
@@ -1189,10 +1204,10 @@ choices after sign-in.
    loom eval batch show <batch-id>
    ```
    Re-run `batch show` until `state` reaches a terminal value.
-10. **Live progress visibility.** While the batch runs, the SPA Monitor page
+11. **Live progress visibility.** While the batch runs, the SPA Monitor page
    shows planned trials and current state transitions, and
    `GET /api/v1/trials/{id}` echoes the same state.
-11. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
+12. **Final evaluator output.** Trial reaches `succeeded` (or `failed`
    with a sensible reason). `GET /api/v1/trials/{id}` carries
    `aggregate_reward`, `failure_reason` (when applicable),
    `total_prompt_tokens`, `total_completion_tokens`,
@@ -1205,7 +1220,7 @@ choices after sign-in.
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform
    failure count instead of only one overall average.
-12. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
+13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
     artifact `download_url` entries from trial detail return object bodies. The
@@ -1213,27 +1228,27 @@ choices after sign-in.
     cross-team callers must not be able to use owner-team artifact proxy URLs.
     Verify the public CLI path with `loom eval trial download ...`; it should
     write the object body locally without printing internal object-store URLs.
-13. **Run Library sharing.** Confirm the completed source run appears in Run
+14. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
     summary, task/agent/model summary, and artifact groups. Team B must be able
     to download a safe artifact only through the Run Library service URL.
-14. **Clone and reuse.** From Team B, clone config from Team A's completed run.
+15. **Clone and reuse.** From Team B, clone config from Team A's completed run.
     If the source run used a provider connection, select a Team B-owned
     provider connection before cloning. Then reuse a safe artifact from the
     source trial. Both created records must belong to Team B and show
     `source_provenance` with the source batch/trial/artifact key.
-15. **Blocked and private access denied.** Team B must be denied when trying to:
+16. **Blocked and private access denied.** Team B must be denied when trying to:
     download the seeded blocked artifact through Run Library; download Team A's
     artifact through the normal owner-team trial route; mutate Team A's original
     batch, such as cancelling it; or inspect/download private or blocked source
     artifacts. Denials should include safe reasons only.
-16. **Provider error surfaces.** Temporarily rotate the provider key
+17. **Provider error surfaces.** Temporarily rotate the provider key
     to an invalid value, re-run a trial, and confirm the SPA + API
     surface a clear `provider_error` reason rather than a generic 500. Confirm
     diagnostic text does not contain raw provider keys, bearer tokens, signed
     URL query parameters, or internal service hostnames.
-17. **Automated evidence script.** After steps 4-15, run the repeatable API
+18. **Automated evidence script.** After steps 4-16, run the repeatable API
     gate. Use disposable staging data because clone/reuse checks create Team B
     records:
     ```bash
@@ -1265,7 +1280,7 @@ choices after sign-in.
     a private artifact store. The script redacts raw API tokens, seeded fake
     secrets, provider-key-like values, signed object-store URLs, and internal
     service URLs before writing evidence.
-17. **Teardown clean.** `loom cluster down --yes` removes every applied
+19. **Teardown clean.** `loom cluster down --yes` removes every applied
     object; PVCs survive (verify via `kubectl get pvc -n loom`). Pass
     `--with-volumes` only when wiping staging state intentionally.
 
@@ -1293,6 +1308,10 @@ checklist:
   download, direct-route denial, clone config, reuse artifact, provenance,
   blocked artifact denial, private artifact denial, cross-team mutation denial,
   and response leak scanning.
+- **`scripts/ops/worker_service_tunnels.py`** — covers the private
+  remote-worker tunnel gate when out-of-cluster workers are attached. It renders
+  durable systemd user units, checks the exact worker-facing URLs locally, and
+  verifies those URLs from SSH worker hosts.
 
 Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a

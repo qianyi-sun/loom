@@ -186,6 +186,12 @@ and the kind smoke runs it before `kubectl apply` — see #77.
 | `loom-egress-proxy`, `loom-egress-xds` | **No** | Egress validators; only reachable from `loom-llm-gateway`. |
 | `loom-gateway-router` | **No** Ingress (binds `hostPort 30443` on each node for sandbox-Docker → gateway routing) | NOT for public Internet — sandbox bridges dial `<node>:30443` from inside the cluster network. Auditor allows this hostPort by exception when shipped from the canonical template. |
 
+Out-of-cluster remote workers are a separate private-network integration, not
+public Ingress. When a staging deployment uses them, operators expose only the
+worker-facing Control Plane, Gateway, and MinIO endpoints on trusted LAN/VPN
+addresses with `scripts/ops/worker_service_tunnels.py` systemd units and verify
+those URLs from the worker hosts after every rollout.
+
 Docker-backed worker nodes must also run with an open-file limit high enough
 for concurrent sandbox/container cleanup. Compose-based dev and remote-worker
 deployments set `nofile=65536`; Kubernetes deployments should set an

@@ -1,10 +1,12 @@
 import subprocess
+import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "ops" / "worker_pool_inventory.sh"
 _PLAN_SCRIPT = _REPO_ROOT / "scripts" / "ops" / "worker_pool_plan.py"
 _SLURM_SCRIPT = _REPO_ROOT / "scripts" / "ops" / "worker_pool_slurm_submit.sh"
+_TUNNEL_SCRIPT = _REPO_ROOT / "scripts" / "ops" / "worker_service_tunnels.py"
 
 
 def test_worker_pool_inventory_script_is_valid_bash() -> None:
@@ -15,8 +17,16 @@ def test_worker_pool_slurm_submit_script_is_valid_bash() -> None:
     subprocess.run(["bash", "-n", str(_SLURM_SCRIPT)], check=True)
 
 
+def test_worker_service_tunnel_script_compiles() -> None:
+    subprocess.run([sys.executable, "-m", "py_compile", str(_TUNNEL_SCRIPT)], check=True)
+
+
 def test_worker_pool_inventory_script_has_no_environment_specific_hosts() -> None:
-    text = _SCRIPT.read_text(encoding="utf-8") + _SLURM_SCRIPT.read_text(encoding="utf-8")
+    text = (
+        _SCRIPT.read_text(encoding="utf-8")
+        + _SLURM_SCRIPT.read_text(encoding="utf-8")
+        + _TUNNEL_SCRIPT.read_text(encoding="utf-8")
+    )
     forbidden = (
         "OLD" + "LAB",
         "192" + ".168.",
@@ -67,7 +77,7 @@ def test_worker_pool_plan_recommends_every_healthy_host(tmp_path: Path) -> None:
 
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             str(_PLAN_SCRIPT),
             "--inventory",
             str(inventory),

@@ -40,6 +40,97 @@ Do not expose those worker-facing endpoints to the public internet. Use
 a private network, VPN, or firewall rules that allow only trusted worker
 hosts to reach them.
 
+## Control-node Service Tunnels
+
+When the control node is a Kubernetes cluster and remote workers live outside
+that cluster, expose the worker-facing services through durable private
+tunnels. Do not leave these as terminal-owned `kubectl port-forward` processes:
+they disconnect when the target pod is recreated during rollout and silently
+detach the remote worker pool.
+
+`scripts/ops/worker_service_tunnels.py` renders or installs systemd user units
+for the three private dependencies:
+
+| Unit | Private port | Kubernetes service |
+|---|---:|---|
+| `loom-remote-worker-tunnel-control-plane.service` | `18081` | `loom-control-plane:8080` |
+| `loom-remote-worker-tunnel-gateway.service` | `19100` | `loom-llm-gateway:9100` |
+| `loom-remote-worker-tunnel-minio.service` | `19000` | `loom-minio:9000` |
+
+Render units for review:
+
+```bash
+scripts/ops/worker_service_tunnels.py render-systemd \
+  --output-dir ./loom-remote-worker-tunnels \
+  --namespace loom-public-beta \
+  --kubectl /usr/local/bin/kubectl \
+  --kubeconfig /secure/path/public-beta.kubeconfig
+```
+
+Install and start them as user services on the control node:
+
+```bash
+scripts/ops/worker_service_tunnels.py install-systemd \
+  --namespace loom-public-beta \
+  --kubectl /usr/local/bin/kubectl \
+  --kubeconfig /secure/path/public-beta.kubeconfig
+```
+
+Use durable paths for `--kubectl` and `--kubeconfig`. `install-systemd`
+rejects `/tmp`-style paths by default because those units must survive host
+reboot. For a disposable test only, pass `--allow-volatile-paths`.
+
+For user services to survive host reboot, enable lingering for the deploy user
+with the host's normal privileged administration path:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+Check the units after every cluster rollout:
+
+```bash
+systemctl --user status \
+  loom-remote-worker-tunnel-control-plane.service \
+  loom-remote-worker-tunnel-gateway.service \
+  loom-remote-worker-tunnel-minio.service
+```
+
+The remote-worker env file should point at the private control-node address and
+the managed local ports:
+
+```bash
+LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
+LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
+LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
+```
+
+The same script provides the rollout gate for those exact URLs:
+
+```bash
+scripts/ops/worker_service_tunnels.py check \
+  --env-file .env.remote-worker
+```
+
+Validate from worker hosts too, not only from the control node:
+
+```bash
+scripts/ops/worker_service_tunnels.py check-remote worker-hosts.txt \
+  --env-file .env.remote-worker
+```
+
+`check-remote` sends only the derived health URLs over SSH. It does not send or
+print worker tokens, MinIO secret keys, or provider credentials.
+
+If workers are reachable only through Slurm allocations rather than SSH, print
+the same secret-free check script and pipe it into `srun`:
+
+```bash
+scripts/ops/worker_service_tunnels.py print-check-script \
+  --env-file .env.remote-worker \
+  | srun --jobid "$REMOTE_WORKER_JOB_ID" --overlap --ntasks=1 bash -s
+```
+
 ## Prerequisites
 
 On each worker host:
@@ -67,12 +158,12 @@ Run the non-destructive inventory script from an operator machine that
 can SSH to the candidates:
 
 ```bash
-export LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:8080
-export LOOM_WORKER_GATEWAY_URL=http://control-node:9100
+export LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
+export LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 # Optional when the sandbox's network view differs from the worker process.
 # For example, use a node-local router or host-gateway URL.
 # export LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
-export LOOM_WORKER_MINIO_ENDPOINT=http://control-node:9000
+export LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 
 scripts/ops/worker_pool_inventory.sh worker-hosts.txt
 ```
@@ -163,13 +254,13 @@ Edit `.env.remote-worker`:
 
 ```bash
 LOOM_IMAGE_TAG=dev
-LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:8080
-LOOM_WORKER_GATEWAY_URL=http://control-node:9100
+LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
+LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 # Leave unset when the sandbox can use the same gateway URL. Set when
 # subprocess agents run in Docker sandboxes that need a host-gateway or
 # node-local router endpoint.
 # LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
-LOOM_WORKER_MINIO_ENDPOINT=http://control-node:9000
+LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
 LOOM_WORKER_MINIO_SECRET_KEY=...
@@ -322,23 +413,27 @@ temp dirs, or trajectory cache files.
 
 Before treating a remote worker pool as usable:
 
-1. Inventory every candidate worker and record CPU, memory, disk, Docker,
+1. Install or verify durable control-node service tunnels with
+   `scripts/ops/worker_service_tunnels.py check`.
+2. Run `scripts/ops/worker_service_tunnels.py check-remote` from every
+   candidate worker context and record endpoint reachability.
+3. Inventory every candidate worker and record CPU, memory, disk, Docker,
    and endpoint reachability.
-2. Generate `worker-plan.csv`; every usable node should be `include`,
+4. Generate `worker-plan.csv`; every usable node should be `include`,
    and every excluded node needs a reason.
-3. Start one remote worker at `LOOM_WORKER_MAX_CONCURRENT=1`.
-4. Submit a tiny API-model + Docker-terminal evaluation and verify the
+5. Start one remote worker at `LOOM_WORKER_MAX_CONCURRENT=1`.
+6. Submit a tiny API-model + Docker-terminal evaluation and verify the
    remote worker claims it.
-5. Confirm the trial reaches a terminal state and artifacts/trajectory
+7. Confirm the trial reaches a terminal state and artifacts/trajectory
    downloads work. Workers bootstrap both runtime buckets
    (`trajectories` and `artifacts`) before claiming trials; a missing
    bucket or artifact upload failure should produce a terminal failed
    trial, not a succeeded trial with missing outputs.
-6. Scale to the rest of the included worker hosts at the planned
+8. Scale to the rest of the included worker hosts at the planned
    concurrency.
-7. Run a real supported-benchmark load test sized to exceed the planned
+9. Run a real supported-benchmark load test sized to exceed the planned
    slot count.
-8. Check there are no stuck `claimed` / `running` trials, leaked Docker
+10. Check there are no stuck `claimed` / `running` trials, leaked Docker
    containers, missing artifacts, provider rate-limit storms, or host
    swap pressure.
 
