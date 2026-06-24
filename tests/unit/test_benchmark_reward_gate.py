@@ -103,6 +103,31 @@ def test_batch_reward_gate_requires_numeric_reward_for_every_trial() -> None:
     assert "missing numeric reward" in results[0].detail
 
 
+def test_batch_reward_gate_accepts_finished_service_batches() -> None:
+    gate = _load_module()
+
+    results = gate.check_batch_rewards(
+        batch={
+            "id": "batch-1",
+            "state": "finished",
+            "result_status": "succeeded",
+            "expected_trial_count": 1,
+        },
+        trials=[
+            {
+                "id": "trial-1",
+                "task_id": "swe-bench-multimodal/1",
+                "state": "succeeded",
+                "failure_reason": None,
+                "aggregate_reward": 0.0,
+            },
+        ],
+    )
+
+    assert [r.status for r in results] == ["pass"]
+    assert "1 trials have numeric rewards" in results[0].detail
+
+
 def test_batch_reward_gate_flags_benchmark_side_failure_reasons() -> None:
     gate = _load_module()
 

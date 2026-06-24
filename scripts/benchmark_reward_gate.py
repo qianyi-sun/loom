@@ -19,7 +19,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-TERMINAL_BATCH_STATES = frozenset({"succeeded", "failed", "cancelled"})
+TERMINAL_BATCH_STATES = frozenset({
+    "finished",
+    "succeeded",
+    "failed",
+    "cancelled",
+})
 TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 BENCHMARK_SIDE_FAILURE_REASONS = frozenset({
     "env_start_failure",
