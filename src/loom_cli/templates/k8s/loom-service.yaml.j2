@@ -14,7 +14,7 @@ spec:
       containers:
         - name: loom-service
           image: loom-service:{{ image_tag }}
-          {{ env_macros.env_block("loom-service", schema) | indent(10) }}
+          {{ env_macros.env_block("loom-service", schema, override_values={"artifacts_bucket": artifacts_bucket, "trajectories_bucket": trajectories_bucket}) | indent(10) }}
             - name: LOOM_SVC_ADMIN_SECRET_FILE
               value: "/var/run/loom/secrets/admin/secrets.toml"
             - name: LOOM_SECRET_STORE_MASTER_KEY

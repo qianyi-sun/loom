@@ -103,6 +103,14 @@ Deferred long-horizon items use
 Feature branches cut from `dev`. PRs target `dev`. `main` is reserved
 for release promotion PRs from `dev`.
 
+Deployment environments are separated from branch workflow:
+`development` follows `dev` at `dev.yylx.world`, `staging` deploys pinned
+`dev` SHAs at `staging.yylx.world`, and `production` follows `main` or
+`release-*` tags at `yylx.world`. Production deploys use the protected
+GitHub Environment named `production`; normal development jobs must not use
+production kubeconfig, database, object-store, provider, SecretStore, or
+worker-token secrets.
+
 ## Issue Ownership
 
 - Work from an issue with acceptance criteria before opening a PR.

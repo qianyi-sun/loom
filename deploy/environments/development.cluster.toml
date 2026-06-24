@@ -1,0 +1,5 @@
+namespace = "loom-dev"
+ingress_host = "dev.yylx.world"
+ingress_tls_secret_name = "loom-dev-tls"
+trajectories_bucket = "loom-dev-trajectories"
+artifacts_bucket = "loom-dev-artifacts"

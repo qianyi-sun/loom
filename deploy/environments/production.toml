@@ -1,0 +1,17 @@
+environment = "production"
+short_name = "prod"
+github_environment = "production"
+namespace = "loom-prod"
+ingress_host = "yylx.world"
+cluster_config = "deploy/environments/production.cluster.toml"
+allowed_refs = ["refs/heads/main"]
+allowed_tag_prefixes = ["refs/tags/release-"]
+
+database_name = "loom_prod"
+task_bucket = "loom-prod-tasks"
+trajectories_bucket = "loom-prod-trajectories"
+artifacts_bucket = "loom-prod-artifacts"
+secret_store_key_ref = "github-environment:production/LOOM_SECRET_STORE_MASTER_KEY"
+worker_token_ref = "github-environment:production/LOOM_WORKER_TOKEN"
+provider_connection_namespace = "production"
+

@@ -45,6 +45,10 @@ evidence needed before `dev` can be promoted to `main`.
 
 Attach these to the release issue or release PR:
 
+- Environment isolation transcript from
+  `python scripts/validate_environment_isolation.py --profiles-dir deploy/environments --workflow .github/workflows/deploy-environment.yml`,
+  plus the exact `deploy/environments/staging.cluster.toml` and
+  `deploy/environments/production.cluster.toml` inputs used for the candidate.
 - `loom cluster audit` output showing TLS ingress, only `/` and `/api/v1`
   public backends, no public LLM Gateway, no public Control Plane, and no public
   object store.

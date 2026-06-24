@@ -1,0 +1,5 @@
+namespace = "loom-staging"
+ingress_host = "staging.yylx.world"
+ingress_tls_secret_name = "loom-staging-tls"
+trajectories_bucket = "loom-staging-trajectories"
+artifacts_bucket = "loom-staging-artifacts"

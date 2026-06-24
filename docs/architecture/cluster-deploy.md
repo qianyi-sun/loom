@@ -202,6 +202,10 @@ The public Ingress is TLS-first. `cluster-config.toml` controls
 `ingress_cert_manager_cluster_issuer`. With cert-manager, the rendered Ingress
 gets a `cert-manager.io/cluster-issuer` annotation; without cert-manager,
 operators pre-create the named TLS Secret.
+Production-like deployments should use the committed environment-specific
+render inputs under `deploy/environments/` so `development`, `staging`, and
+`production` keep separate namespaces, public hosts, object buckets, worker
+tokens, provider namespaces, SecretStore keys, and database names.
 When `ingress_host` is an IP literal for a lab or invite-only staging
 entrypoint, the renderer omits `spec.rules[].host` and `tls.hosts` because the
 Kubernetes API rejects IP literals in those fields. Operators must still

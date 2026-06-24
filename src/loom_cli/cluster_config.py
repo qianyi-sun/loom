@@ -93,6 +93,7 @@ if TYPE_CHECKING:
         ingress_class_name: str = "nginx"
         ingress_host: str = "loom.example.com"
         ingress_tls_secret_name: str = "loom-tls"
+        artifacts_bucket: str = "artifacts"
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"
@@ -100,6 +101,7 @@ if TYPE_CHECKING:
         postgres_storage_gi: int = 50
         provider_egress_allowlist: tuple[str, ...] = ()
         replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
+        trajectories_bucket: str = "trajectories"
         worker_capacity: _WorkerCapacityConfig = field(default_factory=_WorkerCapacityConfig)
         worker_trajectory_storage_gi: int = 100
 

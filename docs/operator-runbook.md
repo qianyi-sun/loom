@@ -3,6 +3,127 @@
 For operators of a production Loom deployment. Local dev → see the
 top-level README + `deploy/docker-compose.dev.yml`.
 
+## Environment isolation
+
+Loom uses three logical deployment environments. Treat the names below as the
+operator contract; do not reuse kubeconfigs, databases, object buckets,
+SecretStore keys, worker tokens, provider connections, or deploy credentials
+across rows.
+
+| Environment | Git branch / ref | GitHub Environment | Namespace | Public host | DB name | Object buckets |
+|---|---|---|---|---|---|---|
+| `development` | `dev` only | `development` | `loom-dev` | `dev.yylx.world` | `loom_dev` | `loom-dev-trajectories`, `loom-dev-artifacts` |
+| `staging` | pinned `dev` SHA | `staging` | `loom-staging` | `staging.yylx.world` | `loom_staging` | `loom-staging-trajectories`, `loom-staging-artifacts` |
+| `production` | `main` or `release-*` tag only | `production` | `loom-prod` | `yylx.world` | `loom_prod` | `loom-prod-trajectories`, `loom-prod-artifacts` |
+
+Committed environment profiles live in `deploy/environments/`. Each profile
+has a matching `*.cluster.toml` render input. The production profile follows
+`main`/release tags only; normal feature, benchmark, provider, worker, and
+catalog work stays on `dev` and cannot use the production GitHub Environment.
+
+Set these GitHub Environment secrets independently in `development`,
+`staging`, and `production`:
+
+| Secret | Contents |
+|---|---|
+| `LOOM_KUBECONFIG_B64` | Base64-encoded kubeconfig for only that environment. |
+| `LOOM_CLUSTER_CONFIG_B64` | Base64-encoded cluster config for only that environment. |
+| `LOOM_DEPLOY_TOKEN` | Environment-scoped deploy marker/credential used to require an environment secret before deploy. |
+| `LOOM_SECRET_STORE_MASTER_KEY` | SecretStore master key for only that environment. |
+| `LOOM_WORKER_TOKEN` | Worker bearer token for only that environment. |
+
+The workflow `.github/workflows/deploy-environment.yml` binds each job to the
+matching GitHub Environment. Because GitHub only exposes environment secrets
+after the selected job enters that environment, a `development` or `staging`
+deploy job cannot read production kubeconfig, database credentials,
+object-store credentials, provider secrets, SecretStore keys, or worker tokens.
+Configure the `production` GitHub Environment with required reviewer approval.
+
+Before a production release, run the static boundary validator:
+
+```bash
+python scripts/validate_environment_isolation.py \
+  --profiles-dir deploy/environments \
+  --workflow .github/workflows/deploy-environment.yml
+```
+
+It verifies the committed environment profile names, namespaces, domains,
+database names, object buckets, SecretStore key refs, worker-token refs,
+provider-connection namespaces, cluster render inputs, and workflow branch
+guards. The same check runs in repository CI through `tests/ops`.
+
+### Deploy, inspect, and rollback by environment
+
+Deploys run through the GitHub Actions workflow:
+
+```bash
+gh workflow run deploy-environment.yml \
+  --ref dev \
+  -f environment=development \
+  -f image_tag="$IMAGE_TAG" \
+  -f dry_run=false
+
+gh workflow run deploy-environment.yml \
+  --ref dev \
+  -f environment=staging \
+  -f image_tag="$IMAGE_TAG" \
+  -f dry_run=false
+
+gh workflow run deploy-environment.yml \
+  --ref main \
+  -f environment=production \
+  -f image_tag="$IMAGE_TAG" \
+  -f dry_run=false
+```
+
+Use `dry_run=true` to render and audit with the environment secret config
+without applying. Production deploys from any ref other than `main` or a
+`release-*` tag are skipped by the workflow condition and still require the
+protected `production` environment approval when they do run.
+
+Inspect a live environment with its own kubeconfig:
+
+```bash
+export KUBECONFIG=/secure/path/to/loom-prod.kubeconfig
+loom cluster status --namespace loom-prod --format table
+loom cluster audit --config deploy/environments/production.cluster.toml
+kubectl -n loom-prod get deploy,sts,svc,ingress
+```
+
+Rollback stays environment-local. Use the matching `*.cluster.toml`,
+namespace, kubeconfig, DB backup, and object buckets for the environment being
+rolled back:
+
+```bash
+# Example: production image rollback only.
+PREVIOUS_IMAGE_TAG=public-beta-known-good
+tmp_config="$(mktemp)"
+cp deploy/environments/production.cluster.toml "$tmp_config"
+python - "$tmp_config" "$PREVIOUS_IMAGE_TAG" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tag = sys.argv[2]
+text = path.read_text()
+replacement = f'image_tag = "{tag}"'
+if re.search(r'(?m)^image_tag\s*=', text):
+    text = re.sub(r'(?m)^image_tag\s*=.*$', replacement, text)
+else:
+    text = replacement + "\n" + text
+path.write_text(text)
+PY
+loom cluster audit --config "$tmp_config"
+loom cluster up --config "$tmp_config" --context "$PROD_CONTEXT"
+loom cluster status --namespace loom-prod --format table
+```
+
+Do not point a dev or staging kubeconfig at `loom-prod`, do not copy provider
+connections between environments, and do not reuse worker tokens across
+environments. Remote OLDLAB/Lux capacity attaches behind the environment's own
+worker token and service URLs; it does not own production control-plane state.
+
 ## At-a-glance: deploy a fresh cluster
 
 The fastest path uses the `loom cluster` CLI (shipped via #76). Install

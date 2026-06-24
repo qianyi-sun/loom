@@ -16,11 +16,14 @@
     {% import "_env.j2" as e %}
     {{ e.env_block("control-plane", schema) }}
 -#}
-{%- macro env_block(service, schema, skip_names=()) -%}
+{%- macro env_block(service, schema, skip_names=(), override_values={}) -%}
 env:
 {% for entry in schema.service_config_for(service) %}
 {% if entry.name not in skip_names %}
-{% if entry.secret is not none %}
+{% if entry.name in override_values %}
+  - name: {{ entry.env_var_for(service) }}
+    value: {{ override_values[entry.name] | string | tojson }}
+{% elif entry.secret is not none %}
   - name: {{ entry.env_var_for(service) }}
     valueFrom:
       secretKeyRef:

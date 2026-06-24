@@ -1,0 +1,120 @@
+name: deploy-environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment."
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      image_tag:
+        description: "Already-built Loom image tag or digest suffix to deploy."
+        required: true
+        type: string
+      dry_run:
+        description: "Render and audit only; do not apply."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-development:
+    name: Deploy development
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.environment == 'development' &&
+        github.ref == 'refs/heads/dev'
+      }}
+    runs-on: ubuntu-latest
+    environment:
+      name: development
+    env:
+      LOOM_KUBECONFIG_B64: ${{ secrets.LOOM_KUBECONFIG_B64 }}
+      LOOM_CLUSTER_CONFIG_B64: ${{ secrets.LOOM_CLUSTER_CONFIG_B64 }}
+      LOOM_DEPLOY_TOKEN: ${{ secrets.LOOM_DEPLOY_TOKEN }}
+      LOOM_DEPLOY_ENVIRONMENT: development
+      LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
+      LOOM_DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Deploy development
+        run: bash scripts/ops/deploy_environment.sh
+
+  deploy-staging:
+    name: Deploy staging
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.environment == 'staging' &&
+        github.ref == 'refs/heads/dev'
+      }}
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+    env:
+      LOOM_KUBECONFIG_B64: ${{ secrets.LOOM_KUBECONFIG_B64 }}
+      LOOM_CLUSTER_CONFIG_B64: ${{ secrets.LOOM_CLUSTER_CONFIG_B64 }}
+      LOOM_DEPLOY_TOKEN: ${{ secrets.LOOM_DEPLOY_TOKEN }}
+      LOOM_DEPLOY_ENVIRONMENT: staging
+      LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
+      LOOM_DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Deploy staging
+        run: bash scripts/ops/deploy_environment.sh
+
+  deploy-production:
+    name: Deploy production
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.environment == 'production' &&
+        (
+          github.ref == 'refs/heads/main' ||
+          startsWith(github.ref, 'refs/tags/release-')
+        )
+      }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      LOOM_KUBECONFIG_B64: ${{ secrets.LOOM_KUBECONFIG_B64 }}
+      LOOM_CLUSTER_CONFIG_B64: ${{ secrets.LOOM_CLUSTER_CONFIG_B64 }}
+      LOOM_DEPLOY_TOKEN: ${{ secrets.LOOM_DEPLOY_TOKEN }}
+      LOOM_DEPLOY_ENVIRONMENT: production
+      LOOM_IMAGE_TAG: ${{ inputs.image_tag }}
+      LOOM_DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Deploy production
+        run: bash scripts/ops/deploy_environment.sh

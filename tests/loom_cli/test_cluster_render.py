@@ -504,6 +504,27 @@ def test_render_worker_max_concurrent_schema_default() -> None:
     assert concurrent_entries[0]["value"] == "16"
 
 
+def test_render_can_override_service_object_buckets() -> None:
+    """Environment-specific cluster configs must not share artifact or
+    trajectory buckets by accident when they use the same object-store
+    endpoint.
+    """
+    cfg = ClusterConfig(
+        trajectories_bucket="loom-prod-trajectories",
+        artifacts_bucket="loom-prod-artifacts",
+    )
+    docs = _load_docs(render_manifests(cfg))
+    service = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+    )
+    env = service["spec"]["template"]["spec"]["containers"][0]["env"]
+    by_name = {entry["name"]: entry["value"] for entry in env if "value" in entry}
+    assert by_name["LOOM_SVC_TRAJECTORIES_BUCKET"] == "loom-prod-trajectories"
+    assert by_name["LOOM_SVC_ARTIFACTS_BUCKET"] == "loom-prod-artifacts"
+
+
 def test_render_uses_strict_undefined_so_missing_var_fails_loudly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -148,7 +148,7 @@ jobs:
         if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           uv run pytest \
-            tests/unit tests/contract tests/property tests/loom_cli \
+            tests/unit tests/contract tests/property tests/loom_cli tests/ops \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
