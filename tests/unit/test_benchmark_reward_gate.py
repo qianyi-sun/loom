@@ -352,7 +352,7 @@ def test_cli_reports_api_errors_without_traceback(monkeypatch, capsys) -> None:
     gate = _load_module()
 
     def raise_unauthorized(_req, *, timeout):
-        assert timeout == 30
+        assert timeout == 120
         raise HTTPError(
             url="https://loom.example/api/v1/benchmarks",
             code=401,
@@ -381,14 +381,84 @@ def test_cli_reports_api_errors_without_traceback(monkeypatch, capsys) -> None:
     assert "Traceback" not in captured.err
 
 
+def test_cli_reports_timeout_errors_without_traceback(monkeypatch, capsys) -> None:
+    gate = _load_module()
+
+    def raise_timeout(_req, *, timeout):
+        assert timeout == 120
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(gate, "urlopen", raise_timeout)
+
+    exit_code = gate.main(
+        [
+            "readiness",
+            "--server-url",
+            "https://loom.example",
+            "--token",
+            "loom_api_test",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "api request failed" in captured.err
+    assert "network timeout" in captured.err
+    assert "read timed out" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_accepts_custom_request_timeout(monkeypatch) -> None:
+    gate = _load_module()
+    seen_timeouts: list[float] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b'{"items":[]}'
+
+    def capture_timeout(_req, *, timeout):
+        seen_timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(gate, "urlopen", capture_timeout)
+
+    exit_code = gate.main(
+        [
+            "readiness",
+            "--server-url",
+            "https://loom.example",
+            "--token",
+            "loom_api_test",
+            "--request-timeout",
+            "90",
+        ],
+    )
+
+    assert exit_code == 1
+    assert seen_timeouts == [90.0]
+
+
 def test_readiness_cli_checks_full_user_visible_catalog(monkeypatch) -> None:
     gate = _load_module()
     paths: list[str] = []
 
     class FakeApiClient:
-        def __init__(self, server_url: str, token: str) -> None:
+        def __init__(
+            self,
+            server_url: str,
+            token: str,
+            *,
+            timeout: float,
+        ) -> None:
             assert server_url == "https://loom.example"
             assert token == "loom_api_test"
+            assert timeout == 120.0
 
         def get_json(self, path: str):
             paths.append(path)
@@ -424,9 +494,16 @@ def test_sweep_cli_fetches_batches_trials_and_task_counts(monkeypatch) -> None:
     post_calls: list[tuple[str, dict]] = []
 
     class FakeApiClient:
-        def __init__(self, server_url: str, token: str) -> None:
+        def __init__(
+            self,
+            server_url: str,
+            token: str,
+            *,
+            timeout: float,
+        ) -> None:
             assert server_url == "https://loom.example"
             assert token == "loom_api_test"
+            assert timeout == 120.0
 
         def get_json(self, path: str):
             get_paths.append(path)

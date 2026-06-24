@@ -81,9 +81,10 @@ class ApiError(RuntimeError):
 
 
 class ApiClient:
-    def __init__(self, server_url: str, token: str) -> None:
+    def __init__(self, server_url: str, token: str, *, timeout: float = 120.0) -> None:
         self.server_url = server_url.rstrip("/")
         self.token = token
+        self.timeout = timeout
 
     def get_json(self, path: str) -> dict[str, Any]:
         req = Request(
@@ -94,11 +95,13 @@ class ApiClient:
             },
         )
         try:
-            with urlopen(req, timeout=30) as response:
+            with urlopen(req, timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = _http_error_detail(exc)
             raise ApiError(f"HTTP {exc.code} {exc.reason}: {detail}") from exc
+        except TimeoutError as exc:
+            raise ApiError(f"network timeout: {exc}") from exc
         except URLError as exc:
             raise ApiError(f"network error: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
@@ -117,11 +120,13 @@ class ApiClient:
             method="POST",
         )
         try:
-            with urlopen(req, timeout=30) as response:
+            with urlopen(req, timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = _http_error_detail(exc)
             raise ApiError(f"HTTP {exc.code} {exc.reason}: {detail}") from exc
+        except TimeoutError as exc:
+            raise ApiError(f"network timeout: {exc}") from exc
         except URLError as exc:
             raise ApiError(f"network error: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
@@ -453,8 +458,22 @@ def _api_page_limit(value: str) -> int:
     return limit
 
 
+def _request_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if timeout <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return timeout
+
+
 def _run_readiness(args: argparse.Namespace) -> int:
-    client = ApiClient(args.server_url, _read_token(args.token))
+    client = ApiClient(
+        args.server_url,
+        _read_token(args.token),
+        timeout=args.request_timeout,
+    )
     payload = client.get_json(
         "/api/v1/benchmarks?"
         + urlencode({"limit": args.limit, "include_empty": "true"}),
@@ -463,14 +482,22 @@ def _run_readiness(args: argparse.Namespace) -> int:
 
 
 def _run_batch(args: argparse.Namespace) -> int:
-    client = ApiClient(args.server_url, _read_token(args.token))
+    client = ApiClient(
+        args.server_url,
+        _read_token(args.token),
+        timeout=args.request_timeout,
+    )
     batch = client.get_json(f"/api/v1/batches/{args.batch_id}")
     trials = collect_batch_trials(client, args.batch_id, page_limit=args.limit)
     return _print_results(check_batch_rewards(batch=batch, trials=trials))
 
 
 def _run_sweep(args: argparse.Namespace) -> int:
-    client = ApiClient(args.server_url, _read_token(args.token))
+    client = ApiClient(
+        args.server_url,
+        _read_token(args.token),
+        timeout=args.request_timeout,
+    )
     expected_benchmarks = (
         list(args.expected_benchmark)
         if args.expected_benchmark
@@ -517,6 +544,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=200,
             help="API page size, 1-200.",
         )
+        p.add_argument(
+            "--request-timeout",
+            type=_request_timeout,
+            default=120.0,
+            help="Per-request timeout in seconds.",
+        )
         if command == "batch":
             p.add_argument("--batch-id", required=True)
             p.set_defaults(func=_run_batch)
@@ -530,6 +563,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=_api_page_limit,
         default=200,
         help="API page size for trial pagination, 1-200.",
+    )
+    sweep.add_argument(
+        "--request-timeout",
+        type=_request_timeout,
+        default=120.0,
+        help="Per-request timeout in seconds.",
     )
     sweep.add_argument(
         "--batch-id",
