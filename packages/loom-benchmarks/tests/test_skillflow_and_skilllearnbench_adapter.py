@@ -203,6 +203,40 @@ def test_skillflow_uses_environment_build_context_for_environment_assets(
     assert not (out_dir / "skills" / ".keep").exists()
 
 
+def test_skilllearnbench_uses_root_build_context_for_root_assets(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="enterprise-information-search",
+        task="enterprise-information-search-1",
+        copy_skills=False,
+    )
+    (bundle / "DATA").mkdir()
+    (bundle / "DATA" / "records.json").write_text("[]\n")
+    (bundle / "environment" / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\n"
+        "WORKDIR /root\n"
+        "COPY DATA /root/DATA\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+    inst = BenchmarkInstance(
+        instance_id="enterprise-information-search/enterprise-information-search-1",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out_dir / "task.toml").read_text()),
+    )
+
+    assert cfg.environment.dockerfile.as_posix() == "environment/Dockerfile"
+    assert cfg.environment.docker_build_context.as_posix() == "."
+    assert (out_dir / "DATA" / "records.json").read_text() == "[]\n"
+
+
 def test_skillflow_rewrites_unpublished_harbor_base_image(
     tmp_path: Path,
 ) -> None:

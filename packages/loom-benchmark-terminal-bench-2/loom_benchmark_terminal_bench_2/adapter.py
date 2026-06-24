@@ -398,23 +398,89 @@ class TerminalBench2Adapter:
             shutil.copy2(run_tests, staged / "run-tests.sh")
 
     def _copy_solution(self, raw: dict[str, Any], out_dir: Path) -> None:
-        """Copy TB-2's reference solution when upstream ships one.
+        """Stage TB-2's reference solution when upstream ships one.
 
-        Loom's oracle agent expects `solution/solve.sh`. TB-2 names the
-        same reference script `solution.sh` at the task root. Keeping this
-        mapping in the adapter gives operators a deterministic baseline
-        smoke without changing model-backed agent behavior.
+        Loom's generic oracle treats a non-zero `solve.sh` exit as an
+        agent failure. TB-2's oracle agent instead sends reference commands
+        into a terminal and lets the verifier decide the reward. The wrapper
+        here preserves that benchmark contract by best-effort executing the
+        reference solution and always handing control to the verifier.
         """
         import shutil
 
-        src = Path(raw["__source_path"]) / "solution.sh"
-        if not src.is_file() or src.is_symlink():
+        src_dir = Path(raw["__source_path"])
+        sh_src = src_dir / "solution.sh"
+        yaml_src = src_dir / "solution.yaml"
+        if (
+            (not sh_src.is_file() or sh_src.is_symlink())
+            and (not yaml_src.is_file() or yaml_src.is_symlink())
+        ):
             return
+
         solution_dir = out_dir / "solution"
         solution_dir.mkdir(parents=True, exist_ok=True)
+
+        if sh_src.is_file() and not sh_src.is_symlink():
+            reference = solution_dir / "reference.sh"
+            shutil.copy2(sh_src, reference)
+            reference.chmod(reference.stat().st_mode | 0o755)
+            body = self._render_reference_shell_wrapper()
+        else:
+            shutil.copy2(yaml_src, solution_dir / "reference.yaml")
+            body = self._render_solution_yaml_script(yaml_src)
+
         dst = solution_dir / "solve.sh"
-        shutil.copy2(src, dst)
+        dst.write_text(body)
         dst.chmod(dst.stat().st_mode | 0o755)
+
+    @staticmethod
+    def _render_reference_shell_wrapper() -> str:
+        return "\n".join((
+            "#!/usr/bin/env bash",
+            "set +e",
+            'task_root="${LOOM_TASK_ROOT:-$(pwd)}"',
+            'bash "$task_root/solution/reference.sh"',
+            "exit 0",
+            "",
+        ))
+
+    @staticmethod
+    def _render_solution_yaml_script(solution_yaml: Path) -> str:
+        data = yaml.safe_load(solution_yaml.read_text()) or []
+        lines = [
+            "#!/usr/bin/env bash",
+            "set +e",
+            "# Generated from Terminal-Bench solution.yaml.",
+            "# Reference commands are best-effort; verifier output is the score.",
+            "",
+        ]
+        if not isinstance(data, list):
+            data = []
+        for index, raw_command in enumerate(data, start=1):
+            if not isinstance(raw_command, dict):
+                continue
+            command = raw_command.get("command")
+            if not isinstance(command, str) or not command.strip():
+                continue
+            lines.append(f"# command {index}")
+            lines.append(command.rstrip())
+            min_timeout = TerminalBench2Adapter._coerce_sleep_seconds(
+                raw_command.get("min_timeout_sec"),
+            )
+            if raw_command.get("block") is not True and min_timeout > 0:
+                lines.append(f"sleep {min_timeout:g}")
+            lines.append("")
+        lines.append("exit 0")
+        lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _coerce_sleep_seconds(value: object) -> float:
+        if isinstance(value, bool):
+            return 0.0
+        if isinstance(value, (int, float)):
+            return max(float(value), 0.0)
+        return 0.0
 
     def _write_verifier_shim(self, out_dir: Path) -> None:
         """Install the bundled verifier_shim.sh as verifier/run.sh —

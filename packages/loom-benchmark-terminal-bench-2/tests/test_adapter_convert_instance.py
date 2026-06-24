@@ -138,7 +138,69 @@ def test_convert_copies_reference_solution_for_oracle_smoke(
     solve = out / "solution" / "solve.sh"
     assert solve.exists()
     assert solve.stat().st_mode & 0o111
-    assert "Hello, world!" in solve.read_text()
+    assert "reference.sh" in solve.read_text()
+    assert "Hello, world!" in (out / "solution" / "reference.sh").read_text()
+
+
+def test_convert_wraps_reference_solution_as_best_effort(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    staged = tmp_path / "tasks" / "nonzero-solution"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "solution.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo before-exit > reference-output.txt\n"
+        "exit 7\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+    completed = subprocess.run(
+        ["bash", str(out / "solution" / "solve.sh")],
+        cwd=out,
+        check=True,
+    )
+
+    assert completed.returncode == 0
+    assert (out / "reference-output.txt").read_text() == "before-exit\n"
+
+
+def test_convert_renders_solution_yaml_for_oracle_smoke(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    staged = tmp_path / "tasks" / "yaml-solution"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "solution.sh").unlink()
+    (staged / "solution.yaml").write_text(
+        "- command: \"printf 'alpha\\\\n' > yaml-output.txt\"\n"
+        "  block: true\n"
+        "  append_enter: true\n"
+        "- command: \"printf 'beta\\\\n' >> yaml-output.txt\"\n"
+        "  min_timeout_sec: 0.01\n"
+        "  block: false\n"
+        "  append_enter: true\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+    completed = subprocess.run(
+        ["bash", str(out / "solution" / "solve.sh")],
+        cwd=out,
+        check=True,
+    )
+
+    assert completed.returncode == 0
+    assert (out / "yaml-output.txt").read_text() == "alpha\nbeta\n"
 
 
 def test_convert_writes_verifier_shim(

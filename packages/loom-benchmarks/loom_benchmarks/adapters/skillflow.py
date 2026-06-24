@@ -221,8 +221,16 @@ class SkillFlowAdapter(CatalogBackedAdapter):
         dockerfile = out_dir / "environment" / "Dockerfile"
         if not dockerfile.exists():
             return False
+        environment_dir = out_dir / "environment"
         for source in cls._dockerfile_copy_sources(dockerfile):
-            if source == "skills" or source.startswith("skills/"):
+            normalized = source.strip("\"'").removeprefix("./")
+            if normalized == "skills" or normalized.startswith("skills/"):
+                return True
+            if cls._copy_source_needs_root_context(
+                normalized,
+                out_dir=out_dir,
+                environment_dir=environment_dir,
+            ):
                 return True
         return False
 
@@ -236,6 +244,26 @@ class SkillFlowAdapter(CatalogBackedAdapter):
             while sources and sources[0].startswith("--"):
                 sources = sources[1:]
             yield from sources
+
+    @staticmethod
+    def _copy_source_needs_root_context(
+        source: str,
+        *,
+        out_dir: Path,
+        environment_dir: Path,
+    ) -> bool:
+        if (
+            not source
+            or source.startswith("/")
+            or "://" in source
+            or source.startswith("$")
+        ):
+            return False
+        env_matches = list(environment_dir.glob(source))
+        if env_matches:
+            return False
+        root_matches = list(out_dir.glob(source))
+        return bool(root_matches)
 
     def _write_loom_task_toml(
         self,

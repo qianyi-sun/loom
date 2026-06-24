@@ -46,6 +46,13 @@ uses a script verifier at `/app/verifier/run.sh` that executes upstream
 `run-tests.sh` with `bash` and emits Loom `VerifierResult` JSON through
 `LOOM_VERIFIER_OUTPUT`.
 
+For deterministic oracle smokes, the adapter stages upstream reference
+solutions under `solution/`. TB-2 tasks may ship either `solution.sh` or
+`solution.yaml`; Loom wraps both into `solution/solve.sh` so the generic oracle
+can run them. The wrapper is best-effort and exits `0`, matching upstream
+Terminal-Bench semantics where the verifier, not the reference command exit
+code, determines the task reward.
+
 Three pinned tasks require auxiliary services. Their compose side services are
 represented as `environment.sidecars` and are started by Docker-backed workers
 on the same per-trial network as the primary sandbox container:
