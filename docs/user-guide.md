@@ -691,20 +691,24 @@ plus operator-oriented `loom datasets list --remote`, `loom datasets audit`,
 and `loom datasets sync-config --dry-run` snippets that use token and database
 environment references instead of raw secrets.
 
-After a supported-benchmark acceptance batch finishes, operators can verify the
-reward contract from the public API:
+After the supported-benchmark acceptance batch or batches finish, operators can
+verify the v1.0 reward contract from the public API:
 
 ```bash
-python scripts/benchmark_reward_gate.py batch \
+python scripts/benchmark_reward_gate.py sweep \
   --server-url "$LOOM_SERVER_URL" \
   --token env:LOOM_API_TOKEN \
   --batch-id "$BATCH_ID"
 ```
 
-This gate checks that the batch is terminal, fan-out produced the expected
-number of trials, and every succeeded trial has a numeric reward. It treats
+Repeat `--batch-id` when the acceptance run uses separate batches for separate
+benchmarks. This gate checks that each batch is terminal, fan-out produced the
+expected number of trials, and every v1.0-supported benchmark has distinct
+numeric-reward task coverage equal to `/api/v1/tasks/count`. It treats
 model-correctness scores such as `0` as valid verifier output, but fails
-missing rewards and benchmark-side verifier or environment failures.
+missing rewards, missing allowlist benchmark coverage, and benchmark-side
+verifier or environment failures. For a narrower diagnostic, add repeated
+`--expected-benchmark BENCHMARK_ID` arguments.
 
 For public-beta or release deployments, operators should provision the ready
 catalog with `loom datasets provision-public-beta-catalog` before inviting

@@ -231,6 +231,97 @@ def test_batch_reward_gate_flags_benchmark_side_failure_reasons() -> None:
     assert "benchmark-side" in results[0].detail
 
 
+def test_sweep_gate_requires_distinct_task_coverage_per_benchmark() -> None:
+    gate = _load_module()
+
+    results = gate.check_reward_sweep(
+        batches=[
+            {
+                "id": "batch-1",
+                "state": "succeeded",
+                "expected_trial_count": 3,
+            },
+        ],
+        trials_by_batch={
+            "batch-1": [
+                {
+                    "id": "trial-1",
+                    "task_id": "mbpp/1",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 1.0,
+                },
+                {
+                    "id": "trial-2",
+                    "task_id": "mbpp/1",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 0.0,
+                },
+                {
+                    "id": "trial-3",
+                    "task_id": "gpqa/1",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 1.0,
+                },
+            ],
+        },
+        expected_benchmark_ids=["mbpp", "gpqa"],
+        expected_task_counts={"mbpp": 2, "gpqa": 1},
+    )
+
+    assert [r.status for r in results] == ["fail"]
+    assert results[0].check_id == "benchmarks.v1_reward_sweep_complete"
+    assert "mbpp task coverage 1/2" in results[0].detail
+    assert "gpqa" not in results[0].detail
+
+
+def test_sweep_gate_passes_with_full_numeric_task_coverage() -> None:
+    gate = _load_module()
+
+    results = gate.check_reward_sweep(
+        batches=[
+            {
+                "id": "batch-1",
+                "state": "succeeded",
+                "expected_trial_count": 3,
+            },
+        ],
+        trials_by_batch={
+            "batch-1": [
+                {
+                    "id": "trial-1",
+                    "task_id": "mbpp/1",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 1.0,
+                },
+                {
+                    "id": "trial-2",
+                    "task_id": "mbpp/2",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 0.0,
+                },
+                {
+                    "id": "trial-3",
+                    "task_id": "gpqa/1",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 0.0,
+                },
+            ],
+        },
+        expected_benchmark_ids=["mbpp", "gpqa"],
+        expected_task_counts={"mbpp": 2, "gpqa": 1},
+    )
+
+    assert [r.status for r in results] == ["pass"]
+    assert "2 benchmarks covered" in results[0].detail
+    assert "3 distinct tasks" in results[0].detail
+
+
 def test_collect_paginated_trials_follows_next_cursor() -> None:
     gate = _load_module()
 
@@ -323,3 +414,77 @@ def test_readiness_cli_checks_full_user_visible_catalog(monkeypatch) -> None:
 
     assert exit_code == 0
     assert paths == ["/api/v1/benchmarks?limit=200&include_empty=true"]
+
+
+def test_sweep_cli_fetches_batches_trials_and_task_counts(monkeypatch) -> None:
+    gate = _load_module()
+    get_paths: list[str] = []
+    post_calls: list[tuple[str, dict]] = []
+
+    class FakeApiClient:
+        def __init__(self, server_url: str, token: str) -> None:
+            assert server_url == "https://loom.example"
+            assert token == "loom_api_test"
+
+        def get_json(self, path: str):
+            get_paths.append(path)
+            if path == "/api/v1/batches/batch-1":
+                return {
+                    "id": "batch-1",
+                    "state": "succeeded",
+                    "expected_trial_count": 2,
+                }
+            if path == "/api/v1/trials?batch_id=batch-1&limit=200":
+                return {
+                    "items": [
+                        {
+                            "id": "trial-1",
+                            "task_id": "mbpp/1",
+                            "state": "succeeded",
+                            "failure_reason": None,
+                            "aggregate_reward": 1.0,
+                        },
+                        {
+                            "id": "trial-2",
+                            "task_id": "gpqa/1",
+                            "state": "succeeded",
+                            "failure_reason": None,
+                            "aggregate_reward": 0.0,
+                        },
+                    ],
+                    "next_cursor": None,
+                }
+            raise AssertionError(f"unexpected GET {path}")
+
+        def post_json(self, path: str, payload: dict):
+            post_calls.append((path, payload))
+            benchmark_id = payload["task_filter"]["benchmark_id"]
+            return {"count": {"mbpp": 1, "gpqa": 1}[benchmark_id]}
+
+    monkeypatch.setattr(gate, "ApiClient", FakeApiClient)
+
+    exit_code = gate.main(
+        [
+            "sweep",
+            "--server-url",
+            "https://loom.example",
+            "--token",
+            "loom_api_test",
+            "--batch-id",
+            "batch-1",
+            "--expected-benchmark",
+            "mbpp",
+            "--expected-benchmark",
+            "gpqa",
+        ],
+    )
+
+    assert exit_code == 0
+    assert get_paths == [
+        "/api/v1/batches/batch-1",
+        "/api/v1/trials?batch_id=batch-1&limit=200",
+    ]
+    assert post_calls == [
+        ("/api/v1/tasks/count", {"task_filter": {"benchmark_id": "mbpp"}}),
+        ("/api/v1/tasks/count", {"task_filter": {"benchmark_id": "gpqa"}}),
+    ]

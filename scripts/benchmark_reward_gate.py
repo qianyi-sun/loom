@@ -19,6 +19,26 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+try:
+    from loom.benchmark_readiness import V1_SUPPORTED_BENCHMARK_IDS
+except ModuleNotFoundError:  # pragma: no cover - direct script fallback.
+    V1_SUPPORTED_BENCHMARK_IDS = frozenset(
+        {
+            "aime-24",
+            "aime-25",
+            "humaneval",
+            "livecodebench",
+            "mbpp",
+            "mmlu-pro",
+            "hendrycks-math",
+            "gpqa",
+            "skillflow",
+            "skilllearnbench",
+            "swe-bench-verified",
+            "terminal-bench-2",
+        }
+    )
+
 TERMINAL_BATCH_STATES = frozenset({
     "finished",
     "succeeded",
@@ -52,6 +72,9 @@ class JsonClient(Protocol):
     def get_json(self, path: str) -> dict[str, Any]:
         ...
 
+    def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        ...
+
 
 class ApiError(RuntimeError):
     """Raised when the public API cannot return the JSON payload we need."""
@@ -69,6 +92,29 @@ class ApiClient:
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.token}",
             },
+        )
+        try:
+            with urlopen(req, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = _http_error_detail(exc)
+            raise ApiError(f"HTTP {exc.code} {exc.reason}: {detail}") from exc
+        except URLError as exc:
+            raise ApiError(f"network error: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise ApiError(f"invalid JSON response: {exc}") from exc
+
+    def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        req = Request(
+            self.server_url + path,
+            data=body,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
         )
         try:
             with urlopen(req, timeout=30) as response:
@@ -234,6 +280,107 @@ def check_batch_rewards(
     ]
 
 
+def _trial_benchmark_id(trial: dict[str, Any]) -> str | None:
+    benchmark_id = trial.get("benchmark_id")
+    if isinstance(benchmark_id, str) and benchmark_id:
+        return benchmark_id
+    task_id = trial.get("task_id")
+    if not isinstance(task_id, str) or "/" not in task_id:
+        return None
+    return task_id.split("/", 1)[0]
+
+
+def _numeric_reward_task_coverage(
+    trials_by_batch: dict[str, list[dict[str, Any]]],
+) -> dict[str, set[str]]:
+    coverage: dict[str, set[str]] = {}
+    for trials in trials_by_batch.values():
+        for trial in trials:
+            if trial.get("state") != "succeeded":
+                continue
+            if not _is_numeric_reward(trial.get("aggregate_reward")):
+                continue
+            task_id = trial.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            benchmark_id = _trial_benchmark_id(trial)
+            if not benchmark_id:
+                continue
+            coverage.setdefault(benchmark_id, set()).add(task_id)
+    return coverage
+
+
+def check_reward_sweep(
+    *,
+    batches: list[dict[str, Any]],
+    trials_by_batch: dict[str, list[dict[str, Any]]],
+    expected_benchmark_ids: list[str],
+    expected_task_counts: dict[str, int] | None = None,
+) -> list[CheckResult]:
+    failures: list[str] = []
+    for batch in batches:
+        batch_id = str(batch.get("id") or "<unknown>")
+        batch_results = check_batch_rewards(
+            batch=batch,
+            trials=trials_by_batch.get(batch_id, []),
+        )
+        for result in batch_results:
+            if result.status != "pass":
+                failures.append(f"{batch_id}: {result.detail}")
+
+    coverage = _numeric_reward_task_coverage(trials_by_batch)
+    for benchmark_id in expected_benchmark_ids:
+        covered_tasks = coverage.get(benchmark_id, set())
+        expected_count = (
+            expected_task_counts.get(benchmark_id)
+            if expected_task_counts is not None
+            else None
+        )
+        if expected_count is None:
+            if not covered_tasks:
+                failures.append(f"{benchmark_id} missing numeric reward evidence")
+            continue
+        if expected_count <= 0:
+            failures.append(f"{benchmark_id} has no runnable tasks according to /tasks/count")
+        elif len(covered_tasks) < expected_count:
+            failures.append(
+                f"{benchmark_id} task coverage {len(covered_tasks)}/{expected_count}"
+            )
+
+    if failures:
+        detail = "; ".join(failures[:25])
+        if len(failures) > 25:
+            detail += f"; ... +{len(failures) - 25} more"
+        return [
+            CheckResult(
+                check_id="benchmarks.v1_reward_sweep_complete",
+                status="fail",
+                detail=detail,
+                remediation=(
+                    "Run or repair supported-benchmark acceptance batches until "
+                    "every v1.0 benchmark has numeric reward evidence for every "
+                    "registered runnable task."
+                ),
+            )
+        ]
+
+    covered_task_total = sum(
+        len(coverage.get(benchmark_id, set()))
+        for benchmark_id in expected_benchmark_ids
+    )
+    return [
+        CheckResult(
+            check_id="benchmarks.v1_reward_sweep_complete",
+            status="pass",
+            detail=(
+                f"{len(expected_benchmark_ids)} benchmarks covered; "
+                f"{covered_task_total} distinct tasks have numeric rewards"
+            ),
+            remediation="",
+        )
+    ]
+
+
 def collect_batch_trials(
     client: JsonClient,
     batch_id: str,
@@ -252,6 +399,25 @@ def collect_batch_trials(
         if not next_cursor:
             return trials
         cursor = str(next_cursor)
+
+
+def collect_task_counts(
+    client: JsonClient,
+    benchmark_ids: list[str],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for benchmark_id in benchmark_ids:
+        payload = client.post_json(
+            "/api/v1/tasks/count",
+            {"task_filter": {"benchmark_id": benchmark_id}},
+        )
+        count = payload.get("count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            raise ApiError(
+                f"/api/v1/tasks/count returned non-integer count for {benchmark_id}"
+            )
+        counts[benchmark_id] = count
+    return counts
 
 
 def _read_token(ref: str) -> str:
@@ -293,6 +459,39 @@ def _run_batch(args: argparse.Namespace) -> int:
     return _print_results(check_batch_rewards(batch=batch, trials=trials))
 
 
+def _run_sweep(args: argparse.Namespace) -> int:
+    client = ApiClient(args.server_url, _read_token(args.token))
+    expected_benchmarks = (
+        list(args.expected_benchmark)
+        if args.expected_benchmark
+        else sorted(V1_SUPPORTED_BENCHMARK_IDS)
+    )
+    batches: list[dict[str, Any]] = []
+    trials_by_batch: dict[str, list[dict[str, Any]]] = {}
+    for batch_id in args.batch_id:
+        batch = client.get_json(f"/api/v1/batches/{batch_id}")
+        resolved_batch_id = str(batch.get("id") or batch_id)
+        batches.append(batch)
+        trials_by_batch[resolved_batch_id] = collect_batch_trials(
+            client,
+            batch_id,
+            page_limit=args.limit,
+        )
+    expected_task_counts = (
+        None
+        if args.skip_task_counts
+        else collect_task_counts(client, expected_benchmarks)
+    )
+    return _print_results(
+        check_reward_sweep(
+            batches=batches,
+            trials_by_batch=trials_by_batch,
+            expected_benchmark_ids=expected_benchmarks,
+            expected_task_counts=expected_task_counts,
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Check benchmark readiness and reward-production acceptance.",
@@ -308,6 +507,30 @@ def build_parser() -> argparse.ArgumentParser:
             p.set_defaults(func=_run_batch)
         else:
             p.set_defaults(func=_run_readiness)
+    sweep = sub.add_parser("sweep")
+    sweep.add_argument("--server-url", required=True)
+    sweep.add_argument("--token", required=True, help="Bearer token, env:NAME, or file:PATH.")
+    sweep.add_argument("--limit", type=int, default=200)
+    sweep.add_argument(
+        "--batch-id",
+        action="append",
+        required=True,
+        help="Acceptance batch id. Repeat for one batch per benchmark.",
+    )
+    sweep.add_argument(
+        "--expected-benchmark",
+        action="append",
+        help=(
+            "Expected benchmark id. Repeat to override the default v1.0 "
+            "supported allowlist."
+        ),
+    )
+    sweep.add_argument(
+        "--skip-task-counts",
+        action="store_true",
+        help="Only require at least one numeric-reward task per expected benchmark.",
+    )
+    sweep.set_defaults(func=_run_sweep)
     return parser
 
 

@@ -1348,20 +1348,26 @@ v1.0 allowlist; they remain visible for transparency, are not selectable, and
 are skipped by the supported-benchmark readiness gate until a support issue
 adds them to scope.
 
-For release acceptance, submit a supported-benchmark batch with the intended
-production runner/provider mix and wait for it to finish. Then verify every
-trial reached evaluator output:
+For release acceptance, submit supported-benchmark batch work with the intended
+production runner/provider mix and wait for every batch to finish. One batch may
+cover the whole v1.0 allowlist, or operators may run one batch per benchmark.
+Then verify that every v1.0-supported benchmark has numeric-reward coverage for
+every currently runnable task:
 
 ```bash
-python scripts/benchmark_reward_gate.py batch \
+python scripts/benchmark_reward_gate.py sweep \
   --server-url "$PUBLIC_SERVER_URL" \
   --token env:TEAM_A_TOKEN \
   --batch-id "$SUPPORTED_BENCHMARK_ACCEPTANCE_BATCH_ID"
 ```
 
-The batch gate treats numeric rewards, including `0`, as successful benchmark
-evaluation. It fails on missing rewards, benchmark-side verifier errors,
-task-image/environment failures, and incomplete trial fan-out.
+Repeat `--batch-id` when the acceptance sweep uses separate batches. The sweep
+gate queries `/api/v1/tasks/count` for each v1.0-supported benchmark, groups
+trials by benchmark/task id, and requires distinct numeric-reward task coverage
+to match the runnable task count. Numeric rewards, including `0`, count as
+successful benchmark evaluation. Missing rewards, benchmark-side verifier
+errors, task-image/environment failures, incomplete fan-out, or missing
+allowlist benchmark coverage fail the gate.
 
 ### Checklist
 

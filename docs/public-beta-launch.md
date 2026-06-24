@@ -69,10 +69,11 @@ Attach these to the release issue or release PR:
   `/api/v1/benchmarks` evidence with at least one runnable entry.
 - Benchmark reward acceptance transcript from
   `scripts/benchmark_reward_gate.py`: the readiness gate must pass against the
-  user-visible catalog, and every trial in the supported-benchmark acceptance
-  batch must finish with a numeric reward. A model answer scored `0` is a valid
-  evaluator result; a missing reward, verifier error, task-image failure, or
-  benchmark-side timeout is not.
+  user-visible catalog, and the supported-benchmark sweep gate must prove every
+  v1.0-supported benchmark has numeric-reward coverage for every currently
+  runnable task. A model answer scored `0` is a valid evaluator result; missing
+  reward, verifier error, task-image failure, benchmark-side timeout, or missing
+  allowlist coverage is not.
 - If a remote-worker pool is attached, private tunnel evidence from
   `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
   Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the
@@ -147,14 +148,14 @@ fake secrets, signed object-store URLs, and internal service URLs from its
 Markdown and JSON output.
 
 Run the benchmark reward gate after catalog provisioning and again after the
-supported-benchmark acceptance batch reaches a terminal state:
+supported-benchmark acceptance batch or batches reach a terminal state:
 
 ```bash
 python scripts/benchmark_reward_gate.py readiness \
   --server-url https://loom.example.com \
   --token env:TEAM_A_TOKEN
 
-python scripts/benchmark_reward_gate.py batch \
+python scripts/benchmark_reward_gate.py sweep \
   --server-url https://loom.example.com \
   --token env:TEAM_A_TOKEN \
   --batch-id "$SUPPORTED_BENCHMARK_ACCEPTANCE_BATCH_ID"
@@ -174,6 +175,13 @@ Rows marked `Not in v1.0` with `blocker_reason="not_v1_supported"` are built-in
 catalog benchmarks outside the current allowlist; they stay visible,
 unselectable, excluded from supported task counts, and skipped by this
 readiness gate until a support issue promotes them into scope.
+
+The sweep command defaults to the v1.0 benchmark allowlist and calls
+`/api/v1/tasks/count` for each benchmark. It groups all trials from the supplied
+batch ids by benchmark and distinct task id, then requires every runnable task
+to have a succeeded trial with a numeric aggregate reward. Repeat `--batch-id`
+for one-batch-per-benchmark validation, or pass `--expected-benchmark` to narrow
+an intermediate diagnostic run.
 
 ## Remote Worker Tunnel Gate
 
