@@ -93,6 +93,38 @@ def test_convert_stages_build_context_without_exposing_it_to_workspace(
     assert not (out / "protected").exists()
 
 
+def test_convert_rewrites_dockerfile_heredoc_copy_for_legacy_builder(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    staged = tmp_path / "tasks" / "heredoc-copy"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "Dockerfile").write_text(
+        "FROM ghcr.io/laude-institute/t-bench/python-3-13:latest\n"
+        "WORKDIR /app\n"
+        "COPY <<EOT /app/data.json\n"
+        '{"answer": 42}\n'
+        "EOT\n"
+        "RUN test -f /app/data.json\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    staged_context = out / ".loom-build" / "client"
+    dockerfile = (staged_context / "Dockerfile").read_text()
+    assert "COPY <<EOT" not in dockerfile
+    assert "COPY .loom-heredocs/" in dockerfile
+    assert "/app/data.json" in dockerfile
+    heredocs = list((staged_context / ".loom-heredocs").iterdir())
+    assert len(heredocs) == 1
+    assert heredocs[0].read_text() == '{"answer": 42}\n'
+
+
 def test_convert_task_toml_id_escapes_special_chars(
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:
@@ -201,6 +233,48 @@ def test_convert_renders_solution_yaml_for_oracle_smoke(
 
     assert completed.returncode == 0
     assert (out / "yaml-output.txt").read_text() == "alpha\nbeta\n"
+
+
+def test_convert_renders_python_repl_solution_yaml_for_oracle_smoke(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    staged = tmp_path / "tasks" / "python-repl-solution"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "solution.sh").unlink()
+    (staged / "solution.yaml").write_text(
+        "- command: python\n"
+        "  block: false\n"
+        "  min_timeout_sec: 0.01\n"
+        "  append_enter: true\n"
+        "- command: from pathlib import Path\n"
+        "  block: false\n"
+        "  min_timeout_sec: 0.01\n"
+        "  append_enter: true\n"
+        "- command: Path('yaml-repl-output.txt').write_text('ok' + chr(10))\n"
+        "  block: false\n"
+        "  min_timeout_sec: 0.01\n"
+        "  append_enter: true\n"
+        "- command: quit()\n"
+        "  block: false\n"
+        "  min_timeout_sec: 0.01\n"
+        "  append_enter: true\n",
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+    completed = subprocess.run(
+        ["bash", str(out / "solution" / "solve.sh")],
+        cwd=out,
+        check=True,
+    )
+
+    assert completed.returncode == 0
+    assert (out / "yaml-repl-output.txt").read_text() == "ok\n"
 
 
 def test_convert_writes_verifier_shim(

@@ -308,7 +308,11 @@ At the pinned v0.1.1 SHA it enumerates 86 official tasks. Each task uses a
 build-only `.loom-build/client` Docker context and `workdir = "/app"`; the 3
 multi-service tasks (`security-vulhub-minio`, `simple-sheets-put`, and
 `simple-web-scraper`) declare `environment.sidecars` instead of falling back to
-a single-image approximation.
+a single-image approximation. The adapter also normalizes pinned TB-2
+compatibility edges: Dockerfile `COPY` heredocs are materialized into ordinary
+build-context files for docker-py legacy builds, and Python-REPL
+`solution.yaml` command groups are rendered as stdin scripts for oracle smoke
+runs.
 
 ## License metadata
 

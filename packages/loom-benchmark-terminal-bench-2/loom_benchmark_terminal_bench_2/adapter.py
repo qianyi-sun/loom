@@ -126,6 +126,9 @@ class TerminalBench2Adapter:
         rel_client_dockerfile = client_build.dockerfile.relative_to(
             client_build.context,
         )
+        self._rewrite_dockerfile_copy_heredocs(
+            client_context / rel_client_dockerfile,
+        )
 
         environment: dict[str, Any] = {
             "os": "linux",
@@ -232,6 +235,9 @@ class TerminalBench2Adapter:
             )
             rel_dockerfile = service_build.dockerfile.relative_to(
                 service_build.context,
+            )
+            self._rewrite_dockerfile_copy_heredocs(
+                sidecar_context / rel_dockerfile,
             )
             sidecar["dockerfile"] = (
                 Path(".loom-build") / "sidecars" / name / rel_dockerfile
@@ -366,6 +372,90 @@ class TerminalBench2Adapter:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(child, target)
 
+    @staticmethod
+    def _rewrite_dockerfile_copy_heredocs(dockerfile: Path) -> None:
+        """Materialize BuildKit COPY heredocs for docker-py legacy builds."""
+        if not dockerfile.is_file():
+            return
+        lines = dockerfile.read_text().splitlines(keepends=True)
+        rewritten: list[str] = []
+        heredoc_dir = dockerfile.parent / ".loom-heredocs"
+        changed = False
+        index = 0
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            parsed = TerminalBench2Adapter._parse_copy_heredoc_start(line)
+            if parsed is None:
+                rewritten.append(line)
+                i += 1
+                continue
+
+            marker, destination, flags = parsed
+            content: list[str] = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != marker:
+                content.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                rewritten.append(line)
+                rewritten.extend(content)
+                break
+
+            index += 1
+            changed = True
+            heredoc_dir.mkdir(parents=True, exist_ok=True)
+            filename = (
+                f"{index:03d}-"
+                f"{TerminalBench2Adapter._safe_heredoc_filename(destination)}"
+            )
+            (heredoc_dir / filename).write_text("".join(content))
+            replacement_parts = [
+                "COPY",
+                *flags,
+                f".loom-heredocs/{filename}",
+                destination,
+            ]
+            rewritten.append(" ".join(replacement_parts) + "\n")
+            i += 1
+
+        if changed:
+            dockerfile.write_text("".join(rewritten))
+
+    @staticmethod
+    def _parse_copy_heredoc_start(
+        line: str,
+    ) -> tuple[str, str, list[str]] | None:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            return None
+        parts = stripped.split()
+        if len(parts) < 3 or parts[0].upper() != "COPY":
+            return None
+        marker_index = next(
+            (i for i, part in enumerate(parts[1:], start=1) if part.startswith("<<")),
+            None,
+        )
+        if marker_index is None or marker_index + 1 >= len(parts):
+            return None
+        marker = parts[marker_index][2:]
+        if marker.startswith("-"):
+            marker = marker[1:]
+        marker = marker.strip("\"'")
+        if not marker:
+            return None
+        flags = parts[1:marker_index]
+        destination = parts[marker_index + 1]
+        return marker, destination, flags
+
+    @staticmethod
+    def _safe_heredoc_filename(destination: str) -> str:
+        safe = "".join(
+            char if char.isalnum() else "-"
+            for char in destination.strip("/").lower()
+        ).strip("-")
+        return safe or "payload"
+
     def _copy_tests(self, raw: dict[str, Any], out_dir: Path) -> None:
         """Stage TB-2's tests/ subtree + run-tests.sh under
         environment/tb2-tests/ so the shared workspace materializer uploads
@@ -456,11 +546,38 @@ class TerminalBench2Adapter:
         ]
         if not isinstance(data, list):
             data = []
-        for index, raw_command in enumerate(data, start=1):
+        index = 0
+        while index < len(data):
+            raw_command = data[index]
+            index += 1
             if not isinstance(raw_command, dict):
                 continue
             command = raw_command.get("command")
             if not isinstance(command, str) or not command.strip():
+                continue
+            if TerminalBench2Adapter._is_python_repl_command(command):
+                repl_lines: list[str] = []
+                while index < len(data):
+                    next_command = data[index]
+                    index += 1
+                    if not isinstance(next_command, dict):
+                        continue
+                    repl_command = next_command.get("command")
+                    if (
+                        not isinstance(repl_command, str)
+                        or not repl_command.strip()
+                    ):
+                        continue
+                    if TerminalBench2Adapter._is_python_repl_exit(
+                        repl_command,
+                    ):
+                        break
+                    repl_lines.append(repl_command.rstrip())
+                lines.append(f"# command {index}")
+                lines.append(f"{command.strip()} <<'PYTHON_REPL'")
+                lines.extend(repl_lines)
+                lines.append("PYTHON_REPL")
+                lines.append("")
                 continue
             lines.append(f"# command {index}")
             lines.append(command.rstrip())
@@ -473,6 +590,20 @@ class TerminalBench2Adapter:
         lines.append("exit 0")
         lines.append("")
         return "\n".join(lines)
+
+    @staticmethod
+    def _is_python_repl_command(command: str) -> bool:
+        parts = shlex.split(command.strip())
+        if not parts:
+            return False
+        executable = Path(parts[0]).name
+        if executable not in {"python", "python3"}:
+            return False
+        return len(parts) == 1 or parts[1:] == ["-i"]
+
+    @staticmethod
+    def _is_python_repl_exit(command: str) -> bool:
+        return command.strip() in {"quit()", "exit()"}
 
     @staticmethod
     def _coerce_sleep_seconds(value: object) -> float:

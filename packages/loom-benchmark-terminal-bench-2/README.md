@@ -40,7 +40,9 @@ instructions, tests, and Docker images use `/app` as the terminal workspace.
 The adapter stages each upstream Docker client build context under
 `.loom-build/client`, which service-mode workers use to build a deterministic
 task image without uploading build-only assets such as `protected/` into the
-agent workspace. It materializes the upstream `tests/` tree under
+agent workspace. BuildKit-style Dockerfile `COPY <<EOF ... EOF` heredocs are
+materialized into ordinary build-context files because the Docker-backed worker
+uses docker-py legacy builds. It materializes the upstream `tests/` tree under
 `/app/environment/tb2-tests`, sets `TEST_DIR` for the primary container, and
 uses a script verifier at `/app/verifier/run.sh` that executes upstream
 `run-tests.sh` with `bash` and emits Loom `VerifierResult` JSON through
@@ -49,7 +51,9 @@ uses a script verifier at `/app/verifier/run.sh` that executes upstream
 For deterministic oracle smokes, the adapter stages upstream reference
 solutions under `solution/`. TB-2 tasks may ship either `solution.sh` or
 `solution.yaml`; Loom wraps both into `solution/solve.sh` so the generic oracle
-can run them. The wrapper is best-effort and exits `0`, matching upstream
+can run them. YAML command sequences that open a Python REPL are converted into
+a single `python <<EOF` stdin script so REPL input is not misinterpreted as
+shell. The wrapper is best-effort and exits `0`, matching upstream
 Terminal-Bench semantics where the verifier, not the reference command exit
 code, determines the task reward.
 
