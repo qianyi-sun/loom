@@ -95,11 +95,19 @@ function ScopeButton({
 
 export default function RunLibrary(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { teams } = useAuth();
+  const auth = useAuth();
   const scope = scopeFromParams(searchParams);
   const teamId = searchParams.get("team_id") ?? "";
   const state = searchParams.get("state") ?? "";
   const artifactType = searchParams.get("artifact_type") ?? "";
+
+  const teamsQuery = useQuery({
+    queryKey: ["admin-teams", auth.isAdmin],
+    queryFn: () => api.listAdminTeams(),
+    enabled: auth.isAdmin,
+  });
+  const teamOptions = auth.isAdmin ? teamsQuery.data?.items ?? [] : auth.teams;
+  const selectedTeamKnown = teamOptions.some((team) => team.id === teamId);
 
   const query = useQuery({
     queryKey: ["run-library", scope, teamId, state, artifactType],
@@ -165,7 +173,10 @@ export default function RunLibrary(): JSX.Element {
               className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
             >
               <option value="">Current scope</option>
-              {teams.map((team) => (
+              {teamId && !selectedTeamKnown ? (
+                <option value={teamId}>{teamId}</option>
+              ) : null}
+              {teamOptions.map((team) => (
                 <option key={team.id} value={team.id}>
                   {team.name}
                 </option>

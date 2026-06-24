@@ -78,6 +78,10 @@ The top-level Run Library page provides:
 - Human-readable task, agent/model, status, score, cost, trial, artifact, and
   share-state columns.
 
+For platform-admin sessions, the team filter is populated from the fixed
+internal-team registry so admins can filter by any team name. Non-admin users
+only see teams returned by their session membership.
+
 The Run Library detail page groups artifacts into reports, trajectories,
 reusable outputs, logs/diagnostics, and raw/internal diagnostics. Shared
 artifacts expose Download, Copy URL, and Reuse actions. Blocked artifacts show

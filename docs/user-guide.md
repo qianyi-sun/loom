@@ -226,6 +226,8 @@ Use the SPA top-level **Run Library** page:
 - Owner-team labels show who ran the original work.
 - State, team, and artifact-type filters narrow the table without showing raw
   JSON payloads.
+- Platform admins can use the team filter with internal team names across the
+  whole platform; ordinary users see only their joined teams.
 
 Open a Library row to inspect task selection, agent/model config, trial rollup,
 provenance, and artifact groups. Safe shared artifacts expose Download, Copy

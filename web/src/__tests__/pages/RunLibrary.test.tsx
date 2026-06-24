@@ -90,7 +90,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function mockRunLibrary(): ReturnType<typeof vi.spyOn> {
+function mockRunLibrary({
+  platformAdmin = false,
+}: { platformAdmin?: boolean } = {}): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -101,17 +103,39 @@ function mockRunLibrary(): ReturnType<typeof vi.spyOn> {
             user: {
               id: "user-beta",
               email: "beta@example.com",
-              display_name: "Beta User",
-              is_platform_admin: false,
+              display_name: platformAdmin ? "Platform Admin" : "Beta User",
+              is_platform_admin: platformAdmin,
             },
             teams: [
               { id: "team-beta", name: "Beta Apps", role: "owner" },
             ],
             current_team: { id: "team-beta", name: "Beta Apps", role: "owner" },
-            role: "owner",
-            scopes: ["read:own", "submit"],
-            is_platform_admin: false,
+            role: platformAdmin ? "platform_admin" : "owner",
+            scopes: platformAdmin ? ["admin:platform"] : ["read:own", "submit"],
+            is_platform_admin: platformAdmin,
             csrf_token: "csrf-test",
+          }),
+        );
+      }
+      if (url.endsWith("/api/v1/admin/teams")) {
+        return Promise.resolve(
+          jsonResponse({
+            items: [
+              { id: "team-alpha", name: "Alpha Research" },
+              { id: "team-beta", name: "Beta Apps" },
+            ],
+          }),
+        );
+      }
+      if (
+        url.endsWith(
+          "/api/v1/run-library/batches?scope=all&team_id=team-alpha",
+        )
+      ) {
+        return Promise.resolve(
+          jsonResponse({
+            items: [sharedBatch],
+            next_cursor: null,
           }),
         );
       }
@@ -252,6 +276,33 @@ describe("RunLibrary", () => {
     expect(
       screen.getByRole("button", { name: "My team" }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("lets platform admins filter the run library by any internal team name", async () => {
+    const fetchMock = mockRunLibrary({ platformAdmin: true });
+    renderWithProviders(<RunLibrary />, {
+      route: "/library?scope=all&team_id=team-alpha",
+    });
+
+    expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    expect(screen.getByLabelText("Team")).toHaveValue("team-alpha");
+    expect(
+      await screen.findByRole("option", { name: "Alpha Research" }),
+    ).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/admin/teams",
+        expect.objectContaining({ credentials: "include" }),
+      );
+      const runLibraryRequest = fetchMock.mock.calls.find(([input]) =>
+        String(input).includes("/api/v1/run-library/batches"),
+      );
+      expect(runLibraryRequest).toBeTruthy();
+      const url = new URL(String(runLibraryRequest![0]), "http://localhost");
+      expect(url.searchParams.get("scope")).toBe("all");
+      expect(url.searchParams.get("team_id")).toBe("team-alpha");
+    });
   });
 });
 
