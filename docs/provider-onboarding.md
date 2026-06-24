@@ -12,6 +12,11 @@ owners create it, Loom encrypts the API key at rest, the LLM Gateway uses it
 server-side, and users select the connection plus model id when creating a
 batch.
 
+Loom v1.0 does not host model inference for teams. The deployed platform runs
+the evaluation, gateway, scheduling, storage, and monitoring surfaces; the
+model-serving endpoint is supplied and operated by the team, whether it is a
+third-party API or a self-hosted OpenAI-compatible service such as vLLM.
+
 ## Hosted Third-Party API
 
 Use this path for OpenAI-compatible hosts such as Together, Fireworks, vLLM
@@ -96,6 +101,10 @@ Use this path when the user owns a checkpoint or Hugging Face model and a
 Slurm-accessible GPU cluster. Loom does not need SSH access to the cluster for
 normal inference calls. The cluster service only needs to expose an
 OpenAI-compatible HTTP endpoint that the Loom server can reach.
+
+The Slurm/vLLM bundle generator is a user-side convenience for starting and
+registering the team's own inference service. It does not make Loom the model
+host or operator of the GPU job.
 
 ### Prerequisites
 

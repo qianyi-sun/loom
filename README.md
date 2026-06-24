@@ -13,6 +13,10 @@ The important product boundary is simple:
 - **Users bring the inference API.** A team can connect a hosted provider such
   as OpenAI, Anthropic, Google, Together, or Fireworks, or expose its own
   OpenAI-compatible inference service from a GPU cluster.
+- **v1.0 does not host model inference.** The public/platform deployment does
+  not run vLLM or serve checkpoints for users. Any vLLM, Ollama, llama.cpp,
+  LM Studio, or hosted API endpoint is operated by the user/team and registered
+  as a provider connection.
 
 Public beta: [https://yylx.world](https://yylx.world)
 
@@ -75,8 +79,8 @@ Use this when the model is already exposed by a hosted API provider.
 
 Examples:
 
-- OpenAI-compatible APIs such as OpenAI, Together, Fireworks, or a managed vLLM
-  endpoint.
+- OpenAI-compatible APIs such as OpenAI, Together, Fireworks, or a vLLM
+  endpoint managed by the user/team.
 - Provider-native APIs such as Anthropic or Google when that provider type is
   enabled.
 

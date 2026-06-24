@@ -142,10 +142,12 @@ even when no matching rate-card entry exists. Missing facade pricing is
 reported with `rate_card_hash='facade:rate-card:missing'` rather than
 blocking evaluation.
 
-The managed-vLLM launcher (`--model hf:<id>` / `--model /path/`)
+The local CLI vLLM helper (`--model hf:<id>` / `--model /path/`)
 registers as provider `local:_auto_vllm`. Rate-card rows for that
-provider attribute internal cost across all hf:/path runs. The
-inline `--local-server` flag registers as `local:_inline`.
+provider attribute internal cost across all hf:/path `loom run`
+invocations. This is not hosted platform inference; service-mode teams
+should register their own hosted or self-hosted endpoint through provider
+connections. The inline `--local-server` flag registers as `local:_inline`.
 
 ## What `provider_extras` captures
 

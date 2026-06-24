@@ -1,8 +1,13 @@
 # Local-LLM execution path
 
 How `loom run` dispatches to a local OpenAI-compatible server (vLLM,
-ollama, llama.cpp, lm-studio), and how the optional managed-vLLM
+ollama, llama.cpp, lm-studio), and how the optional local CLI vLLM
 launcher fits in.
+
+This document is about laptop/CLI execution. Loom v1.0 service mode does not
+host model inference for users; service-mode teams provide their own hosted or
+self-hosted OpenAI-compatible endpoint and register it as a provider
+connection.
 
 User-facing reference: [`../user-guide.md#local-llms`](../user-guide.md).
 
@@ -11,8 +16,8 @@ User-facing reference: [`../user-guide.md#local-llms`](../user-guide.md).
 ```
   --local-server URL --model ID         inline: user manages the server
   --model local/<server>/<model_id>     persisted: user managed + registered
-  --model hf:<org>/<name>               managed: Loom starts vLLM
-  --model /path/ (or ~/path/, ./path/)  managed: Loom starts vLLM
+  --model hf:<org>/<name>               local CLI helper starts vLLM
+  --model /path/ (or ~/path/, ./path/)  local CLI helper starts vLLM
 ```
 
 All four converge on the same `local` provider dispatch inside
@@ -67,8 +72,8 @@ rewrite model →                              │
 |------------------------------------|----------|-----------------------------------------------------------------------|
 | `anthropic/claude-opus-4-7`        | `anthropic` | Direct provider SDK                                                |
 | `local/vllm/meta-llama/Llama-3.1-8B` | `local` | First path segment is the server name; rest is the model id     |
-| `hf:meta-llama/Llama-3.1-8B`       | `hf`     | Triggers managed vLLM launch; must contain `/`                       |
-| `/data/checkpoints/my-tune/` (also `~/…`, `./…`, `../…`) | `file` | Triggers managed vLLM launch; detected by leading filesystem marker  |
+| `hf:meta-llama/Llama-3.1-8B`       | `hf`     | Triggers local CLI vLLM launch; must contain `/`                     |
+| `/data/checkpoints/my-tune/` (also `~/…`, `./…`, `../…`) | `file` | Triggers local CLI vLLM launch; detected by leading filesystem marker |
 
 The `--local-server URL` flag bypasses `_parse_model` entirely:
 `--model` is treated as the raw upstream model id, and `_run_async`
@@ -96,7 +101,8 @@ Both are leading-underscore on purpose:
    they are never persisted to `~/.config/loom/config.toml`.
 
 `_inline` is for `--local-server` (no subprocess); `_auto_vllm` is
-for the managed-vLLM path (Loom owns the subprocess).
+for the local CLI vLLM helper path (the `loom run` process owns the
+subprocess).
 
 ## Subprocess lifecycle
 

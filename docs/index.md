@@ -7,8 +7,8 @@ What you're looking for, where it lives:
 - **[user-guide.md](user-guide.md)** — `loom` CLI: install, `run`,
   `datasets`, `config`, troubleshooting
 - **[provider-onboarding.md](provider-onboarding.md)** — hosted
-  third-party API setup, Slurm/vLLM checkpoint deployment, provider
-  testing, model refresh, and safe registration
+  third-party API setup, user-operated Slurm/vLLM checkpoint deployment,
+  provider testing, model refresh, and safe registration
 
 ## I want to author a benchmark task
 
@@ -67,7 +67,8 @@ Start with the overview, drill into the area you care about:
   `loom` CLI reuses `Trial.run()` statelessly with no server stack
 - **[architecture/local-llm.md](architecture/local-llm.md)** — local
   OpenAI-compatible server dispatch (vLLM / ollama / llama.cpp /
-  lm-studio); inline `--local-server`; managed-vLLM (`--model hf:` / `/path/`)
+  lm-studio); inline `--local-server`; local CLI vLLM helper
+  (`--model hf:` / `/path/`), not hosted platform inference
 - **[architecture/multi-server-local-llm.md](architecture/multi-server-local-llm.md)**
   — `loom serve` + repeatable `--model` for comparing N models on the
   same dataset; sequential-by-default load loop; `--parallel-models` opt-in

@@ -84,6 +84,9 @@ for piping (e.g. `loom run ... --json | jq '.state'`).
 In service mode, team-scoped provider connections are the normal path
 for user-hosted OpenAI-compatible endpoints. Register the connection,
 refresh or manually add its model ids, then launch from the SPA. The
+v1.0 hosted/public platform does not run model servers for users; it only
+stores the team-scoped provider connection and routes calls to the endpoint
+the team provides.
 SPA hides obvious tool/API entries by default and submits
 `provider_connection_id` + `provider_model_id` with the trial or batch;
 operators can use the raw model view for debugging noisy catalogs.
@@ -371,7 +374,7 @@ CLI flag > env var > none. Cost defaults to `$0` (no rate-card row
 for `local:_inline` by default; add one keyed
 `provider="local:_inline"` if you want GPU attribution).
 
-### Path B: managed — Loom starts vLLM for you
+### Path B: local CLI helper — start vLLM for this process
 
 If you have weights on disk or a HuggingFace model id, install the
 optional vLLM extra and pass the spec directly:
@@ -403,6 +406,10 @@ Loom:
    shortened by vLLM still resolve correctly).
 5. Runs the trial against `local/_auto_vllm/<served-name>`.
 6. Tears down vLLM at end-of-process (or on Ctrl-C / SIGTERM).
+
+This path is local `loom run` behavior only. It is not available as hosted
+platform inference in v1.0; service-mode users should run their own vLLM or
+other OpenAI-compatible endpoint and register it as a provider connection.
 
 vLLM tuning (passed through to `vllm serve`):
 

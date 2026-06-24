@@ -11,6 +11,10 @@ Originally tracked in [#76](https://github.com/carinrc/loom/issues/76)
 
 `loom cluster` is the multi-node deployment mode. A control node runs the API services + storage; worker nodes spawn trial sandboxes via `docker.sock` onto per-trial Docker bridges. Users supply OpenAI-compatible model endpoints via the per-team `provider_connections` API; `loom-llm-gateway` mediates every LLM call.
 
+The cluster does not host model inference in v1.0. It can reach third-party or
+team-operated OpenAI-compatible endpoints through approved provider
+connections, but it does not run vLLM jobs or serve checkpoints for users.
+
 `loom service` is the single-box compose mode (existing). The two share `loom-llm-gateway` + the egress proxy + the sandbox routing pattern (see [Sandbox→gateway](#sandboxgateway-flow)); the cluster mode adds per-node Docker singletons + a k8s manifest set.
 
 ## Topology
@@ -387,7 +391,7 @@ and preflight status/error metadata. `view=raw` includes suppressed tool/API
 entries such as
 Amap/APISports/TuShare-style ids with classifier reasons for debugging.
 
-`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable; null = use platform-default provider). Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice.
+`Trial` and `Batch` payloads gain `provider_connection_id` + `provider_model_id` (both nullable for legacy/local or non-model-backed paths). In v1.0 service-mode submissions, model-backed agents should use a team-owned provider connection rather than an implied platform-hosted model provider. Trial FK has no cascade — soft-delete keeps audit/billing references valid. Batch fan-out forwards the batch-level provider fields to every materialized trial; per-combination provider connections are intentionally not part of this schema slice.
 
 Benchmark task images remain model/provider/agent agnostic. The task image owns
 benchmark dependencies, task assets, harness code, and verifier behavior only.
