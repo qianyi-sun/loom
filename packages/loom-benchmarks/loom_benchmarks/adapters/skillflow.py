@@ -34,6 +34,13 @@ _SKILLFLOW_BASE_IMAGE = "skillflow/harbor-cli-base:ubuntu24.04"
 _UNPUBLISHED_HARBOR_BASE_IMAGES = {
     "skillevlove/harbor-cli-openhands:ubuntu24.04",
 }
+_SOLUTION_ROOT_HEADER = (
+    'LOOM_TASK_ROOT="${LOOM_TASK_ROOT:-$(CDPATH= cd -- "$(dirname "$0")" '
+    '&& pwd)}"\n'
+    'if [ "$(basename "$LOOM_TASK_ROOT")" = "solution" ]; then\n'
+    '    LOOM_TASK_ROOT="$(CDPATH= cd -- "$LOOM_TASK_ROOT/.." && pwd)"\n'
+    "fi\n"
+)
 
 
 class SkillFlowAdapter(CatalogBackedAdapter):
@@ -143,6 +150,7 @@ class SkillFlowAdapter(CatalogBackedAdapter):
         source_path = Path(str(instance.raw["__source_path"]))
         self._copy_bundle(source_path, out_dir)
         self._rewrite_unpublished_base_images(out_dir)
+        self._rewrite_absolute_solution_paths(out_dir)
         if self._dockerfile_uses_root_build_context(out_dir):
             skills_dir = out_dir / "skills"
             skills_dir.mkdir(exist_ok=True)
@@ -189,6 +197,24 @@ class SkillFlowAdapter(CatalogBackedAdapter):
                 lines[idx] = line.replace(parts[1], _SKILLFLOW_BASE_IMAGE, 1)
                 dockerfile.write_text("\n".join(lines) + "\n")
             return
+
+    @staticmethod
+    def _rewrite_absolute_solution_paths(out_dir: Path) -> None:
+        solve_sh = out_dir / "solution" / "solve.sh"
+        if not solve_sh.exists():
+            return
+
+        old = solve_sh.read_text()
+        if "/solution/" not in old:
+            return
+
+        new = old.replace("/solution/", "${LOOM_TASK_ROOT}/solution/")
+        if "LOOM_TASK_ROOT=" not in new:
+            lines = new.splitlines()
+            insert_at = 1 if lines and lines[0].startswith("#!") else 0
+            lines[insert_at:insert_at] = _SOLUTION_ROOT_HEADER.splitlines()
+            new = "\n".join(lines) + ("\n" if old.endswith("\n") else "")
+        solve_sh.write_text(new)
 
     @classmethod
     def _dockerfile_uses_root_build_context(cls, out_dir: Path) -> bool:

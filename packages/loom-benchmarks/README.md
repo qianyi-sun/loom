@@ -49,7 +49,10 @@ base image on every Docker host that may build SkillFlow task images, or push
 it to a registry reachable under the same tag. The adapter also chooses the
 Docker build context from the Dockerfile's `COPY`/`ADD` sources: ordinary
 SkillFlow bundles build from `environment/`, while bundles that copy `skills`
-build from the bundle root. The shim runs the upstream
+build from the bundle root. SkillFlow solution scripts that reference files
+under absolute `/solution/...` are normalized at conversion time so oracle
+smoke runs can execute the copied `solve.sh` from the task workdir root. The
+shim runs the upstream
 `tests/test.sh`, reads `/logs/verifier/reward.txt`, and converts that reward
 into Loom's structured `VerifierResult` JSON. Instance ids are derived from
 the relative bundle path and sanitized so spaces or shell-significant

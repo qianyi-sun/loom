@@ -226,6 +226,46 @@ def test_skillflow_rewrites_unpublished_harbor_base_image(
     assert dockerfile.startswith("FROM skillflow/harbor-cli-base:ubuntu24.04\n")
 
 
+def test_skillflow_normalizes_absolute_solution_paths_for_oracle_layout(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="workflow",
+        task="absolute-solution-path-task",
+    )
+    (bundle / "solution").mkdir()
+    (bundle / "solution" / "answer.xlsx").write_text("answer\n")
+    (bundle / "solution" / "solve.sh").write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "cp /solution/answer.xlsx result.xlsx\n",
+    )
+    adapter = SkillFlowAdapter()
+    inst = BenchmarkInstance(
+        instance_id="workflow/absolute-solution-path-task",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+    root_solve = out_dir / "solve.sh"
+    root_solve.write_text((out_dir / "solution" / "solve.sh").read_text())
+    result = subprocess.run(
+        ["bash", "solve.sh"],
+        cwd=out_dir,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert (out_dir / "result.xlsx").read_text() == "answer\n"
+    assert "cp /solution/" not in root_solve.read_text()
+
+
 def test_skillflow_points_at_published_task_dataset() -> None:
     adapter = SkillFlowAdapter()
 
