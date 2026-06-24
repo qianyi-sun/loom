@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { components } from "../../api/schema";
 import BatchDetail from "../../pages/BatchDetail";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
@@ -60,6 +61,23 @@ const BATCH_BODY: BatchBody = {
   total_prompt_tokens: 0,
   total_completion_tokens: 0,
   llm_calls_count: 0,
+};
+
+const BATCH_DEBUG: components["schemas"]["DebugEvidence"] = {
+  schema_version: "1",
+  entity: { type: "batch", id: BATCH_ID, team_id: "team-1" },
+  lifecycle: { state: "finished", terminal_status: "all_failed" },
+  worker: { backend: "docker" },
+  failure: {
+    reason_code: "batch.fanout_submit_failed",
+    reason: "fanout_submit_failed",
+    category: "submit",
+    attribution: "platform",
+    message: "task local/mit-0 submit failed: HTTP 403",
+  },
+  provider: { llm_calls_count: 0, models: [] },
+  task_selection: { expected_trial_count: 0 },
+  next_actions: ["Inspect batch fan-out errors."],
 };
 
 function mockBatch(
@@ -136,6 +154,24 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText(/cloned batch config/i)).toBeInTheDocument();
+  });
+
+  it("shows structured debug evidence without exposing raw JSON by default", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      state: "finished",
+      result_status: "all_failed",
+      failure_reason: "fanout_submit_failed",
+      failure_message: "task local/mit-0 submit failed: HTTP 403",
+      debug_evidence: BATCH_DEBUG,
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText("Debug evidence")).toBeInTheDocument();
+    expect(screen.getByText("batch.fanout_submit_failed")).toBeInTheDocument();
+    expect(screen.getByText("platform")).toBeInTheDocument();
+    expect(screen.getByText("Inspect batch fan-out errors.")).toBeInTheDocument();
+    expect(screen.queryByText("debug_evidence")).not.toBeInTheDocument();
   });
 
   it("shows per-benchmark scores for multi-benchmark batches", async () => {

@@ -248,6 +248,24 @@ The service detail API uses that projection to set `trajectory_ready`,
 `atif_ready`, and artifact download links. Clients should not infer
 output availability by guessing MinIO keys.
 
+The same detail API also exposes user-facing debug evidence:
+
+- `GET /api/v1/trials/{trial_id}` includes `debug_evidence`;
+  `GET /api/v1/trials/{trial_id}/debug` returns that object directly.
+- `GET /api/v1/batches/{batch_id}` includes `debug_evidence`;
+  `GET /api/v1/batches/{batch_id}/debug` returns that object directly.
+- Run Library batch detail includes the same batch `debug_evidence` after the
+  Run Library read policy allows access.
+
+Debug evidence is schema-versioned and machine-readable. The stable fields are
+`entity`, `lifecycle`, `worker`, `agent`, `provider`, `failure`, `task` or
+`task_selection`, `reward`, `evidence_refs`, and `next_actions`. The
+`failure.reason_code` is stable for API/CLI agents and uses prefixes such as
+`trial.verifier_error` or `batch.fanout_submit_failed`. The service redacts
+bearer tokens, provider keys, secret refs, internal service URLs, and signed
+object-store URLs before returning either the detail response or the direct
+debug endpoint.
+
 ## DRF scheduling
 
 `team_quotas` table carries `fair_share_weight` and an `in_flight_count`
@@ -407,8 +425,8 @@ Core pages include:
   activity, and next actions so the SPA does not fan out across multiple
   resources on first load.
 - **TrialsList** — keyset cursor pagination, state filter
-- **TrialDetail** — header + artifact download links + paginated
-  trajectory viewer + EventTimeline (one row per event,
+- **TrialDetail** — header + artifact download links + Debug evidence card +
+  paginated trajectory viewer + EventTimeline (one row per event,
   click-to-expand JSON) + ATIF download button
 - **BatchesList** + **BatchDetail** — `refetchInterval: 5000`
   while state ∈ {submitted, running}; stops on terminal.
@@ -416,7 +434,8 @@ Core pages include:
   grouped server-side from trial task ids to task benchmark ids and
   benchmark display names, so the SPA can show per-benchmark score,
   expected/completed trial counts, and platform failures without
-  parsing task ids.
+  parsing task ids. Batch detail also renders the Debug evidence card from the
+  same `debug_evidence` object exposed to API and CLI callers.
 - **NewBatch** — textarea JSON parse for `task_filter` +
   `trial_config` with local validation
 - **Tasks** — cluster task catalog

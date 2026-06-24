@@ -13,6 +13,7 @@ import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
+import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
@@ -448,6 +449,7 @@ export default function TrialDetail(): JSX.Element {
         </Link>
       </div>
       <TrialHeader trial={trial.data} />
+      <DebugEvidenceCard evidence={trial.data.debug_evidence} />
       <Trajectory trialId={trialId} />
     </div>
   );

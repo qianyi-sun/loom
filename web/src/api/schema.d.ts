@@ -41,6 +41,18 @@ export interface paths {
       };
     };
   };
+  "/api/v1/trials/{trial_id}/debug": {
+    get: {
+      parameters: { path: { trial_id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["DebugEvidence"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/trials/{trial_id}/trajectory": {
     get: {
       parameters: {
@@ -241,6 +253,18 @@ export interface paths {
       };
     };
   };
+  "/api/v1/batches/{id}/debug": {
+    get: {
+      parameters: { path: { id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["DebugEvidence"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/batches/{id}/cancel": {
     post: {
       parameters: { path: { id: string } };
@@ -363,6 +387,46 @@ export interface components {
         share_status?: "pending_scan" | "shared" | "blocked";
         blocked_reason?: string | null;
       }[];
+      debug_evidence?: components["schemas"]["DebugEvidence"];
+    };
+    DebugEvidence: {
+      schema_version: "1";
+      generated_at?: string;
+      entity: {
+        type: "batch" | "trial" | string;
+        id: string;
+        team_id?: string;
+        batch_id?: string | null;
+      };
+      lifecycle: Record<string, unknown>;
+      worker?: Record<string, unknown>;
+      agent?: Record<string, unknown>;
+      provider?: {
+        llm_calls_count?: number;
+        total_prompt_tokens?: number;
+        total_completion_tokens?: number;
+        models?: string[];
+        dialects?: string[];
+        max_attempt?: number;
+        latest_call_at?: string | null;
+        total_cost_usd?: string;
+        provider_connection_id?: string | null;
+        provider_model_id?: string | null;
+        [k: string]: unknown;
+      };
+      failure: {
+        reason_code: string;
+        reason?: string | null;
+        category: string;
+        attribution: string;
+        message?: string | null;
+      };
+      task?: Record<string, unknown>;
+      task_selection?: Record<string, unknown>;
+      trials?: Record<string, unknown>;
+      reward?: Record<string, unknown>;
+      evidence_refs?: Record<string, unknown>;
+      next_actions: string[];
     };
     TrajectoryEvent: {
       kind: string;
@@ -504,6 +568,7 @@ export interface components {
       effective_total_prompt_tokens: number;
       effective_total_completion_tokens: number;
       effective_llm_calls_count: number;
+      debug_evidence?: components["schemas"]["DebugEvidence"];
     };
     UsageBucket: {
       start_at: string;

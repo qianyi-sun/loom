@@ -11,6 +11,7 @@ import {
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
+import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -308,6 +309,8 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           {clone.isError ? <ErrorState error={clone.error} /> : null}
         </Card.Body>
       </Card>
+
+      <DebugEvidenceCard evidence={batch.debug_evidence} />
 
       <Card>
         <Card.Header

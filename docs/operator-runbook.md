@@ -415,6 +415,7 @@ knob you need.
      | jq -r '.trajectory_url,.atif_url,.artifacts[].download_url'
 
    loom eval trial show "$TRIAL_ID"
+   loom eval trial debug "$TRIAL_ID" --format json
    loom eval trial download "$TRIAL_ID" --kind atif --output atif.json
    loom eval trial download "$TRIAL_ID" --kind trajectory --output events.jsonl
    ```
@@ -422,7 +423,10 @@ knob you need.
    Every returned URL should stay on the Loom API host, and a normal authorized
    `curl -L` against those URLs should return the object body without opening a
    separate MinIO tunnel. The CLI should print download commands rather than
-   raw MinIO/S3 signed URLs.
+   raw MinIO/S3 signed URLs. The debug command should return a stable
+   `failure.reason_code`, lifecycle state, token usage summary, scoped evidence
+   links, and redacted next actions without bearer tokens, provider keys,
+   internal service URLs, or signed object-store URLs.
 
 9. **Approve access requests into fixed teams.** Public registration is
    default-closed. A researcher can submit an access request without a bearer
@@ -1470,7 +1474,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    with a sensible reason). `GET /api/v1/trials/{id}` carries
    `aggregate_reward`, `failure_reason` (when applicable),
    `total_prompt_tokens`, `total_completion_tokens`,
-   `llm_calls_count`, plus `atif_url`, `trajectory_url`,
+   `llm_calls_count`, `debug_evidence`, plus `atif_url`, `trajectory_url`,
    `atif_ready`, `trajectory_ready`, and `artifacts` for download.
    Artifact rows include `share_status` and a safe `blocked_reason`
    when org-wide sharing is blocked. Use `/api/v1/usage` for
@@ -1490,8 +1494,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 14. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
-    summary, task/agent/model summary, and artifact groups. Team B must be able
-    to download a safe artifact only through the Run Library service URL.
+    summary, task/agent/model summary, debug evidence, and artifact groups.
+    Team B must be able to download a safe artifact only through the Run
+    Library service URL.
 15. **Clone and reuse.** From Team B, clone config from Team A's completed run.
     If the source run used a provider connection, select a Team B-owned
     provider connection before cloning. Then reuse a safe artifact from the

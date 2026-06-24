@@ -40,6 +40,7 @@ from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
 )
+from loom_service.debug_evidence import build_trial_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
@@ -391,6 +392,14 @@ async def get_trial(
     owner_team = (await s.execute(
         select(Team).where(Team.id == trial.team_id),
     )).scalar_one_or_none()
+    task = (await s.execute(
+        select(Task).where(Task.id == trial.task_id),
+    )).scalar_one_or_none()
+    llm_calls = list((await s.execute(
+        select(LlmCall)
+        .where(LlmCall.trial_id == trial.id)
+        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+    )).scalars().all())
     base = _trial_row(
         trial,
         usage=usage_by_trial.get(trial.id),
@@ -423,7 +432,45 @@ async def get_trial(
         trajectory_index=trajectory_index,
         trial_id=trial.id,
     )
+    base["debug_evidence"] = build_trial_debug_evidence(
+        request,
+        trial,
+        task=task,
+        llm_calls=llm_calls,
+    )
     return base
+
+
+@router.get("/trials/{trial_id}/debug")
+async def get_trial_debug(
+    request: Request,
+    sc: SessionAndCtx,
+    trial_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = (
+        await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )
+    ).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
+    task = (await s.execute(
+        select(Task).where(Task.id == trial.task_id),
+    )).scalar_one_or_none()
+    llm_calls = list((await s.execute(
+        select(LlmCall)
+        .where(LlmCall.trial_id == trial.id)
+        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+    )).scalars().all())
+    return build_trial_debug_evidence(
+        request,
+        trial,
+        task=task,
+        llm_calls=llm_calls,
+    )
 
 
 @router.get("/trials/{trial_id}/artifacts/download")

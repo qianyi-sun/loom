@@ -10,6 +10,7 @@ import { api } from "../api/client";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
+import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -332,6 +333,8 @@ export default function BatchDetail(): JSX.Element {
           ) : null}
         </Card.Body>
       </Card>
+
+      <DebugEvidenceCard evidence={c.debug_evidence} />
 
       {showBenchmarkSummary ? (
         <Card>

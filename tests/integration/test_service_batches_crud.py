@@ -4,6 +4,7 @@ GET lists + detail with rollup, cancel cascades (Plan 19 Task 3)."""
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1257,7 +1258,12 @@ async def test_get_batch_detail_exposes_fanout_failure(
             "combination_idx": None,
             "idempotency_key": f"{batch_id}::local/mit-0::0",
             "status_code": 403,
-            "detail": "task license proprietary-MAA not in team allowlist",
+            "detail": (
+                "task license proprietary-MAA not in team allowlist; "
+                "Authorization: Bearer loom_api_supersecret; "
+                "http://loom-control-plane:8080/trials; "
+                "https://minio.internal/a?X-Amz-Signature=secret"
+            ),
             "seen_at": datetime.now(UTC).isoformat(),
         }
     ]
@@ -1290,12 +1296,107 @@ async def test_get_batch_detail_exposes_fanout_failure(
             f"/api/v1/batches/{batch_id}",
             headers={"Authorization": f"Bearer {raw}"},
         )
+        debug = await ac.get(
+            f"/api/v1/batches/{batch_id}/debug",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
 
     assert r.status_code == 200
     body = r.json()
     assert body["failure_reason"] == "fanout_submit_failed"
     assert "proprietary-MAA" in body["failure_message"]
-    assert body["fanout_errors"] == fanout_errors
+    assert "loom_api_supersecret" not in body["failure_message"]
+    assert "loom-control-plane" not in body["failure_message"]
+    assert "X-Amz-Signature=secret" not in body["failure_message"]
+    assert body["fanout_errors"][0]["task_id"] == "local/mit-0"
+    assert "loom_api_supersecret" not in json.dumps(body["fanout_errors"])
+    assert "debug_evidence" in body
+
+    assert debug.status_code == 200, debug.text
+    evidence = debug.json()
+    assert evidence["schema_version"] == "1"
+    assert evidence["entity"]["type"] == "batch"
+    assert evidence["entity"]["id"] == str(batch_id)
+    assert evidence["entity"]["team_id"] == str(team_id)
+    assert evidence["failure"]["reason_code"] == "batch.fanout_submit_failed"
+    assert evidence["failure"]["category"] == "submit"
+    assert evidence["failure"]["attribution"] == "platform"
+    assert evidence["lifecycle"]["state"] == "finished"
+    assert evidence["task_selection"]["expected_trial_count"] == 0
+    assert evidence["task_selection"]["fanout_errors"][0]["task_id"] == (
+        "local/mit-0"
+    )
+    rendered = json.dumps(evidence)
+    assert "loom_api_supersecret" not in rendered
+    assert "loom-control-plane" not in rendered
+    assert "X-Amz-Signature=secret" not in rendered
+    assert "Inspect batch fan-out errors" in " ".join(evidence["next_actions"])
+
+
+async def test_batch_debug_cross_team_forbidden(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw, team_id = camp_setup
+    batch_id = uuid4()
+    other_team = uuid4()
+    other_raw = f"loom_team_{uuid4().hex}"
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="private-batch",
+                task_filter={"license": "MIT"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=0,
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        s.execute(insert(Team).values(id=other_team, name=f"o-{other_team}"))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(other_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=other_team,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://svc",
+        ) as ac:
+            r = await ac.get(
+                f"/api/v1/batches/{batch_id}/debug",
+                headers={"Authorization": f"Bearer {other_raw}"},
+            )
+        assert r.status_code == 403
+    finally:
+        sync_engine = create_engine(postgres_url)
+        sl = sessionmaker(sync_engine)
+        with sl() as s:
+            from loom.db.schema import Token as TokenModel
+
+            s.execute(
+                delete(TokenModel).where(
+                    TokenModel.team_id == other_team,
+                )
+            )
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id == other_team))
+            s.execute(delete(Team).where(Team.id == other_team))
+            s.commit()
+        sync_engine.dispose()
 
 
 async def test_rerun_failed_batch_creates_linked_exact_targets(

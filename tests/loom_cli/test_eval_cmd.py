@@ -728,6 +728,70 @@ def test_batch_show_renders_fanout_failure(
     assert "fanout_errors:         1" in out
 
 
+def test_batch_debug_fetches_machine_readable_evidence(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "schema_version": "1",
+        "entity": {"type": "batch", "id": _BATCH_ID},
+        "lifecycle": {
+            "state": "finished",
+            "terminal_status": "all_failed",
+            "created_at": "2026-06-16T00:00:00Z",
+            "finished_at": "2026-06-16T00:01:00Z",
+        },
+        "failure": {
+            "reason_code": "batch.fanout_submit_failed",
+            "category": "submit",
+            "attribution": "platform",
+            "message": "task t1 submit failed",
+        },
+        "next_actions": ["Inspect batch fan-out errors."],
+    }
+    mock_server.canned[
+        ("GET", f"/api/v1/batches/{_BATCH_ID}/debug")
+    ] = httpx.Response(200, json=payload)
+
+    rc = main(["eval", "batch", "debug", _BATCH_ID, "--format", "json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["failure"] == (
+        payload["failure"]
+    )
+    assert mock_server[0].url.path == f"/api/v1/batches/{_BATCH_ID}/debug"
+
+
+def test_batch_debug_renders_text_summary(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[
+        ("GET", f"/api/v1/batches/{_BATCH_ID}/debug")
+    ] = httpx.Response(
+        200,
+        json={
+            "schema_version": "1",
+            "entity": {"type": "batch", "id": _BATCH_ID},
+            "lifecycle": {"state": "finished", "terminal_status": "all_failed"},
+            "failure": {
+                "reason_code": "batch.fanout_submit_failed",
+                "category": "submit",
+                "attribution": "platform",
+                "message": "task t1 submit failed",
+            },
+            "provider": {"llm_calls_count": 0},
+            "next_actions": ["Inspect batch fan-out errors."],
+        },
+    )
+
+    rc = main(["eval", "batch", "debug", _BATCH_ID])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "debug_evidence:        batch" in out
+    assert "batch.fanout_submit_failed" in out
+    assert "Inspect batch fan-out errors." in out
+
+
 def test_batch_cancel(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -890,6 +954,39 @@ def test_trial_show_json_format(
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["atif_url"] == "[REDACTED:signed-url]"
     assert parsed["trajectory_url"] == "[REDACTED:signed-url]"
+
+
+def test_trial_debug_fetches_machine_readable_evidence(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "schema_version": "1",
+        "entity": {"type": "trial", "id": _TRIAL_ID},
+        "lifecycle": {
+            "state": "failed",
+            "submitted_at": "2026-06-16T00:00:00Z",
+            "finished_at": "2026-06-16T00:01:00Z",
+            "attempt_count": 2,
+        },
+        "failure": {
+            "reason_code": "trial.verifier_error",
+            "category": "verifier",
+            "attribution": "benchmark",
+            "message": "pytest missing tests",
+        },
+        "provider": {"llm_calls_count": 1, "models": ["openai/gpt-4o"]},
+        "next_actions": ["Inspect verifier output and benchmark task assets."],
+    }
+    mock_server.canned[
+        ("GET", f"/api/v1/trials/{_TRIAL_ID}/debug")
+    ] = httpx.Response(200, json=payload)
+
+    rc = main(["eval", "trial", "debug", _TRIAL_ID, "--format", "json"])
+
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["failure"]["reason_code"] == "trial.verifier_error"
+    assert mock_server[0].url.path == f"/api/v1/trials/{_TRIAL_ID}/debug"
 
 
 def test_trial_download_atif_writes_public_route_response(

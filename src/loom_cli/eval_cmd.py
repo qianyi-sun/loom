@@ -170,6 +170,42 @@ def _dump_json(data: Any) -> None:
     print(json.dumps(redact_mapping(data), indent=2))
 
 
+def _print_debug_evidence_summary(evidence: dict[str, Any]) -> None:
+    entity = evidence.get("entity") if isinstance(evidence, dict) else {}
+    lifecycle = evidence.get("lifecycle") if isinstance(evidence, dict) else {}
+    failure = evidence.get("failure") if isinstance(evidence, dict) else {}
+    provider = evidence.get("provider") if isinstance(evidence, dict) else {}
+    next_actions = evidence.get("next_actions")
+    entity_type = entity.get("type") if isinstance(entity, dict) else "unknown"
+    entity_id = entity.get("id") if isinstance(entity, dict) else "unknown"
+    print(f"debug_evidence:        {entity_type}")
+    print(f"id:                    {entity_id}")
+    if isinstance(lifecycle, dict):
+        if lifecycle.get("state") is not None:
+            print(f"state:                 {lifecycle['state']}")
+        terminal = lifecycle.get("terminal_status")
+        if terminal is not None:
+            print(f"terminal_status:       {terminal}")
+        attempts = lifecycle.get("attempt_count")
+        if attempts is not None:
+            print(f"attempt_count:         {attempts}")
+    if isinstance(failure, dict):
+        print(f"reason_code:           {failure.get('reason_code', 'unknown')}")
+        print(f"category:              {failure.get('category', 'unknown')}")
+        print(f"attribution:           {failure.get('attribution', 'unknown')}")
+        if failure.get("message"):
+            print(f"message:               {failure['message']}")
+    if isinstance(provider, dict):
+        print(f"llm_calls:             {provider.get('llm_calls_count', 0)}")
+        models = provider.get("models")
+        if isinstance(models, list) and models:
+            print("models:                " + ", ".join(str(m) for m in models))
+    if isinstance(next_actions, list) and next_actions:
+        print("next_actions:")
+        for action in next_actions:
+            print(f"  - {action}")
+
+
 def _run(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -393,6 +429,24 @@ def _batch_show(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _batch_debug(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            resp = c.get(f"/api/v1/batches/{args.batch_id}/debug")
+        body = assert_2xx(
+            resp,
+            action=f"fetch batch debug evidence {args.batch_id!r}",
+        )
+        if args.format == "json":
+            _dump_json(body)
+        else:
+            _print_debug_evidence_summary(body)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _batch_cancel(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -463,6 +517,24 @@ def _trial_show(args: argparse.Namespace) -> int:
         else:
             _print_trial_summary(body)
             _print_trial_download_commands(body, args.trial_id)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _trial_debug(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            resp = c.get(f"/api/v1/trials/{args.trial_id}/debug")
+        body = assert_2xx(
+            resp,
+            action=f"fetch trial debug evidence {args.trial_id!r}",
+        )
+        if args.format == "json":
+            _dump_json(body)
+        else:
+            _print_debug_evidence_summary(body)
         return 0
 
     return _run_with_error_handling(_body)
@@ -706,6 +778,14 @@ def dispatch(argv: list[str]) -> int:
     p_bs.add_argument("--format", choices=["text", "json"], default="text")
     p_bs.set_defaults(handler=_batch_show)
 
+    p_bd = batch_sub.add_parser(
+        "debug",
+        help="Fetch structured debug evidence for a batch.",
+    )
+    p_bd.add_argument("batch_id", help="Batch UUID.")
+    p_bd.add_argument("--format", choices=["text", "json"], default="text")
+    p_bd.set_defaults(handler=_batch_debug)
+
     p_bx = batch_sub.add_parser(
         "cancel",
         help="Cancel a batch + cascade-cancel its still-active trials.",
@@ -738,6 +818,14 @@ def dispatch(argv: list[str]) -> int:
     p_ts.add_argument("trial_id", help="Trial UUID.")
     p_ts.add_argument("--format", choices=["text", "json"], default="text")
     p_ts.set_defaults(handler=_trial_show)
+
+    p_tdebug = trial_sub.add_parser(
+        "debug",
+        help="Fetch structured debug evidence for a trial.",
+    )
+    p_tdebug.add_argument("trial_id", help="Trial UUID.")
+    p_tdebug.add_argument("--format", choices=["text", "json"], default="text")
+    p_tdebug.set_defaults(handler=_trial_debug)
 
     p_td = trial_sub.add_parser(
         "download",

@@ -10,6 +10,7 @@ Reward + cost come from `Trial.result`; agent name from
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -424,6 +425,205 @@ async def test_trial_detail_returns_service_download_urls(
     assert body["llm_calls_count"] == 2
     # failure_message field present in response (issue #164).
     assert "failure_message" in body
+
+
+async def test_trial_debug_evidence_is_structured_and_redacted(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    trial_id = trial_ids[1]
+    artifact_key = f"{team_id}/{trial_id}/main/diagnostics.txt"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(
+                state="failed",
+                started_at=datetime.now(UTC) - timedelta(minutes=2),
+                finished_at=datetime.now(UTC),
+                attempt_count=2,
+                failure_reason="verifier_error",
+                failure_message=(
+                    "Verifier failed while calling "
+                    "http://loom-control-plane:8080/tasks with "
+                    "Authorization: Bearer loom_api_supersecret"
+                ),
+                result={
+                    "aggregate_reward": 0.0,
+                    "reward": {"passed": 0.0},
+                    "steps": [
+                        {
+                            "step_name": "main",
+                            "verifier_result": {
+                                "rewards": {"passed": 0.0},
+                                "error": {
+                                    "kind": "missing_tests",
+                                    "message": (
+                                        "pytest could not read "
+                                        "sk-provider-secret"
+                                    ),
+                                },
+                            },
+                            "error": {
+                                "phase": "verifier",
+                                "reason": "exception",
+                                "message": (
+                                    "raw signed url "
+                                    "https://minio.internal/a?"
+                                    "X-Amz-Signature=secret"
+                                ),
+                            },
+                        }
+                    ],
+                },
+                trajectory_index={
+                    "trajectory_uri": (
+                        f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+                    ),
+                    "atif_uri": (
+                        f"s3://trajectories/{team_id}/{trial_id}/atif.json"
+                    ),
+                    "artifacts": [
+                        {
+                            "step_name": "main",
+                            "bucket": "artifacts",
+                            "key": artifact_key,
+                            "size": 99,
+                            "share_status": "blocked",
+                            "blocked_reason": (
+                                "secret-like content sk-artifact-secret"
+                            ),
+                        }
+                    ],
+                },
+            ),
+        )
+        s.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="openai/gpt-debug",
+                dialect="openai",
+                input_tokens=11,
+                output_tokens=7,
+                provider_extras={"finish_reason": "error"},
+                cost_usd=Decimal("0.000001"),
+                rate_card_hash="debug-rate-card",
+                attempt=3,
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        debug = await ac.get(
+            f"/api/v1/trials/{trial_id}/debug",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        detail = await ac.get(
+            f"/api/v1/trials/{trial_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert debug.status_code == 200, debug.text
+    body = debug.json()
+    assert body["schema_version"] == "1"
+    assert body["entity"]["type"] == "trial"
+    assert body["entity"]["id"] == str(trial_id)
+    assert body["entity"]["team_id"] == str(team_id)
+    assert body["failure"]["reason_code"] == "trial.verifier_error"
+    assert body["failure"]["category"] == "verifier"
+    assert body["failure"]["attribution"] == "benchmark"
+    assert body["task"]["task_id"].startswith("local/task-")
+    assert body["task"]["task_checksum"] == "x" * 64
+    assert body["task"]["materialization_state"] == "ready"
+    assert body["provider"]["llm_calls_count"] == 1
+    assert body["provider"]["total_prompt_tokens"] == 11
+    assert body["provider"]["total_completion_tokens"] == 7
+    assert body["provider"]["max_attempt"] == 3
+    assert body["provider"]["models"] == ["openai/gpt-debug"]
+    assert body["reward"]["aggregate_reward"] == 0.0
+    assert body["reward"]["components"] == {"passed": 0.0}
+    assert body["evidence_refs"]["atif"]["ready"] is True
+    assert body["evidence_refs"]["trajectory"]["ready"] is True
+    artifact_url = body["evidence_refs"]["artifacts"][0]["download_url"]
+    assert artifact_url.startswith(
+        f"http://svc/api/v1/trials/{trial_id}/artifacts/download?key=",
+    )
+    assert artifact_key.replace("/", "%2F") in artifact_url
+    rendered = json.dumps(body)
+    assert "loom_api_supersecret" not in rendered
+    assert "sk-provider-secret" not in rendered
+    assert "sk-artifact-secret" not in rendered
+    assert "loom-control-plane" not in rendered
+    assert "X-Amz-Signature=secret" not in rendered
+    assert "provider preflight" not in " ".join(body["next_actions"]).lower()
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["debug_evidence"]["failure"] == body["failure"]
+
+
+async def test_trial_debug_cross_team_forbidden(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, _raw_a, _team_a, trial_ids_a = trials_setup
+    other_team = uuid4()
+    other_raw = f"loom_team_{uuid4().hex}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Team).values(id=other_team, name=f"o-{other_team}"))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(other_raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=other_team,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://svc",
+        ) as ac:
+            r = await ac.get(
+                f"/api/v1/trials/{trial_ids_a[0]}/debug",
+                headers={"Authorization": f"Bearer {other_raw}"},
+            )
+        assert r.status_code == 403
+    finally:
+        sync_engine = create_engine(postgres_url)
+        sl = sessionmaker(sync_engine)
+        with sl() as s:
+            from loom.db.schema import Token as TokenModel
+
+            s.execute(
+                delete(TokenModel).where(
+                    TokenModel.team_id == other_team,
+                )
+            )
+            s.execute(
+                delete(TeamQuota).where(
+                    TeamQuota.team_id == other_team,
+                )
+            )
+            s.execute(delete(Team).where(Team.id == other_team))
+            s.commit()
+        sync_engine.dispose()
 
 
 async def test_trial_detail_exposes_projected_artifacts(

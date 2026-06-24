@@ -119,6 +119,8 @@ export async function apiDownload(
 type TrialList = paths["/api/v1/trials"]["get"]["responses"][200]["content"]["application/json"];
 type TrialDetail =
   paths["/api/v1/trials/{trial_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type DebugEvidence =
+  paths["/api/v1/trials/{trial_id}/debug"]["get"]["responses"][200]["content"]["application/json"];
 type TrajectoryPage =
   paths["/api/v1/trials/{trial_id}/trajectory"]["get"]["responses"][200]["content"]["application/json"];
 type TaskList = paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
@@ -458,6 +460,7 @@ export interface RunLibraryBatch {
   trial_summary: Record<string, number>;
   aggregate_reward: number | null;
   artifact_summary: ArtifactSummary;
+  debug_evidence?: DebugEvidence;
 }
 
 export interface RunLibraryBatchDetail extends RunLibraryBatch {
@@ -607,6 +610,8 @@ export const api = {
     apiFetch<TrialList>(`/api/v1/trials${qs(q)}`),
   getTrial: (id: string) =>
     apiFetch<TrialDetail>(`/api/v1/trials/${id}`),
+  getTrialDebug: (id: string) =>
+    apiFetch<DebugEvidence>(`/api/v1/trials/${id}/debug`),
   submitTrial: (body: {
     task_id: string;
     config: Record<string, unknown>;
@@ -853,6 +858,8 @@ export const api = {
     apiFetch<BatchList>(`/api/v1/batches${qs(q)}`),
   getBatch: (id: string) =>
     apiFetch<BatchDetail>(`/api/v1/batches/${id}`),
+  getBatchDebug: (id: string) =>
+    apiFetch<DebugEvidence>(`/api/v1/batches/${id}/debug`),
   listRunLibraryBatches: (
     q: Record<string, string | undefined> = {},
   ) => apiFetch<RunLibraryBatchList>(`/api/v1/run-library/batches${qs(q)}`),

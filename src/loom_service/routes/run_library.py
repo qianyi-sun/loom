@@ -11,13 +11,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
 
-from loom.db.schema import Batch, Team, Trial
+from loom.db.schema import Batch, LlmCall, Team, Trial
 from loom.security.redaction import redact_text
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
     require_team_or_admin,
 )
+from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
@@ -289,6 +290,20 @@ async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
     )).scalars().all())
 
 
+async def _llm_calls_for_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> list[LlmCall]:
+    trial_ids = [trial.id for trial in trials]
+    if not trial_ids:
+        return []
+    return list((await session.execute(
+        select(LlmCall)
+        .where(LlmCall.trial_id.in_(trial_ids))
+        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+    )).scalars().all())
+
+
 async def _serialize_batch(
     request: Request,
     session: Any,
@@ -298,6 +313,7 @@ async def _serialize_batch(
     include_inventory: bool = False,
 ) -> dict[str, Any]:
     trials = await _batch_trials(session, batch.id)
+    llm_calls = await _llm_calls_for_trials(session, trials)
     reward, cost = _trial_rollup(trials)
     out: dict[str, Any] = {
         "id": str(batch.id),
@@ -330,6 +346,11 @@ async def _serialize_batch(
         "aggregate_reward": reward,
         "total_cost_usd": cost,
         "artifact_summary": _artifact_summary(trials),
+        "debug_evidence": build_batch_debug_evidence(
+            batch,
+            trials=trials,
+            llm_calls=llm_calls,
+        ),
     }
     if include_inventory:
         out["artifact_inventory"] = _artifact_inventory(request, trials)

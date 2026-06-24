@@ -216,9 +216,11 @@ loom eval batch create \
   --n-per-task 1
 
 loom eval batch show <batch-id>
+loom eval batch debug <batch-id> --format json
 loom eval trial list --state succeeded --limit 5
 loom eval usage --start 2026-06-01 --end 2026-06-30
 loom eval trial show <trial-id>
+loom eval trial debug <trial-id> --format json
 loom eval trial download <trial-id> --kind atif --output atif.json
 loom eval trial download <trial-id> --kind trajectory --output events.jsonl
 loom eval trial download <trial-id> --kind artifact \
@@ -230,6 +232,17 @@ Auth and permission errors use the same remediation hint across CLI subcommands.
 Text and JSON output redact raw bearer tokens, provider keys, internal service
 hosts, and signed object-store URLs. `loom eval trial show` prints copyable
 download commands instead of MinIO/S3 signed URLs.
+
+Use `loom eval batch debug <batch-id>` or
+`loom eval trial debug <trial-id>` when an API agent needs structured failure
+evidence without scraping the web UI. The CLI calls
+`GET /api/v1/batches/{id}/debug` and
+`GET /api/v1/trials/{trial_id}/debug`. The response includes a stable
+`failure.reason_code`, `failure.category`, `failure.attribution`, lifecycle
+state/timestamps/attempts, safe backend/provider/model identifiers, token
+usage summaries, task/checksum/readiness metadata, verifier reward/error
+details, scoped ATIF/trajectory/artifact links, and `next_actions`. These
+payloads are team-scoped and redacted the same way as normal detail responses.
 
 ## Run Library
 
@@ -250,9 +263,9 @@ Use the SPA top-level **Run Library** page:
   whole platform; ordinary users see only their joined teams.
 
 Open a Library row to inspect task selection, agent/model config, trial rollup,
-provenance, and artifact groups. Safe shared artifacts expose Download, Copy
-URL, and Reuse actions. Blocked artifacts show only a safe reason and cannot be
-downloaded or reused by another team.
+debug evidence, provenance, and artifact groups. Safe shared artifacts expose
+Download, Copy URL, and Reuse actions. Blocked artifacts show only a safe reason
+and cannot be downloaded or reused by another team.
 
 Clone config and reuse artifact both create new records in your current team and
 record `source_provenance`. They do not copy the source team's provider
@@ -268,7 +281,11 @@ and advanced trial settings in product terms. Batch Detail shows a
 Run plan, Monitor shows planned trials and evaluator score, Run Library shows
 org-wide completed shared work, and Trial Detail separates platform outcome
 from evaluator reward. Batch Detail and Trial Detail also show owner team,
-visibility/share status, and provenance when a run was cloned or reused.
+visibility/share status, provenance when a run was cloned or reused, and a
+Debug evidence card when the API has structured outcome evidence. That card
+shows reason code, category, attribution, lifecycle state, model/provider
+summary, and suggested next actions in human-readable form; the exact redacted
+JSON remains in a collapsed disclosure for API reproduction.
 For normal model-backed runs, New Batch starts from the provider connection and
 model choice and uses Loom's default model runner internally. Users only open
 `Use a specific agent` when they want a non-default runtime such as `oracle` or

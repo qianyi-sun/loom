@@ -53,6 +53,27 @@ const TRIAL_BODY: components["schemas"]["TrialDetail"] = {
   artifacts: [],
 };
 
+const TRIAL_DEBUG: components["schemas"]["DebugEvidence"] = {
+  schema_version: "1",
+  entity: { type: "trial", id: TRIAL_ID, team_id: "team-1" },
+  lifecycle: { state: "failed", attempt_count: 2 },
+  failure: {
+    reason_code: "trial.verifier_error",
+    reason: "verifier_error",
+    category: "verifier",
+    attribution: "benchmark",
+    message: "pytest did not produce a score",
+  },
+  provider: {
+    llm_calls_count: 1,
+    total_prompt_tokens: 11,
+    total_completion_tokens: 7,
+    models: ["openai/gpt-5-mini"],
+  },
+  reward: { aggregate_reward: 0, components: { passed: 0 } },
+  next_actions: ["Inspect verifier output and benchmark task assets."],
+};
+
 function expectSessionDownloadCall(
   fetchMock: ReturnType<typeof vi.fn> | ReturnType<typeof vi.spyOn>,
   url: string,
@@ -165,6 +186,33 @@ describe("TrialDetail trajectory section", () => {
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText(/reused artifact/i)).toBeInTheDocument();
+  });
+
+  it("shows user-facing debug evidence when the API includes it", async () => {
+    fetchSpy(
+      { ok: true, body: { events: [], next_cursor: null } },
+      {
+        ...TRIAL_BODY,
+        state: "failed",
+        failure_reason: "verifier_error",
+        failure_message: "pytest did not produce a score",
+        debug_evidence: TRIAL_DEBUG,
+      },
+    );
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    expect(await screen.findByText("Debug evidence")).toBeInTheDocument();
+    expect(screen.getByText("trial.verifier_error")).toBeInTheDocument();
+    expect(screen.getByText("benchmark")).toBeInTheDocument();
+    expect(
+      screen.getByText("Inspect verifier output and benchmark task assets."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("debug_evidence")).not.toBeInTheDocument();
   });
 
   it("downloads artifacts through the authenticated service endpoint", async () => {

@@ -34,6 +34,7 @@ from loom.db.schema import (
 )
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
+from loom.security.redaction import redact_mapping, redact_text
 from loom_service.agent_catalog import (
     known_names,
     validate_agent_model_compat,
@@ -43,6 +44,7 @@ from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
 )
+from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
@@ -163,8 +165,10 @@ def _serialize(
         "state": b.state,
         "result_status": b.result_status,
         "failure_reason": b.failure_reason,
-        "failure_message": b.failure_message,
-        "fanout_errors": b.fanout_errors,
+        "failure_message": (
+            redact_text(b.failure_message) if b.failure_message else None
+        ),
+        "fanout_errors": redact_mapping(b.fanout_errors),
         "rerun_of_batch_id": (
             str(b.rerun_of_batch_id) if b.rerun_of_batch_id else None
         ),
@@ -597,6 +601,20 @@ async def _usage_totals_for_trials(
     }
 
 
+async def _llm_calls_for_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> list[LlmCall]:
+    trial_ids = [trial.id for trial in trials]
+    if not trial_ids:
+        return []
+    return list((await session.execute(
+        select(LlmCall)
+        .where(LlmCall.trial_id.in_(trial_ids))
+        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+    )).scalars().all())
+
+
 async def _usage_by_batch_ids(
     session: Any,
     batch_ids: Sequence[UUID],
@@ -796,6 +814,7 @@ async def get_batch(
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
+    llm_calls = await _llm_calls_for_trials(s, original_trials)
     benchmark_summary = await _benchmark_summary_from_trials(
         s, original_trials,
     )
@@ -845,6 +864,11 @@ async def get_batch(
         ],
         "effective_llm_calls_count": effective_usage["llm_calls_count"],
         "benchmark_summary": benchmark_summary,
+        "debug_evidence": build_batch_debug_evidence(
+            b,
+            trials=original_trials,
+            llm_calls=llm_calls,
+        ),
     }
 
     return _serialize(
@@ -854,6 +878,32 @@ async def get_batch(
         usage=usage,
         owner_team=owner_team,
         extra=extra,
+    )
+
+
+@router.get("/batches/{batch_id}/debug")
+async def get_batch_debug(
+    sc: SessionAndCtx,
+    batch_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    b = (await s.execute(
+        select(Batch).where(Batch.id == batch_id),
+    )).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(
+            status_code=404, detail="batch not found",
+        )
+    require_team_or_admin(ctx, b.team_id)
+    trials = list((await s.execute(
+        select(Trial).where(Trial.batch_id == batch_id),
+    )).scalars().all())
+    llm_calls = await _llm_calls_for_trials(s, trials)
+    return build_batch_debug_evidence(
+        b,
+        trials=trials,
+        llm_calls=llm_calls,
     )
 
 

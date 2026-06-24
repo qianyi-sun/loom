@@ -45,6 +45,20 @@ const sharedBatch = {
 const detailBatch = {
   ...sharedBatch,
   provider_connection_id: "source-provider",
+  debug_evidence: {
+    schema_version: "1",
+    entity: { type: "batch", id: "batch-alpha", team_id: "team-alpha" },
+    lifecycle: { state: "finished", terminal_status: "partial_failed" },
+    failure: {
+      reason_code: "batch.partial_failed",
+      reason: "partial_failed",
+      category: "aggregate",
+      attribution: "mixed",
+      message: "Some child trials failed.",
+    },
+    provider: { llm_calls_count: 2, models: ["openai/gpt-5-mini"] },
+    next_actions: ["Open failed child trials and inspect their debug evidence."],
+  },
   source_provenance: [
     {
       kind: "cloned_batch_config",
@@ -334,6 +348,13 @@ describe("RunLibraryBatchDetail", () => {
     expect(screen.getByText("Alpha Research")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("org / shared")).toBeInTheDocument();
+    expect(screen.getByText("Debug evidence")).toBeInTheDocument();
+    expect(screen.getByText("batch.partial_failed")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Open failed child trials and inspect their debug evidence.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText("Reports")).toBeInTheDocument();
     expect(screen.getByText("Raw/internal diagnostics")).toBeInTheDocument();
