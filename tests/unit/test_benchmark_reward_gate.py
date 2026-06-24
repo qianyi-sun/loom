@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from urllib.error import HTTPError
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "benchmark_reward_gate.py"
 
@@ -488,3 +490,31 @@ def test_sweep_cli_fetches_batches_trials_and_task_counts(monkeypatch) -> None:
         ("/api/v1/tasks/count", {"task_filter": {"benchmark_id": "mbpp"}}),
         ("/api/v1/tasks/count", {"task_filter": {"benchmark_id": "gpqa"}}),
     ]
+
+
+def test_sweep_cli_rejects_page_limit_above_public_api_max(monkeypatch, capsys) -> None:
+    gate = _load_module()
+
+    class FakeApiClient:
+        def __init__(self, server_url: str, token: str) -> None:
+            raise AssertionError("client should not be constructed for invalid limit")
+
+    monkeypatch.setattr(gate, "ApiClient", FakeApiClient)
+
+    with pytest.raises(SystemExit) as exc:
+        gate.main(
+            [
+                "sweep",
+                "--server-url",
+                "https://loom.example",
+                "--token",
+                "loom_api_test",
+                "--limit",
+                "201",
+                "--batch-id",
+                "batch-1",
+            ],
+        )
+
+    assert exc.value.code == 2
+    assert "between 1 and 200" in capsys.readouterr().err

@@ -443,6 +443,16 @@ def _print_results(results: list[CheckResult]) -> int:
     return 1 if failed else 0
 
 
+def _api_page_limit(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if limit < 1 or limit > 200:
+        raise argparse.ArgumentTypeError("must be between 1 and 200")
+    return limit
+
+
 def _run_readiness(args: argparse.Namespace) -> int:
     client = ApiClient(args.server_url, _read_token(args.token))
     payload = client.get_json(
@@ -501,7 +511,12 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(command)
         p.add_argument("--server-url", required=True)
         p.add_argument("--token", required=True, help="Bearer token, env:NAME, or file:PATH.")
-        p.add_argument("--limit", type=int, default=200)
+        p.add_argument(
+            "--limit",
+            type=_api_page_limit,
+            default=200,
+            help="API page size, 1-200.",
+        )
         if command == "batch":
             p.add_argument("--batch-id", required=True)
             p.set_defaults(func=_run_batch)
@@ -510,7 +525,12 @@ def build_parser() -> argparse.ArgumentParser:
     sweep = sub.add_parser("sweep")
     sweep.add_argument("--server-url", required=True)
     sweep.add_argument("--token", required=True, help="Bearer token, env:NAME, or file:PATH.")
-    sweep.add_argument("--limit", type=int, default=200)
+    sweep.add_argument(
+        "--limit",
+        type=_api_page_limit,
+        default=200,
+        help="API page size for trial pagination, 1-200.",
+    )
     sweep.add_argument(
         "--batch-id",
         action="append",
