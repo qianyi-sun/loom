@@ -378,8 +378,10 @@ surfaces:
   upstream bash `run-tests.sh` script verifier. The 3 multi-service tasks use
   `environment.sidecars` so workers run the official auxiliary services instead
   of a single-image approximation.
-- SkillFlow or SkillLearnBench slice: research-demanded agentic skill learning
-  path, if adapter/runtime requirements are ready.
+- SkillFlow and SkillLearnBench: research-demanded agentic skill learning
+  paths. Their real upstreams publish task bundles rather than one JSON row per
+  instance, so the adapter must wrap each bundle with Loom `task.toml` and a
+  verifier shim over upstream `tests/test.sh` before marking them runnable.
 
 Defer heavy benchmarks until readiness tooling can explain blockers:
 

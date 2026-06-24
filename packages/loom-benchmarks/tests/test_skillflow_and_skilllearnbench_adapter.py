@@ -77,3 +77,141 @@ def test_skill_solution_runs(
     assert result.returncode == 0, (
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
+
+
+def _write_real_bundle(root: Path, *, family: str, task: str) -> Path:
+    bundle = root / "repo" / "tasks" / family / task
+    (bundle / "environment").mkdir(parents=True)
+    (bundle / "tests").mkdir()
+    (bundle / "environment" / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\n"
+        "RUN apt-get update && apt-get install -y python3\n"
+        "WORKDIR /root\n"
+        "COPY skills /root/.codex/skills\n",
+    )
+    (bundle / "task.toml").write_text(
+        "[task]\n"
+        f"id = \"{task}\"\n"
+        "name = \"Real upstream task\"\n"
+        "category = \"Utilities\"\n"
+        "difficulty = \"Easy\"\n"
+        "\n"
+        "[evaluation]\n"
+        "required_files = [\"/root/result.txt\"]\n",
+    )
+    (bundle / "instruction.md").write_text("Create /root/result.txt.\n")
+    (bundle / "tests" / "test.sh").write_text(
+        "#!/bin/bash\n"
+        "mkdir -p /logs/verifier\n"
+        "echo 1 > /logs/verifier/reward.txt\n",
+    )
+    return bundle
+
+
+def test_skilllearnbench_lists_real_upstream_bundle_layout(tmp_path: Path) -> None:
+    _write_real_bundle(
+        tmp_path,
+        family="stock-data-visualization",
+        task="stock-data-visualization-1",
+    )
+
+    instances = list(
+        SkillLearnBenchAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+
+    assert [i.instance_id for i in instances] == [
+        "stock-data-visualization/stock-data-visualization-1",
+    ]
+    assert instances[0].raw["__source_path"].endswith(
+        "stock-data-visualization-1",
+    )
+
+
+def test_skilllearnbench_converts_real_bundle_to_loom_task_config(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="stock-data-visualization",
+        task="stock-data-visualization-1",
+    )
+    adapter = SkillLearnBenchAdapter()
+    inst = BenchmarkInstance(
+        instance_id="stock-data-visualization/stock-data-visualization-1",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    converted = adapter.convert_instance(inst, out_dir=out_dir)
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out_dir / "task.toml").read_text()),
+    )
+
+    assert converted.task_id == (
+        "skilllearnbench/stock-data-visualization/stock-data-visualization-1"
+    )
+    assert cfg.task.id == converted.task_id
+    assert cfg.environment.dockerfile.as_posix() == "environment/Dockerfile"
+    assert cfg.environment.docker_build_context.as_posix() == "."
+    assert cfg.environment.workdir.as_posix() == "/root"
+    assert cfg.environment.user == "root"
+    assert cfg.verifier.name == "script"
+    assert cfg.verifier.args["script_path"] == "/root/verifier/run.sh"
+    assert (out_dir / "skills" / ".keep").exists()
+    run_sh = (out_dir / "verifier" / "run.sh").read_text()
+    assert "LOOM_VERIFIER_OUTPUT" in run_sh
+    assert "/logs/verifier/reward.txt" in run_sh
+
+
+def test_skillflow_points_at_published_task_dataset() -> None:
+    adapter = SkillFlowAdapter()
+
+    assert adapter.upstream_source.kind == "git"
+    assert adapter.upstream_source.locator == (
+        "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task"
+    )
+
+
+def test_skillflow_lists_hf_task_dataset_layout(tmp_path: Path) -> None:
+    bundle = tmp_path / "repo" / "test_tasks" / "Workflow" / "01_task"
+    (bundle / "tests").mkdir(parents=True)
+    (bundle / "task.toml").write_text(
+        "[task]\n"
+        "id = \"01_task\"\n"
+        "name = \"HF task\"\n",
+    )
+    (bundle / "instruction.md").write_text("Do the task.\n")
+    (bundle / "tests" / "test.sh").write_text(
+        "#!/bin/bash\n"
+        "mkdir -p /logs/verifier\n"
+        "echo 0 > /logs/verifier/reward.txt\n",
+    )
+    unsafe_bundle = (
+        tmp_path
+        / "repo"
+        / "test_tasks"
+        / "Inventory-&-Finance-Integration"
+        / "harbor gdpval 21"
+    )
+    (unsafe_bundle / "tests").mkdir(parents=True)
+    (unsafe_bundle / "task.toml").write_text(
+        "[task]\n"
+        "id = \"harbor gdpval 21\"\n"
+        "name = \"Unsafe path task\"\n",
+    )
+    (unsafe_bundle / "instruction.md").write_text("Do the unsafe path task.\n")
+    (unsafe_bundle / "tests" / "test.sh").write_text(
+        "#!/bin/bash\n"
+        "mkdir -p /logs/verifier\n"
+        "echo 0 > /logs/verifier/reward.txt\n",
+    )
+
+    instances = list(
+        SkillFlowAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+
+    assert [i.instance_id for i in instances] == [
+        "Inventory-_-Finance-Integration/harbor_gdpval_21",
+        "Workflow/01_task",
+    ]

@@ -27,6 +27,26 @@ Publish/register still follows the normal schema-v3 path. After publication,
 `loom datasets register <slug>` must store valid `TaskConfig` rows before the
 SPA marks the benchmark ready.
 
+## SkillFlow and SkillLearnBench task bundles
+
+`skillflow` points at the public Hugging Face git dataset
+`zhang-ziao/SkillFlow-Task` rather than the SkillFlow code repository. The
+code repository contains runners and examples, but the benchmark instances are
+published as task bundles under `test_tasks/`.
+
+`skilllearnbench` uses the upstream task-bundle shape under
+`tasks/<family>/<task>/`. Both adapters still support the legacy
+per-instance `manifest.json` fixture format used by older Loom tests, but real
+publication should consume the official bundle directories.
+
+For official bundles, the adapter copies each task directory, preserves the
+upstream `environment/Dockerfile`, writes a Loom-owned `task.toml`, and adds a
+script-verifier shim at `verifier/run.sh`. The shim runs the upstream
+`tests/test.sh`, reads `/logs/verifier/reward.txt`, and converts that reward
+into Loom's structured `VerifierResult` JSON. Instance ids are derived from
+the relative bundle path and sanitized so spaces or shell-significant
+characters in upstream folder names cannot create invalid catalog task ids.
+
 ## LiveCodeBench coverage
 
 The LiveCodeBench adapter targets the official Hugging Face dataset

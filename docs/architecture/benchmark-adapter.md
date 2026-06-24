@@ -259,6 +259,18 @@ to write `agent_output.json`, and `verifier/check.py` emits a Loom
 `VerifierResult`. Do not rely on an image-local `/opt/bfcl/evaluator.py` when
 adding BFCL categories; the script verifier bundle must stay self-contained.
 
+SkillFlow and SkillLearnBench are bundle-backed rather than record-backed.
+The adapters still accept Loom's older `manifest.json` fixture format, but
+real upstream publication should read the official task directories:
+SkillFlow from `zhang-ziao/SkillFlow-Task` under `test_tasks/`, and
+SkillLearnBench under `tasks/<family>/<task>/`. Each bundle is copied into the
+published task, wrapped in a Loom `task.toml`, and given a script-verifier shim
+that runs upstream `tests/test.sh` and converts `/logs/verifier/reward.txt`
+into a structured verifier result. When upstream folder names contain spaces or
+shell-significant characters, the adapter derives a sanitized instance id from
+the relative bundle path while preserving the original files inside the task
+bundle.
+
 The #307 reasoning/browsing wave pins and publishes complete selected official
 sets: GPQA Extended (546), Hendrycks MATH test (5000), MMLU-Pro test (12032),
 tau2-bench default leaderboard domains (278), and BrowseComp (1266). GPQA,

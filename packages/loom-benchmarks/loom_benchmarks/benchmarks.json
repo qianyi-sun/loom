@@ -124,7 +124,7 @@
       "name": "skillflow",
       "display_name": "SkillFlow",
       "series": "skill",
-      "upstream": {"kind": "git", "locator": "https://github.com/ZhangZi-a/SkillFlow.git", "revision": "main"},
+      "upstream": {"kind": "git", "locator": "https://huggingface.co/datasets/zhang-ziao/SkillFlow-Task", "revision": "main"},
       "license": {"spdx": "NOASSERTION", "url": "https://github.com/ZhangZi-a/SkillFlow"},
       "splits": ["test"]
     },
