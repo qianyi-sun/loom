@@ -18,6 +18,7 @@ sample subsets:
 | Slug | Upstream pin | Count | Notes |
 |---|---:|---:|---|
 | `gpqa` | `idavidrein/gpqa` @ `56686c0` | 546 | GPQA Extended CSV from the password-protected official archive; final A-D answer verifier. |
+| `math-500` | `HuggingFaceH4/MATH-500` @ `6e4ed1a` | 500 | Public 500-problem MATH subset; final boxed/exact answer verifier. |
 | `hendrycks-math` | `HuggingFaceTB/MATH` @ `140a673` | 5000 | Full `all` config test split; final boxed/exact answer verifier. |
 | `mmlu-pro` | `TIGER-Lab/MMLU-Pro` @ `b189ec7` | 12032 | Full test split; supports variable A-J option counts. |
 | `tau2-bench` | `HuggingFaceH4/tau2-bench-data` @ `60e37c7` | 278 | Default leaderboard domains: airline, retail, telecom. Bundles domain assets and grades structured `agent_output.json` actions/messages. |

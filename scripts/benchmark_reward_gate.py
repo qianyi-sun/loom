@@ -30,7 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script fallback.
             "livecodebench",
             "mbpp",
             "mmlu-pro",
-            "hendrycks-math",
+            "math-500",
             "gpqa",
             "skillflow",
             "skilllearnbench",

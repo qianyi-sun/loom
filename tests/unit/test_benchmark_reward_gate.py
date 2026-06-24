@@ -279,6 +279,13 @@ def test_sweep_gate_requires_distinct_task_coverage_per_benchmark() -> None:
     assert "gpqa" not in results[0].detail
 
 
+def test_reward_sweep_defaults_to_math500_not_full_hendrycks_math() -> None:
+    gate = _load_module()
+
+    assert "math-500" in gate.V1_SUPPORTED_BENCHMARK_IDS
+    assert "hendrycks-math" not in gate.V1_SUPPORTED_BENCHMARK_IDS
+
+
 def test_sweep_gate_passes_with_full_numeric_task_coverage() -> None:
     gate = _load_module()
 

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 
+from loom.benchmark_readiness import (
+    NON_V1_SUPPORTED_BENCHMARK_IDS,
+    V1_SUPPORTED_BENCHMARK_IDS,
+)
 from loom_cli.benchmark_readiness import (
     BenchmarkAuditSource,
     TaskAuditSource,
@@ -112,6 +116,12 @@ def test_readiness_marks_known_non_v1_benchmarks_as_blocked() -> None:
     assert item.raw_task_count == 1
     assert item.valid_task_config_count == 1
     assert item.license_allowed_task_count == 0
+
+
+def test_v1_supported_math_scope_uses_math500_not_full_hendrycks_math() -> None:
+    assert "math-500" in V1_SUPPORTED_BENCHMARK_IDS
+    assert "hendrycks-math" not in V1_SUPPORTED_BENCHMARK_IDS
+    assert "hendrycks-math" in NON_V1_SUPPORTED_BENCHMARK_IDS
 
 
 def test_readiness_marks_deferred_gaia_as_blocked_without_manifest() -> None:

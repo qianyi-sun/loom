@@ -236,7 +236,7 @@ Use `loom datasets list` to enumerate at runtime.
 | `tool-use` | bfcl, tau2-bench |
 | `browsing` | browsecomp |
 | `knowledge` | mmlu-pro |
-| `reasoning` | gpqa, hendrycks-math |
+| `reasoning` | gpqa, math-500, hendrycks-math |
 | `ui-agent` | osworld, webarena |
 | `research-agent` | gaia |
 | `skill` | skillflow, skilllearnbench |
@@ -290,13 +290,14 @@ the relative bundle path while preserving the original files inside the task
 bundle.
 
 The #307 reasoning/browsing wave pins and publishes complete selected official
-sets: GPQA Extended (546), Hendrycks MATH test (5000), MMLU-Pro test (12032),
-tau2-bench default leaderboard domains (278), and BrowseComp (1266). GPQA,
-MATH, and MMLU-Pro are static answer verifiers. tau2-bench converts the
-official service-domain tasks into structured action/message tasks with domain
-assets in the bundle. BrowseComp records the OpenAI simple-evals git SHA and
-CSV ETag because the encrypted questions live in a public blob outside the git
-tree; executing it requires a browsing/network-capable agent.
+sets: GPQA Extended (546), MATH-500 (500), Hendrycks MATH test (5000),
+MMLU-Pro test (12032), tau2-bench default leaderboard domains (278), and
+BrowseComp (1266). GPQA, MATH-500, full MATH, and MMLU-Pro are static answer
+verifiers. tau2-bench converts the official service-domain tasks into
+structured action/message tasks with domain assets in the bundle. BrowseComp
+records the OpenAI simple-evals git SHA and CSV ETag because the encrypted
+questions live in a public blob outside the git tree; executing it requires a
+browsing/network-capable agent.
 
 ### `packages/loom-benchmark-terminal-bench-2/` — 1 adapter
 

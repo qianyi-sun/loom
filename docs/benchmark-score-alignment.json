@@ -109,13 +109,13 @@
       }
     },
     {
-      "benchmark_id": "hendrycks-math",
+      "benchmark_id": "math-500",
       "canonical_reference": {
         "source_type": "upstream_dataset",
-        "title": "MATH test set",
-        "url": "https://huggingface.co/datasets/HuggingFaceTB/MATH",
-        "version_or_revision": "140a673f1f7182daf7923fdc7108e8cdbf97df46",
-        "justification": "Hendrycks MATH is scored by normalized final answer equivalence over the official test tasks."
+        "title": "MATH-500",
+        "url": "https://huggingface.co/datasets/HuggingFaceH4/MATH-500",
+        "version_or_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+        "justification": "MATH-500 is scored by normalized final answer equivalence over the selected 500-problem MATH subset."
       },
       "harbor_support": {
         "status": "unknown",
@@ -123,8 +123,8 @@
         "decision": "Use Harbor as parity target only after support is confirmed; otherwise replay identical final answers through the canonical MATH answer-normalization path."
       },
       "score_semantics": {
-        "task_set": "HuggingFaceTB/MATH test rows imported into hendrycks-math.",
-        "denominator": "number of runnable hendrycks-math task ids",
+        "task_set": "HuggingFaceH4/MATH-500 test rows imported into math-500.",
+        "denominator": "number of runnable math-500 task ids",
         "task_reward": "1.0 when the normalized final answer is equivalent to the canonical answer; 0.0 otherwise",
         "aggregation": "arithmetic mean of task_reward over distinct task ids",
         "displayed_metric": "accuracy",
@@ -134,9 +134,9 @@
         "status": "replay_defined",
         "cases": [
           {
-            "case_id": "hendrycks-math-normalized-answer-correct",
+            "case_id": "math-500-normalized-answer-correct",
             "input_kind": "final_answer",
-            "reference": "canonical MATH answer from task metadata",
+            "reference": "canonical MATH-500 answer from task metadata",
             "expected_reward": 1.0,
             "replay_method": "Replay a known correct normalized final answer through Loom and the canonical MATH scorer."
           }

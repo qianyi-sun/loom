@@ -168,12 +168,18 @@ def test_swe_bench_verified_upstream_is_pinned_to_hf_revision() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
 
 
-def test_gpqa_and_hendrycks_math_upstreams_are_pinned_full_sets() -> None:
+def test_gpqa_math500_and_hendrycks_math_upstreams_are_pinned_sets() -> None:
     """#307: reasoning benchmarks use selected full official sets, not
     floating or sample subsets."""
     gpqa = CATALOG["gpqa"]
     assert gpqa.upstream.revision == "56686c06f5e19865c153de0fdb11be3890014df7"
     assert gpqa.params == {"subset": "extended", "rows": "546"}
+
+    math500 = CATALOG["math-500"]
+    assert math500.upstream.locator == "HuggingFaceH4/MATH-500"
+    assert math500.upstream.subset is None
+    assert math500.upstream.revision == "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+    assert math500.params == {"rows": "500"}
 
     math = CATALOG["hendrycks-math"]
     assert math.upstream.locator == "HuggingFaceTB/MATH"

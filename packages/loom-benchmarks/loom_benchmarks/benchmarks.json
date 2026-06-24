@@ -80,6 +80,15 @@
       "params": {"subset": "all", "rows": "5000"}
     },
     {
+      "name": "math-500",
+      "display_name": "MATH-500",
+      "series": "reasoning",
+      "upstream": {"kind": "huggingface", "locator": "HuggingFaceH4/MATH-500", "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"},
+      "license": {"spdx": "MIT", "url": "https://github.com/hendrycks/math/blob/main/LICENSE"},
+      "splits": ["test"],
+      "params": {"rows": "500"}
+    },
+    {
       "name": "humaneval",
       "display_name": "HumanEval",
       "series": "code",

@@ -42,7 +42,7 @@ Harbor or the upstream canonical evaluator.
 | `aime-24` | AI-MO AIME 2024 rows | accuracy | Upstream exact-integer scorer unless Harbor support is confirmed |
 | `aime-25` | MathArena AIME 2025 I rows | accuracy | Upstream exact-integer scorer unless Harbor support is confirmed |
 | `gpqa` | GPQA Extended | accuracy | Upstream answer-key scorer unless Harbor support is confirmed |
-| `hendrycks-math` | MATH test set | accuracy | Canonical final-answer scorer unless Harbor support is confirmed |
+| `math-500` | MATH-500 | accuracy | Canonical final-answer scorer unless Harbor support is confirmed |
 | `humaneval` | OpenAI HumanEval | pass@1 accuracy | Harbor if supported, otherwise OpenAI HumanEval harness |
 | `livecodebench` | LiveCodeBench code generation lite | pass@1 accuracy | Upstream LiveCodeBench evaluator unless Harbor support is confirmed |
 | `mbpp` | Google MBPP sanitized | pass@1 accuracy | Harbor if supported, otherwise MBPP canonical tests |
@@ -57,7 +57,7 @@ Harbor or the upstream canonical evaluator.
 Layer 1 evidence should use identical outputs on both sides of the comparison.
 Examples:
 
-- final answer replay for AIME, GPQA, MATH, and MMLU-Pro;
+- final answer replay for AIME, GPQA, MATH-500, and MMLU-Pro;
 - code artifact replay for HumanEval, MBPP, and LiveCodeBench;
 - patch replay for SWE-Bench Verified;
 - task artifact replay for SkillFlow, SkillLearnBench, and Terminal-Bench 2.0.

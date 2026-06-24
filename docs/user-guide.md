@@ -340,8 +340,11 @@ catalog lifecycle but have different runtime assumptions:
 
 - `gpqa` publishes the full official GPQA Extended set (546 rows) from the
   pinned `idavidrein/gpqa` repository and grades a final A-D answer letter.
-- `hendrycks-math` publishes the full 5000-row MATH test split from the pinned
-  `HuggingFaceTB/MATH` `all` config and grades the final boxed/exact answer.
+- `math-500` publishes the 500-problem MATH subset from
+  `HuggingFaceH4/MATH-500` and grades the final boxed/exact answer.
+- `hendrycks-math` remains available as a full 5000-row MATH test-split adapter
+  from the pinned `HuggingFaceTB/MATH` `all` config, but it is outside the
+  current v1.0 supported set.
 - `mmlu-pro` publishes the full 12032-row MMLU-Pro test split and grades a
   final A-J option letter.
 - `tau2-bench` publishes the default leaderboard task sets for airline,

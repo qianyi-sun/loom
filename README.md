@@ -35,11 +35,12 @@ Loom turns a model/agent evaluation into a tracked run:
    the CLI/API.
 
 Out of the box, Loom includes benchmark adapters such as HumanEval, MBPP,
-LiveCodeBench, BFCL, BrowseComp, GPQA, Hendrycks MATH, MMLU-Pro, AIME,
-SWE-Bench variants, SkillFlow, and SkillLearnBench. Some visible catalog rows
-can be intentionally disabled until their runtime or dataset requirements are
-available. Agents are also pluggable; the shipped catalog includes CLI harnesses
-for common coding agents plus an `oracle` baseline.
+LiveCodeBench, BFCL, BrowseComp, GPQA, MATH-500, full Hendrycks MATH,
+MMLU-Pro, AIME, SWE-Bench variants, SkillFlow, and SkillLearnBench. Some
+visible catalog rows can be intentionally disabled until their runtime, dataset,
+or release-scope requirements are available. Agents are also pluggable; the
+shipped catalog includes CLI harnesses for common coding agents plus an
+`oracle` baseline.
 
 ## Architecture
 

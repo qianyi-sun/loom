@@ -1,9 +1,10 @@
-"""Hendrycks MATH full test split adapter.
+"""MATH benchmark adapters for the v1 MATH-500 subset and full test split.
 
 The original `hendrycks/competition_math` Hub dataset is no longer publicly
 loadable without credentials in many environments. Loom uses the public
 HuggingFaceTB mirror of the same MATH data, pinned to a content SHA and the
-`all` config, then publishes the full official 5,000-row test split.
+`all` config, then publishes the full official 5,000-row test split. MATH-500
+uses the public HuggingFaceH4 500-problem subset with the same answer verifier.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import json
 import textwrap
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import datasets  # type: ignore[import-untyped]
 
@@ -141,6 +142,7 @@ _RUN_SH = textwrap.dedent("""
 
 class HendrycksMATHAdapter(CatalogBackedAdapter):
     name = "hendrycks-math"
+    answer_field: ClassVar[str | None] = None
 
     def list_instances(
         self,
@@ -148,9 +150,11 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
         source_dir: Path,
         split: str,
     ) -> Iterator[BenchmarkInstance]:
+        args: list[str] = [self.upstream_source.locator]
+        if self.upstream_source.subset:
+            args.append(self.upstream_source.subset)
         ds = datasets.load_dataset(
-            self.upstream_source.locator,
-            self.upstream_source.subset,
+            *args,
             revision=self.upstream_source.revision,
             cache_dir=str(source_dir),
             trust_remote_code=self.upstream_source.trust_remote_code,
@@ -167,7 +171,8 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
         for idx, record in enumerate(rows):
             rec = dict(record)
             level = str(rec.get("level", "")).strip()
-            problem_type = str(rec.get("type", "")).strip()
+            problem_type = str(rec.get("type") or rec.get("subject") or "").strip()
+            unique_id = str(rec.get("unique_id", "")).strip()
             yield BenchmarkInstance(
                 instance_id=f"{split}/{idx:05d}",
                 split=split,
@@ -176,6 +181,7 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
                     "math_split": split,
                     **({"level": level} if level else {}),
                     **({"type": problem_type} if problem_type else {}),
+                    **({"unique_id": unique_id} if unique_id else {}),
                 },
             )
 
@@ -186,7 +192,7 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
         out_dir: Path,
     ) -> ConvertedTask:
         r = instance.raw
-        answer = _extract_boxed_answer(str(r["solution"]))
+        answer = self._answer_for_instance(instance)
         if answer is None:
             raise ValueError(f"MATH solution has no boxed answer: {instance.instance_id}")
 
@@ -194,9 +200,10 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "instruction.md").write_text(
             _render_instruction(
+                title=self.display_name,
                 problem=str(r["problem"]).strip(),
                 level=str(r.get("level", "")).strip(),
-                problem_type=str(r.get("type", "")).strip(),
+                problem_type=str(r.get("type") or r.get("subject") or "").strip(),
             ),
         )
         (out_dir / "answer_key.json").write_text(
@@ -253,6 +260,18 @@ class HendrycksMATHAdapter(CatalogBackedAdapter):
             warnings=(),
         )
 
+    def _answer_for_instance(self, instance: BenchmarkInstance) -> str | None:
+        if self.answer_field:
+            answer = instance.raw.get(self.answer_field)
+            if answer is not None:
+                return str(answer).strip()
+        return _extract_boxed_answer(str(instance.raw["solution"]))
+
+
+class MATH500Adapter(HendrycksMATHAdapter):
+    name = "math-500"
+    answer_field = "answer"
+
 
 def _extract_boxed_answer(text: str) -> str | None:
     starts: list[tuple[int, str]] = []
@@ -294,7 +313,7 @@ def _extract_boxed_answer(text: str) -> str | None:
     return None
 
 
-def _render_instruction(*, problem: str, level: str, problem_type: str) -> str:
+def _render_instruction(*, title: str, problem: str, level: str, problem_type: str) -> str:
     metadata = []
     if problem_type:
         metadata.append(f"Subject: {problem_type}")
@@ -304,7 +323,7 @@ def _render_instruction(*, problem: str, level: str, problem_type: str) -> str:
     if metadata_block:
         metadata_block += "\n\n"
     return (
-        "# MATH (Hendrycks)\n\n"
+        f"# {title}\n\n"
         f"{metadata_block}"
         f"{problem}\n\n"
         "Write your reasoning, then write the final answer in final_answer.txt. "
