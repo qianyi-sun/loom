@@ -237,6 +237,39 @@ def test_skilllearnbench_uses_root_build_context_for_root_assets(
     assert (out_dir / "DATA" / "records.json").read_text() == "[]\n"
 
 
+def test_skilllearnbench_mirrors_environment_copy_sources_for_root_context(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="weighted-gdp-calculation",
+        task="weighted-gdp-calculation-6",
+    )
+    (bundle / "environment" / "gdp.xlsx").write_bytes(b"spreadsheet")
+    (bundle / "environment" / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\n"
+        "WORKDIR /root\n"
+        "COPY skills /root/.codex/skills\n"
+        "COPY gdp.xlsx /root/gdp.xlsx\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+    inst = BenchmarkInstance(
+        instance_id="weighted-gdp-calculation/weighted-gdp-calculation-6",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out_dir / "task.toml").read_text()),
+    )
+
+    assert cfg.environment.docker_build_context.as_posix() == "."
+    assert (out_dir / "gdp.xlsx").read_bytes() == b"spreadsheet"
+    assert (out_dir / "environment" / "gdp.xlsx").read_bytes() == b"spreadsheet"
+
+
 def test_skillflow_rewrites_unpublished_harbor_base_image(
     tmp_path: Path,
 ) -> None:

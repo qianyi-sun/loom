@@ -152,6 +152,7 @@ class SkillFlowAdapter(CatalogBackedAdapter):
         self._rewrite_unpublished_base_images(out_dir)
         self._rewrite_absolute_solution_paths(out_dir)
         if self._dockerfile_uses_root_build_context(out_dir):
+            self._mirror_environment_copy_sources_for_root_context(out_dir)
             skills_dir = out_dir / "skills"
             skills_dir.mkdir(exist_ok=True)
             (skills_dir / ".keep").touch()
@@ -264,6 +265,36 @@ class SkillFlowAdapter(CatalogBackedAdapter):
             return False
         root_matches = list(out_dir.glob(source))
         return bool(root_matches)
+
+    @classmethod
+    def _mirror_environment_copy_sources_for_root_context(
+        cls,
+        out_dir: Path,
+    ) -> None:
+        dockerfile = out_dir / "environment" / "Dockerfile"
+        environment_dir = out_dir / "environment"
+        if not dockerfile.exists() or not environment_dir.is_dir():
+            return
+
+        for source in cls._dockerfile_copy_sources(dockerfile):
+            normalized = source.strip("\"'").removeprefix("./")
+            if (
+                not normalized
+                or normalized.startswith("/")
+                or "://" in normalized
+                or normalized.startswith("$")
+            ):
+                continue
+            for env_path in environment_dir.glob(normalized):
+                relative = env_path.relative_to(environment_dir)
+                target = out_dir / relative
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if env_path.is_dir():
+                    shutil.copytree(env_path, target)
+                else:
+                    shutil.copy2(env_path, target)
 
     def _write_loom_task_toml(
         self,
