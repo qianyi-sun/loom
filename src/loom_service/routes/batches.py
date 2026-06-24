@@ -46,6 +46,7 @@ from loom_service.auth_guards import (
 )
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
+from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
@@ -837,6 +838,11 @@ async def get_batch(
     rerunnable_failed_count = sum(
         1 for trial in original_trials if _is_rerunnable_failure(trial)
     )
+    debug_evidence = build_batch_debug_evidence(
+        b,
+        trials=original_trials,
+        llm_calls=llm_calls,
+    )
     extra = {
         "rerun_batches": [
             {
@@ -864,10 +870,10 @@ async def get_batch(
         ],
         "effective_llm_calls_count": effective_usage["llm_calls_count"],
         "benchmark_summary": benchmark_summary,
-        "debug_evidence": build_batch_debug_evidence(
-            b,
-            trials=original_trials,
-            llm_calls=llm_calls,
+        "debug_evidence": debug_evidence,
+        "diagnosis": build_batch_diagnosis(
+            debug_evidence,
+            trial_failures=trial_failure_records(original_trials),
         ),
     }
 
@@ -904,6 +910,36 @@ async def get_batch_debug(
         b,
         trials=trials,
         llm_calls=llm_calls,
+    )
+
+
+@router.get("/batches/{batch_id}/diagnosis")
+async def get_batch_diagnosis(
+    sc: SessionAndCtx,
+    batch_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    b = (await s.execute(
+        select(Batch).where(Batch.id == batch_id),
+    )).scalar_one_or_none()
+    if b is None:
+        raise HTTPException(
+            status_code=404, detail="batch not found",
+        )
+    require_team_or_admin(ctx, b.team_id)
+    trials = list((await s.execute(
+        select(Trial).where(Trial.batch_id == batch_id),
+    )).scalars().all())
+    llm_calls = await _llm_calls_for_trials(s, trials)
+    debug_evidence = build_batch_debug_evidence(
+        b,
+        trials=trials,
+        llm_calls=llm_calls,
+    )
+    return build_batch_diagnosis(
+        debug_evidence,
+        trial_failures=trial_failure_records(trials),
     )
 
 

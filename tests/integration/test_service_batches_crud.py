@@ -1381,7 +1381,12 @@ async def test_batch_debug_cross_team_forbidden(
                 f"/api/v1/batches/{batch_id}/debug",
                 headers={"Authorization": f"Bearer {other_raw}"},
             )
+            diagnosis = await ac.get(
+                f"/api/v1/batches/{batch_id}/diagnosis",
+                headers={"Authorization": f"Bearer {other_raw}"},
+            )
         assert r.status_code == 403
+        assert diagnosis.status_code == 403
     finally:
         sync_engine = create_engine(postgres_url)
         sl = sessionmaker(sync_engine)
@@ -1397,6 +1402,96 @@ async def test_batch_debug_cross_team_forbidden(
             s.execute(delete(Team).where(Team.id == other_team))
             s.commit()
         sync_engine.dispose()
+
+
+async def test_batch_diagnosis_clusters_failed_trials(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    trial_ids = [uuid4() for _ in range(4)]
+    now = datetime.now(UTC)
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="gateway-cluster",
+                task_filter={"benchmark_ids": ["humaneval"]},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=4,
+                result_status="all_failed",
+                provider_model_id="qwen2.5-coder",
+                finished_at=now,
+            )
+        )
+        for i, trial_id in enumerate(trial_ids):
+            reason = "gateway_error" if i < 3 else "verifier_error"
+            conn.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    batch_id=batch_id,
+                    team_id=team_id,
+                    task_id=f"local/mit-{i % 3}",
+                    state="failed",
+                    config={"agent_name": "litellm"},
+                    requires_caps={},
+                    submitted_at=now,
+                    started_at=now,
+                    finished_at=now,
+                    failure_reason=reason,
+                    failure_message=(
+                        "provider returned error with "
+                        "Authorization: Bearer loom_api_supersecret"
+                    ),
+                )
+            )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        detail = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        diagnosis = await ac.get(
+            f"/api/v1/batches/{batch_id}/diagnosis",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert diagnosis.status_code == 200, diagnosis.text
+    body = diagnosis.json()
+    assert body["schema_version"] == "1"
+    assert body["entity"] == {"type": "batch", "id": str(batch_id)}
+    assert body["summary"] == (
+        "The batch failed because most failed child trials hit provider "
+        "gateway errors before scoring."
+    )
+    assert body["primary_cause"]["reason_code"] == "trial.gateway_error"
+    assert body["primary_cause"]["affected_trials"] == 3
+    assert body["primary_cause"]["affected_ratio"] == pytest.approx(0.75)
+    assert body["reason_clusters"][0]["reason_code"] == "trial.gateway_error"
+    assert body["reason_clusters"][0]["count"] == 3
+    assert body["reason_clusters"][0]["representative_trial_id"] == (
+        str(trial_ids[0])
+    )
+    assert "not reliable" in body["impact"]
+    assert any(
+        action.get("action") == "rerun_failed"
+        for action in body["next_actions"]
+    )
+    assert "loom_api_supersecret" not in json.dumps(body)
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["diagnosis"]["primary_cause"] == body["primary_cause"]
 
 
 async def test_rerun_failed_batch_creates_linked_exact_targets(

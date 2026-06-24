@@ -45,6 +45,41 @@ const sharedBatch = {
 const detailBatch = {
   ...sharedBatch,
   provider_connection_id: "source-provider",
+  diagnosis: {
+    schema_version: "1",
+    entity: { type: "batch", id: "batch-alpha" },
+    summary: (
+      "The batch failed because most failed child trials hit provider "
+      + "gateway errors before scoring."
+    ),
+    primary_cause: {
+      reason_code: "trial.gateway_error",
+      category: "gateway",
+      attribution: "provider",
+      confidence: "medium",
+      affected_trials: 2,
+      affected_ratio: 0.5,
+    },
+    impact: "The aggregate score is not reliable by itself.",
+    evidence: ["2/4 affected trial(s) matched trial.gateway_error"],
+    next_actions: [
+      {
+        label: "Run provider preflight",
+        kind: "cli_command",
+        command: "loom providers models --preflight gpt-5-mini",
+      },
+    ],
+    reason_clusters: [
+      {
+        reason_code: "trial.gateway_error",
+        category: "gateway",
+        attribution: "provider",
+        count: 2,
+        affected_ratio: 0.5,
+        representative_trial_id: "trial-alpha",
+      },
+    ],
+  },
   debug_evidence: {
     schema_version: "1",
     entity: { type: "batch", id: "batch-alpha", team_id: "team-alpha" },
@@ -348,6 +383,13 @@ describe("RunLibraryBatchDetail", () => {
     expect(screen.getByText("Alpha Research")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("org / shared")).toBeInTheDocument();
+    expect(screen.getByText("Diagnosis")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The batch failed because most failed child trials hit provider gateway errors before scoring.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Run provider preflight")).toBeInTheDocument();
     expect(screen.getByText("Debug evidence")).toBeInTheDocument();
     expect(screen.getByText("batch.partial_failed")).toBeInTheDocument();
     expect(

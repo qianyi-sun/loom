@@ -248,7 +248,7 @@ The service detail API uses that projection to set `trajectory_ready`,
 `atif_ready`, and artifact download links. Clients should not infer
 output availability by guessing MinIO keys.
 
-The same detail API also exposes user-facing debug evidence:
+The same detail API also exposes user-facing diagnosis and debug evidence:
 
 - `GET /api/v1/trials/{trial_id}` includes `debug_evidence`;
   `GET /api/v1/trials/{trial_id}/debug` returns that object directly.
@@ -256,6 +256,21 @@ The same detail API also exposes user-facing debug evidence:
   `GET /api/v1/batches/{batch_id}/debug` returns that object directly.
 - Run Library batch detail includes the same batch `debug_evidence` after the
   Run Library read policy allows access.
+- `GET /api/v1/trials/{trial_id}` and
+  `GET /api/v1/batches/{batch_id}` also include `diagnosis`.
+  `GET /api/v1/trials/{trial_id}/diagnosis` and
+  `GET /api/v1/batches/{batch_id}/diagnosis` return that deterministic
+  `DiagnosisReport` directly.
+- Run Library batch detail includes the same batch `diagnosis` after the Run
+  Library read policy allows access.
+
+Diagnosis reports are schema-versioned and human-readable. They are derived
+from redacted debug evidence and persisted run state, not from LLM
+summarization. The stable fields are `entity`, `summary`, `primary_cause`,
+`impact`, `evidence`, `next_actions`, and `reason_clusters`. Batch diagnosis
+clusters failed child trials by stable reason code, reports affected counts
+and ratios, and states whether the aggregate score is reliable for
+model-quality comparison.
 
 Debug evidence is schema-versioned and machine-readable. The stable fields are
 `entity`, `lifecycle`, `worker`, `agent`, `provider`, `failure`, `task` or

@@ -53,6 +53,18 @@ export interface paths {
       };
     };
   };
+  "/api/v1/trials/{trial_id}/diagnosis": {
+    get: {
+      parameters: { path: { trial_id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["DiagnosisReport"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/trials/{trial_id}/trajectory": {
     get: {
       parameters: {
@@ -265,6 +277,18 @@ export interface paths {
       };
     };
   };
+  "/api/v1/batches/{id}/diagnosis": {
+    get: {
+      parameters: { path: { id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["DiagnosisReport"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/batches/{id}/cancel": {
     post: {
       parameters: { path: { id: string } };
@@ -388,6 +412,7 @@ export interface components {
         blocked_reason?: string | null;
       }[];
       debug_evidence?: components["schemas"]["DebugEvidence"];
+      diagnosis?: components["schemas"]["DiagnosisReport"];
     };
     DebugEvidence: {
       schema_version: "1";
@@ -427,6 +452,40 @@ export interface components {
       reward?: Record<string, unknown>;
       evidence_refs?: Record<string, unknown>;
       next_actions: string[];
+    };
+    DiagnosisReport: {
+      schema_version: "1";
+      generated_at?: string;
+      entity: {
+        type: "batch" | "trial" | string;
+        id: string;
+      };
+      summary: string;
+      primary_cause: {
+        reason_code: string;
+        category: string;
+        attribution: string;
+        confidence: "high" | "medium" | "low" | string;
+        affected_trials: number;
+        affected_ratio: number;
+      };
+      impact: string;
+      evidence: string[];
+      next_actions: {
+        label: string;
+        kind: "manual" | "cli_command" | "web_action" | string;
+        command?: string;
+        action?: string;
+      }[];
+      reason_clusters: {
+        reason_code: string;
+        category?: string;
+        attribution?: string;
+        count: number;
+        affected_ratio?: number;
+        representative_trial_id?: string | null;
+        representative_task_id?: string | null;
+      }[];
     };
     TrajectoryEvent: {
       kind: string;
@@ -569,6 +628,7 @@ export interface components {
       effective_total_completion_tokens: number;
       effective_llm_calls_count: number;
       debug_evidence?: components["schemas"]["DebugEvidence"];
+      diagnosis?: components["schemas"]["DiagnosisReport"];
     };
     UsageBucket: {
       start_at: string;

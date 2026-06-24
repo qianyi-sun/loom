@@ -1474,8 +1474,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    with a sensible reason). `GET /api/v1/trials/{id}` carries
    `aggregate_reward`, `failure_reason` (when applicable),
    `total_prompt_tokens`, `total_completion_tokens`,
-   `llm_calls_count`, `debug_evidence`, plus `atif_url`, `trajectory_url`,
-   `atif_ready`, `trajectory_ready`, and `artifacts` for download.
+   `llm_calls_count`, `diagnosis`, `debug_evidence`, plus `atif_url`,
+   `trajectory_url`, `atif_ready`, `trajectory_ready`, and `artifacts` for
+   download.
    Artifact rows include `share_status` and a safe `blocked_reason`
    when org-wide sharing is blocked. Use `/api/v1/usage` for
    cost views rather than trial or batch detail responses.
@@ -1483,6 +1484,16 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform
    failure count instead of only one overall average.
+   For failed or partially failed work, verify
+   `GET /api/v1/trials/{id}/diagnosis`,
+   `GET /api/v1/batches/{id}/diagnosis`,
+   `loom eval diagnose trial <id>`, and
+   `loom eval diagnose batch <id>` return the same primary cause,
+   reason clusters, score reliability text, and next actions without
+   printing provider secrets, bearer tokens, internal service URLs, or
+   signed object-store URLs. The SPA Trial Detail, Batch Detail, and Run
+   Library Batch Detail pages should show the diagnosis before the raw
+   debug evidence disclosure.
 13. **Trajectory + artifact download.** `GET /api/v1/trials/{id}/trajectory`
     streams event pages; `GET /api/v1/trials/{id}/trajectory/download`
     returns raw JSONL; `GET /api/v1/trials/{id}/atif` returns the ATIF JSON;
@@ -1494,9 +1505,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
 14. **Run Library sharing.** Confirm the completed source run appears in Run
     Library -> My team for Team A and Run Library -> All teams for Team B.
     Evidence must include the owner-team label, completed state, score/cost
-    summary, task/agent/model summary, debug evidence, and artifact groups.
-    Team B must be able to download a safe artifact only through the Run
-    Library service URL.
+    summary, task/agent/model summary, diagnosis, debug evidence, and
+    artifact groups. Team B must be able to download a safe artifact only
+    through the Run Library service URL.
 15. **Clone and reuse.** From Team B, clone config from Team A's completed run.
     If the source run used a provider connection, select a Team B-owned
     provider connection before cloning. Then reuse a safe artifact from the

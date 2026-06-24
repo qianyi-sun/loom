@@ -206,6 +206,82 @@ def _print_debug_evidence_summary(evidence: dict[str, Any]) -> None:
             print(f"  - {action}")
 
 
+def _format_ratio(value: Any) -> str:
+    if isinstance(value, int | float):
+        return f"{value:.0%}"
+    return "-"
+
+
+def _print_diagnosis_report(report: dict[str, Any]) -> None:
+    entity = report.get("entity") if isinstance(report, dict) else {}
+    primary = report.get("primary_cause") if isinstance(report, dict) else {}
+    evidence = report.get("evidence")
+    actions = report.get("next_actions")
+    clusters = report.get("reason_clusters")
+    entity_type = entity.get("type") if isinstance(entity, dict) else "unknown"
+    entity_id = entity.get("id") if isinstance(entity, dict) else "unknown"
+    print(f"Diagnosis: {entity_type}")
+    print(f"id:        {entity_id}")
+    summary = report.get("summary")
+    if isinstance(summary, str) and summary:
+        print()
+        print(summary)
+    if isinstance(primary, dict):
+        print()
+        print("Primary cause:")
+        print(f"  reason_code:     {primary.get('reason_code', 'unknown')}")
+        print(f"  category:        {primary.get('category', 'unknown')}")
+        print(f"  attribution:     {primary.get('attribution', 'unknown')}")
+        print(f"  confidence:      {primary.get('confidence', 'unknown')}")
+        affected = primary.get("affected_trials")
+        if affected is not None:
+            print(
+                "  affected:        "
+                f"{affected} ({_format_ratio(primary.get('affected_ratio'))})",
+            )
+    impact = report.get("impact")
+    if isinstance(impact, str) and impact:
+        print()
+        print("Impact:")
+        print(f"  {impact}")
+    if isinstance(evidence, list) and evidence:
+        print()
+        print("Evidence:")
+        for item in evidence:
+            print(f"  - {item}")
+    if isinstance(clusters, list) and clusters:
+        print()
+        print("Reason clusters:")
+        for cluster in clusters:
+            if not isinstance(cluster, dict):
+                continue
+            representative = cluster.get("representative_trial_id")
+            suffix = f" representative={representative}" if representative else ""
+            print(
+                "  - "
+                f"{cluster.get('reason_code', 'unknown')}: "
+                f"{cluster.get('count', 0)} "
+                f"({_format_ratio(cluster.get('affected_ratio'))})"
+                f"{suffix}",
+            )
+    if isinstance(actions, list) and actions:
+        print()
+        print("Next actions:")
+        for index, action in enumerate(actions, start=1):
+            if isinstance(action, dict):
+                label = action.get("label", "Action")
+                command = action.get("command")
+                action_name = action.get("action")
+                if command:
+                    print(f"  {index}. {label}: {command}")
+                elif action_name:
+                    print(f"  {index}. {label} ({action_name})")
+                else:
+                    print(f"  {index}. {label}")
+            else:
+                print(f"  {index}. {action}")
+
+
 def _run(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -447,6 +523,24 @@ def _batch_debug(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _diagnose_batch(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            resp = c.get(f"/api/v1/batches/{args.batch_id}/diagnosis")
+        body = assert_2xx(
+            resp,
+            action=f"fetch batch diagnosis {args.batch_id!r}",
+        )
+        if args.format == "json":
+            _dump_json(body)
+        else:
+            _print_diagnosis_report(body)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
 def _batch_cancel(args: argparse.Namespace) -> int:
     def _body() -> int:
         cfg = require_logged_in()
@@ -535,6 +629,24 @@ def _trial_debug(args: argparse.Namespace) -> int:
             _dump_json(body)
         else:
             _print_debug_evidence_summary(body)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _diagnose_trial(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            resp = c.get(f"/api/v1/trials/{args.trial_id}/diagnosis")
+        body = assert_2xx(
+            resp,
+            action=f"fetch trial diagnosis {args.trial_id!r}",
+        )
+        if args.format == "json":
+            _dump_json(body)
+        else:
+            _print_diagnosis_report(body)
         return 0
 
     return _run_with_error_handling(_body)
@@ -849,6 +961,37 @@ def dispatch(argv: list[str]) -> int:
         help="Destination path. Defaults to a filename derived from the trial/key.",
     )
     p_td.set_defaults(handler=_trial_download)
+
+    # --- diagnose ---
+    p_diag = sub.add_parser(
+        "diagnose",
+        help="Fetch human-readable diagnosis reports for batches or trials.",
+    )
+    diag_sub = p_diag.add_subparsers(dest="diagnose_cmd", required=True)
+
+    p_diag_batch = diag_sub.add_parser(
+        "batch",
+        help="Diagnose a batch failure summary and reason clusters.",
+    )
+    p_diag_batch.add_argument("batch_id", help="Batch UUID.")
+    p_diag_batch.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+    )
+    p_diag_batch.set_defaults(handler=_diagnose_batch)
+
+    p_diag_trial = diag_sub.add_parser(
+        "trial",
+        help="Diagnose a trial failure or terminal outcome.",
+    )
+    p_diag_trial.add_argument("trial_id", help="Trial UUID.")
+    p_diag_trial.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+    )
+    p_diag_trial.set_defaults(handler=_diagnose_trial)
 
     p_usage = sub.add_parser(
         "usage",

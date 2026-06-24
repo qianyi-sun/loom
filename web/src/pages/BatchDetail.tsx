@@ -11,6 +11,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
+import { DiagnosisCard } from "../components/DiagnosisCard";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -334,6 +335,13 @@ export default function BatchDetail(): JSX.Element {
         </Card.Body>
       </Card>
 
+      <DiagnosisCard
+        diagnosis={c.diagnosis}
+        onRerunFailed={
+          rerunnableFailedCount > 0 ? () => rerunFailed.mutate() : undefined
+        }
+        rerunDisabled={rerunFailed.isPending}
+      />
       <DebugEvidenceCard evidence={c.debug_evidence} />
 
       {showBenchmarkSummary ? (

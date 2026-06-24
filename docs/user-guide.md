@@ -216,10 +216,12 @@ loom eval batch create \
   --n-per-task 1
 
 loom eval batch show <batch-id>
+loom eval diagnose batch <batch-id>
 loom eval batch debug <batch-id> --format json
 loom eval trial list --state succeeded --limit 5
 loom eval usage --start 2026-06-01 --end 2026-06-30
 loom eval trial show <trial-id>
+loom eval diagnose trial <trial-id>
 loom eval trial debug <trial-id> --format json
 loom eval trial download <trial-id> --kind atif --output atif.json
 loom eval trial download <trial-id> --kind trajectory --output events.jsonl
@@ -232,6 +234,14 @@ Auth and permission errors use the same remediation hint across CLI subcommands.
 Text and JSON output redact raw bearer tokens, provider keys, internal service
 hosts, and signed object-store URLs. `loom eval trial show` prints copyable
 download commands instead of MinIO/S3 signed URLs.
+
+Use `loom eval diagnose batch <batch-id>` or
+`loom eval diagnose trial <trial-id>` first when a run failed and a human or
+AI agent needs the short answer. The diagnosis output is deterministic and
+derived from redacted debug evidence. It summarizes the primary cause, owner
+layer, confidence, affected trial count, score reliability, supporting
+evidence, reason clusters for batches, and next actions. Pass `--format json`
+to retrieve the same schema-versioned `DiagnosisReport` for automation.
 
 Use `loom eval batch debug <batch-id>` or
 `loom eval trial debug <trial-id>` when an API agent needs structured failure

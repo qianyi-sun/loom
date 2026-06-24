@@ -792,6 +792,106 @@ def test_batch_debug_renders_text_summary(
     assert "Inspect batch fan-out errors." in out
 
 
+def test_diagnose_batch_fetches_machine_readable_report(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "schema_version": "1",
+        "entity": {"type": "batch", "id": _BATCH_ID},
+        "summary": "The batch failed because most trials hit gateway errors.",
+        "primary_cause": {
+            "reason_code": "trial.gateway_error",
+            "category": "gateway",
+            "attribution": "provider",
+            "confidence": "high",
+            "affected_trials": 148,
+            "affected_ratio": 0.93,
+        },
+        "impact": "The aggregate score is not reliable.",
+        "evidence": ["148/164 trials matched trial.gateway_error"],
+        "next_actions": [
+            {
+                "label": "Run provider preflight",
+                "kind": "cli_command",
+                "command": "loom providers models --preflight gpt-4o-mini",
+            }
+        ],
+        "reason_clusters": [
+            {
+                "reason_code": "trial.gateway_error",
+                "count": 148,
+                "representative_trial_id": _TRIAL_ID,
+            }
+        ],
+    }
+    mock_server.canned[
+        ("GET", f"/api/v1/batches/{_BATCH_ID}/diagnosis")
+    ] = httpx.Response(200, json=payload)
+
+    rc = main(["eval", "diagnose", "batch", _BATCH_ID, "--format", "json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["primary_cause"] == (
+        payload["primary_cause"]
+    )
+    assert mock_server[0].url.path == (
+        f"/api/v1/batches/{_BATCH_ID}/diagnosis"
+    )
+
+
+def test_diagnose_batch_renders_text_report(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[
+        ("GET", f"/api/v1/batches/{_BATCH_ID}/diagnosis")
+    ] = httpx.Response(
+        200,
+        json={
+            "schema_version": "1",
+            "entity": {"type": "batch", "id": _BATCH_ID},
+            "summary": (
+                "The batch failed because most failed child trials hit "
+                "provider gateway errors before scoring."
+            ),
+            "primary_cause": {
+                "reason_code": "trial.gateway_error",
+                "category": "gateway",
+                "attribution": "provider",
+                "confidence": "medium",
+                "affected_trials": 3,
+                "affected_ratio": 0.75,
+            },
+            "impact": "The aggregate score is not reliable.",
+            "evidence": ["3/4 affected trial(s) matched trial.gateway_error"],
+            "next_actions": [
+                {
+                    "label": "Rerun failed trials after the provider path is healthy",
+                    "kind": "web_action",
+                    "action": "rerun_failed",
+                }
+            ],
+            "reason_clusters": [
+                {
+                    "reason_code": "trial.gateway_error",
+                    "count": 3,
+                    "affected_ratio": 0.75,
+                    "representative_trial_id": _TRIAL_ID,
+                }
+            ],
+        },
+    )
+
+    rc = main(["eval", "diagnose", "batch", _BATCH_ID])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Diagnosis: batch" in out
+    assert "trial.gateway_error" in out
+    assert "The aggregate score is not reliable." in out
+    assert "Reason clusters:" in out
+    assert "Rerun failed trials" in out
+
+
 def test_batch_cancel(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -987,6 +1087,46 @@ def test_trial_debug_fetches_machine_readable_evidence(
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["failure"]["reason_code"] == "trial.verifier_error"
     assert mock_server[0].url.path == f"/api/v1/trials/{_TRIAL_ID}/debug"
+
+
+def test_diagnose_trial_fetches_machine_readable_report(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "schema_version": "1",
+        "entity": {"type": "trial", "id": _TRIAL_ID},
+        "summary": "The trial reached the verifier, but the verifier failed.",
+        "primary_cause": {
+            "reason_code": "trial.verifier_error",
+            "category": "verifier",
+            "attribution": "benchmark",
+            "confidence": "high",
+            "affected_trials": 1,
+            "affected_ratio": 1.0,
+        },
+        "impact": "The reward is not reliable.",
+        "evidence": ["1/1 affected trial(s) matched trial.verifier_error"],
+        "next_actions": [
+            {
+                "label": "Inspect verifier output and benchmark task assets",
+                "kind": "manual",
+            }
+        ],
+        "reason_clusters": [],
+    }
+    mock_server.canned[
+        ("GET", f"/api/v1/trials/{_TRIAL_ID}/diagnosis")
+    ] = httpx.Response(200, json=payload)
+
+    rc = main(["eval", "diagnose", "trial", _TRIAL_ID, "--format", "json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["primary_cause"] == (
+        payload["primary_cause"]
+    )
+    assert mock_server[0].url.path == (
+        f"/api/v1/trials/{_TRIAL_ID}/diagnosis"
+    )
 
 
 def test_trial_download_atif_writes_public_route_response(

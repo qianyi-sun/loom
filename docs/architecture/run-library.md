@@ -51,8 +51,8 @@ diagnostics.
   caller's team. `scope=all` shows the caller's team plus org-shared completed
   runs from other teams; platform admins can inspect all rows.
 - `GET /api/v1/run-library/batches/{batch_id}`: detail view with owner-team
-  label, task/config summary data, redacted batch debug evidence, provenance,
-  trial rollup, and grouped artifact inventory.
+  label, task/config summary data, deterministic diagnosis, redacted batch
+  debug evidence, provenance, trial rollup, and grouped artifact inventory.
 - `PATCH /api/v1/run-library/batches/{batch_id}/visibility`: owner/admin update
   for `visibility` and `share_status`.
 - `POST /api/v1/run-library/batches/{batch_id}/clone-config`: create a new
@@ -86,9 +86,10 @@ The Run Library detail page groups artifacts into reports, trajectories,
 reusable outputs, logs/diagnostics, and raw/internal diagnostics. Shared
 artifacts expose Download, Copy URL, and Reuse actions. Blocked artifacts show
 only a safe blocked reason and do not expose cross-team actions. The same
-Debug evidence card used by Batch Detail appears on Run Library detail when the
-API includes `debug_evidence`; it shows reason code, category, attribution, and
-safe next actions while keeping the exact redacted JSON collapsed.
+Diagnosis and Debug evidence cards used by Batch Detail appear on Run Library
+detail when the API includes `diagnosis` and `debug_evidence`; diagnosis shows
+the human-readable summary, primary cause, impact, reason clusters, and next
+actions first, while the exact redacted debug JSON remains collapsed.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused

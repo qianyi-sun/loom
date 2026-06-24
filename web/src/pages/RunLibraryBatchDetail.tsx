@@ -12,6 +12,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
+import { DiagnosisCard } from "../components/DiagnosisCard";
 import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -310,6 +311,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
         </Card.Body>
       </Card>
 
+      <DiagnosisCard diagnosis={batch.diagnosis} />
       <DebugEvidenceCard evidence={batch.debug_evidence} />
 
       <Card>

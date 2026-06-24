@@ -20,6 +20,7 @@ from loom_service.auth_guards import (
 )
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
+from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.routes.object_downloads import stream_object_response
@@ -315,6 +316,11 @@ async def _serialize_batch(
     trials = await _batch_trials(session, batch.id)
     llm_calls = await _llm_calls_for_trials(session, trials)
     reward, cost = _trial_rollup(trials)
+    debug_evidence = build_batch_debug_evidence(
+        batch,
+        trials=trials,
+        llm_calls=llm_calls,
+    )
     out: dict[str, Any] = {
         "id": str(batch.id),
         "team_id": str(batch.team_id),
@@ -346,10 +352,10 @@ async def _serialize_batch(
         "aggregate_reward": reward,
         "total_cost_usd": cost,
         "artifact_summary": _artifact_summary(trials),
-        "debug_evidence": build_batch_debug_evidence(
-            batch,
-            trials=trials,
-            llm_calls=llm_calls,
+        "debug_evidence": debug_evidence,
+        "diagnosis": build_batch_diagnosis(
+            debug_evidence,
+            trial_failures=trial_failure_records(trials),
         ),
     }
     if include_inventory:

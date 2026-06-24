@@ -14,6 +14,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
+import { DiagnosisCard } from "../components/DiagnosisCard";
 import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
@@ -449,6 +450,7 @@ export default function TrialDetail(): JSX.Element {
         </Link>
       </div>
       <TrialHeader trial={trial.data} />
+      <DiagnosisCard diagnosis={trial.data.diagnosis} />
       <DebugEvidenceCard evidence={trial.data.debug_evidence} />
       <Trajectory trialId={trialId} />
     </div>

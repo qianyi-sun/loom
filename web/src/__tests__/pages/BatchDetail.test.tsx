@@ -80,6 +80,43 @@ const BATCH_DEBUG: components["schemas"]["DebugEvidence"] = {
   next_actions: ["Inspect batch fan-out errors."],
 };
 
+const BATCH_DIAGNOSIS = {
+  schema_version: "1",
+  entity: { type: "batch", id: BATCH_ID },
+  summary: (
+    "The batch failed because most failed child trials hit provider gateway "
+    + "errors before scoring."
+  ),
+  primary_cause: {
+    reason_code: "trial.gateway_error",
+    category: "gateway",
+    attribution: "provider",
+    confidence: "medium",
+    affected_trials: 3,
+    affected_ratio: 0.75,
+  },
+  impact: "The aggregate score is not reliable for model-quality comparison.",
+  evidence: ["3/4 affected trial(s) matched trial.gateway_error"],
+  next_actions: [
+    {
+      label: "Rerun failed trials after the provider path is healthy",
+      kind: "web_action",
+      action: "rerun_failed",
+    },
+  ],
+  reason_clusters: [
+    {
+      reason_code: "trial.gateway_error",
+      category: "gateway",
+      attribution: "provider",
+      count: 3,
+      affected_ratio: 0.75,
+      representative_trial_id: "trial-1",
+      representative_task_id: "humaneval/0",
+    },
+  ],
+};
+
 function mockBatch(
   body: BatchBody = BATCH_BODY,
   rerunBody: Record<string, unknown> | null = null,
@@ -164,9 +201,18 @@ describe("BatchDetail run plan", () => {
       failure_reason: "fanout_submit_failed",
       failure_message: "task local/mit-0 submit failed: HTTP 403",
       debug_evidence: BATCH_DEBUG,
+      diagnosis: BATCH_DIAGNOSIS,
     });
     renderBatchDetail();
 
+    expect(await screen.findByText("Diagnosis")).toBeInTheDocument();
+    expect(screen.getByText(BATCH_DIAGNOSIS.summary)).toBeInTheDocument();
+    expect(screen.getAllByText("trial.gateway_error").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("The aggregate score is not reliable for model-quality comparison."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Reason clusters")).toBeInTheDocument();
+    expect(screen.getByText(/Rerun failed trials/i)).toBeInTheDocument();
     expect(await screen.findByText("Debug evidence")).toBeInTheDocument();
     expect(screen.getByText("batch.fanout_submit_failed")).toBeInTheDocument();
     expect(screen.getByText("platform")).toBeInTheDocument();

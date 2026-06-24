@@ -529,6 +529,10 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
             f"/api/v1/trials/{trial_id}/debug",
             headers={"Authorization": f"Bearer {raw}"},
         )
+        diagnosis = await ac.get(
+            f"/api/v1/trials/{trial_id}/diagnosis",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
         detail = await ac.get(
             f"/api/v1/trials/{trial_id}",
             headers={"Authorization": f"Bearer {raw}"},
@@ -568,8 +572,34 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
     assert "X-Amz-Signature=secret" not in rendered
     assert "provider preflight" not in " ".join(body["next_actions"]).lower()
 
+    assert diagnosis.status_code == 200, diagnosis.text
+    diagnosis_body = diagnosis.json()
+    assert diagnosis_body["schema_version"] == "1"
+    assert diagnosis_body["entity"] == {
+        "type": "trial",
+        "id": str(trial_id),
+    }
+    assert diagnosis_body["primary_cause"]["reason_code"] == (
+        "trial.verifier_error"
+    )
+    assert diagnosis_body["primary_cause"]["category"] == "verifier"
+    assert diagnosis_body["primary_cause"]["attribution"] == "benchmark"
+    assert "not reliable" in diagnosis_body["impact"]
+    assert diagnosis_body["reason_clusters"][0]["representative_trial_id"] == (
+        str(trial_id)
+    )
+    rendered_diagnosis = json.dumps(diagnosis_body)
+    assert "loom_api_supersecret" not in rendered_diagnosis
+    assert "sk-provider-secret" not in rendered_diagnosis
+    assert "sk-artifact-secret" not in rendered_diagnosis
+    assert "loom-control-plane" not in rendered_diagnosis
+    assert "X-Amz-Signature=secret" not in rendered_diagnosis
+
     assert detail.status_code == 200, detail.text
     assert detail.json()["debug_evidence"]["failure"] == body["failure"]
+    assert detail.json()["diagnosis"]["primary_cause"] == (
+        diagnosis_body["primary_cause"]
+    )
 
 
 async def test_trial_debug_cross_team_forbidden(
@@ -604,7 +634,12 @@ async def test_trial_debug_cross_team_forbidden(
                 f"/api/v1/trials/{trial_ids_a[0]}/debug",
                 headers={"Authorization": f"Bearer {other_raw}"},
             )
+            diagnosis = await ac.get(
+                f"/api/v1/trials/{trial_ids_a[0]}/diagnosis",
+                headers={"Authorization": f"Bearer {other_raw}"},
+            )
         assert r.status_code == 403
+        assert diagnosis.status_code == 403
     finally:
         sync_engine = create_engine(postgres_url)
         sl = sessionmaker(sync_engine)

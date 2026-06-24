@@ -42,6 +42,7 @@ from loom_service.auth_guards import (
 )
 from loom_service.debug_evidence import build_trial_debug_evidence
 from loom_service.dependencies import SessionAndCtx
+from loom_service.diagnosis import build_trial_diagnosis
 from loom_service.forwarders import forward, propagate
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
@@ -432,12 +433,14 @@ async def get_trial(
         trajectory_index=trajectory_index,
         trial_id=trial.id,
     )
-    base["debug_evidence"] = build_trial_debug_evidence(
+    debug_evidence = build_trial_debug_evidence(
         request,
         trial,
         task=task,
         llm_calls=llm_calls,
     )
+    base["debug_evidence"] = debug_evidence
+    base["diagnosis"] = build_trial_diagnosis(debug_evidence)
     return base
 
 
@@ -471,6 +474,39 @@ async def get_trial_debug(
         task=task,
         llm_calls=llm_calls,
     )
+
+
+@router.get("/trials/{trial_id}/diagnosis")
+async def get_trial_diagnosis(
+    request: Request,
+    sc: SessionAndCtx,
+    trial_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = (
+        await s.execute(
+            select(Trial).where(Trial.id == trial_id),
+        )
+    ).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
+    task = (await s.execute(
+        select(Task).where(Task.id == trial.task_id),
+    )).scalar_one_or_none()
+    llm_calls = list((await s.execute(
+        select(LlmCall)
+        .where(LlmCall.trial_id == trial.id)
+        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+    )).scalars().all())
+    debug_evidence = build_trial_debug_evidence(
+        request,
+        trial,
+        task=task,
+        llm_calls=llm_calls,
+    )
+    return build_trial_diagnosis(debug_evidence)
 
 
 @router.get("/trials/{trial_id}/artifacts/download")

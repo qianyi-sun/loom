@@ -74,6 +74,42 @@ const TRIAL_DEBUG: components["schemas"]["DebugEvidence"] = {
   next_actions: ["Inspect verifier output and benchmark task assets."],
 };
 
+const TRIAL_DIAGNOSIS = {
+  schema_version: "1",
+  entity: { type: "trial", id: TRIAL_ID },
+  summary: (
+    "The trial reached the benchmark verifier, but the verifier reported "
+    + "an error."
+  ),
+  primary_cause: {
+    reason_code: "trial.verifier_error",
+    category: "verifier",
+    attribution: "benchmark",
+    confidence: "high",
+    affected_trials: 1,
+    affected_ratio: 1,
+  },
+  impact: "The aggregate score is not reliable for affected tasks.",
+  evidence: ["1/1 affected trial(s) matched trial.verifier_error"],
+  next_actions: [
+    {
+      label: "Inspect verifier output and benchmark task assets",
+      kind: "manual",
+    },
+  ],
+  reason_clusters: [
+    {
+      reason_code: "trial.verifier_error",
+      category: "verifier",
+      attribution: "benchmark",
+      count: 1,
+      affected_ratio: 1,
+      representative_trial_id: TRIAL_ID,
+      representative_task_id: "hello-world",
+    },
+  ],
+};
+
 function expectSessionDownloadCall(
   fetchMock: ReturnType<typeof vi.fn> | ReturnType<typeof vi.spyOn>,
   url: string,
@@ -197,7 +233,8 @@ describe("TrialDetail trajectory section", () => {
         failure_reason: "verifier_error",
         failure_message: "pytest did not produce a score",
         debug_evidence: TRIAL_DEBUG,
-      },
+        diagnosis: TRIAL_DIAGNOSIS,
+      } as typeof TRIAL_BODY,
     );
     renderWithProviders(
       <Routes>
@@ -206,9 +243,13 @@ describe("TrialDetail trajectory section", () => {
       { route: `/trials/${TRIAL_ID}` },
     );
 
+    expect(await screen.findByText("Diagnosis")).toBeInTheDocument();
+    expect(screen.getByText(TRIAL_DIAGNOSIS.summary)).toBeInTheDocument();
+    expect(screen.getAllByText("trial.verifier_error").length).toBeGreaterThan(0);
+    expect(screen.getByText("The aggregate score is not reliable for affected tasks.")).toBeInTheDocument();
     expect(await screen.findByText("Debug evidence")).toBeInTheDocument();
-    expect(screen.getByText("trial.verifier_error")).toBeInTheDocument();
-    expect(screen.getByText("benchmark")).toBeInTheDocument();
+    expect(screen.getAllByText("trial.verifier_error").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("benchmark").length).toBeGreaterThan(0);
     expect(
       screen.getByText("Inspect verifier output and benchmark task assets."),
     ).toBeInTheDocument();
