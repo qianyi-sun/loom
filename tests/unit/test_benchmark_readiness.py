@@ -94,6 +94,20 @@ def test_readiness_marks_known_unsupported_ui_benchmarks_as_blocked() -> None:
         assert item.license_allowed_task_count == 0
 
 
+def test_readiness_marks_deferred_gaia_as_blocked_without_manifest() -> None:
+    item = build_readiness_item(
+        _benchmark("gaia"),
+        tasks=[],
+        registry_names={"gaia"},
+    )
+
+    assert item.readiness_state == "blocked"
+    assert item.blocker_reason == "deferred_support"
+    assert item.raw_task_count == 0
+    assert item.valid_task_config_count == 0
+    assert item.license_allowed_task_count == 0
+
+
 def test_readiness_blocks_unknown_source_scheme() -> None:
     item = build_readiness_item(
         _benchmark(),

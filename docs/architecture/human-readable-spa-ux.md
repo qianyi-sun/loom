@@ -141,7 +141,9 @@ Required changes:
   selectable, blocked rows are disabled with API-provided guidance and
   raw-versus-runnable counts. License metadata is informational and does not
   create a blocker. `Not supported yet` rows are visible current-scope
-  exclusions, not publish failures.
+  exclusions, not publish failures. `Deferred` rows are visible tracked
+  follow-ups that remain outside the supported scope until their product or
+  data-access blocker is resolved.
 - Add one-line explanations for each subset option:
   - `All tasks`: run every runnable task in the selected benchmarks.
   - `First N`: deterministic smoke slice from the start of the sorted task list.

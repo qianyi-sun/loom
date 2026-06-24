@@ -1317,6 +1317,10 @@ with `readiness_label="Not supported yet"` and
 `blocker_reason="unsupported_runtime"` are explicit product exclusions: they
 remain visible with guidance but are skipped by the supported-benchmark
 readiness gate and cannot be selected until their runtime follow-up lands.
+Rows with `readiness_label="Deferred"` and
+`blocker_reason="deferred_support"` follow the same gate semantics for
+benchmarks that need an explicit product/data-access follow-up before they can
+enter the supported catalog.
 
 For release acceptance, submit a supported-benchmark batch with the intended
 production runner/provider mix and wait for it to finish. Then verify every

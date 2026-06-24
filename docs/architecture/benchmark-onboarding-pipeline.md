@@ -249,6 +249,8 @@ New Batch behavior:
   count and the stored `TaskConfig` blocker.
 - `Not supported yet`: disabled; show the runtime contract that must land
   before the benchmark can be selected.
+- `Deferred`: disabled; show the tracked product or data-access blocker that
+  must land before the benchmark can enter the supported catalog.
 - `Smoke failed`: disabled by default; allow operator override later if needed.
 - `Heavy/special requirements`: disabled unless worker capabilities and runtime
   requirements are satisfied.

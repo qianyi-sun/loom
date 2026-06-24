@@ -623,9 +623,11 @@ rows show the API-provided readiness message and
 raw-versus-runnable counts so operators know whether to publish, republish,
 or repair a benchmark. `Not supported yet` means the benchmark is intentionally
 visible but excluded from the current supported runtime surface; it cannot be
-selected until the listed runtime work lands. Required public benchmarks should
-move from publish/repair pending states to `Ready`; hiding a needed benchmark
-is not a substitute for publishing it.
+selected until the listed runtime work lands. `Deferred` means the benchmark is
+visible for roadmap transparency but intentionally outside the current
+supported scope until the listed product or data-access follow-up lands.
+Required public benchmarks should move from publish/repair pending states to
+`Ready`; hiding a needed benchmark is not a substitute for publishing it.
 
 The hidden `/benchmarks` route remains a power-user diagnostic view rather
 than the normal submission path. It includes the same registry readiness states

@@ -14,6 +14,7 @@ from loom.models.task import TaskConfig
 ReadinessState = Literal["adapter_available", "registered", "runnable", "blocked"]
 
 UNSUPPORTED_RUNTIME_BLOCKER_REASON = "unsupported_runtime"
+DEFERRED_SUPPORT_BLOCKER_REASON = "deferred_support"
 
 UNSUPPORTED_RUNTIME_BENCHMARKS: dict[str, str] = {
     "osworld": (
@@ -27,7 +28,18 @@ UNSUPPORTED_RUNTIME_BENCHMARKS: dict[str, str] = {
     ),
 }
 
+DEFERRED_SUPPORT_BENCHMARKS: dict[str, str] = {
+    "gaia": (
+        "GAIA requires a GAIA-authorized Hugging Face token and a published "
+        "public-beta task bundle before it can be selected."
+    ),
+}
+
 UNSUPPORTED_RUNTIME_BENCHMARK_IDS = frozenset(UNSUPPORTED_RUNTIME_BENCHMARKS)
+DEFERRED_SUPPORT_BENCHMARK_IDS = frozenset(DEFERRED_SUPPORT_BENCHMARKS)
+CURRENTLY_UNSUPPORTED_BENCHMARK_IDS = (
+    UNSUPPORTED_RUNTIME_BENCHMARK_IDS | DEFERRED_SUPPORT_BENCHMARK_IDS
+)
 
 # `none` covers inline task rows whose validated TaskConfig is already stored in
 # Postgres and does not require fetching an external bundle before launch.
@@ -85,6 +97,10 @@ def is_unsupported_runtime_benchmark(benchmark_id: str | None) -> bool:
     return bool(benchmark_id and benchmark_id in UNSUPPORTED_RUNTIME_BENCHMARK_IDS)
 
 
+def is_deferred_support_benchmark(benchmark_id: str | None) -> bool:
+    return bool(benchmark_id and benchmark_id in DEFERRED_SUPPORT_BENCHMARK_IDS)
+
+
 def build_readiness_item(
     benchmark: BenchmarkAuditSource,
     *,
@@ -102,7 +118,10 @@ def build_readiness_item(
         valid_count += 1
     invalid_count = raw_count - valid_count
     unsupported_runtime = is_unsupported_runtime_benchmark(benchmark.id)
-    license_allowed_count = 0 if unsupported_runtime else valid_count
+    deferred_support = is_deferred_support_benchmark(benchmark.id)
+    license_allowed_count = (
+        0 if unsupported_runtime or deferred_support else valid_count
+    )
     license_blocked_count = 0
 
     source_schemes = sorted({_source_scheme(task.source) for task in tasks})
@@ -118,6 +137,9 @@ def build_readiness_item(
     if unsupported_runtime:
         readiness_state = "blocked"
         blocker_reason = UNSUPPORTED_RUNTIME_BLOCKER_REASON
+    elif deferred_support:
+        readiness_state = "blocked"
+        blocker_reason = DEFERRED_SUPPORT_BLOCKER_REASON
     elif raw_count == 0:
         readiness_state = "blocked"
         blocker_reason = "manifest_missing"
@@ -197,6 +219,13 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         message = UNSUPPORTED_RUNTIME_BENCHMARKS.get(
             item.id,
             "This benchmark requires runtime support before it can be selected.",
+        )
+        selectable = False
+    elif item.blocker_reason == DEFERRED_SUPPORT_BLOCKER_REASON:
+        label = "Deferred"
+        message = DEFERRED_SUPPORT_BENCHMARKS.get(
+            item.id,
+            "This benchmark is intentionally outside the current supported scope.",
         )
         selectable = False
     else:

@@ -83,6 +83,7 @@ async def benchmarks_setup(
         )
         for bid, dn, lic in (
             ("aime", "AIME", "proprietary-MAA"),
+            ("gaia", "GAIA", "CC-BY-SA-4.0"),
             ("humaneval", "HumanEval", "MIT"),
             ("mbpp", "MBPP", "CC-BY-4.0"),
             ("osworld", "OSWorld", "Apache-2.0"),
@@ -139,10 +140,11 @@ async def test_list_benchmarks(
     assert r_default.json()["items"] == []
     assert r_all.status_code == 200
     items = r_all.json()["items"]
-    assert len(items) == 4
-    # Sorted by display_name: AIME < HumanEval < MBPP
+    assert len(items) == 5
+    # Sorted by display_name.
     assert [it["display_name"] for it in items] == [
         "AIME",
+        "GAIA",
         "HumanEval",
         "MBPP",
         "OSWorld",
@@ -259,6 +261,48 @@ async def test_list_benchmarks_keeps_unsupported_ui_benchmark_visible_but_disabl
         == osworld
     )
     assert "UI benchmark runtime" in osworld["readiness_message"]
+
+
+async def test_list_benchmarks_keeps_deferred_gaia_visible_but_disabled(
+    benchmarks_setup: tuple[FastAPI, str],
+) -> None:
+    """GAIA remains visible for roadmap transparency, but is outside the
+    current supported catalog until the gated dataset is published."""
+    app, raw = benchmarks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r_default = await ac.get(
+            "/api/v1/benchmarks",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        r_all = await ac.get(
+            "/api/v1/benchmarks?include_empty=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r_default.status_code == 200
+    assert "gaia" not in {item["id"] for item in r_default.json()["items"]}
+
+    assert r_all.status_code == 200
+    gaia = {item["id"]: item for item in r_all.json()["items"]}["gaia"]
+    assert (
+        gaia
+        | {
+            "task_count": 0,
+            "raw_task_count": 0,
+            "valid_task_config_count": 0,
+            "license_allowed_task_count": 0,
+            "readiness_state": "blocked",
+            "readiness_label": "Deferred",
+            "selectable": False,
+            "blocker_reason": "deferred_support",
+        }
+        == gaia
+    )
+    assert "GAIA-authorized" in gaia["readiness_message"]
 
 
 async def test_list_benchmarks_counts_only_runnable_task_configs(
@@ -495,15 +539,22 @@ async def test_pagination(
         )
         j1 = r1.json()
         assert len(j1["items"]) == 2
-        assert j1["next_cursor"] == "HumanEval"
+        assert j1["next_cursor"] == "GAIA"
         r2 = await ac.get(
             f"/api/v1/benchmarks?limit=2&include_empty=true&cursor={j1['next_cursor']}",
             headers={"Authorization": f"Bearer {raw}"},
         )
-    j2 = r2.json()
+        j2 = r2.json()
+        r3 = await ac.get(
+            f"/api/v1/benchmarks?limit=2&include_empty=true&cursor={j2['next_cursor']}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
     assert len(j2["items"]) == 2
-    assert [item["id"] for item in j2["items"]] == ["mbpp", "osworld"]
-    assert j2["next_cursor"] is None
+    assert [item["id"] for item in j2["items"]] == ["humaneval", "mbpp"]
+    assert j2["next_cursor"] == "MBPP"
+    j3 = r3.json()
+    assert [item["id"] for item in j3["items"]] == ["osworld"]
+    assert j3["next_cursor"] is None
 
 
 async def test_get_benchmark_detail(

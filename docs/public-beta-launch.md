@@ -163,6 +163,9 @@ release answer is to publish and prove them, not to hide them. Rows marked
 `Not supported yet` with `blocker_reason="unsupported_runtime"` are explicit
 current-scope exclusions: they stay visible to users, remain unselectable, and
 are skipped by this readiness gate until their runtime follow-up is delivered.
+Rows marked `Deferred` with `blocker_reason="deferred_support"` use the same
+gate behavior for benchmarks that need a tracked product or data-access
+follow-up before they can be supported.
 
 ## Remote Worker Tunnel Gate
 

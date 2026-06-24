@@ -103,6 +103,13 @@ reset and URL/HTML evaluators. Keep them visible in the catalog, but do not
 treat converted rows as supported runnable tasks until the runtime follow-ups
 land.
 
+## GAIA adapter
+
+GAIA remains a catalog adapter but is intentionally marked `Deferred` by the
+service readiness layer until operators can publish the gated dataset through a
+GAIA-authorized Hugging Face access path. Keep it visible in the catalog, but
+do not treat placeholder or unpublished rows as supported runnable tasks.
+
 ## BFCL output contract
 
 The BFCL adapter targets the upstream v4 task layout under

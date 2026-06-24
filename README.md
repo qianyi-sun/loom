@@ -15,10 +15,11 @@ assumptions:
   BrowseComp, GPQA, Hendrycks MATH, MMLU-Pro, tau2-bench, GAIA,
   AIME, OSWorld, WebArena, SkillFlow, SkillLearnBench), plus the
   optional Terminal-Bench-2.0 package. Catalog presence is separate from
-  current runtime support: OSWorld and WebArena remain visible but disabled
-  until Loom has the required UI benchmark runtime. Add your own by
-  implementing a `BenchmarkAdapter` Protocol — your task isn't locked to
-  anyone else's leaderboard.
+  current supported scope: OSWorld and WebArena remain visible but disabled
+  until Loom has the required UI benchmark runtime, and GAIA remains visible
+  but deferred until a GAIA-authorized dataset publish path is available. Add
+  your own by implementing a `BenchmarkAdapter` Protocol — your task isn't
+  locked to anyone else's leaderboard.
 - **Agents** — 11 pick-up-and-use harnesses for popular CLI agents
   (Claude Code, Codex, OpenHands, Aider, Gemini, Qwen, Kimi, ...)
   plus an `oracle` baseline. Bring your own by implementing

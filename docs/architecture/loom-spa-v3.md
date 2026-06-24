@@ -376,7 +376,10 @@ close to what PR J shipped, with three deliberate changes:
    `config` is empty or invalid surface as disabled readiness badges such as
    `Needs publish`, `Needs republish`, or `Needs repair`. Benchmarks that need
    a runtime Loom does not yet provide surface as `Not supported yet`; they
-   remain visible but are excluded from supported task counts and submit.
+   remain visible but are excluded from supported task counts and submit. A
+   benchmark with a tracked product or data-access follow-up can surface as
+   `Deferred`; it is also visible, unselectable, and excluded from supported
+   task counts until that follow-up lands.
    License metadata is visible but does not affect selectability. The picker uses
    the API-provided `readiness_label`, `readiness_message`, and `selectable`
    fields rather than hard-coded benchmark names. The real

@@ -33,6 +33,10 @@ BENCHMARK_SIDE_FAILURE_REASONS = frozenset({
     "verifier_timeout",
     "internal_error",
 })
+EXPLICIT_SCOPE_BLOCKER_REASONS = frozenset({
+    "unsupported_runtime",
+    "deferred_support",
+})
 
 
 @dataclass(frozen=True)
@@ -116,7 +120,7 @@ def check_benchmark_readiness(items: list[dict[str, Any]]) -> list[CheckResult]:
     runnable = 0
     unsupported = 0
     for item in items:
-        if item.get("blocker_reason") == "unsupported_runtime":
+        if item.get("blocker_reason") in EXPLICIT_SCOPE_BLOCKER_REASONS:
             unsupported += 1
             continue
         task_count = item.get("task_count")
