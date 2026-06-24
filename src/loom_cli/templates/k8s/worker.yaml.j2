@@ -39,6 +39,9 @@ spec:
               #   (b) move workers to a dedicated cluster, or
               #   (c) switch to a non-Docker driver (sysbox / kata).
               mountPath: /var/run/docker.sock
+            - name: docker-config
+              mountPath: /root/.docker
+              readOnly: true
           resources:
             requests:
               cpu: {{ worker_capacity.cpu_request | tojson }}
@@ -54,6 +57,13 @@ spec:
           hostPath:
             path: /var/run/docker.sock
             type: Socket
+        - name: docker-config
+          secret:
+            secretName: docker-config
+            optional: true
+            items:
+              - key: .dockerconfigjson
+                path: config.json
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

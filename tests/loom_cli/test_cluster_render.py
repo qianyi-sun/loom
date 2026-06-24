@@ -222,6 +222,36 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     )
 
 
+def test_worker_manifest_mounts_docker_registry_auth_config() -> None:
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    worker = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+    )
+    pod_spec = worker["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+
+    assert {
+        "name": "docker-config",
+        "mountPath": "/root/.docker",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {
+        "name": "docker-config",
+        "secret": {
+            "secretName": "docker-config",
+            "optional": True,
+            "items": [
+                {
+                    "key": ".dockerconfigjson",
+                    "path": "config.json",
+                },
+            ],
+        },
+    } in pod_spec["volumes"]
+
+
 def test_worker_manifest_renders_configured_capacity_and_resources() -> None:
     worker_capacity_cls = type(ClusterConfig().worker_capacity)
     cfg = ClusterConfig(

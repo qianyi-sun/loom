@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import uuid4
 
 from loom_worker import main_loop as ml
@@ -111,6 +112,53 @@ def test_configure_blocking_io_executor_sets_loop_default(
 
     assert created == [(32, "loom-worker-io")]
     assert len(installed) == 1
+
+
+def test_docker_registry_auth_summary_reports_only_secret_free_metadata(
+    tmp_path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    docker_config = tmp_path / "docker"
+    docker_config.mkdir()
+    (docker_config / "config.json").write_text(
+        json.dumps(
+            {
+                "auths": {
+                    "https://index.docker.io/v1/": {"auth": "base64-secret"},
+                    "ghcr.io": {"identitytoken": "secret-token"},
+                },
+                "credsStore": "desktop",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCKER_CONFIG", str(docker_config))
+
+    summary = ml._docker_registry_auth_summary()  # type: ignore[attr-defined]
+
+    assert summary == {
+        "config_path": str(docker_config / "config.json"),
+        "present": True,
+        "auth_registries": ["ghcr.io", "https://index.docker.io/v1/"],
+        "uses_credential_store": True,
+    }
+
+
+def test_docker_registry_auth_summary_handles_missing_config(
+    tmp_path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    docker_config = tmp_path / "missing"
+    monkeypatch.setenv("DOCKER_CONFIG", str(docker_config))
+
+    summary = ml._docker_registry_auth_summary()  # type: ignore[attr-defined]
+
+    assert summary == {
+        "config_path": str(docker_config / "config.json"),
+        "present": False,
+        "auth_registries": [],
+        "uses_credential_store": False,
+    }
 
 
 class _ClaimingCP:

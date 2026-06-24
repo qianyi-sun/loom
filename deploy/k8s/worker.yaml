@@ -97,6 +97,9 @@ spec:
           mountPath: /var/lib/loom/trajectories
         - name: docker-sock
           mountPath: /var/run/docker.sock
+        - name: docker-config
+          mountPath: /root/.docker
+          readOnly: true
         resources:
           requests:
             cpu: 500m
@@ -112,6 +115,13 @@ spec:
         hostPath:
           path: /var/run/docker.sock
           type: Socket
+      - name: docker-config
+        secret:
+          secretName: docker-config
+          optional: true
+          items:
+          - key: .dockerconfigjson
+            path: config.json
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -18,7 +18,9 @@ integration ships.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -148,12 +150,65 @@ def _configure_blocking_io_executor(settings: WorkerSettings) -> None:
     logger.info("worker_blocking_io_executor_configured max_workers=%d", max_workers)
 
 
+def _docker_registry_auth_summary(
+    config_path: Path | None = None,
+) -> dict[str, object]:
+    if config_path is None:
+        docker_config = os.environ.get("DOCKER_CONFIG")
+        if docker_config:
+            config_path = Path(docker_config) / "config.json"
+        else:
+            config_path = Path.home() / ".docker" / "config.json"
+
+    summary: dict[str, object] = {
+        "config_path": str(config_path),
+        "present": False,
+        "auth_registries": [],
+        "uses_credential_store": False,
+    }
+    try:
+        present = config_path.is_file()
+    except OSError:
+        return summary
+    if not present:
+        return summary
+
+    summary["present"] = True
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return summary
+
+    auths = data.get("auths")
+    if isinstance(auths, dict):
+        summary["auth_registries"] = sorted(str(key) for key in auths)
+    cred_helpers = data.get("credHelpers")
+    summary["uses_credential_store"] = bool(
+        data.get("credsStore")
+        or (isinstance(cred_helpers, dict) and cred_helpers)
+    )
+    return summary
+
+
+def _log_docker_registry_auth_summary() -> None:
+    summary = _docker_registry_auth_summary()
+    logger.info(
+        "docker_registry_auth_config config_path=%s present=%s "
+        "auth_registries=%s uses_credential_store=%s",
+        summary["config_path"],
+        summary["present"],
+        summary["auth_registries"],
+        summary["uses_credential_store"],
+    )
+
+
 async def run_worker(settings: WorkerSettings) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
 
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
     _configure_blocking_io_executor(settings)
+    _log_docker_registry_auth_summary()
 
     async with (
         httpx.AsyncClient(

@@ -680,16 +680,22 @@ See `docs/architecture/agent-adapter.md` for the architecture.
    private repository — e.g. `loomops/trial-cache`.
 2. Create a robot account / access token with `read+write` to that
    repo.
-3. Mount a `docker-config` Secret on each worker with the credentials
-   the docker daemon expects:
+3. Create a `docker-config` Secret for every worker namespace. Loom
+   mounts the Docker-registry Secret's `.dockerconfigjson` key as
+   `/root/.docker/config.json` so docker-py can send registry auth
+   during task-image builds and sidecar/base-image pulls:
    ```bash
    kubectl -n loom create secret docker-registry docker-config \
      --docker-server=https://index.docker.io/v1/ \
      --docker-username=<robot-user> \
      --docker-password=<robot-token>
    ```
-   (`loom cluster render` wires the Secret in already — see the
-   workers' StatefulSet manifest.)
+   `loom cluster render` wires this Secret into the worker Deployment
+   as an optional read-only mount. Workers still start if the Secret
+   is missing, but Docker Hub pulls remain anonymous until the Secret
+   exists. At startup, each worker logs only secret-free metadata:
+   config path, whether the file is present, configured registry
+   domains, and whether a credential store is configured.
 4. Set the config:
    ```bash
    loom admin config set trial_cache_registry_repo loomops/trial-cache
