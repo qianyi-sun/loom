@@ -247,6 +247,11 @@ Run plan, Monitor shows planned trials and evaluator score, Run Library shows
 org-wide completed shared work, and Trial Detail separates platform outcome
 from evaluator reward. Batch Detail and Trial Detail also show owner team,
 visibility/share status, and provenance when a run was cloned or reused.
+For normal model-backed runs, New Batch starts from the provider connection and
+model choice and uses Loom's default model runner internally. Users only open
+`Use a specific agent` when they want a non-default runtime such as `oracle` or
+another service-mode agent; choosing an agent that does not need a model hides
+the provider/model controls.
 
 When a finished batch has transient gateway failures, Batch Detail shows
 `Rerun failed cases`. That action creates a linked rerun batch containing

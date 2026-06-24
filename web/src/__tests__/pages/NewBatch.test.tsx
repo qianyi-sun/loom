@@ -392,6 +392,35 @@ async function pickBenchmark(id: string = "humaneval"): Promise<void> {
   await user.click(cb);
 }
 
+async function waitForNewBatchReady(): Promise<void> {
+  await screen.findByLabelText(/^Provider connection$/i);
+  await screen.findByLabelText(/^Model$/i);
+  expect(screen.queryByLabelText(/^Agent$/i)).not.toBeInTheDocument();
+}
+
+async function pickOracleAgent(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<void> {
+  await user.click(
+    screen.getByRole("checkbox", { name: /Use a specific agent/i }),
+  );
+  await user.selectOptions(await screen.findByLabelText(/^Agent$/i), "oracle");
+  await screen.findByText(/Runs solution\/solve.sh/i);
+}
+
+async function pickDefaultModel(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<void> {
+  await user.selectOptions(
+    await screen.findByLabelText(/^Provider connection$/i),
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await user.selectOptions(
+    await screen.findByLabelText(/^Model$/i),
+    "openai|deepseek-chat|11111111-1111-4111-8111-111111111111",
+  );
+}
+
 const SUBMIT_BTN = /Submit (\d+ trials?|batch)/i;
 
 describe("NewBatch", () => {
@@ -404,7 +433,7 @@ describe("NewBatch", () => {
   it("labels launch controls with human-readable sections", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
 
     expect(screen.getByText("Task selection")).toBeInTheDocument();
     expect(screen.getByText("Agent/model combinations")).toBeInTheDocument();
@@ -423,10 +452,25 @@ describe("NewBatch", () => {
     expect(screen.queryByText("Advanced options")).not.toBeInTheDocument();
   });
 
+  it("shows model-first controls without exposing the default agent selector", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+
+    await waitForNewBatchReady();
+    expect(
+      screen.getByLabelText(/^Provider connection$/i),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Model$/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /Use a specific agent/i }),
+    ).not.toBeChecked();
+    expect(screen.queryByLabelText(/^Agent$/i)).not.toBeInTheDocument();
+  });
+
   it("defaults backend to docker once the catalog loads", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     const dropdown = (await screen.findByLabelText(
       "Backend",
     )) as HTMLSelectElement;
@@ -436,7 +480,7 @@ describe("NewBatch", () => {
   it("requests the full catalog so pending benchmarks stay visible", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
 
     const benchmarkCall = spy.mock.calls.find((c) =>
       String(c[0]).includes("/api/v1/benchmarks"),
@@ -446,8 +490,13 @@ describe("NewBatch", () => {
   });
 
   it("marks agents without service runtime as setup-needed", async () => {
+    const user = userEvent.setup();
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await user.click(
+      screen.getByRole("checkbox", { name: /Use a specific agent/i }),
+    );
 
     const unavailable = await screen.findByRole("option", {
       name: /opencode .*setup needed/i,
@@ -464,7 +513,7 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "x");
     await pickBackend();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
@@ -477,7 +526,7 @@ describe("NewBatch", () => {
   it("shows '<N> tasks match' once the count loads for the chosen benchmark", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await pickBenchmark();
     expect(
       await screen.findByText(/12 tasks match across 1 benchmark/i),
@@ -487,7 +536,7 @@ describe("NewBatch", () => {
   it("shows unpublished benchmarks disabled while publish work is pending", async () => {
     mockEndpoints({ emptyBenchmark: true });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
 
     const marker = await screen.findByText(/Needs publish/i);
     expect(marker.closest("label")).toHaveAttribute(
@@ -502,7 +551,7 @@ describe("NewBatch", () => {
   it("shows legacy republish-needed benchmarks disabled with diagnostics", async () => {
     mockEndpoints({ legacyBenchmark: true });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
 
     const legacy = await screen.findByRole("checkbox", {
       name: /Select benchmark mbpp/i,
@@ -519,7 +568,7 @@ describe("NewBatch", () => {
   it("shows deployment-facing guidance instead of an operator import command when no benchmarks are provisioned", async () => {
     mockEndpoints({ noBenchmarks: true });
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
 
     expect(
       await screen.findByText(/No runnable benchmarks are provisioned/i),
@@ -533,14 +582,15 @@ describe("NewBatch", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("POSTs the minimal body (backend + single-combo) when only required fields are set", async () => {
+  it("POSTs the default model-runner body without showing a default agent selector", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "my-batch");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
@@ -554,6 +604,35 @@ describe("NewBatch", () => {
     expect(call.body.trial_config).toEqual({});
     expect(call.body.combinations).toEqual([
       {
+        agent_name: "litellm",
+        agent_model: {
+          provider: "openai",
+          name: "deepseek-chat",
+          source: "api",
+        },
+        n_per_task: 1,
+      },
+    ]);
+  });
+
+  it("expands a specific agent selector and lets oracle submit without a model", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await user.type(screen.getByPlaceholderText(/run 7/i), "oracle-batch");
+    await pickBackend();
+    await pickBenchmark();
+    await pickOracleAgent(user);
+
+    expect(screen.getByLabelText(/^Agent$/i)).toHaveValue("oracle");
+    expect(screen.queryByLabelText(/^Provider connection$/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Model$/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.combinations).toEqual([
+      {
         agent_name: "oracle",
         agent_model: null,
         n_per_task: 1,
@@ -561,14 +640,36 @@ describe("NewBatch", () => {
     ]);
   });
 
+  it("unchecking the specific agent restores the default model runner with the current model", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickDefaultModel(user);
+    await pickOracleAgent(user);
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Use a specific agent/i }),
+    );
+
+    expect(screen.queryByLabelText(/^Agent$/i)).not.toBeInTheDocument();
+    expect(await screen.findByLabelText(/^Provider connection$/i)).toHaveValue(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    expect(await screen.findByLabelText(/^Model$/i)).toHaveValue(
+      "openai|deepseek-chat|11111111-1111-4111-8111-111111111111",
+    );
+  });
+
   it("requires confirmation when matched_count * n_per_task exceeds the threshold", async () => {
     const spy = mockEndpoints({ matchingTasks: 250 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "big-batch");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/250 tasks match across 1 benchmark/i);
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
@@ -588,7 +689,7 @@ describe("NewBatch", () => {
     mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     const nField = screen.getByLabelText(
       /Samples per task \(combination 1\)/i,
     );
@@ -602,10 +703,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "retry-batch");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
@@ -635,10 +737,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "env-batch");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(
       screen.getByRole("checkbox", { name: /Force rebuild env image/i }),
@@ -657,10 +760,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "prio-batch");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     const prio = screen.getByLabelText(/Submit priority/i);
     await user.clear(prio);
@@ -675,9 +779,10 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "explicit-batch");
     await pickBackend();
+    await pickDefaultModel(user);
     await user.click(screen.getByRole("radio", { name: /Explicit task ids/i }));
     const textarea = screen.getByPlaceholderText(/HumanEval\/0/i);
     await user.type(textarea, "HumanEval/0{Enter}HumanEval/1");
@@ -694,10 +799,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "noisy-batch");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByText(/Advanced trial settings/i));
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
@@ -713,13 +819,14 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(
       screen.getByPlaceholderText(/run 7/i),
       "single-attempt",
     );
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByText(/Advanced trial settings/i));
     await user.click(
@@ -735,10 +842,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "bad-backoff");
     await pickBackend();
     await pickBenchmark();
+    await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     const maxAttempts = screen.getByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
@@ -763,9 +871,10 @@ describe("NewBatch", () => {
     const spy = mockEndpoints();
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "aime-batch");
     await pickBackend();
+    await pickDefaultModel(user);
     await user.click(
       await screen.findByRole("checkbox", {
         name: /Select all in series aime/i,
@@ -788,10 +897,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ tasksCount: 14 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "filtered");
     await pickBackend();
     await pickBenchmark("aime-22");
+    await pickDefaultModel(user);
     await user.click(
       await screen.findByRole("button", { name: "2024", pressed: false }),
     );
@@ -817,7 +927,7 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ tasksCount: 0 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "narrowed-to-zero");
     await pickBackend();
     await pickBenchmark("aime-22");
@@ -839,10 +949,11 @@ describe("NewBatch", () => {
     const spy = mockEndpoints();
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "swap-batch");
     await pickBackend();
     await pickBenchmark("aime-22");
+    await pickDefaultModel(user);
     await user.click(
       await screen.findByRole("button", { name: "2024", pressed: false }),
     );
@@ -866,11 +977,10 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "byo-batch");
     await pickBackend();
     await pickBenchmark();
-    await user.selectOptions(screen.getByLabelText(/^Agent$/i), "litellm");
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
       "11111111-1111-4111-8111-111111111111",
@@ -907,11 +1017,10 @@ describe("NewBatch", () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
-    await screen.findByText(/Runs solution\/solve.sh/i);
+    await waitForNewBatchReady();
     await user.type(screen.getByPlaceholderText(/run 7/i), "manual-batch");
     await pickBackend();
     await pickBenchmark();
-    await user.selectOptions(screen.getByLabelText(/^Agent$/i), "litellm");
     await user.selectOptions(
       await screen.findByLabelText(/^Provider connection$/i),
       "11111111-1111-4111-8111-111111111111",

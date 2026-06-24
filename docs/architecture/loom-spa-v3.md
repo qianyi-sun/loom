@@ -376,6 +376,14 @@ close to what PR J shipped, with three deliberate changes:
      task requires gpu_vendor=nvidia. Pick modal or daytona, or
      ask an admin to add GPU workers."`
 
+   New Batch is model-first for the common path. The combination row
+   defaults to Loom's service-mode model runner (`litellm`) and asks for a
+   provider connection plus model first. The `Agent` dropdown is hidden behind
+   `Use a specific agent` so new users do not have to understand agent runtimes
+   before launching a model-backed evaluation. Enabling that toggle exposes the
+   service-mode agent catalog; agents such as `oracle` that do not call a model
+   hide provider/model controls.
+
 2. **Task selection card** gets richer than today's "benchmark
    dropdown + id-substring search". The new options:
 

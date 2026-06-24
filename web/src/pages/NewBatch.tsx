@@ -1692,6 +1692,8 @@ export default function NewBatch(): JSX.Element {
                     value={r.picker}
                     onChange={(v) => updateRow(i, { picker: v })}
                     disabled={create.isPending}
+                    specificAgentToggle
+                    defaultAgentName="litellm"
                   />
                   <div className="grid grid-cols-2 gap-3">
                     <label className="block">

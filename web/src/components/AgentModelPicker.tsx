@@ -58,6 +58,8 @@ export interface AgentModelValue {
   localServer?: string;
   /** Required when source = "hf". local-vllm (default) spawns vLLM; inference-api hits HF. */
   hfExecution?: HFExecution;
+  /** New Batch hides the default model runner unless the user opts into a specific agent. */
+  useSpecificAgent?: boolean;
 }
 
 export interface AgentModelPickerProps {
@@ -65,6 +67,10 @@ export interface AgentModelPickerProps {
   onChange: (v: AgentModelValue) => void;
   /** Disables every input (e.g. while submitting). */
   disabled?: boolean;
+  /** Hide the default model runner behind a "Use a specific agent" toggle. */
+  specificAgentToggle?: boolean;
+  /** Internal default runner used when `specificAgentToggle` is false. */
+  defaultAgentName?: string;
 }
 
 interface AgentEntry extends AgentReadinessLike {
@@ -111,10 +117,26 @@ function providerNamespace(conn: ProviderConnectionEntry | undefined): string {
   return conn.type;
 }
 
+function firstSource(agent: AgentEntry | undefined): ModelSource {
+  return (agent?.supported_model_sources[0] as ModelSource | undefined) ?? "api";
+}
+
+function supportsModelSelection(agent: AgentEntry, value: AgentModelValue): boolean {
+  if (!agent.needs_model) return true;
+  if (!agent.supported_model_sources.includes(value.source)) return false;
+  if (!value.modelProvider) return true;
+  return (
+    agent.supported_providers.includes("*") ||
+    agent.supported_providers.includes(value.modelProvider)
+  );
+}
+
 export function AgentModelPicker({
   value,
   onChange,
   disabled,
+  specificAgentToggle = false,
+  defaultAgentName = "litellm",
 }: AgentModelPickerProps): JSX.Element {
   const [showRaw, setShowRaw] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
@@ -144,21 +166,59 @@ export function AgentModelPicker({
     [agents.data, value.agentName],
   );
 
-  // Default to the first agent when the catalog resolves and the
-  // current `agentName` isn't in it.
+  const defaultAgent: AgentEntry | undefined = useMemo(() => {
+    if (!agents.data) return undefined;
+    const named = agents.data.items.find(
+      (a) => a.name === defaultAgentName && agentServiceModeReady(a),
+    );
+    if (named) return named;
+    return agents.data.items.find(
+      (a) => agentServiceModeReady(a) && a.needs_model,
+    ) ?? agents.data.items.find(agentServiceModeReady);
+  }, [agents.data, defaultAgentName]);
+
+  // Default to the first valid agent when the catalog resolves. In
+  // New Batch's model-first mode, keep the internal default runner
+  // selected while the specific-agent toggle is off.
   useEffect(() => {
     if (!agents.data) return;
+    if (specificAgentToggle && value.useSpecificAgent) {
+      if (!value.agentName) return;
+      const current = agents.data.items.find((a) => a.name === value.agentName);
+      if (current && agentServiceModeReady(current)) return;
+      onChange({ ...value, agentName: "" });
+      return;
+    }
+
+    if (specificAgentToggle) {
+      if (!defaultAgent) return;
+      const current = agents.data.items.find((a) => a.name === value.agentName);
+      if (current?.name === defaultAgent.name && agentServiceModeReady(current)) {
+        return;
+      }
+      const nextSource = defaultAgent.supported_model_sources.includes(value.source)
+        ? value.source
+        : firstSource(defaultAgent);
+      onChange({
+        ...value,
+        agentName: defaultAgent.name,
+        source: defaultAgent.needs_model ? nextSource : value.source,
+        useSpecificAgent: false,
+        hfExecution: value.hfExecution ?? "local-vllm",
+      });
+      return;
+    }
+
     const current = agents.data.items.find((a) => a.name === value.agentName);
     if (current && agentServiceModeReady(current)) {
       return;
     }
-    const first = agents.data.items.find(agentServiceModeReady)
+    const fallback = agents.data.items.find(agentServiceModeReady)
       ?? agents.data.items[0];
-    if (!first) return;
-    const firstSource = (first.supported_model_sources[0] as ModelSource) ?? "api";
+    if (!fallback) return;
     onChange({
-      agentName: first.name,
-      source: firstSource,
+      agentName: fallback.name,
+      source: firstSource(fallback),
       modelProvider: "",
       modelName: "",
       providerConnectionId: undefined,
@@ -166,7 +226,13 @@ export function AgentModelPicker({
       manualModel: false,
       hfExecution: "local-vllm",
     });
-  }, [agents.data, value.agentName, onChange]);
+  }, [
+    agents.data,
+    defaultAgent,
+    specificAgentToggle,
+    value,
+    onChange,
+  ]);
 
   const agentList = useMemo(
     () =>
@@ -176,12 +242,22 @@ export function AgentModelPicker({
     [agents.data],
   );
 
+  const visibleAgentList = useMemo(
+    () =>
+      specificAgentToggle
+        ? agentList.filter((a) => a.name !== defaultAgentName)
+        : agentList,
+    [agentList, defaultAgentName, specificAgentToggle],
+  );
+
+  const compatibilityAgent = selectedAgent ?? defaultAgent;
+
   // Sources the SELECTED agent actually supports.
   const availableSources: ModelSource[] = useMemo(() => {
-    if (!selectedAgent) return [];
-    const supported = new Set(selectedAgent.supported_model_sources);
+    if (!compatibilityAgent) return [];
+    const supported = new Set(compatibilityAgent.supported_model_sources);
     return ALL_SOURCES.filter((s) => supported.has(s));
-  }, [selectedAgent]);
+  }, [compatibilityAgent]);
 
   // When the agent switches, snap the source into the new agent's
   // supported set. Avoids the picker rendering a tab the route would
@@ -211,9 +287,9 @@ export function AgentModelPicker({
   const filteredModels: ModelEntry[] = useMemo(() => {
     const items = models.data?.items ?? [];
     const q = modelSearch.trim().toLocaleLowerCase();
-    const allowed = selectedAgent?.supported_providers.includes("*")
+    const allowed = compatibilityAgent?.supported_providers.includes("*")
       ? null
-      : new Set(selectedAgent?.supported_providers ?? []);
+      : new Set(compatibilityAgent?.supported_providers ?? []);
     return items.filter((m) => {
       if (m.provider_connection_id !== value.providerConnectionId) {
         return false;
@@ -229,7 +305,7 @@ export function AgentModelPicker({
   }, [
     models.data,
     modelSearch,
-    selectedAgent,
+    compatibilityAgent,
     value.providerConnectionId,
   ]);
 
@@ -237,14 +313,14 @@ export function AgentModelPicker({
     const items = (models.data?.items ?? []).filter(
       (m) => !m.provider_connection_id,
     );
-    if (!selectedAgent || selectedAgent.supported_providers.includes("*")) {
+    if (!compatibilityAgent || compatibilityAgent.supported_providers.includes("*")) {
       return items;
     }
-    const allowed = new Set(selectedAgent.supported_providers);
+    const allowed = new Set(compatibilityAgent.supported_providers);
     return items.filter((m) => allowed.has(m.provider));
-  }, [models.data, selectedAgent]);
+  }, [models.data, compatibilityAgent]);
 
-  const needsModel = selectedAgent?.needs_model ?? true;
+  const needsModel = compatibilityAgent?.needs_model ?? true;
   const selectedAgentReady = selectedAgent
     ? agentServiceModeReady(selectedAgent)
     : true;
@@ -694,71 +770,126 @@ export function AgentModelPicker({
     );
   };
 
+  const showAgentSelector = !specificAgentToggle || value.useSpecificAgent === true;
+
+  const chooseAgent = (agentName: string): void => {
+    const next = agents.data?.items.find((a) => a.name === agentName);
+    if (!next) {
+      onChange({
+        ...value,
+        agentName,
+        useSpecificAgent: specificAgentToggle ? true : value.useSpecificAgent,
+      });
+      return;
+    }
+    if (!agentServiceModeReady(next)) return;
+    const keepModel = specificAgentToggle && supportsModelSelection(next, value);
+    const nextSource = next.needs_model && next.supported_model_sources.includes(value.source)
+      ? value.source
+      : firstSource(next);
+    onChange({
+      ...value,
+      agentName: next.name,
+      source: next.needs_model ? nextSource : value.source,
+      modelProvider: keepModel ? value.modelProvider : "",
+      modelName: keepModel ? value.modelName : "",
+      providerConnectionId: keepModel ? value.providerConnectionId : undefined,
+      providerConnectionName: keepModel ? value.providerConnectionName : undefined,
+      manualModel: keepModel ? value.manualModel : false,
+      hfExecution: value.hfExecution ?? "local-vllm",
+      localServer: keepModel ? value.localServer : undefined,
+      useSpecificAgent: specificAgentToggle ? true : value.useSpecificAgent,
+    });
+    setCustomMode(false);
+  };
+
+  const setSpecificAgentEnabled = (checked: boolean): void => {
+    if (checked) {
+      onChange({
+        ...value,
+        agentName: "",
+        useSpecificAgent: true,
+      });
+      return;
+    }
+    const next = defaultAgent;
+    onChange({
+      ...value,
+      agentName: next?.name ?? defaultAgentName,
+      source: next?.needs_model
+        ? next.supported_model_sources.includes(value.source)
+          ? value.source
+          : firstSource(next)
+        : value.source,
+      useSpecificAgent: false,
+      hfExecution: value.hfExecution ?? "local-vllm",
+    });
+  };
+
   return (
     <div className="space-y-4">
-      <label className="block">
-        <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-          Agent
-        </span>
-        <select
-          aria-label="Agent"
-          title="Choose which agent implementation will run each task."
-          className={SELECT_CLS}
-          value={value.agentName}
-          disabled={disabled || agents.isPending}
-          onChange={(e) => {
-            const next = agents.data?.items.find((a) => a.name === e.target.value);
-            if (!next) {
-              onChange({ ...value, agentName: e.target.value });
-              return;
-            }
-            if (!agentServiceModeReady(next)) return;
-            const nextSource =
-              (next.supported_model_sources[0] as ModelSource) ?? "api";
-            onChange({
-              agentName: e.target.value,
-              source: next.needs_model ? nextSource : value.source,
-              modelProvider: "",
-              modelName: "",
-              providerConnectionId: undefined,
-              providerConnectionName: undefined,
-              manualModel: false,
-              hfExecution: "local-vllm",
-              localServer: undefined,
-            });
-            setCustomMode(false);
-          }}
-        >
-          {agents.isPending ? (
-            <option value="">Loading…</option>
-          ) : (
-            agentList.map((a) => {
-              const ready = agentServiceModeReady(a);
-              const reason = ready ? a.description : agentReadinessMessage(a);
-              return (
-                <option
-                  key={a.name}
-                  value={a.name}
-                  disabled={!ready}
-                  title={reason}
-                >
-                  {a.name}{ready ? "" : " (setup needed)"}
-                </option>
-              );
-            })
-          )}
-        </select>
-        {selectedAgent && selectedAgentReady ? (
-          <p className="mt-1 text-xs text-slate-500">
-            {selectedAgent.description}
-          </p>
-        ) : null}
-        {selectedAgent && !selectedAgentReady ? (
-          <p className="mt-1 text-xs text-amber-700">
-            Setup needed: {agentReadinessMessage(selectedAgent)}
-          </p>
-        ) : null}
-      </label>
+      {specificAgentToggle ? (
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={value.useSpecificAgent === true}
+            onChange={(e) => setSpecificAgentEnabled(e.target.checked)}
+            disabled={disabled}
+            className="h-4 w-4 rounded border-slate-300"
+          />
+          <span>Use a specific agent</span>
+        </label>
+      ) : null}
+
+      {showAgentSelector ? (
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+            Agent
+          </span>
+          <select
+            aria-label="Agent"
+            title="Choose which agent implementation will run each task."
+            className={SELECT_CLS}
+            value={value.agentName}
+            disabled={disabled || agents.isPending}
+            onChange={(e) => chooseAgent(e.target.value)}
+          >
+            {agents.isPending ? (
+              <option value="">Loading...</option>
+            ) : (
+              <>
+                {specificAgentToggle ? (
+                  <option value="">Choose an agent...</option>
+                ) : null}
+                {visibleAgentList.map((a) => {
+                  const ready = agentServiceModeReady(a);
+                  const reason = ready ? a.description : agentReadinessMessage(a);
+                  return (
+                    <option
+                      key={a.name}
+                      value={a.name}
+                      disabled={!ready}
+                      title={reason}
+                    >
+                      {a.name}{ready ? "" : " (setup needed)"}
+                    </option>
+                  );
+                })}
+              </>
+            )}
+          </select>
+          {selectedAgent && selectedAgentReady ? (
+            <p className="mt-1 text-xs text-slate-500">
+              {selectedAgent.description}
+            </p>
+          ) : null}
+          {selectedAgent && !selectedAgentReady ? (
+            <p className="mt-1 text-xs text-amber-700">
+              Setup needed: {agentReadinessMessage(selectedAgent)}
+            </p>
+          ) : null}
+        </label>
+      ) : null}
 
       {!selectedAgentReady ? null : needsModel ? (
         <div className="space-y-3">
