@@ -22,6 +22,7 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { useTrialEventStream } from "../hooks/useTrialEventStream";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
@@ -343,56 +344,83 @@ function TrialHeader({
 }
 
 function Trajectory({ trialId }: { trialId: string }): JSX.Element {
-  const [pages, setPages] = useState<TrajEvent[][]>([]);
-  const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
-  const [done, setDone] = useState(false);
+  // #5 Slice 6: switch the trajectory viewer from manual-paginate
+  // `/trajectory?cursor=N` to SSE `/stream`. Events stream in live
+  // while the trial is non-terminal; the connection closes itself
+  // on the server's `complete` event. The legacy paginated path is
+  // retained as a fallback for environments where EventSource is
+  // unavailable (some corp proxies strip text/event-stream).
+  const stream = useTrialEventStream(trialId);
+  const events = stream.events as TrajEvent[];
 
-  const page = useQuery({
-    queryKey: ["trajectory", trialId, pages.length],
+  const useFallback = stream.status === "error";
+
+  const [fallbackPages, setFallbackPages] = useState<TrajEvent[][]>([]);
+  const [fallbackCursor, setFallbackCursor] = useState<number | undefined>(undefined);
+  const [fallbackDone, setFallbackDone] = useState(false);
+
+  const fallback = useQuery({
+    queryKey: ["trajectory-fallback", trialId, fallbackPages.length],
     queryFn: async () => {
-      const result = await api.getTrajectoryPage(trialId, nextCursor, 200);
-      setPages((prev) => [...prev, result.events]);
+      const result = await api.getTrajectoryPage(trialId, fallbackCursor, 200);
+      setFallbackPages((prev) => [...prev, result.events]);
       if (result.next_cursor === null) {
-        setDone(true);
+        setFallbackDone(true);
       } else {
-        setNextCursor(result.next_cursor);
+        setFallbackCursor(result.next_cursor);
       }
       return result;
     },
-    enabled: !done && pages.length === 0,
+    enabled: useFallback && !fallbackDone && fallbackPages.length === 0,
   });
 
-  const flat = pages.flat();
+  const renderedEvents = useFallback
+    ? (fallbackPages.flat() as TrajEvent[])
+    : events;
+
+  const liveBadge = (() => {
+    if (useFallback) return "fallback polling";
+    if (stream.status === "open") return "live";
+    if (stream.status === "connecting") return "connecting…";
+    if (stream.status === "complete") return "complete";
+    if (stream.status === "reconnect") return "reconnecting…";
+    return stream.status;
+  })();
 
   return (
     <Card>
       <Card.Header
         title="Trajectory"
-        description={
-          done ? `${flat.length} events` : `${flat.length} events loaded`
-        }
+        description={`${renderedEvents.length} events · ${liveBadge}`}
       />
       <Card.Body className="space-y-3">
-        {page.isPending && pages.length === 0 ? <LoadingState /> : null}
-        {page.isError ? <ErrorState error={page.error} /> : null}
-        <EventTimeline events={flat} />
-        {page.isError ? (
+        {!useFallback && stream.status === "connecting" && events.length === 0 ? (
+          <LoadingState />
+        ) : null}
+        {useFallback && fallback.isPending && fallbackPages.length === 0 ? (
+          <LoadingState />
+        ) : null}
+        {useFallback && fallback.isError ? (
+          <ErrorState error={fallback.error} />
+        ) : null}
+        <EventTimeline events={renderedEvents} />
+        {useFallback && fallback.isError ? (
           <Button
-            onClick={() => page.refetch()}
-            disabled={page.isFetching}
+            onClick={() => fallback.refetch()}
+            disabled={fallback.isFetching}
             title="Retry loading trajectory events after the previous request failed."
           >
-            {page.isFetching ? "Retrying…" : "Retry"}
+            {fallback.isFetching ? "Retrying…" : "Retry"}
           </Button>
-        ) : !done ? (
+        ) : useFallback && !fallbackDone ? (
           <Button
-            onClick={() => page.refetch()}
-            disabled={page.isFetching}
+            onClick={() => fallback.refetch()}
+            disabled={fallback.isFetching}
             title="Load the next page of trajectory events."
           >
-            {page.isFetching ? "Loading…" : "Load more"}
+            {fallback.isFetching ? "Loading…" : "Load more"}
           </Button>
-        ) : flat.length > 0 ? (
+        ) : stream.status === "complete" && events.length > 0 ? (
           <p className="pt-1 text-center text-xs text-slate-400">
             End of trajectory.
           </p>
