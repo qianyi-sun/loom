@@ -209,6 +209,14 @@ The staged OLDLAB public-beta plan is recorded under
 `58000M` per node with `LOOM_WORKER_MAX_CONCURRENT=6`, even when inventory
 shows more total host capacity.
 
+The staged GB10 public-beta plan is recorded under
+`deploy/worker-pools/gb10/`. GB10 differs from OLDLAB in two important ways:
+GB10 workers are ARM64 fixed Docker Compose workers instead of Slurm jobs, and
+their Docker data-root plus worker scratch must stay on each node's local ext4
+disk. Do not use `/shared_work` for GB10 Docker overlay2, worker scratch,
+Postgres, MinIO backend data, or kind/k8s volumes; `/shared_work` is NFSv4 and
+is suitable only for read-mostly cache staging or evidence transfer.
+
 ## Capacity Plan
 
 Convert the inventory output into an initial per-node concurrency plan:
@@ -417,6 +425,31 @@ docker compose \
   -f deploy/docker-compose.remote-worker.yml \
   up -d --build
 ```
+
+When the worker-facing URLs are node-local loopback tunnels such as
+`http://127.0.0.1:18081`, run the worker container with host networking so the
+container's loopback is the host loopback:
+
+```yaml
+services:
+  worker:
+    network_mode: host
+```
+
+Then start with both compose files:
+
+```bash
+docker compose \
+  --env-file .env.remote-worker \
+  -f deploy/docker-compose.remote-worker.yml \
+  -f docker-compose.gb10-hostnet.yml \
+  up -d --build
+```
+
+For GB10-style hosts, keep `LOOM_WORKER_GATEWAY_URL` pointed at
+`http://127.0.0.1:19100` for the worker process and set
+`LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:19100` so
+subprocess agents inside trial sandboxes can also reach the gateway.
 
 Watch registration and claim activity:
 

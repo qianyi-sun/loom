@@ -1829,6 +1829,17 @@ mock provider and browser automation job.
   footprint with `MAX_JOBS`; lower per-node pressure with
   `REQUESTED_CONCURRENCY`; disable the pool with
   `LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=false`.
+- For GB10-style ARM64 fixed Docker Compose capacity, use the staged runbook
+  and evidence under `deploy/worker-pools/gb10/`. GB10 hosts attach through
+  private loopback worker-service tunnels, run the worker compose service with
+  `network_mode: host`, and set `LOOM_WORKER_HOSTNAME=trt-gb10-N` so Monitor
+  and database evidence map workers to physical hosts. Keep Docker data-root,
+  worker trajectory cache, benchmark cache, and trial scratch on each node's
+  local ext4 disk; do not put those hot paths on `/shared_work`. Current
+  public-beta validation uses `trt-gb10-1..15` at
+  `LOOM_WORKER_MAX_CONCURRENT=2`, for 30 configured ARM64 slots. After every
+  rollout, restart/check the OLDLAB-1 `loom-remote-worker-tunnel-*` user units
+  and run the GB10 `check-remote` gate before treating the pool as healthy.
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
 

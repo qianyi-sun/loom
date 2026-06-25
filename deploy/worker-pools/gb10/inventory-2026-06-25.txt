@@ -1,0 +1,147 @@
+# GB10 remote worker inventory
+#
+# Evidence date: 2026-06-25
+# Fresh recheck: 2026-06-25T20:15:40Z
+# Control plane: OLDLAB-1 / platform-dev / namespace loom-public-beta
+# Worker path: /home/trt/loom-remote-worker
+# Repo commit used for runtime smoke: cbbe6ff213da492fcef4348121b941944547c188
+# Current per-host concurrency: LOOM_WORKER_MAX_CONCURRENT=2
+# Policy: all trt-gb10-1..15 are worker-enabled fixed Docker Compose remote
+# workers. Use local ext4 root disk for Docker data-root and worker hot paths;
+# do not use /shared_work for Docker overlay2, scratch, Postgres, MinIO backend
+# data, or kind/k8s volumes.
+
+## trt-gb10-1
+host=trt-gb10-1
+status=worker-enabled
+arch=arm64 docker_version=28.3.3 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=ac2d1a1f-1ed0-4bfe-9fdb-acdbd257a94e
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-2
+host=trt-gb10-2
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=03b6f4ed-2bc1-4bc6-9c76-d8cc07ca486b
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-3
+host=trt-gb10-3
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=4cb7f372-f4f1-40d5-becd-90a222f0b150
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-4
+host=trt-gb10-4
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=2092b326-c187-4189-90c3-73a83b3bec15
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-5
+host=trt-gb10-5
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=9999bf06-42c0-4adb-a7e4-4516fcdefc73
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-6
+host=trt-gb10-6
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=628ad24e-56c3-42ae-8bdc-68eb860b2283
+reason=registered active arm64 worker; claimed and completed issue #518 canary
+
+## trt-gb10-7
+host=trt-gb10-7
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=d4dbabc8-a9f2-42f7-8446-7058dc79c08e
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-8
+host=trt-gb10-8
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=3b2722f1-bdc8-4c9d-a1e5-70689d66996a
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-9
+host=trt-gb10-9
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=ce290f26-8d9b-4e5b-bc01-943a3a7e781f
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-10
+host=trt-gb10-10
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=73d2f5bb-0e36-4329-aae8-da201bb48557
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-11
+host=trt-gb10-11
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=988bc9cc-22ae-4390-ac9c-ebecc4da8523
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-12
+host=trt-gb10-12
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=7fe89894-1ae2-496b-b79a-73066874aeef
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-13
+host=trt-gb10-13
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=5114d8e1-4e7a-408d-a077-d0b8f36705ee
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-14
+host=trt-gb10-14
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=31665a4e-d710-430e-ba2c-92234c0cf7ed
+reason=registered active arm64 worker and passed endpoint plus Docker checks
+
+## trt-gb10-15
+host=trt-gb10-15
+status=worker-enabled
+arch=arm64 docker_version=29.2.1 docker_access=ok
+control_plane=ok gateway=ok minio=ok
+concurrency=2
+worker_id=3b67670f-a46a-4f6e-ad24-a9d4d86f25b2
+reason=registered active arm64 worker and passed endpoint plus Docker checks
