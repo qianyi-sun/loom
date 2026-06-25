@@ -1,0 +1,115 @@
+"""Unit tests for `loom_service.task_compat` (#320).
+
+Pin the (agent, task) capability-matching heuristics that the batch
+preflight uses to skip combos that would deterministically AgentError
+mid-trial (the original case: oracle vs. non-pytest benchmarks)."""
+
+from __future__ import annotations
+
+from loom_service.agent_catalog import get_agent
+from loom_service.task_compat import (
+    filter_tasks_by_agent_capability,
+    task_provides_capability,
+    task_supports_agent,
+)
+
+
+def _config(verifier_name: str) -> dict[str, object]:
+    """Minimal TaskConfig-shaped dict — only the field the heuristic
+    looks at (`verifier.name`) needs to be present."""
+    return {"verifier": {"name": verifier_name}}
+
+
+def test_oracle_agent_declares_solution_solve_sh_requirement() -> None:
+    """Wiring guard: oracle MUST advertise the solve.sh requirement
+    so the preflight knows to filter incompatible tasks. Regression
+    against silent removal of `requires_capabilities`."""
+    oracle = get_agent("oracle")
+    assert oracle is not None
+    assert "solution_solve_sh" in oracle.requires_capabilities
+
+
+def test_litellm_agent_has_no_hard_capability_requirements() -> None:
+    """Model-backed agents work against any task shape — they emit
+    the answer however the task's verifier expects it. The preflight
+    should never filter tasks for them."""
+    litellm = get_agent("litellm")
+    assert litellm is not None
+    assert litellm.requires_capabilities == frozenset()
+
+
+def test_pytest_verifier_task_provides_solve_sh_capability() -> None:
+    """mbpp/humaneval/livecodebench all use the pytest verifier and
+    every one of those adapters co-emits `solution/solve.sh` next to
+    `_reference.py`. So pytest⇒solve.sh is the post-#388/#414
+    invariant the heuristic relies on."""
+    assert task_provides_capability(
+        _config("pytest"), "solution_solve_sh",
+    ) is True
+
+
+def test_script_verifier_task_does_not_provide_solve_sh() -> None:
+    """aime/gpqa/mmlu-pro/bfcl tasks use the `script` verifier and
+    ship no solve.sh. Oracle can't run them — this is the failure
+    pattern #320 set out to block at submit time."""
+    assert task_provides_capability(
+        _config("script"), "solution_solve_sh",
+    ) is False
+
+
+def test_unknown_capability_fails_closed() -> None:
+    """Typo'd capability names must not silently grant access — they
+    return False so a misconfigured agent gets filtered out rather
+    than passing every preflight."""
+    assert task_provides_capability(
+        _config("pytest"), "nonexistent_capability",
+    ) is False
+
+
+def test_task_supports_agent_passes_when_requirements_empty() -> None:
+    """Agents with empty `requires_capabilities` (litellm, all
+    subprocess agents) always pass — they have no platform-level
+    hard requirements on task shape."""
+    assert task_supports_agent(_config("script"), frozenset()) is True
+
+
+def test_task_supports_agent_requires_all_capabilities() -> None:
+    """Multi-capability requirements are conjunctive — missing any
+    one disqualifies the task."""
+    cfg = _config("pytest")  # provides solution_solve_sh
+    assert task_supports_agent(
+        cfg, frozenset({"solution_solve_sh"}),
+    ) is True
+    assert task_supports_agent(
+        cfg, frozenset({"solution_solve_sh", "nonexistent_capability"}),
+    ) is False
+
+
+def test_filter_tasks_by_agent_capability_splits_compat_and_incompat() -> None:
+    """The (compatible, incompatible) split mirrors the matrix
+    runner's #316 evidence: pytest tasks for oracle land in
+    `compatible`, script tasks land in `incompatible`."""
+    configs = {
+        "mbpp/100": _config("pytest"),
+        "aime-25/2025-I/2": _config("script"),
+        "humaneval/0": _config("pytest"),
+        "gpqa/q1": _config("script"),
+    }
+    compat, incompat = filter_tasks_by_agent_capability(
+        task_configs=configs, required=frozenset({"solution_solve_sh"}),
+    )
+    assert compat == ["mbpp/100", "humaneval/0"]
+    assert incompat == ["aime-25/2025-I/2", "gpqa/q1"]
+
+
+def test_filter_with_no_requirements_returns_everything_as_compatible() -> None:
+    """Empty `required` short-circuits — no DB cost, no filtering."""
+    configs = {
+        "a": _config("pytest"),
+        "b": _config("script"),
+    }
+    compat, incompat = filter_tasks_by_agent_capability(
+        task_configs=configs, required=frozenset(),
+    )
+    assert compat == ["a", "b"]
+    assert incompat == []

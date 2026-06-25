@@ -36,6 +36,7 @@ from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_mapping, redact_text
 from loom_service.agent_catalog import (
+    get_agent,
     known_names,
     validate_agent_model_compat,
 )
@@ -50,6 +51,7 @@ from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.task_compat import task_supports_agent
 from loom_service.task_config_validation import (
     expected_trial_count,
     invalid_task_config_detail,
@@ -142,6 +144,85 @@ async def _reject_if_known_failed_provider_model(
     )
     _reject_submission(
         reason="provider_model_preflight",
+        status_code=400,
+        detail=detail,
+    )
+
+
+def _agents_in_batch(
+    combinations: Sequence[Combination],
+    single_agent_name: Any,
+) -> list[str]:
+    """Collect the agent names involved in this batch: every combo's
+    `agent_name` for multi-combination batches, else the single
+    `trial_config.agent_name`. Empty when the request used neither
+    surface (legacy default-agent path)."""
+    if combinations:
+        return list({c.agent_name for c in combinations})
+    if isinstance(single_agent_name, str) and single_agent_name:
+        return [single_agent_name]
+    return []
+
+
+async def _reject_agent_task_incompat(
+    session: Any,
+    *,
+    valid_task_ids: Sequence[str],
+    combinations: Sequence[Combination],
+    single_agent_name: Any,
+) -> None:
+    """#320 preflight. For every agent in the batch, drop any task
+    that doesn't expose every capability the agent requires
+    (currently only `solution_solve_sh` for oracle). Reject the whole
+    batch with a structured 400 listing the offending (agent, task)
+    pairs so the caller can resubmit with a per-agent task slate."""
+    agents = _agents_in_batch(combinations, single_agent_name)
+    if not agents or not valid_task_ids:
+        return
+    # Skip the DB read entirely if every agent is capability-permissive.
+    requirements: dict[str, frozenset[str]] = {}
+    for name in agents:
+        entry = get_agent(name)
+        if entry is None or not entry.requires_capabilities:
+            continue
+        requirements[name] = entry.requires_capabilities
+    if not requirements:
+        return
+
+    rows = (
+        await session.execute(
+            select(Task.id, Task.config).where(
+                Task.id.in_(list(valid_task_ids)),
+            ),
+        )
+    ).all()
+    configs: dict[str, Any] = {str(tid): cfg for tid, cfg in rows}
+
+    offenders: dict[str, list[str]] = {}
+    for agent_name, required in requirements.items():
+        bad = [
+            tid for tid in valid_task_ids
+            if not task_supports_agent(configs.get(tid) or {}, required)
+        ]
+        if bad:
+            offenders[agent_name] = bad
+
+    if not offenders:
+        return
+
+    pairs = "; ".join(
+        f"{name}: {len(ids)} task(s) (e.g. {sorted(ids)[0]})"
+        for name, ids in sorted(offenders.items())
+    )
+    detail = (
+        f"agent×task capability mismatch — {pairs}. The listed agents "
+        f"cannot run these tasks at the platform level (e.g. oracle "
+        f"requires `solution/solve.sh`, which non-pytest-verifier "
+        f"benchmarks do not ship). Submit per-agent batches with the "
+        f"compatible task slate, or drop the incompatible agent."
+    )
+    _reject_submission(
+        reason="agent_task_incompat",
         status_code=400,
         detail=detail,
     )
@@ -391,6 +472,19 @@ async def create_batch(
             status_code=400,
             detail=invalid_task_config_detail(invalid_tasks),
         )
+
+    # #320 preflight: skip launching trials for (agent, task) combos
+    # where the agent's `requires_capabilities` doesn't match what the
+    # task bundle exposes. The current case is oracle, which needs
+    # `solution/solve.sh` (granted by the pytest-verifier heuristic).
+    # Reject upfront with a structured detail instead of fanning out
+    # into trials that deterministically AgentError mid-run.
+    await _reject_agent_task_incompat(
+        s,
+        valid_task_ids=valid_task_ids,
+        combinations=payload.combinations,
+        single_agent_name=payload.trial_config.get("agent_name"),
+    )
 
     token_prefix = (
         ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"

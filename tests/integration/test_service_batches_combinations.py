@@ -43,6 +43,23 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
     }
 
 
+def _script_verifier_task_config(task_id: str) -> dict[str, object]:
+    """aime-shape task (verifier=script, no solve.sh). See
+    test_service_batches_crud._script_verifier_task_config for the
+    parallel single-agent test."""
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {
+            "name": "script",
+            "args": {"script_path": "/workspace/verifier/run.sh"},
+        },
+        "steps": [{"name": "main"}],
+    }
+
+
 @pytest.fixture
 async def setup(
     monkeypatch: pytest.MonkeyPatch,
@@ -441,6 +458,55 @@ async def test_combinations_reject_agent_without_service_runtime(
 # ----------------------------------------------------------------
 # Backend
 # ----------------------------------------------------------------
+
+
+async def test_combinations_reject_oracle_when_any_task_is_incompat(
+    setup: tuple[FastAPI, str], postgres_url: str,
+) -> None:
+    """#320: a multi-agent combinations batch where oracle is one of
+    the agents must be rejected if any task is non-pytest. The
+    structured 400 lets the matrix runner split per-agent."""
+    app, raw = setup
+    # Inject an aime-shape task into the fixture's task table.
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="local/script-only-combo",
+                checksum="x" * 64,
+                config=_script_verifier_task_config("local/script-only-combo"),
+                source="local",
+                license="MIT",
+                benchmark_id=None,
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    r = await _post(
+        app, raw,
+        {
+            "name": "oracle+litellm-on-script-task",
+            "task_filter": {
+                "task_ids": ["local/script-only-combo"],
+                "subset_kind": "explicit",
+            },
+            "trial_config": {},
+            "combinations": [
+                {"agent_name": "oracle", "agent_model": None,
+                 "n_per_task": 1, "label": "oracle"},
+                {"agent_name": "litellm",
+                 "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                 "n_per_task": 1, "label": "litellm"},
+            ],
+        },
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "oracle" in detail
+    # litellm has no requirements — it must not appear in the offender list.
+    assert "litellm:" not in detail
 
 
 async def test_backend_stored_on_batch(setup: tuple[FastAPI, str]) -> None:

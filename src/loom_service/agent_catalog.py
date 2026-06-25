@@ -110,6 +110,14 @@ class AgentEntry:
     service_mode_ready: bool = True
     readiness_status: ReadinessStatus = "ready"
     readiness_message: str | None = None
+    # #320: task-shape capabilities the agent needs. Empty = no hard
+    # task-shape requirements (works against any task that exposes a
+    # workable agent step). Currently only `solution_solve_sh` exists
+    # (oracle needs `solution/solve.sh` in the bundle). Surfaced to
+    # the SPA via /api/v1/agents and consumed by the POST /batches
+    # preflight to skip incompatible (agent, task) combos before
+    # fan-out instead of bubbling agent_error after submit.
+    requires_capabilities: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -123,6 +131,7 @@ class AgentEntry:
             "service_mode_ready": self.service_mode_ready,
             "readiness_status": self.readiness_status,
             "readiness_message": self.readiness_message,
+            "requires_capabilities": sorted(self.requires_capabilities),
         }
 
     def readiness_error(self) -> str | None:
@@ -149,6 +158,12 @@ _BUILTIN: tuple[AgentEntry, ...] = (
             execution="builtin-oracle",
             capture="loom-trajectory",
         ),
+        # #320: oracle hard-requires `solution/solve.sh` in the
+        # materialized bundle. Tasks that don't ship it (most non-code
+        # benchmarks: aime, gpqa, mmlu-pro, bfcl, etc.) are filtered
+        # out at POST /batches preflight rather than launched and
+        # failed mid-trial with `AgentError: solve.sh ... not found`.
+        requires_capabilities=frozenset({"solution_solve_sh"}),
     ),
     AgentEntry(
         name="litellm",

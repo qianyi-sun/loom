@@ -45,6 +45,24 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
     }
 
 
+def _script_verifier_task_config(task_id: str) -> dict[str, object]:
+    """Used by tests covering oracle×non-pytest-verifier preflight
+    rejection (#320). Mirrors the aime/gpqa/mmlu-pro shape: the
+    verifier is `script`, so the bundle ships no `solution/solve.sh`
+    and oracle can't run it."""
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {"os": "linux", "docker_image": "alpine"},
+        "agent": {"name": "oracle"},
+        "verifier": {
+            "name": "script",
+            "args": {"script_path": "/workspace/verifier/run.sh"},
+        },
+        "steps": [{"name": "main"}],
+    }
+
+
 def _counter_value(
     metric_name: str,
     sample_name: str,
@@ -1842,3 +1860,135 @@ async def test_cancel_batch_cascades_to_active_trials(
     sync_engine.dispose()
     assert queued_state == "cancelled"
     assert succ_state == "succeeded"  # terminal trial untouched
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #320: oracle × incompatible-task preflight rejection
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_post_batch_rejects_oracle_against_non_pytest_tasks(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """oracle hard-requires `solution/solve.sh`; only pytest-verifier
+    benchmarks ship one (mbpp / humaneval / livecodebench). Submitting
+    `agent_name=oracle` against an aime/gpqa-style script-verifier task
+    used to deterministically AgentError mid-trial. After #320, the
+    preflight rejects upfront with a structured detail."""
+    _app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        # An aime-like task: verifier=script, no solve.sh in bundle.
+        s.execute(
+            insert(Task).values(
+                id="local/script-only-0",
+                checksum="x" * 64,
+                config=_script_verifier_task_config("local/script-only-0"),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "oracle-on-script-task",
+                "task_filter": {
+                    "task_ids": ["local/script-only-0"],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                },
+            },
+        )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "agent×task capability mismatch" in detail
+    assert "oracle" in detail
+    assert "local/script-only-0" in detail
+    assert "solve.sh" in detail
+
+
+async def test_post_batch_allows_oracle_against_pytest_tasks(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """Negative-space guard: oracle×pytest-verifier tasks (mbpp shape)
+    keep working unchanged. Fixture's MIT tasks all use verifier=pytest
+    so this is the unmodified happy path."""
+    _app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "oracle-on-pytest-tasks",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                },
+            },
+        )
+    assert r.status_code == 201, r.text
+
+
+async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """litellm and the subprocess agents have empty
+    `requires_capabilities`. The preflight must short-circuit them so
+    a model-backed batch isn't blocked from running against an
+    aime-shape task."""
+    _app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id="local/script-only-1",
+                checksum="x" * 64,
+                config=_script_verifier_task_config("local/script-only-1"),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "litellm-on-script-task",
+                "task_filter": {
+                    "task_ids": ["local/script-only-1"],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": "litellm",
+                    "agent_model": {
+                        "provider": "openai", "name": "gpt-4o-mini",
+                    },
+                },
+            },
+        )
+    assert r.status_code == 201, r.text
