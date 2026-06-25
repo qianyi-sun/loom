@@ -134,6 +134,14 @@ def _row_errors(row: dict[str, Any], index: int) -> list[str]:
         status = harbor.get("status")
         if isinstance(status, str) and status not in HARBOR_STATUSES:
             errors.append(f"{label}: harbor_support.status {status!r} is invalid")
+        for field_name in ("decision", "parity_target"):
+            value = harbor.get(field_name)
+            if isinstance(value, str) and "coder-harbor-cloud" in value:
+                errors.append(
+                    f"{label}: harbor_support.{field_name} references "
+                    f"coder-harbor-cloud (Huawei platform); use "
+                    f"harbor-framework/harbor instead"
+                )
 
     score = row.get("score_semantics")
     if not isinstance(score, dict):
@@ -172,10 +180,44 @@ def _row_errors(row: dict[str, Any], index: int) -> list[str]:
     return errors
 
 
+def _harbor_reference_errors(manifest: dict[str, Any]) -> list[str]:
+    ref = manifest.get("harbor_reference")
+    if not isinstance(ref, dict):
+        return [
+            "harbor_reference block is required at the top level "
+            "(must pin harbor-framework/harbor at a 40-char hex commit sha)"
+        ]
+    errors: list[str] = []
+    repo = ref.get("repo")
+    if repo != "harbor-framework/harbor":
+        errors.append(
+            f"harbor_reference.repo must be 'harbor-framework/harbor', got {repo!r}"
+        )
+    url = ref.get("url")
+    if url != "https://github.com/harbor-framework/harbor":
+        errors.append(
+            "harbor_reference.url must be "
+            "'https://github.com/harbor-framework/harbor', "
+            f"got {url!r}"
+        )
+    pinned = ref.get("pinned_commit")
+    if not (
+        isinstance(pinned, str)
+        and len(pinned) == 40
+        and all(c in "0123456789abcdef" for c in pinned)
+    ):
+        errors.append(
+            "harbor_reference.pinned_commit must be a 40-char hex sha"
+        )
+    return errors
+
+
 def check_manifest(manifest: dict[str, Any]) -> list[CheckResult]:
     failures: list[str] = []
     if manifest.get("schema_version") != 1:
         failures.append("schema_version must be 1")
+
+    failures.extend(_harbor_reference_errors(manifest))
 
     rows = manifest.get("benchmarks")
     if not isinstance(rows, list):

@@ -1,307 +1,214 @@
 # Benchmark Score Alignment — Layer 2 Reports
 
-Layer 1 (PR #477) declared the manifest — per-benchmark canonical
-reference, score semantics, and replay-case definitions. Layer 2
-records the actual alignment evidence: for each benchmark, the
-parity decision (Harbor vs. upstream), the replay tests that prove
-Loom's verifier matches the canonical scorer, and any observed
-deltas or known limitations.
+Layer 1 (see [`benchmark-score-alignment.md`](benchmark-score-alignment.md))
+declares the manifest: each v1.0 benchmark's canonical reference, score
+semantics, and replay-case definitions. Layer 2 records the actual
+alignment evidence for each benchmark: the parity decision (Harbor vs.
+upstream canonical), the replay tests that prove Loom's verifier matches
+the canonical scorer, and any observed deltas or known limitations.
 
-Reports are added per benchmark as Layer 2 evidence lands. This
-file is the human-readable narrative; the machine-readable form
-lives in `benchmark-score-alignment.json` under each benchmark's
-`layer2_evidence` field.
+This file is the human-readable narrative. The machine-readable form
+lives in [`benchmark-score-alignment.json`](benchmark-score-alignment.json)
+under each benchmark's `layer2_evidence` field; the `harbor_reference`
+block at the top of that manifest pins the Harbor repo and commit this
+document is written against.
 
-## Harbor support determination
+## Correction note (2026-06-25)
 
-`coder-harbor-cloud` (the platform the gate names as the first-choice
-parity target) ships the `voyager` subsystem with bespoke benchmark
-tasks (fizzbuzz, hello-world, bugfix-sum, npu-smoke). It does **not**
-ship native verifiers for any v1.0 academic benchmark: AIME, GPQA,
-MATH-500, HumanEval, MBPP, LiveCodeBench, MMLU-Pro, or SWE-Bench. So
-for all 12 v1.0 benchmarks the parity target collapses to **upstream
-canonical** — the official paper/leaderboard/test harness for the
-benchmark.
+The first four Layer 2 batches (PRs #499, #513, #514, #517) mistakenly
+named `coder-harbor-cloud` (a Huawei agent platform) as the Harbor
+parity target. The real reference is `harbor-framework/harbor` at
+commit `2ead3f1f2462f6f7260aca5ef2377cd7e309ff06`. The correction is
+tracked under #419 sub-issue #538, and the pinned adapter inventory at
+that commit is captured in
+[`docs/research/harbor-adapter-snapshot-2026-06-25.md`](research/harbor-adapter-snapshot-2026-06-25.md).
+All sections below reference the real Harbor.
 
-This determination is reflected in each completed entry's
-`harbor_support.status="not_supported"` with the justification
-inline; new entries should follow the same convention until or
-unless Harbor ships a verifier for that benchmark.
+## Reference target
 
-## Batch 1 (this PR) — mbpp, humaneval, aime-24, aime-25
+The pinned Harbor reference is `harbor-framework/harbor`
+(<https://github.com/harbor-framework/harbor>) at commit
+`2ead3f1f2462f6f7260aca5ef2377cd7e309ff06` (2026-06-25). At that
+commit, Harbor's `adapters/` directory contains adapters for five of
+the twelve v1.0 benchmarks; the remaining seven collapse to
+upstream-canonical equivalence because Harbor ships no parity target
+for them.
 
-### mbpp
+| Benchmark | Harbor parity | Adapter at pinned commit | Layer 2 evidence |
+|---|---|---|---|
+| `aime-24` | supported | [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) | pending paired run |
+| `aime-25` | supported | [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) (shared with aime-24) | pending paired run |
+| `gpqa` | supported (Diamond) | [`adapters/gpqa-diamond`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/gpqa-diamond) | pending paired run |
+| `livecodebench` | supported | [`adapters/livecodebench`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/livecodebench) | pending paired run |
+| `swe-bench-verified` | supported | [`adapters/swebench`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/swebench) | pending paired run |
+| `humaneval` | not supported | (`adapters/humanevalfix` is a different task set) | replay-validated |
+| `mbpp` | not supported | — | replay-validated |
+| `math-500` | not supported | (`aime`, `ineqmath`, `omnimath` cover different task sets) | replay-validated |
+| `mmlu-pro` | not supported | (`adapters/mmmlu` is the multilingual variant, different question pool) | replay-validated |
+| `terminal-bench-2` | not supported | (TB-2 is Harbor's host framework, not an adapted benchmark) | replay-validated |
+| `skillflow` | not supported | — | replay-validated |
+| `skilllearnbench` | not supported | — | replay-validated |
 
-- **Parity kind:** by construction. Loom's MBPP adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/mbpp.py`)
-  writes the upstream sanitized-MBPP test strings verbatim into the
-  bundle's `tests/test_mbpp_*.py` files (one pytest file per test
-  case). The verifier is `pytest` running those bundled tests. The
-  canonical MBPP scorer is also `pytest` running the same tests, so
-  the verifier and canonical scorer are the same code path.
-- **Replay validation:** two tests in
-  `packages/loom-benchmarks/tests/test_mbpp_adapter.py` —
-  `test_mbpp_solution_runs_against_tests_after_oracle_copy`
-  exercises a known-passing solution (the bundled `_reference.py`),
-  asserts pytest returns 0 (reward=1.0). The complementary
-  `test_mbpp_solution_fails_pytest_when_stub_not_replaced` proves
-  the inverse path: the stub solution must NOT silently pass
-  (guards against the #388 false-positive).
-- **Known deltas:** none. Loom reports one-output reward as a
-  pass@1 surrogate; the manifest's `score_semantics.task_reward`
-  documents this explicitly.
-- **Verdict:** credible for user-facing reporting.
+## Benchmarks with Harbor parity (pending paired runs)
 
-### humaneval
+These five benchmarks have a real Harbor adapter at the pinned commit.
+Loom's adapter and Harbor's adapter implement the same parity target
+via independent code paths, so end-to-end matched-config paired runs
+are the appropriate evidence — stronger than the by-construction
+claims used by the earlier (incorrect) Layer 2 batches. The paired
+runs themselves are tracked in Stage B child issues under #419.
 
-- **Parity kind:** by construction. Loom's HumanEval adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/humaneval.py`)
-  emits the upstream `check(candidate)` function verbatim as a
-  pytest-discoverable test next to the bundled `_reference.py`.
-- **Replay validation:** two tests in
-  `packages/loom-benchmarks/tests/test_humaneval_adapter.py` —
-  `test_convert_instance_solution_runs_after_oracle_copy` proves
-  the canonical reference passes the bundled check; the inverse
-  `test_convert_instance_pytest_fails_without_oracle_copy` proves
-  the stub fails the same check.
-- **Known deltas:** none. Same one-output / pass@1 convention as
-  mbpp.
-- **Verdict:** credible for user-facing reporting.
+The replay tests listed below remain the Layer 2 evidence that Loom's
+verifier semantics are well-defined and behave as documented; they
+are necessary but no longer sufficient where Harbor ships a parallel
+implementation.
 
 ### aime-24
 
-- **Parity kind:** replay-validated. Loom's adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/aime.py`)
-  emits a script verifier (`verifier/run.sh` + `verifier/check.py`)
-  that extracts the last integer from `final_answer.txt` and
-  compares to the canonical `answer` field from the AIME 2024
-  dataset row. The canonical scorer is exact integer match against
-  the same dataset field.
-- **Replay validation:** three tests in
-  `packages/loom-benchmarks/tests/test_aime_adapter.py` —
-  `test_aime_run_sh_is_self_contained_and_writes_verifier_result`
-  (correct answer → reward 1.0 with structured `{got, expected}`),
-  `test_aime_checker_rejects_wrong_answer` (wrong answer → reward
-  0.0), `test_aime_checker_picks_last_integer` (pins the
-  extraction rule against ambiguous final-line shapes).
-- **Known deltas:** the extraction rule is "last integer on the
-  final line" — well-defined for AIME's single-integer-answer
-  convention but does NOT handle boxed-LaTeX, multi-answer rows,
-  or non-integer answers. None of those shapes appear in AIME.
-- **Verdict:** credible for user-facing reporting.
+- **Harbor adapter:** [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) at `harbor-framework/harbor@2ead3f1f`.
+- **Published Harbor baseline:** none at the pinned commit; Stage B must establish it.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/aime.py`.
+- **Layer 2 status:** `pending_paired_run`.
+- **Replay tests (verifier semantics):**
+  - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_run_sh_is_self_contained_and_writes_verifier_result`
+  - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_rejects_wrong_answer`
+  - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_picks_last_integer`
+- **Stage B paired run:** tracked in [#540](https://github.com/carinrc/loom/issues/540).
 
 ### aime-25
 
-- **Parity kind:** replay-validated by inheritance. The aime-25
-  adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/aime_2025.py`)
-  emits the same script-verifier infrastructure as aime-24; the
-  integer-extraction logic in `verifier/check.py` is identical.
-- **Replay validation:** `test_aime_2025_emits_script_path` proves
-  the verifier wiring is shared with aime-22..24; the shared
-  extraction tests
-  (`test_aime_checker_extracts_last_integer`,
-  `test_aime_checker_picks_last_integer`,
-  `test_aime_checker_rejects_wrong_answer`) cover the same code
-  path the aime-25 task bundle invokes.
-- **Known deltas:** same as aime-24.
-- **Verdict:** credible for user-facing reporting.
-
-## Batch 2 — gpqa, mmlu-pro, livecodebench, skillflow, skilllearnbench
+- **Harbor adapter:** [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) — shared with aime-24; Harbor's adapter covers both years through one verifier.
+- **Published Harbor baseline:** none at the pinned commit; Stage B must establish it.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/aime_2025.py` (shares script-verifier infrastructure with Loom's aime-24 adapter, mirroring Harbor's single-adapter approach).
+- **Layer 2 status:** `pending_paired_run`.
+- **Replay tests (verifier semantics):**
+  - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_2025_emits_script_path`
+  - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_extracts_last_integer`
+- **Stage B paired run:** tracked in [#540](https://github.com/carinrc/loom/issues/540).
 
 ### gpqa
 
-- **Parity kind:** replay-validated. The adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/gpqa.py`)
-  emits a script verifier that extracts the answer letter from
-  `final_answer.txt` and compares to the canonical letter stored
-  in `answer_key.json` (derived from the GPQA Extended dataset
-  row). The canonical scorer is exact letter match against the
-  same dataset field.
-- **Replay validation:**
-  `packages/loom-benchmarks/tests/test_gpqa_adapter.py::test_gpqa_verifier_scores_correct_letter`
-  — correct letter → reward `{score: 1.0}`.
-- **Known deltas:** extraction rule is "letter after 'Final
-  answer:' on the last line"; rejects ambiguous outputs (no
-  partial credit, by design).
+- **Harbor adapter:** [`adapters/gpqa-diamond`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/gpqa-diamond) — covers the Diamond subset (198 tasks) only.
+- **Published Harbor baseline:** codex + gpt-5.2, 3 trials, 198 Diamond tasks — Harbor 87.21% ± 0.34 vs. `XuandongZhao/gpqa-harbor-adapter` original 87.88% ± 0.58.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/gpqa.py` — currently emits the **Extended** subset.
+- **Subset complication:** Diamond (Harbor) vs. Extended (Loom) is a structural mismatch. Stage B must either reconfigure Loom to Diamond or document the subset gap as a blocker for parity.
+- **Layer 2 status:** `pending_paired_run`.
+- **Replay tests (verifier semantics):**
+  - `packages/loom-benchmarks/tests/test_gpqa_adapter.py::test_gpqa_verifier_scores_correct_letter`
+- **Stage B paired run:** tracked in [#541](https://github.com/carinrc/loom/issues/541).
+
+### livecodebench
+
+- **Harbor adapter:** [`adapters/livecodebench`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/livecodebench).
+- **Published Harbor baselines:**
+  - terminus-2 + gpt-5-mini, 4 trials, 100 release_v6 tasks — TB adapter 76.50% ± 0.50 (Harbor n/a) vs. `audreycs/terminal-bench` original 77.25% ± 0.48.
+  - claude-code@2.0.32 + claude-haiku-4-5, 4 trials, 100 release_v6 tasks — Harbor 53.25% ± 0.95 vs. TB adapter 54.50% ± 1.50.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/livecodebench.py`.
+- **Layer 2 status:** `pending_paired_run`. Match Harbor's claude-haiku-4-5 baseline for Stage B.
+- **Replay tests (verifier semantics):**
+  - `packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_solution_passes_subprocess_run`
+  - `packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_decodes_compressed_private_cases`
+  - `packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_functional_cases_call_solution_method`
+- **Stage B paired run:** tracked in [#542](https://github.com/carinrc/loom/issues/542).
+
+### swe-bench-verified
+
+- **Harbor adapter:** [`adapters/swebench`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/swebench).
+- **Published Harbor baselines:**
+  - terminus-2 + Claude-Sonnet-4-5, 1 run, 500 tasks — Harbor 68.6% vs. TB adapter 70.0%.
+  - mini-swe-agent@2.1.0 + gpt-5-mini, 3 runs, 499 comparable tasks (Daytona) — Harbor 54.5% ± 0.7 vs. SWE-Bench leaderboard 56.3%.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/swe_bench_verified.py` — emits the upstream SWE-Bench harness (`solve.sh` applies the canonical patch; `tests/test_swebench.py` shells out to `pytest -x -q` against the union of `FAIL_TO_PASS` + `PASS_TO_PASS` node ids) inside the per-instance `swebench/sweb.eval.x86_64.<slug>` Docker image.
+- **Layer 2 status:** `pending_paired_run`. Match Harbor's Claude-Sonnet-4-5 or gpt-5-mini baseline for Stage B.
+- **Replay tests (verifier semantics):**
+  - `packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_convert_emits_valid_task`
+  - `packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_empty_test_node_lists_emit_script_verifier_reward_zero` (guards the #388 false-positive: empty node-id lists must NOT silently pass)
+  - `packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_image_slug_replaces_double_underscore` (per-instance image-name encoding pins the runtime to the upstream eval image)
+- **Known limitation:** no CI test pulls the multi-GB `swebench/sweb.eval.x86_64.<slug>` image to execute `solve.sh` + pytest end-to-end. Image size × image count (500) makes per-instance CI execution impractical. Mitigation: operator smoke — submit an oracle batch with N=5 SWE-Bench Verified instances and verify all 5 reach `state=succeeded` with the bundled patch.
+- **Stage B paired run:** tracked in [#543](https://github.com/carinrc/loom/issues/543).
+
+## Benchmarks without a Harbor adapter (upstream-canonical equivalence)
+
+These seven benchmarks have no parity target in
+`harbor-framework/harbor` at the pinned commit. Parity therefore
+collapses to the **upstream canonical** evaluator — the official
+paper/leaderboard/test harness — and Loom's verifier IS that
+canonical scorer by construction. Equivalence is proven by replay,
+not by paired runtime comparison.
+
+### humaneval
+
+- **Closest Harbor variant:** `adapters/humanevalfix` (HumanEval+ bugfix variant). Different task set + prompts, NOT a parity target.
+- **Canonical parity target:** OpenAI HumanEval `check(candidate)`.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/humaneval.py` — emits the upstream `check(candidate)` function verbatim as a pytest-discoverable test next to the bundled `_reference.py`.
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmarks/tests/test_humaneval_adapter.py::test_convert_instance_solution_runs_after_oracle_copy` (bundled reference passes the upstream check, reward 1.0)
+  - `packages/loom-benchmarks/tests/test_humaneval_adapter.py::test_convert_instance_pytest_fails_without_oracle_copy` (stub solution fails, guarding the #388 false-positive class)
+- **Verdict:** credible for user-facing reporting.
+
+### mbpp
+
+- **Closest Harbor variant:** none.
+- **Canonical parity target:** Google sanitized-MBPP test strings under pytest.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/mbpp.py` — writes the upstream sanitized-MBPP test strings verbatim into the bundled `tests/test_mbpp_*.py` files; verifier is `pytest` running those tests.
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmarks/tests/test_mbpp_adapter.py::test_mbpp_solution_runs_against_tests_after_oracle_copy` (bundled reference scores reward 1.0)
+  - `packages/loom-benchmarks/tests/test_mbpp_adapter.py::test_mbpp_solution_fails_pytest_when_stub_not_replaced` (stub fails, guarding the #388 false-positive class)
+- **Verdict:** credible for user-facing reporting.
+
+### math-500
+
+- **Closest Harbor variants:** `adapters/aime`, `adapters/ineqmath`, `adapters/omnimath` — all cover different task sets, none is a MATH-500 parity target.
+- **Canonical parity target:** `HuggingFaceH4/MATH-500` boxed-answer equivalence (inherited from the original Hendrycks MATH evaluator).
+- **Loom adapter:** `MATH500Adapter` in `packages/loom-benchmarks/loom_benchmarks/adapters/hendrycks_math.py` (inherits from `HendrycksMATHAdapter`). Script verifier extracts the boxed final answer from `final_answer.txt` and compares via the boxed-answer math-equivalence routine (`\frac{1}{3}` ≡ `1/3`, etc.) that the MATH paper uses.
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py::test_math500_lists_public_500_problem_test_split` (pinned `@6e4ed1a` upstream revision matches the canonical 500-row test set)
+  - `packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py::test_math500_convert_writes_math500_task_id`
+  - `packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py::test_hendrycks_math_verifier_accepts_equivalent_boxed_output`
+  - `packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py::test_hendrycks_math_extracts_nested_boxed_answer`
 - **Verdict:** credible for user-facing reporting.
 
 ### mmlu-pro
 
-- **Parity kind:** replay-validated. Same shape as gpqa — script
-  verifier extracts the last standalone letter and compares to the
-  dataset row's `answer` field.
-- **Replay validation:**
-  `packages/loom-benchmarks/tests/test_mmlu_pro_adapter.py::test_mmlu_pro_verifier_scores_last_standalone_letter`
-  — pins the extraction rule against multi-letter reasoning bodies
-  (e.g. "Reasoning mentions A. Final answer: D" → D).
-- **Known deltas:** same convention as gpqa.
-- **Verdict:** credible for user-facing reporting.
-
-### livecodebench
-
-- **Parity kind:** by construction. The adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/livecodebench.py`)
-  decodes the compressed IO/functional test cases from the
-  upstream dataset row and emits them verbatim as pytest test
-  files. Loom's pytest verifier IS the canonical LiveCodeBench
-  scorer — same code path.
-- **Replay validation:** three tests in
-  `packages/loom-benchmarks/tests/test_livecodebench_adapter.py` —
-  `test_livecodebench_solution_passes_subprocess_run` (end-to-end
-  pass against decoded cases),
-  `test_livecodebench_decodes_compressed_private_cases` (guards
-  the decode step against upstream-format drift),
-  `test_livecodebench_functional_cases_call_solution_method` (the
-  functional invocation matches the upstream evaluator's shape).
-- **Known deltas:** one-output pass@1 surrogate, same convention
-  as mbpp/humaneval.
-- **Verdict:** credible for user-facing reporting.
-
-### skillflow
-
-- **Parity kind:** by construction. The adapter passes through
-  the upstream SkillFlow task bundle unchanged. The bundled
-  pre-baked solution + tests pass under pytest end-to-end. Loom's
-  pytest verifier IS the canonical scorer.
-- **Replay validation:**
-  `packages/loom-benchmarks/tests/test_skillflow_and_skilllearnbench_adapter.py::test_skill_solution_runs[SkillFlowAdapter-skillflow]`
-  — bundled solution passes pytest after `convert_instance`.
-- **Known deltas:** none for the parity claim; reward semantics
-  are the task bundle's own (mean task reward over bundled
-  sub-checks).
-- **Verdict:** credible for user-facing reporting.
-
-### skilllearnbench
-
-- **Parity kind:** by construction by inheritance — same adapter
-  family as skillflow, same parametrized test
-  (`[SkillLearnBenchAdapter-skilllearnbench]` variant).
-- **Replay validation:** same `test_skill_solution_runs` test,
-  parametrized by adapter class.
-- **Known deltas:** same as skillflow.
-- **Verdict:** credible for user-facing reporting.
-
-## Batch 3 — swe-bench-verified
-
-### swe-bench-verified
-
-- **Parity kind:** by construction. The adapter
-  (`packages/loom-benchmarks/loom_benchmarks/adapters/swe_bench_verified.py`)
-  emits the official SWE-Bench evaluation harness verbatim:
-  - `solve.sh` runs `git apply --3way` of the canonical patch
-    inside the per-instance image's `/testbed` checkout.
-  - `tests/test_swebench.py` shells out to `pytest -x -q` with the
-    union of the upstream `FAIL_TO_PASS` + `PASS_TO_PASS` node ids
-    and asserts rc=0.
-  - The container image is the upstream
-    `swebench/sweb.eval.x86_64.<slug>` per-instance evaluation
-    image. Loom's verifier code path IS the upstream harness, so
-    parity is by construction — same story as mbpp/humaneval where
-    Loom's pytest verifier executes the canonical test code.
-- **Replay validation:** three tests in
-  `packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py` —
-  `test_convert_emits_valid_task` pins the canonical structure
-  (solve.sh + tests + image),
-  `test_empty_test_node_lists_emit_script_verifier_reward_zero`
-  guards the degenerate path (no test ids → reward=0, not a
-  silent pytest-collects-zero "pass"; covers the #388 false-
-  positive class for SWE-Bench),
-  `test_image_slug_replaces_double_underscore` pins the per-
-  instance image-name encoding so the runtime pulls the correct
-  upstream eval image.
-- **Known limitation — live runtime not unit-tested:** No CI test
-  pulls the multi-GB `swebench/sweb.eval.x86_64.<slug>` image to
-  execute solve.sh + pytest end-to-end. Image size × image count
-  (500 in SWE-Bench Verified) makes per-instance CI execution
-  impractical. The construction claim above is the verifier-
-  semantics parity proof; live-runtime parity is observed when
-  operators submit oracle batches against SWE-Bench Verified and
-  the trials reach succeeded with reward 1.0. **Mitigation:**
-  operator smoke — submit an oracle batch with N=5 SWE-Bench
-  Verified instances and verify all 5 reach state=succeeded with
-  the bundled patch. Any verifier-semantics regression would
-  surface as reward!=1.0 on the oracle path.
-- **Known deltas:** none on verifier semantics. The displayed
-  metric (resolved rate = fraction of instances where all node
-  ids pass) matches the upstream SWE-Bench-Verified leaderboard
-  definition.
-- **Verdict:** credible for user-facing reporting, with the
-  live-runtime gap noted in operator-facing docs.
-
-## Batch 4 — math-500, terminal-bench-2 (final)
-
-### math-500
-
-- **Parity kind:** replay-validated. The `MATH500Adapter` (in
-  `packages/loom-benchmarks/loom_benchmarks/adapters/hendrycks_math.py`,
-  inherits from `HendrycksMATHAdapter`) emits a script verifier
-  that extracts the boxed final answer from `final_answer.txt`
-  and compares it to the canonical `answer` field on the
-  `HuggingFaceH4/MATH-500` row via the boxed-answer math-
-  equivalence routine the MATH paper uses (`\frac{1}{3}` ≡
-  `1/3`, etc.).
-- **Replay validation:** four tests in
-  `packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py` —
-  `test_math500_lists_public_500_problem_test_split` (the pinned
-  `@6e4ed1a` upstream revision matches the canonical 500-row
-  test set), `test_math500_convert_writes_math500_task_id`
-  (task ids namespaced under `math-500/...`),
-  `test_hendrycks_math_verifier_accepts_equivalent_boxed_output`
-  (shared verifier code path scores equivalent answers as 1.0),
-  `test_hendrycks_math_extracts_nested_boxed_answer` (extraction
-  handles nested boxed structures and picks the last one).
-- **Known deltas:** none. The math-equivalence routine matches
-  the upstream MATH paper's `is_equiv` algorithm.
+- **Closest Harbor variant:** `adapters/mmmlu` (M-MMLU multilingual variant). Different question pool with multilingual prompts, NOT a parity target.
+- **Canonical parity target:** TIGER-Lab MMLU-Pro exact-letter match against the dataset row's canonical answer.
+- **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/mmlu_pro.py` — script verifier extracts the last standalone letter from `final_answer.txt` and compares to the dataset row's `answer` field.
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmarks/tests/test_mmlu_pro_adapter.py::test_mmlu_pro_verifier_scores_last_standalone_letter` (pins the extraction rule against multi-letter reasoning bodies — e.g. "Reasoning mentions A. Final answer: D" → D)
 - **Verdict:** credible for user-facing reporting.
 
 ### terminal-bench-2
 
-- **Parity kind:** by construction. The TB2 adapter (in
-  `packages/loom-benchmark-terminal-bench-2/`) emits a verifier
-  shim that wraps the upstream TB2 `tests/` directory verbatim —
-  `TEST_DIR` defaults to `/app/environment/tb2-tests` where the
-  upstream test suite is staged in the per-task image. Loom's
-  verifier code path IS the upstream TB2 test runner.
-- **Replay validation:** four tests in
-  `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py` —
-  `test_convert_copies_reference_solution_for_oracle_smoke`
-  (upstream `reference.sh` is staged + wired into oracle's
-  `solve.sh`), `test_convert_renders_solution_yaml_for_oracle_smoke`
-  (the YAML-solution oracle path actually EXECUTES end-to-end in
-  CI — `subprocess.run(['bash', solve.sh], check=True)` plus
-  asserts on the resulting output file; this is stronger
-  live-runtime evidence than any other v1.0 benchmark in this
-  suite), `test_generated_verifier_shim_emits_loom_verifier_result`
-  (shim emits a well-formed VerifierResult JSON), and
-  `test_convert_writes_verifier_shim` (TEST_DIR points at the
-  upstream test location).
-- **Known deltas:** none on verifier semantics. The shim's
-  result-shape mapping is well-defined and tested.
-- **Verdict:** credible for user-facing reporting. Note: the
-  TB2 in-CI oracle execution provides stronger live-runtime
-  evidence than any other v1.0 benchmark here.
+- **Closest Harbor variant:** none — Terminal-Bench 2 is Harbor's host framework, not an adapted external benchmark. Harbor's `adapters/` directory ships nothing for TB-2.
+- **Canonical parity target:** upstream Terminal-Bench 2 (laude-institute) test runner.
+- **Loom adapter:** `packages/loom-benchmark-terminal-bench-2/` — emits a verifier shim that wraps the upstream TB-2 `tests/` directory verbatim (`TEST_DIR` defaults to `/app/environment/tb2-tests`).
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_copies_reference_solution_for_oracle_smoke`
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_renders_solution_yaml_for_oracle_smoke` (the YAML-solution oracle path EXECUTES end-to-end in CI via `subprocess.run(['bash', solve.sh], check=True)` plus an output-file assertion — stronger live-runtime evidence than the other by-construction benchmarks here)
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_generated_verifier_shim_emits_loom_verifier_result`
+  - `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_writes_verifier_shim`
+- **Verdict:** credible for user-facing reporting.
 
-## Coverage summary — all 12 v1.0 benchmarks Layer 2-validated
+### skillflow
 
-| Batch | PR | Benchmarks |
-|---|---|---|
-| 1 | #499 | aime-24, aime-25, humaneval, mbpp |
-| 2 | #513 | gpqa, mmlu-pro, livecodebench, skillflow, skilllearnbench |
-| 3 | #514 | swe-bench-verified |
-| 4 | (this PR) | math-500, terminal-bench-2 |
+- **Closest Harbor variant:** none — SkillFlow is a Loom-supported external benchmark, not in Harbor's catalog.
+- **Canonical parity target:** the upstream SkillFlow task bundle's pre-baked solution + pytest tests.
+- **Loom adapter:** passes the upstream task bundle through unchanged; the bundled solution + tests run under pytest end-to-end.
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmarks/tests/test_skillflow_and_skilllearnbench_adapter.py::test_skill_solution_runs[SkillFlowAdapter-skillflow]`
+- **Verdict:** credible for user-facing reporting.
 
-All 12 v1.0-supported benchmarks now have:
-- `harbor_support.status = "not_supported"` with justification
-- `layer2_evidence` citing the adapter test(s) that prove the
-  verifier-semantics parity claim
-- A `Verdict` section in this document marking the benchmark as
-  credible for user-facing reporting
+### skilllearnbench
 
-The two known gaps recorded in earlier batches remain:
-- **swe-bench-verified live-runtime parity** — no in-CI execution
-  of the multi-GB per-instance Docker image. Mitigation: operator
-  smoke (oracle batch against N=5 instances).
-- **`hendrycks-math`** is cataloged but explicitly non-v1; it's
-  the broader MATH dataset, and `math-500` is the v1-scoped
-  subset (see codex's #480).
+- **Closest Harbor variant:** none — SkillLearnBench is a Loom-supported external benchmark, not in Harbor's catalog.
+- **Canonical parity target:** the upstream SkillLearnBench task bundle (same construction as SkillFlow).
+- **Loom adapter:** same adapter family as SkillFlow; passes the upstream bundle through unchanged.
+- **Parity kind:** `upstream_canonical_by_construction`.
+- **Replay tests:**
+  - `packages/loom-benchmarks/tests/test_skillflow_and_skilllearnbench_adapter.py::test_skill_solution_runs[SkillLearnBenchAdapter-skilllearnbench]`
+- **Verdict:** credible for user-facing reporting.
