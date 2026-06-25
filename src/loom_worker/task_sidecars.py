@@ -247,7 +247,16 @@ class DockerTaskSidecarRuntime:
         healthcheck = _docker_healthcheck(sidecar.healthcheck)
         if healthcheck is not None:
             kwargs["healthcheck"] = healthcheck
-        return self._client.containers.run(image, **kwargs)
+        create_kwargs = dict(kwargs)
+        create_kwargs.pop("remove", None)
+        container = self._client.containers.create(image, **create_kwargs)
+        try:
+            container.start()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                container.remove(force=True)
+            raise
+        return container
 
     async def _wait_for_healthy(
         self,

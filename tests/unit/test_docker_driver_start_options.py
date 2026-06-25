@@ -12,16 +12,25 @@ from loom.driver.base import StartOptions
 from loom.driver.docker import DockerDriver
 
 
-async def test_docker_driver_passes_extra_hosts_to_container_run(
+class _FakeContainer:
+    def __init__(self) -> None:
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+
+async def test_docker_driver_passes_extra_hosts_to_container_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_kwargs: dict[str, Any] = {}
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
 
     class _Containers:
-        def run(self, image: str, **kwargs: Any) -> object:
-            run_kwargs["image"] = image
-            run_kwargs.update(kwargs)
-            return object()
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs["image"] = image
+            create_kwargs.update(kwargs)
+            return container
 
     class _Client:
         containers = _Containers()
@@ -51,22 +60,25 @@ async def test_docker_driver_passes_extra_hosts_to_container_run(
         )
     )
 
-    assert run_kwargs["image"] == "loom-agent-sandbox:dev"
-    assert run_kwargs["extra_hosts"] == {
+    assert create_kwargs["image"] == "loom-agent-sandbox:dev"
+    assert create_kwargs["extra_hosts"] == {
         "host.docker.internal": "host-gateway",
     }
+    assert "remove" not in create_kwargs
+    assert container.started is True
 
 
-async def test_docker_driver_passes_dns_and_tmpfs_to_container_run(
+async def test_docker_driver_passes_dns_and_tmpfs_to_container_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_kwargs: dict[str, Any] = {}
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
 
     class _Containers:
-        def run(self, image: str, **kwargs: Any) -> object:
-            run_kwargs["image"] = image
-            run_kwargs.update(kwargs)
-            return object()
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs["image"] = image
+            create_kwargs.update(kwargs)
+            return container
 
     class _Client:
         containers = _Containers()
@@ -97,22 +109,25 @@ async def test_docker_driver_passes_dns_and_tmpfs_to_container_run(
         )
     )
 
-    assert run_kwargs["image"] == "loom-agent-sandbox:dev"
-    assert run_kwargs["dns"] == ["192.0.2.1", "198.51.100.1"]
-    assert run_kwargs["tmpfs"] == {
+    assert create_kwargs["image"] == "loom-agent-sandbox:dev"
+    assert create_kwargs["dns"] == ["192.0.2.1", "198.51.100.1"]
+    assert create_kwargs["tmpfs"] == {
         "/root": "size=100M,mode=755",
         "/run": "",
     }
+    assert "remove" not in create_kwargs
+    assert container.started is True
 
 
 async def test_docker_driver_passes_api_timeout_to_docker_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from_env_timeouts: list[float | None] = []
+    container = _FakeContainer()
 
     class _Containers:
-        def run(self, image: str, **kwargs: Any) -> object:
-            return object()
+        def create(self, image: str, **kwargs: Any) -> object:
+            return container
 
     class _Client:
         containers = _Containers()
@@ -144,3 +159,4 @@ async def test_docker_driver_passes_api_timeout_to_docker_client(
     await driver.start()
 
     assert from_env_timeouts == [900.0]
+    assert container.started is True

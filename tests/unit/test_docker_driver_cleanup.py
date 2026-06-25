@@ -12,16 +12,30 @@ from typing import Any
 import pytest
 from docker.errors import APIError
 
+import loom.driver.docker as docker_module
 from loom.driver.docker import DockerDriver
 from loom.errors import DriverError
 
 
 class _FakeContainer:
-    def __init__(self, *, stop_raises: bool = False, remove_raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        start_raises: bool = False,
+        stop_raises: bool = False,
+        remove_raises: bool = False,
+    ) -> None:
+        self.start_raises = start_raises
         self.stop_raises = stop_raises
         self.remove_raises = remove_raises
+        self.start_calls = 0
         self.stop_calls = 0
         self.remove_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+        if self.start_raises:
+            raise APIError("simulated start failure")
 
     def stop(self, *, timeout: int = 10) -> None:
         self.stop_calls += 1
@@ -126,3 +140,40 @@ async def test_start_failure_path_cleans_partial_state(monkeypatch):  # type: ig
 
     assert teardown_calls["n"] == 1
     assert d._state == "stopped"  # type: ignore[attr-defined]
+
+
+async def test_start_removes_container_when_docker_start_fails_after_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docker-py's high-level run() creates before it starts. If start fails,
+    the driver must still hold and remove the Created container.
+    """
+
+    container = _FakeContainer(start_raises=True)
+
+    class _Containers:
+        def run(self, image: str, **kwargs: Any) -> _FakeContainer:
+            container.start()
+            return container
+
+        def create(self, image: str, **kwargs: Any) -> _FakeContainer:
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    driver = DockerDriver(image="alpine:3.19", workspace=PurePosixPath("/workspace"))
+
+    with pytest.raises(APIError, match="simulated start failure"):
+        await driver.start()
+
+    assert container.start_calls == 1
+    assert container.remove_calls == 1
+    assert driver._container is None  # type: ignore[attr-defined]
+    assert driver._state == "stopped"  # type: ignore[attr-defined]

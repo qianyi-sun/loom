@@ -136,16 +136,21 @@ class DockerDriver:
                 run_kwargs["dns"] = list(opts.dns)
             if opts.tmpfs:
                 run_kwargs["tmpfs"] = _tmpfs_specs_to_docker_map(opts.tmpfs)
-            # to_thread can't unify the **kwargs overloads of
-            # docker-py's containers.run, so wrap the call in a
-            # closure whose signature is unambiguous to mypy.
+            # docker-py's high-level containers.run() creates before it starts,
+            # but it does not return the Container if start() raises. Split the
+            # steps so the failure cleanup path can remove Created containers.
             client = self._client
             assert client is not None
 
-            def _run_container() -> Any:
-                return client.containers.run(self.image, **run_kwargs)
+            create_kwargs = dict(run_kwargs)
+            create_kwargs.pop("remove", None)
 
-            self._container = await asyncio.to_thread(_run_container)
+            def _create_container() -> Any:
+                return client.containers.create(self.image, **create_kwargs)
+
+            container = await asyncio.to_thread(_create_container)
+            self._container = container
+            await asyncio.to_thread(container.start)
             await self._wait_until_running()
             # Mark running BEFORE applying baseline policy —
             # set_network_policy() calls _require_running() which checks state.

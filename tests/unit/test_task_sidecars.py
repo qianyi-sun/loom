@@ -5,7 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from docker.errors import ImageNotFound
+from docker.errors import APIError, ImageNotFound
 
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.task import (
@@ -79,14 +79,27 @@ class _FakeImages:
 
 
 class _FakeContainer:
-    def __init__(self, name: str, health_statuses: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        health_statuses: list[str] | None = None,
+        *,
+        start_raises: bool = False,
+    ) -> None:
         self.name = name
         self.removed = False
+        self.started = False
+        self.start_raises = start_raises
         self.reload_calls = 0
         self._health_statuses = health_statuses or []
         self.attrs: dict[str, Any] = {"State": {}}
         if self._health_statuses:
             self.attrs["State"]["Health"] = {"Status": self._health_statuses[0]}
+
+    def start(self) -> None:
+        if self.start_raises:
+            raise APIError("simulated sidecar start failure")
+        self.started = True
 
     def reload(self) -> None:
         self.reload_calls += 1
@@ -103,19 +116,29 @@ class _FakeContainer:
 
 class _FakeContainers:
     def __init__(self) -> None:
+        self.fail_next_start = False
         self.run_calls: list[dict[str, Any]] = []
+        self.create_calls: list[dict[str, Any]] = []
         self.created: list[_FakeContainer] = []
 
-    def run(self, image: str, **kwargs: Any) -> _FakeContainer:
+    def create(self, image: str, **kwargs: Any) -> _FakeContainer:
         call = {"image": image, **kwargs}
-        self.run_calls.append(call)
+        self.create_calls.append(call)
         container = _FakeContainer(
             str(kwargs["name"]),
             health_statuses=(
                 ["starting", "healthy"] if "healthcheck" in kwargs else None
             ),
+            start_raises=self.fail_next_start,
         )
+        self.fail_next_start = False
         self.created.append(container)
+        return container
+
+    def run(self, image: str, **kwargs: Any) -> _FakeContainer:
+        self.run_calls.append({"image": image, **kwargs})
+        container = self.create(image, **kwargs)
+        container.start()
         return container
 
 
@@ -184,11 +207,11 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     assert fake_client.images.pull_calls == ["postgres:15"]
     assert fake_client.images.build_calls[0]["path"] == str(api_context)
     assert fake_client.images.build_calls[0]["dockerfile"] == "Dockerfile"
-    assert [c["name"] for c in fake_client.containers.run_calls] == [
+    assert [c["name"] for c in fake_client.containers.create_calls] == [
         f"loom-sidecar-{trial_id}-db",
         f"loom-sidecar-{trial_id}-api",
     ]
-    api_call = fake_client.containers.run_calls[1]
+    api_call = fake_client.containers.create_calls[1]
     assert api_call["network"] == "loom-task-net"
     assert "network_aliases" not in api_call
     assert api_call["networking_config"] == {
@@ -203,11 +226,54 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
         "retries": 5,
         "start_period": 0,
     }
+    assert "remove" not in api_call
+    assert [container.started for container in fake_client.containers.created] == [
+        True,
+        True,
+    ]
     assert fake_client.containers.created[1].reload_calls >= 1
     assert [container.removed for container in fake_client.containers.created] == [
         True,
         True,
     ]
+    assert fake_client.closed is True
+
+
+async def test_sidecar_runtime_removes_container_when_start_fails_after_create(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    task_config = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="tb2/api-task", name="API task"),
+        environment=EnvironmentConfig(
+            os="linux",
+            dockerfile=PurePosixPath(".loom-build/client/Dockerfile"),
+            sidecars=[TaskSidecarConfig(name="db", docker_image="postgres:15")],
+        ),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="script"),
+    )
+    fake_client = _FakeDockerClient()
+    fake_client.containers.fail_next_start = True
+    monkeypatch.setattr(
+        task_sidecars.docker,
+        "from_env",
+        lambda: fake_client,
+    )
+    runtime = DockerTaskSidecarRuntime(
+        task_config=task_config,
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+    )
+
+    with pytest.raises(APIError, match="simulated sidecar start failure"):
+        await runtime.start(network_name="loom-task-net")
+
+    assert len(fake_client.containers.created) == 1
+    assert fake_client.containers.created[0].removed is True
     assert fake_client.closed is True
 
 
