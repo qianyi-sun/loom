@@ -4,7 +4,9 @@ from uuid import UUID, uuid4
 from loom_worker.orphan_cleanup import cleanup_orphan_trajectories
 
 
-def test_deletes_terminal_and_unowned_trials(tmp_path: Path) -> None:
+def test_deletes_terminal_trials_regardless_of_owner(tmp_path: Path) -> None:
+    """Terminal trials (succeeded/failed/cancelled) get cleaned up;
+    owner identity doesn't matter for the terminal branch."""
     trial_a = uuid4()
     trial_b = uuid4()
     trial_c = uuid4()
@@ -19,8 +21,8 @@ def test_deletes_terminal_and_unowned_trials(tmp_path: Path) -> None:
         if tid == trial_a:
             return "succeeded", my_worker
         if tid == trial_b:
-            return "running", other_worker
-        return "failed", my_worker
+            return "failed", other_worker
+        return "cancelled", None
 
     deleted = cleanup_orphan_trajectories(
         cache_dir=tmp_path,
@@ -43,6 +45,95 @@ def test_preserves_running_trials_we_own(tmp_path: Path) -> None:
     )
     assert deleted == []
     assert (tmp_path / f"{trial_a}.jsonl").is_file()
+
+
+def test_preserves_running_trial_after_reclaim_orphaned_us(
+    tmp_path: Path,
+) -> None:
+    """#416 root cause: the worker died mid-trial, the CP reclaim
+    sweep nulled the owner and re-queued the trial, then this worker
+    boots and runs orphan cleanup. The JSONL is the only forensic
+    record of the prior attempt — keep it for the reclaim path /
+    operator triage. Predicate must not branch on `owner != ours`."""
+    trial_a = uuid4()
+    (tmp_path / f"{trial_a}.jsonl").write_text("partial trajectory")
+
+    deleted = cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        # Post-reclaim shape: state=running (reclaim flipped to queued
+        # then a new worker picked it up) with owner=None at the moment
+        # the sweep observes the file. Either way: non-terminal, keep.
+        state_and_owner_lookup=lambda _tid: ("running", None),
+    )
+    assert deleted == []
+    assert (tmp_path / f"{trial_a}.jsonl").is_file()
+
+
+def test_preserves_running_trial_owned_by_other_worker(
+    tmp_path: Path,
+) -> None:
+    """Same predicate applies when CP reports a different owner — the
+    file might be a leftover from a previous incarnation of this
+    worker, but the active trial belongs to someone else. Keeping the
+    file is harmless and matches the conservative #416 contract."""
+    trial_a = uuid4()
+    other = uuid4()
+    (tmp_path / f"{trial_a}.jsonl").write_text("x")
+
+    deleted = cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        state_and_owner_lookup=lambda _tid: ("running", other),
+    )
+    assert deleted == []
+    assert (tmp_path / f"{trial_a}.jsonl").is_file()
+
+
+def test_preserves_claimed_and_queued_trials(tmp_path: Path) -> None:
+    """Non-terminal covers `claimed` and `queued` too, not just
+    `running`. The reclaim sweep can leave a trial in `queued` and
+    the existing local JSONL is from the previous worker incarnation."""
+    a, b = uuid4(), uuid4()
+    (tmp_path / f"{a}.jsonl").write_text("a")
+    (tmp_path / f"{b}.jsonl").write_text("b")
+    states = {a: "claimed", b: "queued"}
+
+    deleted = cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        state_and_owner_lookup=lambda tid: (states[tid], None),
+    )
+    assert deleted == []
+    assert (tmp_path / f"{a}.jsonl").is_file()
+    assert (tmp_path / f"{b}.jsonl").is_file()
+
+
+def test_deletes_non_terminal_when_older_than_fallback_window(
+    tmp_path: Path,
+) -> None:
+    """Safety valve: if a JSONL has been tagged non-terminal for
+    longer than `non_terminal_fallback_sec` (default 24h), the reclaim
+    sweep is broken or the trial is wedged at the CP — delete the
+    file to bound disk growth and log loudly. Drives the
+    `orphan_trajectory_deleted_stale` log path."""
+    trial_a = uuid4()
+    f = tmp_path / f"{trial_a}.jsonl"
+    f.write_text("ancient")
+    # Backdate the file by 48h.
+    import os
+    mtime = 1_000_000.0
+    os.utime(f, (mtime, mtime))
+
+    deleted = cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        state_and_owner_lookup=lambda _tid: ("running", None),
+        now_sec=mtime + 48 * 60 * 60,
+        non_terminal_fallback_sec=24 * 60 * 60,
+    )
+    assert deleted == [trial_a]
+    assert not f.exists()
 
 
 def test_deletes_unknown_trials(tmp_path: Path) -> None:

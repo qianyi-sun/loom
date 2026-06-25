@@ -404,8 +404,8 @@ def _run_orphan_cleanup(settings: WorkerSettings, worker_id: UUID) -> None:
             r.raise_for_status()
             body = r.json()
             # The Control Plane's GET /trials/{id} returns `state` but
-            # currently doesn't expose `worker_id`. Treat ownership as
-            # unknown → cleanup deletes any non-terminal record we hold.
+            # currently doesn't expose `worker_id`. Owner is returned
+            # as None — only `state` drives the predicate now (#416).
             return body["state"], None
 
     cleanup_orphan_trajectories(
