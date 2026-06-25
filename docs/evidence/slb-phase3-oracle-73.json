@@ -1,0 +1,302 @@
+{
+  "batch_id": "20a18b8a-8164-4fef-97b3-e319e504b856",
+  "batch_name": "slb-phase3-oracle-73",
+  "expected_trial_count": 73,
+  "aggregate_reward": 0.7808219178082192,
+  "pass_count": 57,
+  "fail_count": 16,
+  "per_task": [
+    {
+      "task_id": "skilllearnbench/court-form-filling/court-form-filling-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/court-form-filling/court-form-filling-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/court-form-filling/court-form-filling-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/court-form-filling/court-form-filling-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/court-form-filling/court-form-filling-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/court-form-filling/court-form-filling-6",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dbscan-parameter-tuning/dbscan-parameter-tuning-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dbscan-parameter-tuning/dbscan-parameter-tuning-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dbscan-parameter-tuning/dbscan-parameter-tuning-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dbscan-parameter-tuning/dbscan-parameter-tuning-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dbscan-parameter-tuning/dbscan-parameter-tuning-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dependency-vulnerability-check/dependency-vulnerability-check-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dependency-vulnerability-check/dependency-vulnerability-check-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dependency-vulnerability-check/dependency-vulnerability-check-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dependency-vulnerability-check/dependency-vulnerability-check-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/dependency-vulnerability-check/dependency-vulnerability-check-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/earthquake-plate-calculation/earthquake-plate-calculation-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/earthquake-plate-calculation/earthquake-plate-calculation-2",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/earthquake-plate-calculation/earthquake-plate-calculation-3",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/earthquake-plate-calculation/earthquake-plate-calculation-4",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/earthquake-plate-calculation/earthquake-plate-calculation-5",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/earthquake-plate-calculation/earthquake-plate-calculation-6",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/financial-analysis/financial-analysis-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/financial-analysis/financial-analysis-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/financial-analysis/financial-analysis-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/financial-analysis/financial-analysis-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/financial-analysis/financial-analysis-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/financial-analysis/financial-analysis-6",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/fix-security-bug/fix-security-bug-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/fix-security-bug/fix-security-bug-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/fix-security-bug/fix-security-bug-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/github-repo-analytics/github-repo-analytics-1",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/github-repo-analytics/github-repo-analytics-2",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/github-repo-analytics/github-repo-analytics-3",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/github-repo-analytics/github-repo-analytics-4",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/github-repo-analytics/github-repo-analytics-5",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/nlp-paper-reproduction/nlp-paper-reproduction-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/nlp-paper-reproduction/nlp-paper-reproduction-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/nlp-paper-reproduction/nlp-paper-reproduction-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/offer-letter-generator/offer-letter-generator-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/offer-letter-generator/offer-letter-generator-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/offer-letter-generator/offer-letter-generator-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/offer-letter-generator/offer-letter-generator-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/offer-letter-generator/offer-letter-generator-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/offer-letter-generator/offer-letter-generator-6",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/organize-messy-files/organize-messy-files-1",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/organize-messy-files/organize-messy-files-2",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/organize-messy-files/organize-messy-files-3",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/organize-messy-files/organize-messy-files-4",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/organize-messy-files/organize-messy-files-5",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/organize-messy-files/organize-messy-files-6",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/python-scala-translation/python-scala-translation-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/python-scala-translation/python-scala-translation-2",
+      "reward": 0.0
+    },
+    {
+      "task_id": "skilllearnbench/stock-data-visualization/stock-data-visualization-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/stock-data-visualization/stock-data-visualization-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/stock-data-visualization/stock-data-visualization-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/stock-data-visualization/stock-data-visualization-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/stock-data-visualization/stock-data-visualization-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/travel-planning/travel-planning-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/travel-planning/travel-planning-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/travel-planning/travel-planning-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/travel-planning/travel-planning-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/travel-planning/travel-planning-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/video-object-counting/video-object-counting-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/video-object-counting/video-object-counting-2",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/video-object-counting/video-object-counting-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/video-object-counting/video-object-counting-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/video-object-counting/video-object-counting-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/weighted-gdp-calculation/weighted-gdp-calculation-1",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/weighted-gdp-calculation/weighted-gdp-calculation-3",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/weighted-gdp-calculation/weighted-gdp-calculation-4",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/weighted-gdp-calculation/weighted-gdp-calculation-5",
+      "reward": 1.0
+    },
+    {
+      "task_id": "skilllearnbench/weighted-gdp-calculation/weighted-gdp-calculation-6",
+      "reward": 1.0
+    }
+  ]
+}

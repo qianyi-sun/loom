@@ -117,7 +117,7 @@
           {
             "case_id": "aime-25-shares-extractor-with-aime-24",
             "test_id": "packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_extracts_last_integer",
-            "asserts": "the shared integer-extraction routine handles the canonical AIME answer shape — used by both aime-24 and aime-25 since they share verifier infrastructure"
+            "asserts": "the shared integer-extraction routine handles the canonical AIME answer shape \u2014 used by both aime-24 and aime-25 since they share verifier infrastructure"
           }
         ],
         "pending_reason": "Original Layer 2 evidence (PRs #499 #513 #514 #517) claimed parity-by-construction against coder-harbor-cloud (Huawei platform, wrong Harbor). Real Harbor (harbor-framework/harbor at 2ead3f1f) ships an adapter for this benchmark; matched-config paired runs required to validate score parity. Stage B child issue link added in Task A7.",
@@ -136,7 +136,7 @@
       "harbor_support": {
         "status": "supported",
         "harbor_adapter_dir": "https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/gpqa-diamond",
-        "parity_target": "harbor-framework/harbor's `adapters/gpqa-diamond` adapter at pinned commit 2ead3f1f covers GPQA Diamond (198 tasks). Published parity_experiment.json baseline: codex + gpt-5.2, 3 trials, 198 Diamond tasks — Harbor 87.21% +/- 0.34 vs XuandongZhao/gpqa-harbor-adapter original 87.88% +/- 0.58. STAGE B COMPLICATION: Harbor's adapter covers Diamond only, but Loom's current `gpqa` adapter targets the Extended subset; Stage B must either point at Diamond or document the subset mismatch as a structural reason parity cannot be claimed.",
+        "parity_target": "harbor-framework/harbor's `adapters/gpqa-diamond` adapter at pinned commit 2ead3f1f covers GPQA Diamond (198 tasks). Published parity_experiment.json baseline: codex + gpt-5.2, 3 trials, 198 Diamond tasks \u2014 Harbor 87.21% +/- 0.34 vs XuandongZhao/gpqa-harbor-adapter original 87.88% +/- 0.58. STAGE B COMPLICATION: Harbor's adapter covers Diamond only, but Loom's current `gpqa` adapter targets the Extended subset; Stage B must either point at Diamond or document the subset mismatch as a structural reason parity cannot be claimed.",
         "decision": "Real Harbor (harbor-framework/harbor) supports GPQA via `adapters/gpqa-diamond`, which targets the Diamond subset (198 tasks). Loom's `GPQAAdapter` currently emits the Extended subset, so matched-config paired runs require either reconfiguring Loom to Diamond or treating the subset mismatch as a structural blocker for parity. Stage B paired-run task tracked in a child issue (link added in Task A7) and must record the subset choice."
       },
       "score_semantics": {
@@ -224,7 +224,7 @@
           {
             "case_id": "math-500-verifier-equivalent-answer-scores-1",
             "test_id": "packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py::test_hendrycks_math_verifier_accepts_equivalent_boxed_output",
-            "asserts": "the shared math verifier (used by both hendrycks-math and math-500) scores reward 1.0 when the agent's boxed answer is mathematically equivalent to the canonical answer (e.g. `\\frac{1}{3}` vs `1/3`) — the same equivalence routine the upstream MATH evaluator uses"
+            "asserts": "the shared math verifier (used by both hendrycks-math and math-500) scores reward 1.0 when the agent's boxed answer is mathematically equivalent to the canonical answer (e.g. `\\frac{1}{3}` vs `1/3`) \u2014 the same equivalence routine the upstream MATH evaluator uses"
           },
           {
             "case_id": "math-500-extracts-nested-boxed",
@@ -297,7 +297,7 @@
       "harbor_support": {
         "status": "supported",
         "harbor_adapter_dir": "https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/livecodebench",
-        "parity_target": "harbor-framework/harbor's `adapters/livecodebench` adapter at pinned commit 2ead3f1f. Published parity_experiment.json baselines: (1) terminus-2 + gpt-5-mini, 4 trials, 100 release_v6 tasks — Harbor n/a (not run), TB adapter 76.50% +/- 0.50 vs audreycs/terminal-bench original 77.25% +/- 0.48; (2) claude-code@2.0.32 + claude-haiku-4-5, 4 trials, 100 release_v6 tasks — Harbor 53.25% +/- 0.95 vs TB adapter 54.50% +/- 1.50.",
+        "parity_target": "harbor-framework/harbor's `adapters/livecodebench` adapter at pinned commit 2ead3f1f. Published parity_experiment.json baselines: (1) terminus-2 + gpt-5-mini, 4 trials, 100 release_v6 tasks \u2014 Harbor n/a (not run), TB adapter 76.50% +/- 0.50 vs audreycs/terminal-bench original 77.25% +/- 0.48; (2) claude-code@2.0.32 + claude-haiku-4-5, 4 trials, 100 release_v6 tasks \u2014 Harbor 53.25% +/- 0.95 vs TB adapter 54.50% +/- 1.50.",
         "decision": "Real Harbor (harbor-framework/harbor) supports LiveCodeBench via `adapters/livecodebench`. Loom's `LiveCodeBenchAdapter` decodes the upstream IO/functional test cases and runs them under pytest (by-construction parity with the upstream evaluator); Harbor's adapter does the same against the same upstream dataset but via an independent code path. Matched-config paired runs against Harbor's published claude-haiku-4-5 baseline are required to validate score parity. Stage B paired-run task tracked in a child issue (link added in Task A7)."
       },
       "score_semantics": {
@@ -332,7 +332,7 @@
           {
             "case_id": "livecodebench-private-cases-decoded",
             "test_id": "packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_decodes_compressed_private_cases",
-            "asserts": "the adapter correctly decodes the upstream's compressed private test cases before emitting them — guards against the parity claim regressing if the upstream format changes"
+            "asserts": "the adapter correctly decodes the upstream's compressed private test cases before emitting them \u2014 guards against the parity claim regressing if the upstream format changes"
           },
           {
             "case_id": "livecodebench-functional-format",
@@ -390,7 +390,7 @@
           {
             "case_id": "mbpp-stub-solution-fails",
             "test_id": "packages/loom-benchmarks/tests/test_mbpp_adapter.py::test_mbpp_solution_fails_pytest_when_stub_not_replaced",
-            "asserts": "reward!=1.0 (pytest returncode nonzero) when the stub `solution.py` is left in place — guards against the #388 false-positive class"
+            "asserts": "reward!=1.0 (pytest returncode nonzero) when the stub `solution.py` is left in place \u2014 guards against the #388 false-positive class"
           }
         ]
       }
@@ -452,7 +452,7 @@
       },
       "harbor_support": {
         "status": "not_supported",
-        "parity_target": "The canonical upstream SkillFlow task-bundle scorer (pre-baked solution + pytest tests bundled with each task) is the parity target. Real Harbor (harbor-framework/harbor at 2ead3f1f, see docs/research/harbor-adapter-snapshot-2026-06-25.md) ships no SkillFlow adapter — SkillFlow is a Loom-supported external benchmark not in Harbor's catalog.",
+        "parity_target": "The canonical upstream SkillFlow task-bundle scorer (pre-baked solution + pytest tests bundled with each task) is the parity target. Real Harbor (harbor-framework/harbor at 2ead3f1f, see docs/research/harbor-adapter-snapshot-2026-06-25.md) ships no SkillFlow adapter \u2014 SkillFlow is a Loom-supported external benchmark not in Harbor's catalog.",
         "decision": "Real Harbor (harbor-framework/harbor at 2ead3f1f) ships no SkillFlow adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md); SkillFlow is not in Harbor's catalog. Loom's SkillFlow adapter passes through the upstream task bundle's pre-baked solution + tests, so pytest IS the canonical SkillFlow scorer by construction. Equivalence is proven by replay, not paired-runtime comparison."
       },
       "score_semantics": {
@@ -498,7 +498,7 @@
       },
       "harbor_support": {
         "status": "not_supported",
-        "parity_target": "The canonical upstream SkillLearnBench task-bundle scorer is the parity target. Real Harbor (harbor-framework/harbor at 2ead3f1f, see docs/research/harbor-adapter-snapshot-2026-06-25.md) ships no SkillLearnBench adapter — SkillLearnBench is a Loom-supported external benchmark not in Harbor's catalog.",
+        "parity_target": "The canonical upstream SkillLearnBench task-bundle scorer is the parity target. Real Harbor (harbor-framework/harbor at 2ead3f1f, see docs/research/harbor-adapter-snapshot-2026-06-25.md) ships no SkillLearnBench adapter \u2014 SkillLearnBench is a Loom-supported external benchmark not in Harbor's catalog.",
         "decision": "Real Harbor (harbor-framework/harbor at 2ead3f1f) ships no SkillLearnBench adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md); SkillLearnBench is not in Harbor's catalog. Loom's SkillLearnBench adapter passes through the upstream task bundle's structure unchanged, so pytest IS the canonical SkillLearnBench evaluator by construction. Equivalence is proven by replay, not paired-runtime comparison."
       },
       "score_semantics": {
@@ -531,6 +531,31 @@
             "asserts": "the upstream-bundled solution passes pytest end-to-end after `SkillLearnBenchAdapter.convert_instance` materializes the task"
           }
         ]
+      },
+      "layer3_evidence": {
+        "status": "cluster_validated",
+        "runs": [
+          {
+            "case_id": "slb-oracle-human-authored-73",
+            "agent": "oracle",
+            "method": "human_authored",
+            "model": null,
+            "upstream_revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46",
+            "batch_id": "20a18b8a-8164-4fef-97b3-e319e504b856",
+            "batch_name": "slb-phase3-oracle-73",
+            "trial_count": 73,
+            "platform_failures": 0,
+            "pass_count": 57,
+            "fail_count": 16,
+            "aggregate_reward": 0.7808219178082192,
+            "reference": "by construction \u2014 oracle on solve.sh-equipped tasks is expected to score reward=1.0",
+            "per_task_table": "docs/evidence/slb-phase3-oracle-73.json",
+            "verdict": "Loom verifier shim matches upstream tests/test.sh semantics for the 57 passing tasks. The 16 outliers (4 families) all hit a single OracleAgent invocation issue tracked at #548 \u2014 not a Loom \u00d7 SLB integration regression.",
+            "follow_ups": [
+              "#548"
+            ]
+          }
+        ]
       }
     },
     {
@@ -545,7 +570,7 @@
       "harbor_support": {
         "status": "supported",
         "harbor_adapter_dir": "https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/swebench",
-        "parity_target": "harbor-framework/harbor's `adapters/swebench` adapter at pinned commit 2ead3f1f covers SWE-Bench Verified. Published parity_experiment.json baselines: (1) terminus-2 + Claude-Sonnet-4-5, 1 run, 500 tasks — Harbor 68.6% vs TB adapter 70.0%; (2) mini-swe-agent@2.1.0 + gpt-5-mini, 3 runs, 499 comparable tasks — Harbor (daytona) 54.5% +/- 0.7 vs swebench leaderboard 56.3%.",
+        "parity_target": "harbor-framework/harbor's `adapters/swebench` adapter at pinned commit 2ead3f1f covers SWE-Bench Verified. Published parity_experiment.json baselines: (1) terminus-2 + Claude-Sonnet-4-5, 1 run, 500 tasks \u2014 Harbor 68.6% vs TB adapter 70.0%; (2) mini-swe-agent@2.1.0 + gpt-5-mini, 3 runs, 499 comparable tasks \u2014 Harbor (daytona) 54.5% +/- 0.7 vs swebench leaderboard 56.3%.",
         "decision": "Real Harbor (harbor-framework/harbor) supports SWE-Bench Verified via `adapters/swebench`. Loom's `SWEBenchVerifiedAdapter` emits the official SWE-Bench evaluation harness verbatim inside the per-instance `swebench/sweb.eval.x86_64.<slug>` Docker image; Harbor's adapter targets the same harness via an independent code path. Matched-config paired runs against Harbor's published Claude-Sonnet-4-5 or gpt-5-mini baselines are required to validate score parity. Stage B paired-run task tracked in a child issue (link added in Task A7)."
       },
       "score_semantics": {
@@ -575,23 +600,23 @@
           {
             "case_id": "swe-bench-verified-emits-canonical-harness",
             "test_id": "packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_convert_emits_valid_task",
-            "asserts": "the emitted bundle ships `solve.sh` with `git apply` of the canonical patch, `tests/test_swebench.py` with the exact upstream node ids, and the per-instance `swebench/sweb.eval.x86_64` Docker image — together this IS the upstream SWE-Bench evaluation harness"
+            "asserts": "the emitted bundle ships `solve.sh` with `git apply` of the canonical patch, `tests/test_swebench.py` with the exact upstream node ids, and the per-instance `swebench/sweb.eval.x86_64` Docker image \u2014 together this IS the upstream SWE-Bench evaluation harness"
           },
           {
             "case_id": "swe-bench-verified-empty-test-ids-graceful",
             "test_id": "packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_empty_test_node_lists_emit_script_verifier_reward_zero",
-            "asserts": "the degenerate `FAIL_TO_PASS=[] PASS_TO_PASS=[]` case (which would silently 'pass' under pytest with no tests collected) is detected at convert time and emits a script verifier reporting reward=0 with reason `no_upstream_test_node_ids`. Guards against the #388 false-positive class — no test ids must NOT score 1.0"
+            "asserts": "the degenerate `FAIL_TO_PASS=[] PASS_TO_PASS=[]` case (which would silently 'pass' under pytest with no tests collected) is detected at convert time and emits a script verifier reporting reward=0 with reason `no_upstream_test_node_ids`. Guards against the #388 false-positive class \u2014 no test ids must NOT score 1.0"
           },
           {
             "case_id": "swe-bench-verified-per-instance-image",
             "test_id": "packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_image_slug_replaces_double_underscore",
-            "asserts": "the per-instance image name follows the upstream slug-encoding convention (`repo__name-N` → `swebench/sweb.eval.x86_64.repo_1776_name-N`), so the runtime pulls the correct upstream eval image instead of a Loom-built proxy"
+            "asserts": "the per-instance image name follows the upstream slug-encoding convention (`repo__name-N` \u2192 `swebench/sweb.eval.x86_64.repo_1776_name-N`), so the runtime pulls the correct upstream eval image instead of a Loom-built proxy"
           }
         ],
         "known_limitations": [
           {
             "limitation": "live_runtime_not_unit_tested",
-            "description": "No CI test pulls the multi-GB per-instance `swebench/sweb.eval.x86_64.<slug>` image to execute solve.sh + pytest end-to-end. Image size (GBs) × image count (500 in SWE-Bench Verified) makes per-instance CI execution impractical. The construction claim above is the verifier-semantics parity proof; live runtime parity is observed when operators submit oracle batches against SWE-Bench Verified and the trials reach succeeded with reward 1.0.",
+            "description": "No CI test pulls the multi-GB per-instance `swebench/sweb.eval.x86_64.<slug>` image to execute solve.sh + pytest end-to-end. Image size (GBs) \u00d7 image count (500 in SWE-Bench Verified) makes per-instance CI execution impractical. The construction claim above is the verifier-semantics parity proof; live runtime parity is observed when operators submit oracle batches against SWE-Bench Verified and the trials reach succeeded with reward 1.0.",
             "mitigation": "Operator smoke: submit an oracle batch with N=5 SWE-Bench Verified instances and verify all 5 reach state=succeeded with the bundled patch. Any verifier-semantics regression would surface as reward!=1.0 on the oracle path."
           }
         ],
@@ -610,7 +635,7 @@
       },
       "harbor_support": {
         "status": "not_supported",
-        "parity_target": "The canonical upstream Terminal-Bench 2 (laude-institute) test runner is the parity target. Real Harbor (harbor-framework/harbor) IS descended from terminal-bench, but at commit 2ead3f1f the `adapters/` directory ships no terminal-bench-2 adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md) — TB-2 is Harbor's host benchmark framework itself, not an adapted external benchmark.",
+        "parity_target": "The canonical upstream Terminal-Bench 2 (laude-institute) test runner is the parity target. Real Harbor (harbor-framework/harbor) IS descended from terminal-bench, but at commit 2ead3f1f the `adapters/` directory ships no terminal-bench-2 adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md) \u2014 TB-2 is Harbor's host benchmark framework itself, not an adapted external benchmark.",
         "decision": "Real Harbor (harbor-framework/harbor at 2ead3f1f) ships no terminal-bench-2 adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md) because TB-2 is the host framework Harbor is built on, not an external benchmark Harbor adapts. Loom's TB-2 adapter wraps the upstream TB-2 test runner verbatim, so Loom's verifier IS the canonical TB-2 scorer by construction. Equivalence is proven by replay, not paired-runtime comparison."
       },
       "score_semantics": {
@@ -645,7 +670,7 @@
           {
             "case_id": "tb2-oracle-yaml-solution-executes",
             "test_id": "packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py::test_convert_renders_solution_yaml_for_oracle_smoke",
-            "asserts": "the YAML-solution oracle path EXECUTES end-to-end (`subprocess.run(['bash', solve.sh], check=True)` + asserts the output file matches expected content). Stronger live-runtime evidence than the by-construction benchmarks above — the actual oracle script runs in CI"
+            "asserts": "the YAML-solution oracle path EXECUTES end-to-end (`subprocess.run(['bash', solve.sh], check=True)` + asserts the output file matches expected content). Stronger live-runtime evidence than the by-construction benchmarks above \u2014 the actual oracle script runs in CI"
           },
           {
             "case_id": "tb2-verifier-shim-emits-loom-result",
