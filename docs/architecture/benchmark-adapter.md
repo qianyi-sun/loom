@@ -131,7 +131,9 @@ timeout_sec = 300
 
 [verifier.args]      # per-verifier-kind kwargs
 # script_path = "/workspace/verifier/run.sh"   # required for ScriptVerifier
-# test_dir = "tests/"                      # PytestVerifier (default)
+# tests_dir = "/workspace/tests"              # PytestVerifier default
+# install_timeout_sec = 120                   # Pytest dependency setup
+# pytest_timeout_sec = 240                    # scored timeout for hanging code
 
 [[steps]]
 name = "main"

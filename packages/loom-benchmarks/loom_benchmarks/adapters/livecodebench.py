@@ -272,6 +272,11 @@ class LiveCodeBenchAdapter(CatalogBackedAdapter):
 
             [verifier]
             name = "pytest"
+            timeout_sec = 420
+
+            [verifier.args]
+            install_timeout_sec = 120
+            pytest_timeout_sec = 240
 
             [[steps]]
             name = "main"

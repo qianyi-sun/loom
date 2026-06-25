@@ -29,6 +29,7 @@ def test_livecodebench_emits_io_pytest(tmp_path: Path) -> None:
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.verifier.name == "pytest"
+    assert cfg.verifier.args["pytest_timeout_sec"] < cfg.verifier.timeout_sec
     assert cfg.task.id == "livecodebench/lcb-9001"
     tests = list((tmp_path / "tests").glob("test_lcb_*.py"))
     assert len(tests) == 3  # 2 public + 1 private

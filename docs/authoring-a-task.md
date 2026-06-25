@@ -70,6 +70,24 @@ artifacts = ["result.txt"]
 | `llm-judge` | Submits trajectory excerpt + rubric to the gateway | rubric in config |
 | `composite` | Aggregates sub-verifiers (MEAN/MIN/MAX/WEIGHTED) | nested verifier list |
 
+For `pytest`, Loom first ensures `pytest` is importable, then runs the
+configured test directory with `--junitxml=/loom/verifier/junit.xml`.
+Dependency setup failures are verifier infrastructure failures. A bounded
+pytest command timeout is reported as a scored `passed=0.0` outcome with
+structured timeout diagnostics, which is appropriate for code benchmarks where
+generated solutions may hang.
+
+```toml
+[verifier]
+name = "pytest"
+timeout_sec = 420
+
+[verifier.args]
+tests_dir = "/workspace/tests"
+install_timeout_sec = 120
+pytest_timeout_sec = 240
+```
+
 For `script`, set the script path explicitly and write a full
 `VerifierResult` JSON object to `LOOM_VERIFIER_OUTPUT`:
 

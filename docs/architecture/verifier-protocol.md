@@ -110,6 +110,29 @@ Notes:
 args. The aggregator (`Aggregator.MIN`, `Aggregator.MEAN`,
 `Aggregator.WEIGHTED`) reduces `rewards` dicts across children.
 
+### Pytest diagnostics and timeouts
+
+`PytestVerifier` has two execution phases:
+
+1. dependency setup (`build_pytest_install_command()`), bounded by
+   `install_timeout_sec` when configured; and
+2. the pytest command, bounded by `pytest_timeout_sec` when configured.
+
+Dependency setup failures or timeouts are unscored verifier infrastructure
+failures: the verifier returns empty `rewards` plus `VerifierError`. A pytest
+command timeout is treated as a scored model outcome for coding benchmarks:
+the verifier returns `{"passed": 0.0, "pytest_pass_rate": 0.0}` and also
+attaches `VerifierError(kind="timeout")`. This preserves numeric reward
+coverage when generated code hangs while still making the timeout visible to
+debug tooling.
+
+When pytest finishes but no JUnit XML is available, or when the XML cannot be
+parsed, `VerifierError.detail` includes a capped diagnostic payload: phase,
+command, return code, stdout/stderr tails, byte counts, driver truncation
+status, duration, and expected JUnit path. Treat this as bounded, team-scoped
+debug evidence; API/CLI/UI surfaces should still pass it through the normal
+diagnostic RBAC and redaction paths.
+
 ## Script verifier bundle contract
 
 `ScriptVerifier` is the preferred adapter boundary for benchmark-specific

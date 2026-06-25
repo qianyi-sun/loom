@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree
 
 from loom.driver.base import Driver
+from loom.models.exec import ExecResult
 from loom.models.verifier import CheckResult, VerifierError, VerifierResult
 
 if TYPE_CHECKING:
@@ -52,6 +53,9 @@ class PytestVerifier:
         default_factory=lambda: ("--maxfail=0", "-q"),
     )
     user: str | int | None = None
+    install_timeout_sec: float | None = 120.0
+    pytest_timeout_sec: float | None = None
+    diagnostic_bytes: int = 4096
 
     def __post_init__(self) -> None:
         # #186: task.toml ships verifier args as JSON-friendly types
@@ -76,23 +80,97 @@ class PytestVerifier:
         # fast-path (~1s) when already installed. Task authors who care
         # about cold-start latency can bake pytest into the image.
         #
-        # The `{...} && cd && pytest || true` chain matters:
-        # - `&&` between ensure-pytest and cd means a pip-install
-        #   failure short-circuits BEFORE cd+pytest, surfacing as a
-        #   clear shell error in stderr rather than silently leaving
-        #   junit.xml unwritten and getting misattributed as
-        #   "missing_tests" by the post-exec download (#187 fixup).
-        # - `|| true` only wraps pytest itself, since non-zero is
-        #   expected on failing tests; we read the XML for the truth.
+        # Keep dependency setup and pytest execution as separate exec phases.
+        # If setup fails or times out, that is verifier infrastructure failure.
+        # If pytest itself times out, coding-benchmark tasks treat it as a
+        # scored model outcome (`passed=0`) with structured diagnostics: bad
+        # or hanging generated code should not erase reward coverage.
+        install_cmd = build_pytest_install_command()
+        try:
+            install_result = await env.exec(
+                install_cmd,
+                user=self.user,
+                timeout_sec=self.install_timeout_sec,
+            )
+        except TimeoutError:
+            detail = _timeout_detail(
+                phase="install",
+                timeout_sec=self.install_timeout_sec,
+            )
+            return VerifierResult(
+                rewards={},
+                structured={"install_timeout": detail},
+                error=VerifierError(
+                    kind="timeout",
+                    message=(
+                        "pytest dependency setup exceeded "
+                        f"{self.install_timeout_sec:g}s"
+                        if self.install_timeout_sec is not None
+                        else "pytest dependency setup timed out"
+                    ),
+                    detail=detail,
+                ),
+            )
+        if install_result.return_code != 0:
+            detail = _exec_detail(
+                phase="install",
+                command=install_cmd,
+                result=install_result,
+                diagnostic_bytes=self.diagnostic_bytes,
+            )
+            return VerifierResult(
+                rewards={},
+                structured={"install_exec": detail},
+                error=VerifierError(
+                    kind="exec_failure",
+                    message=(
+                        "pytest dependency setup failed with return code "
+                        f"{install_result.return_code}"
+                    ),
+                    detail=detail,
+                ),
+            )
+
         cmd = (
-            f"{{ {build_pytest_install_command()}; }} && "
             f"cd {self.tests_dir.as_posix()} && "
-            "{ "
             f"pytest --junitxml={_JUNIT_PATH.as_posix()} "
             + " ".join(self.pytest_args)
-            + " || true; }"
         )
-        await env.exec(cmd, user=self.user)
+        try:
+            pytest_result = await env.exec(
+                cmd,
+                user=self.user,
+                timeout_sec=self.pytest_timeout_sec,
+            )
+        except TimeoutError:
+            detail = _timeout_detail(
+                phase="pytest",
+                timeout_sec=self.pytest_timeout_sec,
+            )
+            return VerifierResult(
+                rewards={"passed": 0.0, "pytest_pass_rate": 0.0},
+                structured={
+                    "total": 0,
+                    "passed": 0,
+                    "failed": 0,
+                    "pytest_timeout": detail,
+                },
+                error=VerifierError(
+                    kind="timeout",
+                    message=(
+                        f"pytest exceeded {self.pytest_timeout_sec:g}s"
+                        if self.pytest_timeout_sec is not None
+                        else "pytest timed out"
+                    ),
+                    detail=detail,
+                ),
+            )
+        pytest_detail = _exec_detail(
+            phase="pytest",
+            command=cmd,
+            result=pytest_result,
+            diagnostic_bytes=self.diagnostic_bytes,
+        )
 
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "junit.xml"
@@ -101,19 +179,27 @@ class PytestVerifier:
             except FileNotFoundError:
                 return VerifierResult(
                     rewards={},
+                    structured={"pytest_exec": pytest_detail},
                     error=VerifierError(
                         kind="missing_tests",
                         message=f"pytest did not produce {_JUNIT_PATH}",
+                        detail=pytest_detail,
                     ),
                 )
             try:
                 parsed = parse_junit_xml(local.read_text(encoding="utf-8"))
             except ElementTree.ParseError as exc:
+                detail = {
+                    **pytest_detail,
+                    "parse_error": str(exc),
+                }
                 return VerifierResult(
                     rewards={},
+                    structured={"pytest_exec": pytest_detail},
                     error=VerifierError(
                         kind="parse_failure",
                         message=f"junit XML parse failed: {exc}",
+                        detail=detail,
                     ),
                 )
 
@@ -166,3 +252,42 @@ def parse_junit_xml(xml_text: str) -> dict[str, Any]:
         "pass_rate": pass_rate,
         "checks": checks,
     }
+
+
+def _timeout_detail(
+    *,
+    phase: str,
+    timeout_sec: float | None,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "timeout_sec": timeout_sec,
+        "junit_xml_path": _JUNIT_PATH.as_posix(),
+    }
+
+
+def _exec_detail(
+    *,
+    phase: str,
+    command: str,
+    result: ExecResult,
+    diagnostic_bytes: int,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "command": command,
+        "return_code": result.return_code,
+        "stdout_tail": _decode_tail(result.stdout, diagnostic_bytes),
+        "stderr_tail": _decode_tail(result.stderr, diagnostic_bytes),
+        "stdout_bytes": len(result.stdout),
+        "stderr_bytes": len(result.stderr),
+        "driver_truncated": result.truncated,
+        "duration_sec": result.duration_sec,
+        "junit_xml_path": _JUNIT_PATH.as_posix(),
+    }
+
+
+def _decode_tail(data: bytes, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    return data[-limit:].decode("utf-8", errors="replace")
