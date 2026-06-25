@@ -194,18 +194,25 @@ async def _reject_agent_task_incompat(
 
     rows = (
         await session.execute(
-            select(Task.id, Task.config).where(
+            select(Task.id, Task.config, Task.tags).where(
                 Task.id.in_(list(valid_task_ids)),
             ),
         )
     ).all()
-    configs: dict[str, Any] = {str(tid): cfg for tid, cfg in rows}
+    configs: dict[str, Any] = {str(tid): cfg for tid, cfg, _ in rows}
+    tags_by_id: dict[str, dict[str, str]] = {
+        str(tid): dict(tags or {}) for tid, _, tags in rows
+    }
 
     offenders: dict[str, list[str]] = {}
     for agent_name, required in requirements.items():
         bad = [
             tid for tid in valid_task_ids
-            if not task_supports_agent(configs.get(tid) or {}, required)
+            if not task_supports_agent(
+                configs.get(tid) or {},
+                required,
+                tags=tags_by_id.get(tid),
+            )
         ]
         if bad:
             offenders[agent_name] = bad

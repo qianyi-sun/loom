@@ -75,6 +75,73 @@ def test_terminal_bench_script_task_provides_solve_sh_capability() -> None:
     ) is True
 
 
+def test_oracle_eligible_tag_grants_solve_sh_capability_for_script_verifier() -> None:
+    """SkillLearnBench uses the script verifier across all 100 tasks,
+    but 73 of them DO ship `solution/solve.sh` upstream. The adapter
+    emits `oracle_eligible=true` per-instance; the capability check
+    honors that marker so those tasks can run under the oracle agent."""
+    assert task_provides_capability(
+        _config("script", task_id="skilllearnbench/court-form-filling/court-form-filling-1"),
+        "solution_solve_sh",
+        tags={"oracle_eligible": "true", "method": "human_authored"},
+    ) is True
+
+
+def test_oracle_eligible_false_tag_keeps_task_incompatible() -> None:
+    """The 27 SLB tasks without upstream `solve.sh` tag
+    `oracle_eligible=false`; the capability check must keep treating
+    them as incompatible so the oracle agent doesn't try to run them."""
+    assert task_provides_capability(
+        _config("script", task_id="skilllearnbench/schedule-planning/schedule-planning-1"),
+        "solution_solve_sh",
+        tags={"oracle_eligible": "false", "method": "human_authored"},
+    ) is False
+
+
+def test_oracle_eligible_tag_without_tags_arg_is_ignored() -> None:
+    """Back-compat: legacy callers that don't pass `tags=` see the
+    pre-tag behavior — script-verifier tasks remain incompatible."""
+    assert task_provides_capability(
+        _config("script", task_id="skilllearnbench/foo/bar"),
+        "solution_solve_sh",
+    ) is False
+
+
+def test_filter_tasks_consumes_per_task_tags() -> None:
+    """`task_tags` is a parallel id→tags mapping; the filter passes
+    each task's tags to the capability check so SLB's heterogeneous
+    oracle slate splits correctly."""
+    configs = {
+        "skilllearnbench/court-form-filling/court-form-filling-1": _config(
+            "script",
+            task_id="skilllearnbench/court-form-filling/court-form-filling-1",
+        ),
+        "skilllearnbench/schedule-planning/schedule-planning-1": _config(
+            "script",
+            task_id="skilllearnbench/schedule-planning/schedule-planning-1",
+        ),
+    }
+    tags = {
+        "skilllearnbench/court-form-filling/court-form-filling-1": {
+            "oracle_eligible": "true",
+        },
+        "skilllearnbench/schedule-planning/schedule-planning-1": {
+            "oracle_eligible": "false",
+        },
+    }
+    compat, incompat = filter_tasks_by_agent_capability(
+        task_configs=configs,
+        required=frozenset({"solution_solve_sh"}),
+        task_tags=tags,
+    )
+    assert compat == [
+        "skilllearnbench/court-form-filling/court-form-filling-1",
+    ]
+    assert incompat == [
+        "skilllearnbench/schedule-planning/schedule-planning-1",
+    ]
+
+
 def test_unknown_capability_fails_closed() -> None:
     """Typo'd capability names must not silently grant access — they
     return False so a misconfigured agent gets filtered out rather
