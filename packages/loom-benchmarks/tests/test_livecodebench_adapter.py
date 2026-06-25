@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pickle
 import subprocess
 import sys
@@ -182,3 +183,38 @@ def test_livecodebench_functional_cases_support_multiline_args(
     assert result.returncode == 0, (
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
+
+
+def test_livecodebench_without_reference_emits_noop_oracle_solve_script(
+    tmp_path: Path,
+) -> None:
+    rec = {
+        "question_id": "lcb-no-reference",
+        "question_content": "Return the maximum value.",
+        "starter_code": "class Solution:\n    def maxValue(self, nums):\n        pass\n",
+        "public_test_cases": json.dumps([
+            {"input": "[1, 3, 2]", "output": "3", "testtype": "functional"}
+        ]),
+        "private_test_cases": "[]",
+        "metadata": json.dumps({"func_name": "maxValue"}),
+        "platform": "leetcode",
+        "difficulty": "easy",
+    }
+    inst = BenchmarkInstance(
+        instance_id=rec["question_id"], split="test", raw=rec,
+    )
+
+    LiveCodeBenchAdapter().convert_instance(inst, out_dir=tmp_path)
+
+    solve_script = tmp_path / "solution" / "solve.sh"
+    assert solve_script.exists()
+    assert os.access(solve_script, os.X_OK)
+    subprocess.run(["bash", "solution/solve.sh"], cwd=tmp_path, check=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "-q"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0

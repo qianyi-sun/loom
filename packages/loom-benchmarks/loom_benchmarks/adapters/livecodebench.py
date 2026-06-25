@@ -39,6 +39,20 @@ _LIVECODEBENCH_STUB_SCRIPT = (
 )
 
 
+def _write_noop_solve_script(*, solution_dir: Path) -> Path:
+    solution_dir.mkdir(parents=True, exist_ok=True)
+    solve_sh = solution_dir / "solve.sh"
+    solve_sh.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "# No bundled reference solution exists for this task; leave\n"
+        "# solution.py unchanged so the pytest verifier scores the\n"
+        "# starter/agent output instead of failing oracle setup.\n",
+    )
+    solve_sh.chmod(0o755)
+    return solve_sh
+
+
 def _stdin_pytest_case(idx: int, inp: str, expected: str) -> str:
     return textwrap.dedent(f"""
         import subprocess
@@ -218,6 +232,7 @@ class LiveCodeBenchAdapter(CatalogBackedAdapter):
             (sol_dir / "solution.py").write_text(
                 str(r.get("starter_code", "")),
             )
+            _write_noop_solve_script(solution_dir=sol_dir)
 
         tests_dir = out_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
