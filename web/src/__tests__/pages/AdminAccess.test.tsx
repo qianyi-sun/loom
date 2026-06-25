@@ -282,6 +282,162 @@ describe("AdminAccess", () => {
     });
   });
 
+  it("keeps invite links visible when multiple registrations are approved", async () => {
+    window.localStorage.setItem("loom_token", "loom_admin_secret");
+    vi.spyOn(global, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-1",
+                name: "research-platform",
+                created_at: "2026-06-16T00:00:00Z",
+                disabled_at: null,
+                disabled_reason: null,
+                submissions_paused_at: null,
+                submissions_paused_reason: null,
+                quota: {
+                  fair_share_weight: 1,
+                  max_attempts: 3,
+                  in_flight_count: 0,
+                  license_allowlist: [],
+                },
+                members: [],
+                user_members: [],
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          if (init?.method === "POST" && url.endsWith("/reg-1/approve")) {
+            return jsonResponse({
+              registration: {
+                id: "reg-1",
+                name: "Mark Li",
+                contact_email: "mark@example.com",
+                status: "approved",
+                requested_at: "2026-06-16T00:00:00Z",
+                reviewed_at: "2026-06-16T00:01:00Z",
+                reviewed_by_actor: "qianyi",
+                approved_team_id: "team-1",
+              },
+              team: { id: "team-1", name: "research-platform" },
+              invite: {
+                id: "invite-1",
+                team_id: "team-1",
+                team_name: "research-platform",
+                email: "mark@example.com",
+                allowed_domain: null,
+                role: "member",
+                status: "pending",
+                code_prefix: "mark1234",
+                max_uses: 1,
+                accepted_uses: 0,
+                created_by_actor: "qianyi",
+                created_at: "2026-06-16T00:01:00Z",
+                expires_at: "2026-06-30T00:01:00Z",
+                last_sent_at: "2026-06-16T00:01:00Z",
+                accepted_at: null,
+                revoked_at: null,
+              },
+              invite_code: "loom_invite_mark",
+              invite_link: "https://loom.example.com/invites/accept?code=loom_invite_mark",
+            });
+          }
+          if (init?.method === "POST" && url.endsWith("/reg-2/approve")) {
+            return jsonResponse({
+              registration: {
+                id: "reg-2",
+                name: "Rina Chen",
+                contact_email: "rina@example.com",
+                status: "approved",
+                requested_at: "2026-06-16T00:02:00Z",
+                reviewed_at: "2026-06-16T00:03:00Z",
+                reviewed_by_actor: "qianyi",
+                approved_team_id: "team-1",
+              },
+              team: { id: "team-1", name: "research-platform" },
+              invite: {
+                id: "invite-2",
+                team_id: "team-1",
+                team_name: "research-platform",
+                email: "rina@example.com",
+                allowed_domain: null,
+                role: "member",
+                status: "pending",
+                code_prefix: "rina5678",
+                max_uses: 1,
+                accepted_uses: 0,
+                created_by_actor: "qianyi",
+                created_at: "2026-06-16T00:03:00Z",
+                expires_at: "2026-06-30T00:03:00Z",
+                last_sent_at: "2026-06-16T00:03:00Z",
+                accepted_at: null,
+                revoked_at: null,
+              },
+              invite_code: "loom_invite_rina",
+              invite_link: "https://loom.example.com/invites/accept?code=loom_invite_rina",
+            });
+          }
+          return jsonResponse({
+            items: [
+              {
+                id: "reg-1",
+                name: "Mark Li",
+                contact_email: "mark@example.com",
+                status: "pending",
+                requested_at: "2026-06-16T00:00:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+                approved_team_id: null,
+              },
+              {
+                id: "reg-2",
+                name: "Rina Chen",
+                contact_email: "rina@example.com",
+                status: "pending",
+                requested_at: "2026-06-16T00:02:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+                approved_team_id: null,
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<AdminAccess />);
+
+    await userEvent.clear(await screen.findByLabelText("Admin actor"));
+    await userEvent.type(screen.getByLabelText("Admin actor"), "qianyi");
+
+    const firstInviteLink = "https://loom.example.com/invites/accept?code=loom_invite_mark";
+    const secondInviteLink = "https://loom.example.com/invites/accept?code=loom_invite_rina";
+    const approveButtons = await screen.findAllByRole("button", { name: "Approve" });
+    await userEvent.click(approveButtons[0]);
+    expect(await screen.findByText(firstInviteLink)).toBeInTheDocument();
+
+    await userEvent.click((await screen.findAllByRole("button", { name: "Approve" }))[1]);
+    expect(await screen.findByText(secondInviteLink)).toBeInTheDocument();
+    expect(screen.getByText(firstInviteLink)).toBeInTheDocument();
+  });
+
   it("creates invites with a team selector instead of raw team ids", async () => {
     const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {

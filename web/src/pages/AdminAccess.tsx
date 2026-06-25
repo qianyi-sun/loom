@@ -187,7 +187,7 @@ export default function AdminAccess(): JSX.Element {
   const [section, setSection] = useState<AccessSection>("requests");
   const [actor, setActor] = useState("");
   const [rejectedReason, setRejectedReason] = useState<Record<string, string>>({});
-  const [revealed, setRevealed] = useState<RevealedInvite | null>(null);
+  const [revealedInvites, setRevealedInvites] = useState<RevealedInvite[]>([]);
   const [inviteStatus, setInviteStatus] = useState<InviteStatus>("pending");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteTeamId, setInviteTeamId] = useState("");
@@ -240,6 +240,13 @@ export default function AdminAccess(): JSX.Element {
     ? section
     : visibleSections[0].value;
 
+  function revealInvite(data: RevealedInvite): void {
+    setRevealedInvites((current) => [
+      data,
+      ...current.filter((item) => item.invite.id !== data.invite.id),
+    ]);
+  }
+
   const approve = useMutation({
     mutationFn: ({
       id,
@@ -255,7 +262,7 @@ export default function AdminAccess(): JSX.Element {
         role,
       }),
     onSuccess: (data) => {
-      setRevealed(data);
+      revealInvite(data);
       queryClient.invalidateQueries({ queryKey: ["admin", "team-registrations"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
       queryClient.invalidateQueries({ queryKey: ["invites"] });
@@ -303,7 +310,7 @@ export default function AdminAccess(): JSX.Element {
         actor.trim() || undefined,
       ),
     onSuccess: (data) => {
-      setRevealed(data);
+      revealInvite(data);
       setInviteEmail("");
       queryClient.invalidateQueries({ queryKey: ["invites"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
@@ -320,7 +327,7 @@ export default function AdminAccess(): JSX.Element {
   const resendInvite = useMutation({
     mutationFn: (invite: InviteEntry) => api.resendInvite(invite.id, actor.trim()),
     onSuccess: (data) => {
-      setRevealed(data);
+      revealInvite(data);
       queryClient.invalidateQueries({ queryKey: ["invites"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
@@ -366,6 +373,7 @@ export default function AdminAccess(): JSX.Element {
     !inviteEmail.trim() ||
     (isAdmin && !selectedInviteTeamId) ||
     createInvite.isPending;
+  const latestRevealedInvite = revealedInvites[0];
 
   function toggleTokenScope(scope: string, checked: boolean): void {
     setTokenScopes((current) => {
@@ -424,32 +432,51 @@ export default function AdminAccess(): JSX.Element {
         </Card>
       ) : null}
 
-      {revealed ? (
+      {latestRevealedInvite ? (
         <Card className="border-emerald-200">
           <Card.Header
-            title="Invite link"
-            description={`Copy this invite link and share it manually with ${revealed.invite.email}. Loom will not send it by email.`}
+            title={revealedInvites.length === 1 ? "Invite link" : "Invite links"}
+            description={
+              revealedInvites.length === 1
+                ? `Copy this invite link and share it manually with ${latestRevealedInvite.invite.email}. Loom will not send it by email.`
+                : "Copy these invite links and share them manually. Loom will not send them by email."
+            }
           />
           <Card.Body className="space-y-3">
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm text-emerald-900">
-              {revealed.invite_link}
-            </div>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                onClick={() => navigator.clipboard.writeText(revealed.invite_link)}
+            {revealedInvites.map((revealed) => (
+              <div
+                key={revealed.invite.id}
+                className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
               >
-                Copy
-              </Button>
-              <Button
-                size="sm"
-                onClick={() =>
-                  downloadInviteLink(revealed.invite_link, revealed.invite.team_name)
-                }
-              >
-                Download
-              </Button>
-            </div>
+                {revealedInvites.length > 1 ? (
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-emerald-900">
+                    <span className="font-medium">{revealed.invite.email}</span>
+                    <span>{revealed.invite.team_name ?? revealed.invite.team_id}</span>
+                  </div>
+                ) : null}
+                <div className="break-all rounded-lg border border-emerald-200 bg-white px-3 py-2 font-mono text-sm text-emerald-900">
+                  {revealed.invite_link}
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    aria-label={`Copy invite link for ${revealed.invite.email}`}
+                    onClick={() => navigator.clipboard.writeText(revealed.invite_link)}
+                  >
+                    Copy
+                  </Button>
+                  <Button
+                    size="sm"
+                    aria-label={`Download invite link for ${revealed.invite.email}`}
+                    onClick={() =>
+                      downloadInviteLink(revealed.invite_link, revealed.invite.team_name)
+                    }
+                  >
+                    Download
+                  </Button>
+                </div>
+              </div>
+            ))}
           </Card.Body>
         </Card>
       ) : null}
