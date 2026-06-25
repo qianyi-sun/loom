@@ -362,6 +362,64 @@ async def test_overview_summarizes_signed_in_team_readiness(
     assert "start_worker" not in action_ids
 
 
+async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
+    overview_setup: tuple[FastAPI, UUID, UUID],
+) -> None:
+    app, team_id, _latest_batch_id = overview_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        await _login(ac)
+        r = await ac.get(
+            "/api/v1/monitor/summary",
+            params={
+                "view": "trials",
+                "team_id": str(team_id),
+                "benchmark_id": "humaneval",
+                "agent": "oracle",
+                "state": "failed",
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["scope"] == {
+        "view": "trials",
+        "team_id": str(team_id),
+        "benchmark_id": "humaneval",
+        "agent": "oracle",
+        "model": None,
+        "batch_id": None,
+        "state": "failed",
+    }
+    assert body["state_counts"]["batches"] == {
+        "submitted": 1,
+        "running": 1,
+        "finished": 0,
+        "cancelled": 0,
+    }
+    assert body["state_counts"]["trials"] == {
+        "queued": 1,
+        "claimed": 0,
+        "running": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "cancelled": 0,
+    }
+    assert body["queue"] == {
+        "queued": 1,
+        "claimed": 0,
+        "running": 1,
+        "waiting": 1,
+        "active_workers": 1,
+        "available_backends": ["docker", "fake"],
+        "has_default_backend": True,
+        "status": "waiting",
+    }
+
+
 async def test_overview_marks_operator_prerequisites_separately(
     overview_setup: tuple[FastAPI, UUID, UUID],
     postgres_url: str,

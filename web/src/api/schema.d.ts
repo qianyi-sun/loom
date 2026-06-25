@@ -11,6 +11,28 @@ export interface paths {
       };
     };
   };
+  "/api/v1/monitor/summary": {
+    get: {
+      parameters: {
+        query?: {
+          view?: "batches" | "trials";
+          team_id?: string;
+          benchmark_id?: string;
+          agent?: string;
+          model?: string;
+          batch_id?: string;
+          state?: string;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["MonitorSummary"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/trials": {
     get: {
       parameters: {
@@ -362,6 +384,43 @@ export interface paths {
 
 export interface components {
   schemas: {
+    MonitorSummary: {
+      scope: {
+        view: "batches" | "trials";
+        team_id: string | null;
+        benchmark_id: string | null;
+        agent: string | null;
+        model: string | null;
+        batch_id: string | null;
+        state: string | null;
+      };
+      state_counts: {
+        batches: {
+          submitted: number;
+          running: number;
+          finished: number;
+          cancelled: number;
+        };
+        trials: {
+          queued: number;
+          claimed: number;
+          running: number;
+          succeeded: number;
+          failed: number;
+          cancelled: number;
+        };
+      };
+      queue: {
+        queued: number;
+        claimed: number;
+        running: number;
+        waiting: number;
+        active_workers: number;
+        available_backends: string[];
+        has_default_backend: boolean;
+        status: "blocked" | "waiting" | "running" | "idle" | string;
+      };
+    };
     Trial: {
       id: string;
       task_id: string;

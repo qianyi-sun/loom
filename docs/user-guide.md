@@ -162,13 +162,18 @@ scoped.
 
 Monitor lists show the owning team for each batch and trial. Ordinary users see
 their current team's work; platform admins can use the team filter to inspect
-cross-team queues without losing context. Monitor filters are reflected in the
-URL so support links can preserve `view`, `state`, `q`, `batch_id`, `team_id`,
-`benchmark_id`, `agent`, and `model` while switching between batch and trial
-views. Failed trial lists include a Failure diagnostics summary grouped by
-platform `failure_reason`, with representative messages and links to the first
-affected trial so provider, sandbox, verifier, and artifact failures can be
-triaged before opening individual logs.
+cross-team queues without losing context. The Monitor health card summarizes
+the current URL scope with batch/trial state counters, queued/claimed/running
+trial pressure, active worker count, and available worker backends before the
+row table. The table's State dropdown is still reflected in the URL, but the
+health card keeps all lifecycle counters visible so queue pressure does not
+disappear when you filter the rows to failures. Monitor filters are reflected
+in the URL so support links can preserve `view`, `state`, `q`, `batch_id`,
+`team_id`, `benchmark_id`, `agent`, and `model` while switching between batch
+and trial views. Failed trial lists include a Failure diagnostics summary
+grouped by platform `failure_reason`, with representative messages and links to
+the first affected trial so provider, sandbox, verifier, and artifact failures
+can be triaged before opening individual logs.
 
 New Batch includes a Release review card before submit. Check that it shows the
 intended task scope, planned trial count, selected backend worker availability,

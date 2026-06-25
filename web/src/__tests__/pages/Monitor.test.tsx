@@ -4,11 +4,52 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import Monitor from "../../pages/Monitor";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
 
+const monitorSummaryPayload = {
+  scope: {
+    view: "trials",
+    team_id: "team-a",
+    benchmark_id: "mbpp",
+    agent: "litellm",
+    model: "qwen",
+    batch_id: null,
+    state: "failed",
+  },
+  state_counts: {
+    batches: { submitted: 1, running: 0, finished: 0, cancelled: 0 },
+    trials: {
+      queued: 1,
+      claimed: 0,
+      running: 2,
+      succeeded: 4,
+      failed: 1,
+      cancelled: 0,
+    },
+  },
+  queue: {
+    queued: 1,
+    claimed: 0,
+    running: 2,
+    waiting: 1,
+    active_workers: 1,
+    available_backends: ["docker", "fake"],
+    has_default_backend: true,
+    status: "waiting",
+  },
+};
+
 function mockMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/v1/monitor/summary")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(monitorSummaryPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
       if (url.includes("/api/v1/batches")) {
         return Promise.resolve(
           new Response(
@@ -46,6 +87,14 @@ function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/v1/monitor/summary")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(monitorSummaryPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
       if (url.includes("/api/v1/auth/me")) {
         return Promise.resolve(
           new Response(
@@ -113,6 +162,14 @@ function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/v1/monitor/summary")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(monitorSummaryPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
       if (url.includes("/api/v1/auth/me")) {
         return Promise.resolve(
           new Response(
@@ -238,6 +295,37 @@ describe("Monitor human-readable labels", () => {
       );
       expect(trialRequest).toBeTruthy();
       const url = new URL(String(trialRequest![0]), "http://localhost");
+      expect(url.searchParams.get("state")).toBe("failed");
+      expect(url.searchParams.get("team_id")).toBe("team-a");
+      expect(url.searchParams.get("benchmark_id")).toBe("mbpp");
+      expect(url.searchParams.get("agent")).toBe("litellm");
+      expect(url.searchParams.get("model")).toBe("qwen");
+    });
+  });
+
+  it("shows scoped monitor health and worker capacity from the URL filters", async () => {
+    const fetchMock = mockFilteredMonitorEndpoints();
+    renderWithProviders(<Monitor />, {
+      route:
+        "/monitor?view=trials&state=failed&q=mbpp&team_id=team-a&benchmark_id=mbpp&agent=litellm&model=qwen",
+    });
+
+    expect(await screen.findByText("Monitor health")).toBeInTheDocument();
+    expect(screen.getByText("1 active worker")).toBeInTheDocument();
+    expect(screen.getByText("1 queued")).toBeInTheDocument();
+    expect(screen.getByText("2 running")).toBeInTheDocument();
+    expect(screen.getByText("docker, fake")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 waiting for 1 active worker."),
+    ).toBeInTheDocument();
+
+    await waitFor(() => {
+      const summaryRequest = fetchMock.mock.calls.find(([input]) =>
+        String(input).includes("/api/v1/monitor/summary"),
+      );
+      expect(summaryRequest).toBeTruthy();
+      const url = new URL(String(summaryRequest![0]), "http://localhost");
+      expect(url.searchParams.get("view")).toBe("trials");
       expect(url.searchParams.get("state")).toBe("failed");
       expect(url.searchParams.get("team_id")).toBe("team-a");
       expect(url.searchParams.get("benchmark_id")).toBe("mbpp");

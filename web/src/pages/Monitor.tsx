@@ -14,7 +14,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, type MonitorSummary } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -28,7 +28,7 @@ import Pagination, {
   prevPage,
   type PageState,
 } from "../components/Pagination";
-import { StatusPill } from "../components/StatusPill";
+import { StatusPill, type StatusVariant } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
@@ -154,6 +154,202 @@ interface FailureGroup {
   count: number;
   firstTrialId: string;
   messages: string[];
+}
+
+function plural(value: number, singular: string, pluralLabel?: string): string {
+  return `${value} ${value === 1 ? singular : (pluralLabel ?? `${singular}s`)}`;
+}
+
+function stateCount(value: number, label: string): string {
+  return `${value} ${label}`;
+}
+
+function queueStatusVariant(status: string): StatusVariant {
+  if (status === "blocked") return "failed";
+  if (status === "waiting") return "queued";
+  if (status === "running") return "running";
+  return "neutral";
+}
+
+function queueStatusText(summary: MonitorSummary): string {
+  const { active_workers, running, status, waiting } = summary.queue;
+  if (status === "blocked") {
+    return "No active workers; queued trials cannot start.";
+  }
+  if (status === "waiting") {
+    return `${stateCount(waiting, "waiting")} for ${plural(active_workers, "active worker")}.`;
+  }
+  if (status === "running") {
+    return `${stateCount(running, "running")} with no queued backlog.`;
+  }
+  return "No queued or running trials in this scope.";
+}
+
+function CountBox({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}): JSX.Element {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+        {label}
+      </p>
+      <p className="mt-1 text-sm font-semibold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function MonitorHealthSummary({
+  view,
+  stateFilter,
+  teamFilter,
+  benchmarkFilter,
+  agentFilter,
+  modelFilter,
+  batchId,
+}: {
+  view: View;
+  stateFilter: string;
+  teamFilter: string;
+  benchmarkFilter: string;
+  agentFilter: string;
+  modelFilter: string;
+  batchId?: string;
+}): JSX.Element | null {
+  const polling = useAdaptivePolling({
+    baseIntervalMs: 4_000,
+    minIntervalMs: 3_000,
+    maxIntervalMs: 60_000,
+    hiddenBehavior: "pause",
+    blurBehavior: "slow",
+  });
+  const query = useQuery({
+    queryKey: [
+      "monitor-summary",
+      view,
+      stateFilter,
+      teamFilter,
+      benchmarkFilter,
+      agentFilter,
+      modelFilter,
+      batchId,
+    ],
+    queryFn: () =>
+      api.getMonitorSummary({
+        view,
+        state: stateFilter || undefined,
+        team_id: teamFilter || undefined,
+        benchmark_id: benchmarkFilter || undefined,
+        agent: agentFilter || undefined,
+        model: modelFilter || undefined,
+        batch_id: batchId || undefined,
+      }),
+    refetchInterval: polling.refetchInterval,
+  });
+
+  if (query.isError) {
+    return (
+      <Card>
+        <Card.Header
+          title="Monitor health"
+          description="State counters and worker capacity for the current URL scope."
+          headingLevel="h2"
+        />
+        <Card.Body>
+          <ErrorState error={query.error} />
+        </Card.Body>
+      </Card>
+    );
+  }
+  const data = query.data;
+  if (!data) {
+    return (
+      <Card>
+        <Card.Header
+          title="Monitor health"
+          description="State counters and worker capacity for the current URL scope."
+          headingLevel="h2"
+        />
+        <Card.Body>
+          <div className="grid gap-3 md:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-16 animate-pulse rounded-lg bg-slate-100"
+              />
+            ))}
+          </div>
+        </Card.Body>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <Card.Header
+        title="Monitor health"
+        description="State counters and worker capacity for the current URL scope."
+        headingLevel="h2"
+        actions={
+          <StatusPill variant={queueStatusVariant(data.queue.status)}>
+            {data.queue.status}
+          </StatusPill>
+        }
+      />
+      <Card.Body className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          <CountBox
+            label="Workers"
+            value={plural(data.queue.active_workers, "active worker")}
+          />
+          <CountBox
+            label="Queued"
+            value={stateCount(data.queue.queued, "queued")}
+          />
+          <CountBox
+            label="Running"
+            value={stateCount(data.queue.running, "running")}
+          />
+          <CountBox
+            label="Failed"
+            value={stateCount(data.state_counts.trials.failed, "failed")}
+          />
+        </div>
+        <div className="grid gap-3 text-sm md:grid-cols-2">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+              Queue health
+            </p>
+            <p className="mt-1 text-slate-700">{queueStatusText(data)}</p>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+              Backends
+            </p>
+            <p className="mt-1 text-slate-700">
+              {data.queue.available_backends.length > 0
+                ? data.queue.available_backends.join(", ")
+                : "No active backend"}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+          <span>
+            Batches: {data.state_counts.batches.submitted} submitted,{" "}
+            {data.state_counts.batches.running} running,{" "}
+            {data.state_counts.batches.finished} finished
+          </span>
+          <span>
+            Trials: {data.state_counts.trials.succeeded} succeeded,{" "}
+            {data.state_counts.trials.failed} failed,{" "}
+            {data.state_counts.trials.cancelled} cancelled
+          </span>
+        </div>
+      </Card.Body>
+    </Card>
+  );
 }
 
 function BatchesView({
@@ -734,6 +930,16 @@ export default function Monitor(): JSX.Element {
           </span>
         ) : null}
       </div>
+
+      <MonitorHealthSummary
+        view={view}
+        stateFilter={stateFilter}
+        teamFilter={teamFilter}
+        benchmarkFilter={benchmarkFilter}
+        agentFilter={agentFilter}
+        modelFilter={modelFilter}
+        batchId={batchIdFilter}
+      />
 
       {view === "batches" ? (
         <BatchesView

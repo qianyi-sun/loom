@@ -36,7 +36,6 @@ from loom_service.agent_catalog import (
     validate_agent_model_compat,
 )
 from loom_service.auth_guards import (
-    is_admin,
     require_scope,
     require_team_or_admin,
 )
@@ -44,6 +43,10 @@ from loom_service.debug_evidence import build_trial_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_trial_diagnosis
 from loom_service.forwarders import forward, propagate
+from loom_service.monitor_filters import (
+    apply_trial_monitor_filters,
+    resolve_monitor_team_filter,
+)
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.routes.object_downloads import stream_object_response
@@ -195,48 +198,22 @@ async def list_trials(
     s, ctx = sc
     require_scope(ctx, "read:own")
 
-    # Resolve the team filter:
-    # - explicit `team_id` query → require_team_or_admin
-    # - no filter + non-admin → scope to caller's own team
-    # - no filter + admin → no team filter
-    target_team = team_id
-    if target_team is not None:
-        require_team_or_admin(ctx, target_team)
-    elif not is_admin(ctx):
-        target_team = ctx.team_id
+    target_team = resolve_monitor_team_filter(ctx, team_id)
 
     stmt = select(Trial).order_by(
         Trial.submitted_at.desc(),
         Trial.id.desc(),
     )
-    if target_team is not None:
-        stmt = stmt.where(Trial.team_id == target_team)
-    if task_id is not None:
-        stmt = stmt.where(Trial.task_id == task_id)
-    if benchmark_id is not None:
-        stmt = stmt.join(Task, Task.id == Trial.task_id).where(
-            Task.benchmark_id == benchmark_id,
-        )
-    if batch_id is not None:
-        stmt = stmt.where(Trial.batch_id == batch_id)
-    if agent:
-        stmt = stmt.where(or_(
-            func.jsonb_extract_path_text(Trial.config, "agent_name") == agent,
-            func.jsonb_extract_path_text(Trial.config, "agent", "name") == agent,
-        ))
-    if model:
-        stmt = stmt.where(or_(
-            func.jsonb_extract_path_text(
-                Trial.config, "agent_model", "name",
-            ) == model,
-            func.jsonb_extract_path_text(
-                Trial.config, "agent", "model", "name",
-            ) == model,
-        ))
-    if state:
-        wanted = [x.strip() for x in state.split(",") if x.strip()]
-        if wanted:
-            stmt = stmt.where(Trial.state.in_(wanted))
+    stmt = apply_trial_monitor_filters(
+        stmt,
+        target_team=target_team,
+        task_id=task_id,
+        batch_id=batch_id,
+        benchmark_id=benchmark_id,
+        agent=agent,
+        model=model,
+        state=state,
+    )
     if cursor:
         try:
             c = decode_cursor(cursor)

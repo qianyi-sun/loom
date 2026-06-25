@@ -117,6 +117,8 @@ export async function apiDownload(
 }
 
 type TrialList = paths["/api/v1/trials"]["get"]["responses"][200]["content"]["application/json"];
+export type MonitorSummary =
+  paths["/api/v1/monitor/summary"]["get"]["responses"][200]["content"]["application/json"];
 type TrialDetail =
   paths["/api/v1/trials/{trial_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type DebugEvidence =
@@ -583,6 +585,9 @@ function qs(params: Record<string, string | number | undefined>): string {
 
 export const api = {
   getOverview: () => apiFetch<OverviewSummary>("/api/v1/overview"),
+  getMonitorSummary: (
+    q: Record<string, string | undefined> = {},
+  ) => apiFetch<MonitorSummary>(`/api/v1/monitor/summary${qs(q)}`),
   authMe: () => apiFetch<AuthMe>("/api/v1/auth/me"),
   loginStart: (email: string) =>
     apiFetch<{ status: "sent"; login_token?: string }>(

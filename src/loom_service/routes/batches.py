@@ -41,7 +41,6 @@ from loom_service.agent_catalog import (
     validate_agent_model_compat,
 )
 from loom_service.auth_guards import (
-    is_admin,
     require_scope,
     require_team_or_admin,
 )
@@ -49,6 +48,10 @@ from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
+from loom_service.monitor_filters import (
+    apply_batch_monitor_filters,
+    resolve_monitor_team_filter,
+)
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.task_compat import task_supports_agent
@@ -566,38 +569,19 @@ async def list_batches(
     s, ctx = sc
     require_scope(ctx, "read:own")
 
-    target_team = team_id
-    if target_team is not None:
-        require_team_or_admin(ctx, target_team)
-    elif not is_admin(ctx):
-        target_team = ctx.team_id
+    target_team = resolve_monitor_team_filter(ctx, team_id)
 
     stmt = select(Batch).order_by(
         Batch.created_at.desc(), Batch.id.desc(),
     )
-    if target_team is not None:
-        stmt = stmt.where(Batch.team_id == target_team)
-    if benchmark_id:
-        stmt = stmt.where(or_(
-            Batch.task_filter.contains({"benchmark_id": benchmark_id}),
-            Batch.task_filter.contains({"benchmark_ids": [benchmark_id]}),
-        ))
-    if agent:
-        stmt = stmt.where(or_(
-            Batch.trial_config.contains({"agent_name": agent}),
-            Batch.trial_config.contains({"agent": {"name": agent}}),
-            Batch.combinations.contains([{"agent_name": agent}]),
-        ))
-    if model:
-        stmt = stmt.where(or_(
-            Batch.trial_config.contains({"agent_model": {"name": model}}),
-            Batch.trial_config.contains({"agent": {"model": {"name": model}}}),
-            Batch.combinations.contains([{"agent_model": {"name": model}}]),
-        ))
-    if state:
-        wanted = [x.strip() for x in state.split(",") if x.strip()]
-        if wanted:
-            stmt = stmt.where(Batch.state.in_(wanted))
+    stmt = apply_batch_monitor_filters(
+        stmt,
+        target_team=target_team,
+        benchmark_id=benchmark_id,
+        agent=agent,
+        model=model,
+        state=state,
+    )
     if cursor:
         try:
             cur = decode_cursor(cursor)

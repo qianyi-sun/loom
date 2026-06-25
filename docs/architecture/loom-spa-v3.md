@@ -154,6 +154,14 @@ monitoring and submission flows. A read of the reference
   `failure_reason`, with representative failure messages and links to the
   first affected trial. The table remains the source of individual rows;
   the summary is a triage layer for provider, sandbox, and verifier failures.
+- **Monitor health summary.** The Monitor route also queries a lightweight
+  URL-scoped summary before the table. It uses the same team, benchmark, agent,
+  model, and batch filters as the table while preserving the selected table
+  state in the response scope. The counters intentionally cover all lifecycle
+  states so queue/capacity evidence remains visible even when the row table is
+  filtered to failures. The card shows batch/trial state counters,
+  queued/claimed/running pressure, active worker count, and available worker
+  backends without asking users to page through rows.
 - **Two-status taxonomy** (lifecycle + outcome) split as
   separate fields with separate colour scales.
 - **Inline error inside the table cell** with a retry button
