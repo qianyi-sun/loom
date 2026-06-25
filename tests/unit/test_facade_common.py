@@ -204,3 +204,113 @@ def test_resolve_empty_string_header_treated_as_absent() -> None:
     # Both empty/None ⇒ 400.
     with pytest.raises(HTTPException):
         resolve_provider_connection_id(_step_ctx(None), "")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# decrypt_facade_api_key — #423 controlled-error contract
+# ──────────────────────────────────────────────────────────────────────
+
+
+from types import SimpleNamespace  # noqa: E402
+from typing import Any  # noqa: E402
+
+from loom.security.secret_store import (  # noqa: E402
+    DecryptError,
+    InvalidRefError,
+    SecretNotFoundError,
+)
+from loom_llm_gateway.routes._facade_common import (  # noqa: E402
+    decrypt_facade_api_key,
+)
+
+
+def _row_with_ref(ref: str) -> SimpleNamespace:
+    """Minimal ProviderConnection stand-in. decrypt_facade_api_key only
+    reads .id and .encrypted_api_key_ref on the row — duck-typed."""
+    return SimpleNamespace(id=uuid4(), encrypted_api_key_ref=ref)
+
+
+class _StubStore:
+    """Replaces LocalEncryptedSecretStore in the helper for these
+    tests so we can drive each error class without standing up a real
+    session/DB. Patched via monkeypatch in the test below."""
+    def __init__(self, exc: Exception | None = None, value: str = "sk-x"):
+        self._exc = exc
+        self._value = value
+
+    def __call__(self, _session: Any) -> _StubStore:
+        return self
+
+    async def get(self, _ref: str) -> str:
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+
+async def test_decrypt_facade_api_key_happy_returns_decrypted_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubStore(value="sk-decrypted")
+    monkeypatch.setattr(
+        "loom_llm_gateway.routes._facade_common.LocalEncryptedSecretStore",
+        stub,
+    )
+    out = await decrypt_facade_api_key(
+        object(), _row_with_ref("loom://team:abc/" + str(uuid4())),
+    )
+    assert out == "sk-decrypted"
+
+
+async def test_decrypt_facade_api_key_malformed_ref_returns_controlled_502(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy env:X refs were the #423 trigger. They surface as
+    InvalidRefError; facade must return 502 with an actionable detail,
+    not bubble a 500."""
+    stub = _StubStore(
+        exc=InvalidRefError("ref missing scheme separator: 'env:LEGACY'"),
+    )
+    monkeypatch.setattr(
+        "loom_llm_gateway.routes._facade_common.LocalEncryptedSecretStore",
+        stub,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await decrypt_facade_api_key(
+            object(), _row_with_ref("env:LEGACY"),
+        )
+    assert exc.value.status_code == 502
+    assert "malformed_ref" in exc.value.detail
+    assert "rotate-key" in exc.value.detail
+
+
+async def test_decrypt_facade_api_key_missing_secret_returns_controlled_502(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubStore(exc=SecretNotFoundError("no row for that ref"))
+    monkeypatch.setattr(
+        "loom_llm_gateway.routes._facade_common.LocalEncryptedSecretStore",
+        stub,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await decrypt_facade_api_key(
+            object(), _row_with_ref("loom://team:abc/" + str(uuid4())),
+        )
+    assert exc.value.status_code == 502
+    assert "missing_secret" in exc.value.detail
+
+
+async def test_decrypt_facade_api_key_decrypt_failed_returns_controlled_502(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubStore(exc=DecryptError("AEAD verification failed"))
+    monkeypatch.setattr(
+        "loom_llm_gateway.routes._facade_common.LocalEncryptedSecretStore",
+        stub,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await decrypt_facade_api_key(
+            object(), _row_with_ref("loom://team:abc/" + str(uuid4())),
+        )
+    assert exc.value.status_code == 502
+    assert "decrypt_failed" in exc.value.detail
+    assert "master key" in exc.value.detail

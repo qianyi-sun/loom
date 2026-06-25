@@ -1629,6 +1629,69 @@ def test_models_unhide_makes_operator_hidden_visible(
     assert body["hidden_reason"] is None
 
 
+def test_test_flips_status_invalid_when_stored_ref_is_malformed(
+    app_setup, postgres_url: str,
+) -> None:
+    """#423: legacy public-beta provider rows can hold an argv-style
+    ref like `env:PUBLIC_BETA_SMOKE_OPENAI` in `encrypted_api_key_ref`
+    instead of the runtime-supported `loom://<ns>/<uuid>` shape. The
+    /test endpoint must surface this as an actionable failure AND flip
+    `status='invalid'` so list/show surfaces stop hiding the broken
+    row behind status='valid'."""
+    app, tokens, _ = app_setup
+    c = _client(app)
+    create = c.post(
+        "/api/v1/provider-connections", headers=_auth(tokens["team_a"]),
+        json={"name": "legacy-ref", "type": "openai-compatible",
+              "base_url": "https://api.openai.com/v1", "api_key": "sk-XYZ"},
+    )
+    assert create.status_code == 201, create.text
+    conn_id = create.json()["id"]
+
+    # Corrupt the stored ref to the pre-secret-store legacy shape. The
+    # POST path always writes a proper loom://... ref via SecretStore.put
+    # so direct DB surgery is the only way to reproduce the pre-#423
+    # legacy state.
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    try:
+        with sl() as s:
+            row = s.execute(
+                ProviderConnection.__table__.select().where(
+                    ProviderConnection.id == UUID(conn_id),
+                ),
+            ).first()
+            assert row is not None
+            s.execute(
+                ProviderConnection.__table__.update()
+                .where(ProviderConnection.id == UUID(conn_id))
+                .values(encrypted_api_key_ref="env:PUBLIC_BETA_SMOKE_OPENAI"),
+            )
+            s.commit()
+    finally:
+        sync_engine.dispose()
+
+    r = c.post(
+        f"/api/v1/provider-connections/{conn_id}/test",
+        headers=_auth(tokens["team_a"]),
+    )
+    # Controlled service-side error — NOT an unhandled 500. The exact
+    # status code is the existing _PROVIDER_SECRET_UNREADABLE_DETAIL
+    # contract (503); the new behavior is the row.status flip below.
+    assert r.status_code == 503, r.text
+
+    show = c.get(
+        f"/api/v1/provider-connections/{conn_id}",
+        headers=_auth(tokens["team_a"]),
+    )
+    assert show.status_code == 200, show.text
+    body = show.json()
+    assert body["status"] == "invalid", body
+    assert body["last_validation_error"] is not None
+    assert "malformed_ref" in body["last_validation_error"]
+    assert "rotate-key" in body["last_validation_error"]
+
+
 def test_models_routes_cross_team_return_404(app_setup) -> None:
     """team_a owns the connection; team_b can't list / refresh / hide /
     unhide it. 404 (not 403) so existence isn't leaked."""

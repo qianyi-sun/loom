@@ -29,7 +29,6 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from loom.models.types import ModelSpec
-from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway import litellm_wrapper
 from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.dialect import TokenUsage
@@ -43,6 +42,7 @@ from loom_llm_gateway.rate_card import (
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
+    decrypt_facade_api_key,
     redact_api_key,
     resolve_facade_connection,
 )
@@ -189,8 +189,7 @@ async def chat_completions(
                 supported_types=_BYO_SUPPORTED_TYPES,
                 dialect_label="chat-completions",
             )
-            store = LocalEncryptedSecretStore(session)
-            byo_api_key = await store.get(byo_row.encrypted_api_key_ref)
+            byo_api_key = await decrypt_facade_api_key(session, byo_row)
 
     # Bug 1 fix: the bearer token's team_id is the source of truth. If the
     # token is team-scoped (ctx.team_id is not None), the client-supplied

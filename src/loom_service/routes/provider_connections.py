@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection, ProviderModelCache, TeamQuota
 from loom.security.secret_store import (
+    InvalidRefError,
     LocalEncryptedSecretStore,
     SecretStore,
     SecretStoreError,
@@ -330,6 +331,25 @@ async def _get_provider_api_key(
     secret_store = _make_secret_store(session)
     try:
         return await secret_store.get(row.encrypted_api_key_ref)
+    except InvalidRefError as exc:
+        # The stored ref doesn't parse as `loom://<namespace>/<uuid>` —
+        # almost always a legacy row created before secret-store
+        # enforcement (#423). Decrypt errors and missing-secret errors
+        # can be transient (master-key rotation, etc.) and shouldn't
+        # poison row.status, but a malformed ref is structurally broken
+        # and requires operator repair, so flip status='invalid' so
+        # listing surfaces no longer hide it behind status='valid'.
+        row.status = "invalid"
+        row.last_validation_error = (
+            f"malformed_ref: {exc}. Operator must run "
+            f"`loom providers rotate-key` to re-register the api_key."
+        )
+        row.last_validated_at = datetime.now(UTC)
+        await session.commit()
+        raise HTTPException(
+            status_code=503,
+            detail=_PROVIDER_SECRET_UNREADABLE_DETAIL,
+        ) from exc
     except SecretStoreError as exc:
         raise HTTPException(
             status_code=503,

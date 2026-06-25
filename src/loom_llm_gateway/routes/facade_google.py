@@ -37,12 +37,12 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
+    decrypt_facade_api_key,
     redact_api_key,
     resolve_facade_connection,
     resolve_provider_connection_id,
@@ -116,8 +116,7 @@ async def google_generate_content_facade(
             supported_types=_GOOGLE_TYPES,
             dialect_label="/google/v1beta/models/...",
         )
-        store = LocalEncryptedSecretStore(session)
-        api_key = await store.get(row.encrypted_api_key_ref)
+        api_key = await decrypt_facade_api_key(session, row)
 
     upstream_url = (
         f"{row.base_url.rstrip('/')}/v1beta/models/{model_path}"

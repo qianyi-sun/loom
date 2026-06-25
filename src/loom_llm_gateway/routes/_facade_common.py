@@ -28,6 +28,12 @@ from loom.auth import AuthContext, verify_bearer_token
 from loom.db.schema import ProviderConnection
 from loom.models.types import ModelSpec
 from loom.security.redaction import redact_text
+from loom.security.secret_store import (
+    DecryptError,
+    InvalidRefError,
+    LocalEncryptedSecretStore,
+    SecretNotFoundError,
+)
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
 from loom_llm_gateway.rate_card import (
@@ -248,6 +254,68 @@ async def compute_facade_cost_usd(
         cache_write_tokens=usage.cache_write_tokens,
     )
     return cost, hash_table(table)
+
+
+async def decrypt_facade_api_key(
+    session: Any, row: ProviderConnection,
+) -> str:
+    """Decrypt the provider api_key, translating SecretStore failures
+    into controlled 502 responses so the facade never bubbles an
+    unhandled traceback on a row with a malformed/missing/undecryptable
+    stored ref. #423
+
+    Three failure shapes are distinguished so the operator can pick the
+    right repair path (see operator-runbook.md):
+
+    - `malformed_ref` — `encrypted_api_key_ref` doesn't parse as the
+      runtime-supported `loom://<namespace>/<uuid>` shape. Legacy rows
+      created before secret-store enforcement (e.g. argv-style
+      `env:PUBLIC_BETA_SMOKE_OPENAI` strings) hit this. Fix:
+      `loom providers rotate-key <name> --api-key env:<NEW>`.
+    - `missing_secret` — ref is well-formed but the `secrets` row was
+      pruned. Same operator fix.
+    - `decrypt_failed` — ciphertext won't validate (wrong master key,
+      mid-rotation with no fallback configured). Restore the master
+      key, deploy with `LOOM_SECRET_STORE_MASTER_KEYS` carrying both
+      old and new, or run `loom admin secret-store rewrap`.
+
+    The status flip lives in the service `/test` endpoint, not here —
+    a transient gateway hot-path write to `provider_connections` would
+    risk flipping every row to invalid during a master-key blip.
+    """
+    store = LocalEncryptedSecretStore(session)
+    try:
+        return await store.get(row.encrypted_api_key_ref)
+    except InvalidRefError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"provider_connection {row.id} stored api_key reference is "
+                f"malformed (kind=malformed_ref): {exc}. The administrator "
+                f"must repair this connection via "
+                f"`loom providers rotate-key`."
+            ),
+        ) from exc
+    except SecretNotFoundError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"provider_connection {row.id} stored api_key secret is "
+                f"missing (kind=missing_secret): {exc}. The administrator "
+                f"must re-register the api_key via "
+                f"`loom providers rotate-key`."
+            ),
+        ) from exc
+    except DecryptError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"provider_connection {row.id} stored api_key cannot be "
+                f"decrypted (kind=decrypt_failed): {exc}. Restore the "
+                f"SecretStore master key (or its rotation fallback) and "
+                f"retry."
+            ),
+        ) from exc
 
 
 def redact_api_key(text: str, api_key: str, *, limit: int = 500) -> str:

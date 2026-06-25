@@ -897,6 +897,37 @@ invalidation step is needed.
 without the post-test step; `rotate-key` is the runbook-friendly verb
 for the "swap + verify" flow.
 
+#### Repairing legacy/malformed stored API-key refs
+
+A provider connection's `encrypted_api_key_ref` must be a runtime-
+supported encrypted reference of the form `loom://<namespace>/<uuid>`
+(or `k8s://<namespace>/<name>` for the k8s secret store). Rows
+created by the current `POST /api/v1/provider-connections` path
+always meet this shape. Legacy/imported rows may carry an argv-style
+string like `env:PUBLIC_BETA_SMOKE_OPENAI` instead; the gateway
+cannot decrypt these and every call fails.
+
+Symptoms:
+
+- Gateway returns HTTP 502 with detail containing
+  `kind=malformed_ref` (instead of an unhandled 500 traceback). The
+  message tells the operator to run `loom providers rotate-key`.
+- `POST /api/v1/provider-connections/<id>/test` returns HTTP 503 and
+  side-effects the row: `status='invalid'`, `last_validation_error`
+  starts with `malformed_ref:`, `last_validated_at` is set. After
+  this, the SPA / `loom providers list` / `loom providers test` show
+  the row as `invalid` instead of silently `valid`.
+
+Fix:
+
+```bash
+loom providers rotate-key <connection-name> --api-key env:NEW_KEY
+```
+
+The rotate path writes a fresh `loom://...` ref via
+`SecretStore.put`, then re-probes the upstream. After it succeeds
+the row's status returns to `valid`.
+
 ### Secret-store master-key rotation — `loom admin secret-store rewrap`
 
 All provider-connection API keys are AES-GCM encrypted at rest using
