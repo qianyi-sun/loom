@@ -402,6 +402,10 @@ worker, and sandbox launch boundary at execution time. Agent runtime bits may
 come from the worker image, a cached layered sandbox image, or an install
 script, but changing a selected model/provider/agent must not require
 republishing a benchmark task image.
+When `trial_config.agent_model.max_output_tokens` is set, the worker gateway
+client forwards it to the LLM Gateway as the provider `max_tokens` request
+limit; operators can use this for long-tail acceptance reruns without changing
+the benchmark bundle.
 
 ## Secrets, SSRF, gateway hot path
 

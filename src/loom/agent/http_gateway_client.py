@@ -50,6 +50,8 @@ class HttpLLMGatewayClient:
             body["loom"]["tier"] = request.model.tier
         if request.model.region:
             body["loom"]["region"] = request.model.region
+        if request.model.max_output_tokens is not None:
+            body["max_tokens"] = request.model.max_output_tokens
         # #178: forward BYO provider connection id so the gateway can
         # decrypt + use the team's stored credential.
         if request.provider_connection_id:
