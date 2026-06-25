@@ -54,6 +54,9 @@ class EnvironmentConfig(BaseModel):
     dockerfile: PurePosixPath | None = None
     docker_build_context: PurePosixPath | None = None
     environment: dict[str, str] = {}
+    extra_hosts: dict[str, str] = {}
+    dns: list[str] = []
+    tmpfs: list[str] = []
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
     user: str | int = "agent"

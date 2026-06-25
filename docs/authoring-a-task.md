@@ -169,6 +169,18 @@ aggregate is computed from the steps that completed.
   wait for declared healthchecks before running the agent. Use
   `[environment].environment` for environment variables that belong on the
   primary sandbox container.
+- **Sandbox create options:** `extra_hosts`, `dns`, and `tmpfs` are primary
+  sandbox container options, applied when Docker-backed workers create the
+  container. Use them only when the task definition depends on custom hostname
+  resolution, resolver behavior, or tmpfs-backed paths. Example:
+  ```toml
+  [environment]
+  dns = ["192.0.2.1"]
+  tmpfs = ["/root:size=100M,mode=755"]
+
+  [environment.extra_hosts]
+  "example.com" = "131.25.18.2"
+  ```
 
 ## Network policy
 

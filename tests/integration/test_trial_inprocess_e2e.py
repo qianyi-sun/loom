@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from loom.agent.oracle import OracleAgent
+from loom.driver.base import StartOptions
 from loom.driver.fake import FakeDriver, command_table_handler
 from loom.models.exec import ExecResult
 from loom.models.result import FailureReason, TrialState
@@ -167,13 +168,84 @@ async def test_trial_run_respects_environment_workdir(
     assert PurePosixPath("/workspace/instruction.md") not in driver.filesystem
 
 
+async def test_trial_run_passes_task_sandbox_start_options(
+    hello_task: Path, tmp_path: Path,
+):
+    class _CaptureStartOptionsDriver(FakeDriver):
+        start_options: list[StartOptions | None]
+
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            super().__init__(**kwargs)
+            self.start_options = []
+
+        async def start(self, *, options: StartOptions | None = None) -> None:
+            self.start_options.append(options)
+            await super().start(options=options)
+
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(
+            os="linux",
+            docker_image="alpine",
+            environment={"BETA": "2", "ALPHA": "1"},
+            extra_hosts={
+                "example.com": "131.25.18.2",
+                "archive.ubuntu.com": "162.242.195.82",
+            },
+            dns=["192.0.2.1"],
+            tmpfs=["/root:size=100M,mode=755"],
+        ),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="pass"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+    driver = _CaptureStartOptionsDriver(exec_handler=handler)
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=driver,
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_AlwaysPassVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+        sandbox_extra_hosts=(("host.docker.internal", "host-gateway"),),
+    )
+
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert len(driver.start_options) == 1
+    start_options = driver.start_options[0]
+    assert start_options is not None
+    assert start_options.environment == (("ALPHA", "1"), ("BETA", "2"))
+    assert start_options.extra_hosts == (
+        ("archive.ubuntu.com", "162.242.195.82"),
+        ("example.com", "131.25.18.2"),
+        ("host.docker.internal", "host-gateway"),
+    )
+    assert start_options.dns == ("192.0.2.1",)
+    assert start_options.tmpfs == ("/root:size=100M,mode=755",)
+
+
 async def test_trial_run_driver_start_failure_classified(
     hello_task: Path, tmp_path: Path,
 ):
     """Regression for Bug 1: a DriverError from start() used to escape
     Trial.run unhandled. Now classified into FailureReason.ENV_START_FAILURE
     and surfaced via TrialResult."""
-    from loom.driver.base import StartOptions
     from loom.errors import DriverError
     from loom.models.result import FailureReason
 

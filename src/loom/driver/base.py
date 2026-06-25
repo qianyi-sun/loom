@@ -50,6 +50,12 @@ class StartOptions:
     # to make sandbox-facing gateway URLs such as `host.docker.internal`
     # resolve on Linux Docker.
     extra_hosts: tuple[tuple[str, str], ...] = ()
+    # DNS servers for the primary sandbox container. This preserves benchmark
+    # task definitions that intentionally alter resolver behavior.
+    dns: tuple[str, ...] = ()
+    # Docker tmpfs mount specs, in docker-compose form such as
+    # "/root:size=100M,mode=755" or just "/run".
+    tmpfs: tuple[str, ...] = ()
 
 
 @dataclass

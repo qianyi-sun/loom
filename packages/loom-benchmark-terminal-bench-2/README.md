@@ -42,7 +42,9 @@ The adapter stages each upstream Docker client build context under
 task image without uploading build-only assets such as `protected/` into the
 agent workspace. BuildKit-style Dockerfile `COPY <<EOF ... EOF` heredocs are
 materialized into ordinary build-context files because the Docker-backed worker
-uses docker-py legacy builds. It materializes the upstream `tests/` tree under
+uses docker-py legacy builds. Client compose `dns`, `extra_hosts`, and `tmpfs`
+options are preserved as primary sandbox create options in the generated
+`task.toml`. It materializes the upstream `tests/` tree under
 `/app/environment/tb2-tests`, sets `TEST_DIR` for the primary container, and
 uses a script verifier at `/app/verifier/run.sh` that executes upstream
 `run-tests.sh` with `bash` and emits Loom `VerifierResult` JSON through

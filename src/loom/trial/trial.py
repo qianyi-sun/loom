@@ -180,7 +180,12 @@ class Trial:
                             environment=tuple(sorted(
                                 self.ctx.task_config.environment.environment.items(),
                             )),
-                            extra_hosts=self.ctx.sandbox_extra_hosts,
+                            extra_hosts=_merge_extra_hosts(
+                                self.ctx.task_config.environment.extra_hosts,
+                                self.ctx.sandbox_extra_hosts,
+                            ),
+                            dns=tuple(self.ctx.task_config.environment.dns),
+                            tmpfs=tuple(self.ctx.task_config.environment.tmpfs),
                         )
                     )
                     driver_started = True
@@ -475,6 +480,16 @@ def _aggregate(ctx: TrialContext, result: TrialResult) -> dict[str, float] | Non
     if strategy == "min":
         return {k: min(r.get(k, 0.0) for r in rewards) for k in keys}
     return {k: sum(r.get(k, 0.0) for r in rewards) / len(rewards) for k in keys}
+
+
+def _merge_extra_hosts(
+    task_extra_hosts: dict[str, str],
+    sandbox_extra_hosts: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    return (
+        *tuple(sorted(task_extra_hosts.items())),
+        *sandbox_extra_hosts,
+    )
 
 
 def _first_terminal_step_failure(result: TrialResult) -> tuple[FailureReason, str | None] | None:

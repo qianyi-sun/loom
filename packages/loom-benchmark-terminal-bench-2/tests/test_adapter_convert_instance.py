@@ -437,6 +437,46 @@ def test_multiservice_stages_sidecar_build_contexts(
     assert (out / ".loom-build" / "sidecars" / "api" / "app.py").exists()
 
 
+def test_client_compose_sandbox_options_are_preserved(
+    fixtures_dir: Path, tmp_path: Path,
+) -> None:
+    staged = tmp_path / "tasks" / "broken-networking"
+    shutil.copytree(fixtures_dir / "tb2-task-hello-world", staged)
+    (staged / "docker-compose.yaml").write_text(
+        "services:\n"
+        "  client:\n"
+        "    build:\n"
+        "      context: .\n"
+        "      dockerfile: Dockerfile\n"
+        "    command: [\"sh\", \"-c\", \"sleep infinity\"]\n"
+        "    dns:\n"
+        "      - 192.0.2.1\n"
+        "    extra_hosts:\n"
+        "      - example.com:131.25.18.2\n"
+        "      - archive.ubuntu.com:162.242.195.82\n"
+        "    tmpfs:\n"
+        "      - /root:size=100M,mode=755\n"
+    )
+    (only,) = list(
+        TerminalBench2Adapter().list_instances(
+            source_dir=tmp_path, split="test",
+        ),
+    )
+    out = tmp_path / "out"
+
+    TerminalBench2Adapter().convert_instance(only, out_dir=out)
+
+    cfg = TaskConfig.model_validate(
+        tomllib.loads((out / "task.toml").read_text()),
+    )
+    assert cfg.environment.dns == ["192.0.2.1"]
+    assert cfg.environment.extra_hosts == {
+        "archive.ubuntu.com": "162.242.195.82",
+        "example.com": "131.25.18.2",
+    }
+    assert cfg.environment.tmpfs == ["/root:size=100M,mode=755"]
+
+
 def test_checksum_stable_across_runs(
     fixtures_dir: Path, tmp_path: Path,
 ) -> None:

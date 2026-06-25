@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
-import yaml
+import yaml  # type: ignore[import-untyped]
 from loom_benchmarks.base import (
     BenchmarkInstance,
     ConvertedTask,
@@ -150,6 +150,18 @@ class TerminalBench2Adapter:
         environment.setdefault("environment", {})["TEST_DIR"] = (
             "/app/environment/tb2-tests"
         )
+        if isinstance(client_service, dict):
+            dns = self._parse_string_list(client_service.get("dns"))
+            if dns:
+                environment["dns"] = dns
+            extra_hosts = self._parse_extra_hosts(
+                client_service.get("extra_hosts"),
+            )
+            if extra_hosts:
+                environment["extra_hosts"] = extra_hosts
+            tmpfs = self._parse_string_list(client_service.get("tmpfs"))
+            if tmpfs:
+                environment["tmpfs"] = tmpfs
 
         sidecars: list[dict[str, Any]] = []
         for name, service in services.items():
@@ -292,6 +304,42 @@ class TerminalBench2Adapter:
                 continue
             key, value = item.split("=", 1)
             parsed[key] = value
+        return parsed
+
+    @staticmethod
+    def _parse_string_list(raw: object) -> list[str]:
+        if isinstance(raw, str):
+            value = raw.strip()
+            return [value] if value else []
+        if not isinstance(raw, list):
+            return []
+        parsed: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value:
+                parsed.append(value)
+        return parsed
+
+    @staticmethod
+    def _parse_extra_hosts(raw: object) -> dict[str, str]:
+        if isinstance(raw, dict):
+            return {
+                str(host).strip(): str(ip).strip()
+                for host, ip in raw.items()
+                if str(host).strip() and str(ip).strip()
+            }
+        parsed: dict[str, str] = {}
+        for item in TerminalBench2Adapter._parse_string_list(raw):
+            separator = "=" if "=" in item else ":"
+            if separator not in item:
+                continue
+            host, ip = item.split(separator, 1)
+            host = host.strip()
+            ip = ip.strip()
+            if host and ip:
+                parsed[host] = ip
         return parsed
 
     @staticmethod

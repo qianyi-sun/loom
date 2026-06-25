@@ -107,6 +107,9 @@ docker_image = "python:3.12-slim"
 workdir = "/workspace"   # default; override for upstreams that expect /app
 gpu_vendor = "none"
 environment = { TEST_DIR = "/workspace/tests" }
+extra_hosts = { "example.com" = "131.25.18.2" }
+dns = ["192.0.2.1"]
+tmpfs = ["/root:size=100M,mode=755"]
 network_policies_supported = ["public", "allowlist"]
 baseline_network_policy = { kind = "public" }
 
@@ -318,7 +321,11 @@ a single-image approximation. The adapter also normalizes pinned TB-2
 compatibility edges: Dockerfile `COPY` heredocs are materialized into ordinary
 build-context files for docker-py legacy builds, and Python-REPL
 `solution.yaml` command groups are rendered as stdin scripts for oracle smoke
-runs.
+runs. Compose fields that affect the primary client sandbox are preserved in
+the generated `TaskConfig`: `dns`, `extra_hosts`, and `tmpfs` map to
+`environment.dns`, `environment.extra_hosts`, and `environment.tmpfs`.
+Compose fields used only by the upstream harness runner, such as
+`container_name` and log `volumes`, are not copied into Loom task config.
 
 ## License metadata
 

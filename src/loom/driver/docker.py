@@ -56,6 +56,16 @@ def _default_caps() -> Capabilities:
     )
 
 
+def _tmpfs_specs_to_docker_map(specs: tuple[str, ...]) -> dict[str, str]:
+    mounts: dict[str, str] = {}
+    for spec in specs:
+        path, separator, options = spec.partition(":")
+        if not path:
+            continue
+        mounts[path] = options if separator else ""
+    return mounts
+
+
 @dataclass
 class DockerDriver:
     """Real-Docker Driver. Uses docker-py SDK throughout."""
@@ -122,6 +132,10 @@ class DockerDriver:
                 run_kwargs["environment"] = dict(opts.environment)
             if opts.extra_hosts:
                 run_kwargs["extra_hosts"] = dict(opts.extra_hosts)
+            if opts.dns:
+                run_kwargs["dns"] = list(opts.dns)
+            if opts.tmpfs:
+                run_kwargs["tmpfs"] = _tmpfs_specs_to_docker_map(opts.tmpfs)
             # to_thread can't unify the **kwargs overloads of
             # docker-py's containers.run, so wrap the call in a
             # closure whose signature is unambiguous to mypy.
