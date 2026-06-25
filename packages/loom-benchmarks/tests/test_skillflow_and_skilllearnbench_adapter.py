@@ -333,6 +333,91 @@ def test_skillflow_normalizes_absolute_solution_paths_for_oracle_layout(
     assert "cp /solution/" not in root_solve.read_text()
 
 
+def _stage_upstream_skill(
+    root: Path,
+    *,
+    method: str,
+    family: str,
+    skill_name: str = "main-skill",
+    skill_body: str = "# Skill\n",
+) -> Path:
+    skill_dir = root / "skills" / method / family / skill_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(skill_body)
+    return skill_dir
+
+
+def test_skilllearnbench_injects_method_skills_into_bundle(
+    tmp_path: Path,
+) -> None:
+    family = "stock-data-visualization"
+    task = "stock-data-visualization-1"
+    _write_real_bundle(tmp_path, family=family, task=task)
+    _stage_upstream_skill(
+        tmp_path,
+        method="human_authored",
+        family=family,
+        skill_name="d3-visualization",
+        skill_body="# d3 visualization\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+
+    instances = list(adapter.list_instances(source_dir=tmp_path, split="test"))
+    assert len(instances) == 1
+    inst = instances[0]
+    assert inst.tags["method"] == "human_authored"
+
+    out_dir = tmp_path / "out"
+    adapter.convert_instance(inst, out_dir=out_dir)
+
+    injected = out_dir / "skills" / "d3-visualization" / "SKILL.md"
+    assert injected.read_text() == "# d3 visualization\n"
+    assert not (out_dir / "skills" / ".keep").exists()
+
+
+def test_skilllearnbench_keeps_placeholder_when_method_missing_for_family(
+    tmp_path: Path,
+) -> None:
+    family = "schedule-planning"
+    task = "schedule-planning-1"
+    _write_real_bundle(tmp_path, family=family, task=task)
+    # Upstream has skills/<method>/<other-family>/ but nothing for this family.
+    _stage_upstream_skill(
+        tmp_path,
+        method="human_authored",
+        family="financial-analysis",
+    )
+    adapter = SkillLearnBenchAdapter()
+
+    inst = next(iter(adapter.list_instances(source_dir=tmp_path, split="test")))
+    out_dir = tmp_path / "out"
+    adapter.convert_instance(inst, out_dir=out_dir)
+
+    assert (out_dir / "skills" / ".keep").exists()
+    assert list((out_dir / "skills").iterdir()) == [out_dir / "skills" / ".keep"]
+
+
+def test_skilllearnbench_injection_changes_checksum(tmp_path: Path) -> None:
+    family = "stock-data-visualization"
+    task = "stock-data-visualization-1"
+    _write_real_bundle(tmp_path, family=family, task=task)
+    adapter = SkillLearnBenchAdapter()
+    inst = next(iter(adapter.list_instances(source_dir=tmp_path, split="test")))
+
+    bare = adapter.convert_instance(inst, out_dir=tmp_path / "bare")
+
+    _stage_upstream_skill(
+        tmp_path,
+        method="human_authored",
+        family=family,
+        skill_body="# real skill content\n",
+    )
+    inst2 = next(iter(adapter.list_instances(source_dir=tmp_path, split="test")))
+    with_skills = adapter.convert_instance(inst2, out_dir=tmp_path / "withskills")
+
+    assert bare.checksum != with_skills.checksum
+
+
 def test_skillflow_points_at_published_task_dataset() -> None:
     adapter = SkillFlowAdapter()
 
