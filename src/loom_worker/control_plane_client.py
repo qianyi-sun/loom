@@ -251,6 +251,44 @@ class HttpControlPlaneClient:
             fields={"result": result, **trajectory_index},
         )
 
+    async def append_events(
+        self,
+        *,
+        trial_id: UUID,
+        worker_id: UUID,
+        events: list[dict[str, Any]],
+    ) -> bool:
+        """POST a batch of typed trajectory events to the CP
+        `trial_events` table (#5 Slice 3a endpoint).
+
+        Returns True on success, False on 409 (worker lost claim — the
+        caller's writer should stop trying to flush events for this
+        trial). Raises on other HTTP errors so the caller can decide
+        whether to drop the batch (MinIO trajectory remains the
+        authoritative copy in Slice 3b — Slice 3c flips the SSE
+        reader to Postgres, at which point a persistent CP write
+        failure starts mattering more).
+        """
+        if not events:
+            return True
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                f"/trials/{trial_id}/events",
+                headers=self._headers,
+                json={
+                    "worker_id": str(worker_id),
+                    "events": events,
+                },
+            )
+            if r.status_code == 409:
+                return False
+            r.raise_for_status()
+            return True
+        finally:
+            if owned:
+                await client.aclose()
+
     # ─── #317 trial-cache build coordination ────────────────────────
 
     async def claim_trial_cache_slot(

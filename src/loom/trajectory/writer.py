@@ -24,6 +24,7 @@ import aiofiles
 
 from loom.errors import TrajectoryFlushFailedError
 from loom.models.trajectory import TrajectoryEvent
+from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MultipartUpload, ObjectStore
 
 S3_MIN_PART_BYTES = 5 * 1024 * 1024          # S3/MinIO multipart floor (5 MiB)
@@ -48,6 +49,13 @@ class TrajectoryWriter:
         flush_sec: float = DEFAULT_FLUSH_SEC,
         flush_retries: int = DEFAULT_FLUSH_RETRIES,
         min_part_bytes: int = S3_MIN_PART_BYTES,
+        # #5 Slice 3b: optional CP-side dual-write observer. When set,
+        # every appended event is mirrored to the `trial_events` table
+        # via the sink, with its own (smaller) flush cadence. MinIO
+        # remains authoritative in Slice 3b; Slice 3c flips the SSE
+        # reader to Postgres, at which point sink failures start
+        # mattering more. The sink swallows all errors internally.
+        cp_event_sink: CpEventSink | None = None,
     ) -> None:
         self._local_path = local_path
         self._store = store
@@ -60,6 +68,7 @@ class TrajectoryWriter:
         # S3/MinIO multipart floor — every non-final part must clear this.
         # The final flush at close() ignores it (last-part has no minimum).
         self._min_part_bytes = min_part_bytes
+        self._cp_event_sink = cp_event_sink
 
         self._buf: list[bytes] = []
         self._buf_bytes = 0
@@ -99,6 +108,11 @@ class TrajectoryWriter:
             raise RuntimeError("append after close")
         line = event.model_dump_json().encode("utf-8") + b"\n"
         await self._write_line(line)
+        # #5 Slice 3b: mirror the typed event to the CP sink. Sink
+        # internally swallows all errors so a CP outage never fails
+        # the trial in this slice.
+        if self._cp_event_sink is not None:
+            await self._cp_event_sink.observe(event)
 
     async def write_raw_dict(self, data: dict[str, object]) -> None:
         """Append a pre-shaped dict as one JSONL line WITHOUT pydantic
@@ -114,6 +128,12 @@ class TrajectoryWriter:
         import json
         line = (json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8")
         await self._write_line(line)
+        # #5 Slice 3b: mirror to CP sink. observe_raw skips payloads
+        # without int seq + str kind (subprocess adapters that pre-date
+        # the typed envelope), so a malformed adapter emit doesn't
+        # break the sink.
+        if self._cp_event_sink is not None:
+            await self._cp_event_sink.observe_raw(dict(data))
 
     async def _write_line(self, line: bytes) -> None:
         assert self._local_file is not None
@@ -200,5 +220,15 @@ class TrajectoryWriter:
                             f"complete multipart failed: {exc!r}",
                         ) from exc
                 self._upload = None
+            # #5 Slice 3b: drain the CP sink after MinIO is committed
+            # (or aborted). The sink swallows its own errors so a
+            # failure here never overwrites `final_flush_exc`.
+            if self._cp_event_sink is not None:
+                try:
+                    await self._cp_event_sink.flush_and_close()
+                except Exception:
+                    # Defensive — sink internally swallows, but if
+                    # anything escapes don't blow up trial close.
+                    pass
         if final_flush_exc is not None:
             raise final_flush_exc

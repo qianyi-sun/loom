@@ -125,3 +125,113 @@ async def test_writer_append_after_close_raises(tmp_path: Path, store: FakeObjec
         await writer.append(_event(0))
     with pytest.raises(RuntimeError, match="append after close"):
         await writer.append(_event(1))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #5 Slice 3b: CP-side dual-write through optional event sink
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_writer_mirrors_appends_to_cp_event_sink(
+    tmp_path: Path, store: FakeObjectStore,
+) -> None:
+    """When `cp_event_sink` is supplied, every typed event flowing
+    through `append` is also forwarded to the sink. MinIO writes
+    are unchanged."""
+    from loom.trajectory.cp_event_sink import CpEventSink
+
+    sent: list[list[dict]] = []
+
+    async def sender(batch: list[dict]) -> bool:
+        sent.append(batch)
+        return True
+
+    sink = CpEventSink(
+        trial_id=uuid4(), worker_id=uuid4(),
+        send_batch=sender, flush_event_count=2, flush_interval_sec=999,
+    )
+    local = tmp_path / "events.jsonl"
+    writer = TrajectoryWriter(
+        local_path=local, store=store,
+        bucket="trajectories", key="t/x/events.jsonl",
+        flush_event_count=1000, flush_bytes=10_000_000,
+        flush_sec=3600, min_part_bytes=0,
+        cp_event_sink=sink,
+    )
+    async with writer:
+        await writer.append(_event(0))
+        await writer.append(_event(1))  # trips sink threshold
+        await writer.append(_event(2))
+    # Sink received the first 2 from the flush + final drain on close.
+    assert sent  # at least one batch landed
+    flat = [r["seq"] for batch in sent for r in batch]
+    assert flat == [0, 1, 2]
+    # MinIO upload still happened.
+    assert ("trajectories", "t/x/events.jsonl") in store.objects
+
+
+async def test_writer_sink_failure_does_not_fail_trial(
+    tmp_path: Path, store: FakeObjectStore,
+) -> None:
+    """A misbehaving CP-side sink (network blip, CP outage, …) must
+    NOT poison the writer — MinIO is still authoritative in Slice 3b.
+    The sink internally swallows errors so the writer doesn't even
+    need to try/except around its calls."""
+    from loom.trajectory.cp_event_sink import CpEventSink
+
+    async def angry_sender(batch: list[dict]) -> bool:
+        raise RuntimeError("CP is on fire")
+
+    sink = CpEventSink(
+        trial_id=uuid4(), worker_id=uuid4(),
+        send_batch=angry_sender,
+        flush_event_count=1, flush_interval_sec=999,
+    )
+    local = tmp_path / "events.jsonl"
+    writer = TrajectoryWriter(
+        local_path=local, store=store,
+        bucket="trajectories", key="t/x/events.jsonl",
+        flush_event_count=1000, flush_bytes=10_000_000,
+        flush_sec=3600, min_part_bytes=0,
+        cp_event_sink=sink,
+    )
+    async with writer:
+        await writer.append(_event(0))  # sink raises internally, swallowed
+        await writer.append(_event(1))
+    # The trial completes cleanly: local JSONL + MinIO upload landed.
+    assert local.read_bytes().count(b"\n") == 2
+    assert ("trajectories", "t/x/events.jsonl") in store.objects
+
+
+async def test_writer_close_drains_sink_after_minio_completes(
+    tmp_path: Path, store: FakeObjectStore,
+) -> None:
+    """`_close` calls `cp_event_sink.flush_and_close()` even when the
+    sink buffer never tripped a flush trigger during the trial."""
+    from loom.trajectory.cp_event_sink import CpEventSink
+
+    sent: list[list[dict]] = []
+
+    async def sender(batch: list[dict]) -> bool:
+        sent.append(batch)
+        return True
+
+    sink = CpEventSink(
+        trial_id=uuid4(), worker_id=uuid4(),
+        send_batch=sender,
+        flush_event_count=999,  # never trips
+        flush_interval_sec=999,
+    )
+    local = tmp_path / "events.jsonl"
+    writer = TrajectoryWriter(
+        local_path=local, store=store,
+        bucket="trajectories", key="t/x/events.jsonl",
+        flush_event_count=1000, flush_bytes=10_000_000,
+        flush_sec=3600, min_part_bytes=0,
+        cp_event_sink=sink,
+    )
+    async with writer:
+        await writer.append(_event(0))
+        await writer.append(_event(1))
+    # Drain on close emitted one final batch.
+    assert sum(len(b) for b in sent) == 2

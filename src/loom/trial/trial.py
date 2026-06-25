@@ -31,6 +31,7 @@ from loom.models.trajectory import (
     TrialStartEvent,
 )
 from loom.models.trial import TrialConfig
+from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.finalize import finalize_trajectory
@@ -92,6 +93,12 @@ class TrialContext:
     # endpoints on Linux Docker, where `host.docker.internal` is not
     # present unless the container is started with host-gateway mapping.
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
+    # #5 Slice 3b: optional CP-side event sink. When set, every event
+    # appended through the TrajectoryWriter is mirrored to the
+    # `trial_events` table via the worker's HttpControlPlaneClient.
+    # MinIO remains authoritative until Slice 3c flips the SSE reader
+    # to Postgres; sink failures are logged + swallowed here.
+    cp_event_sink: CpEventSink | None = None
 
     @property
     def task_id(self) -> str:
@@ -158,6 +165,7 @@ class Trial:
             store=self.ctx.object_store,
             bucket=self.ctx.trajectory_bucket,
             key=self.ctx.trajectory_key,
+            cp_event_sink=self.ctx.cp_event_sink,
         )
 
         cancelled = False

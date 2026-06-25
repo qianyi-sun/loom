@@ -23,6 +23,7 @@ from loom.models.result import FailureReason, TrialResult, TrialState
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
 from loom.verifier.base import Verifier
@@ -113,6 +114,12 @@ class LocalTrialRunner:
     sandbox_step_jwt_ttl_sec: int = 600
     sandbox_extra_hosts: tuple[tuple[str, str], ...] = ()
     sidecar_runtime_factory: TaskSidecarRuntimeFactory | None = None
+    # #5 Slice 3b: optional CP-side event sink. When the worker is
+    # configured to dual-write trajectory events into Postgres
+    # `trial_events`, main_loop constructs one per trial and passes
+    # it here; the runner forwards it onto TrialContext for
+    # Trial.run → TrajectoryWriter to mirror events through.
+    cp_event_sink: CpEventSink | None = None
 
     async def run(self) -> TrialResult:
         driver = self.driver_factory()
@@ -237,6 +244,7 @@ class LocalTrialRunner:
             on_driver_started=on_driver_started_cb,
             sandbox_volumes=sandbox_volumes,
             sandbox_extra_hosts=self.sandbox_extra_hosts,
+            cp_event_sink=self.cp_event_sink,
         )
 
         deferred_success_patch: tuple[str, str | None, str | None] | None = None

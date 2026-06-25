@@ -48,6 +48,7 @@ from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MinioObjectStore, ObjectStore
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
@@ -631,6 +632,26 @@ async def _spawn_trial(
                 trajectory_index=trajectory_index,
             )
 
+        # #5 Slice 3b: per-trial CP event sink. The send callback is
+        # a thin shim around `cp_client.append_events` that captures
+        # trial_id + worker_id; the sink owns batching + flush
+        # scheduling internally. MinIO is still authoritative in
+        # this slice — sink errors are swallowed.
+        async def _send_event_batch(
+            events: list[dict[str, object]],
+        ) -> bool:
+            return await cp_client.append_events(
+                trial_id=trial_id,
+                worker_id=worker_id,
+                events=events,
+            )
+
+        trial_cp_event_sink = CpEventSink(
+            trial_id=trial_id,
+            worker_id=worker_id,
+            send_batch=_send_event_batch,
+        )
+
         subprocess_gateway_url = getattr(settings, "subprocess_gateway_url", None)
         subprocess_gateway_url_str = (
             str(subprocess_gateway_url)
@@ -668,6 +689,13 @@ async def _spawn_trial(
             # project each into an LLMCallEvent. No-op for trials that
             # don't route through the Gateway (oracle, in-box runtimes).
             llm_calls_fetcher=cp_client.get_trial_llm_calls,
+            # #5 Slice 3b: mirror typed trajectory events to the CP
+            # `trial_events` table alongside the existing MinIO writer.
+            # Slice 3c will flip the SSE reader from MinIO-poll to
+            # Postgres-LISTEN, at which point sink failures start
+            # mattering more; for now MinIO remains authoritative
+            # and the sink swallows its own errors.
+            cp_event_sink=trial_cp_event_sink,
             # PR-E: worker-spawned vLLM registry. Shared across trials
             # claimed by this worker process so the 1-3 min vLLM startup
             # is amortised across many same-model trials.
