@@ -30,6 +30,7 @@ class _StubSettings:
         trial_cache_ttl_hours: int = 168,
         trial_cache_min_free_gb: int = 20,
         trial_cache_build_lock_timeout_sec: float = 1800.0,
+        docker_api_timeout_sec: int = 900,
     ) -> None:
         self.trial_cache_registry_repo = trial_cache_registry_repo
         self.trial_cache_registry_pull_timeout_sec = (
@@ -43,6 +44,7 @@ class _StubSettings:
         self.trial_cache_build_lock_timeout_sec = (
             trial_cache_build_lock_timeout_sec
         )
+        self.docker_api_timeout_sec = docker_api_timeout_sec
 
 
 class _StubAdapter:
@@ -267,6 +269,40 @@ async def test_resolve_trial_image_missing_attr_returns_task_image() -> None:
         docker_client=_stub_docker(),
     )
     assert out == "python:3.11-slim"
+
+
+@pytest.mark.asyncio
+async def test_resolve_trial_image_creates_docker_client_with_worker_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = "sha256:cached"
+    install = "echo install"
+    key = trial_cache._cache_key(
+        task_image_digest=digest,
+        install_script=install,
+    )
+    client = _stub_docker(locally={
+        "python:3.11-slim": digest,
+        f"loom-trial-cache:{key}": "sha256:layered",
+    })
+    from_env_timeouts: list[float | None] = []
+
+    def _from_env(*, timeout: float | None = None) -> Any:
+        from_env_timeouts.append(timeout)
+        return client
+
+    monkeypatch.setattr(trial_cache.docker, "from_env", _from_env)
+
+    out = await trial_cache.resolve_trial_image(
+        task_image="python:3.11-slim",
+        adapter=_StubAdapter(install_script=install),
+        settings=_StubSettings(docker_api_timeout_sec=900.0),
+        cp_client=_StubCPClient(),
+        worker_id=uuid4(),
+    )
+
+    assert out == f"loom-trial-cache:{key}"
+    assert from_env_timeouts == [900.0]
 
 
 @pytest.mark.asyncio

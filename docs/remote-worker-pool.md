@@ -375,6 +375,13 @@ LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
 LOOM_WORKER_MINIO_SECRET_KEY=...
 LOOM_WORKER_MAX_CONCURRENT=5
+# Keep these defaults for normal sweeps; raise only after logs show SDK timeouts.
+LOOM_WORKER_DOCKER_API_TIMEOUT_SEC=1800
+LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS=256
+LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC=5
+LOOM_WORKER_MINIO_READ_TIMEOUT_SEC=120
+LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC=300
+LOOM_WORKER_MINIO_OPERATION_ATTEMPTS=3
 # Fixed workers should leave this unset. Elastic Slurm workers should opt in.
 # LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=600
 # Optional: leave unset unless a capacity sweep says blocking I/O is the bottleneck.
@@ -469,6 +476,14 @@ This executor setting is not additional trial capacity. It only prevents
 blocking setup and sandbox calls from capping admission around Python's
 small default thread pool. Override it only when a single-worker sweep
 shows blocking I/O threads are still the first bottleneck.
+
+Docker SDK timeouts and S3 operation timeouts are independent of the
+blocking-I/O executor. Use `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC` when logs show
+docker-py read timeouts during large base-image pulls, task Dockerfile builds,
+or sidecar startup. Use `LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC`,
+`LOOM_WORKER_MINIO_OPERATION_ATTEMPTS`, and
+`LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS` when logs show `download_prefix`,
+artifact upload, or trajectory flush timeouts under high trial concurrency.
 
 Service-mode tasks that carry `environment.dockerfile` are built on the worker
 host from the materialized task bundle, or from

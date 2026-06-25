@@ -19,6 +19,11 @@
     "default": "'http://loom-control-plane:8080'",
     "required": false
   },
+  "docker_api_timeout_sec": {
+    "annotation": "<class 'int'>",
+    "default": "1800",
+    "required": false
+  },
   "docker_socket": {
     "annotation": "<class 'pathlib.Path'>",
     "default": "PosixPath('/var/run/docker.sock')",
@@ -74,9 +79,34 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "minio_connect_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "5.0",
+    "required": false
+  },
   "minio_endpoint": {
     "annotation": "<class 'str'>",
     "default": "'http://loom-minio:9000'",
+    "required": false
+  },
+  "minio_max_pool_connections": {
+    "annotation": "<class 'int'>",
+    "default": "256",
+    "required": false
+  },
+  "minio_operation_attempts": {
+    "annotation": "<class 'int'>",
+    "default": "3",
+    "required": false
+  },
+  "minio_operation_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "300.0",
+    "required": false
+  },
+  "minio_read_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "120.0",
     "required": false
   },
   "minio_region": {

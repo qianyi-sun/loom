@@ -21,6 +21,7 @@ class WorkerSettings(BaseSettings):
     blocking_io_max_workers: int | None = None
     claim_poll_interval_sec: float = 1.0
     control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")
+    docker_api_timeout_sec: int = 1800
     docker_socket: Path = Path("/var/run/docker.sock")
     drain_timeout_sec: int = 600
     enable_worker_vllm: bool = False
@@ -32,7 +33,12 @@ class WorkerSettings(BaseSettings):
     max_concurrent: int = 5
     metrics_port: int = 9090
     minio_access_key: SecretStr
+    minio_connect_timeout_sec: float = 5.0
     minio_endpoint: str = "http://loom-minio:9000"
+    minio_max_pool_connections: int = 256
+    minio_operation_attempts: int = 3
+    minio_operation_timeout_sec: float = 300.0
+    minio_read_timeout_sec: float = 120.0
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     sandbox_isolation: bool = False

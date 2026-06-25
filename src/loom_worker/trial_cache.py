@@ -300,7 +300,11 @@ async def resolve_trial_image(
     if install_script is None:
         return task_image
 
-    client = docker_client if docker_client is not None else docker.from_env()
+    client = (
+        docker_client
+        if docker_client is not None
+        else docker.from_env(timeout=settings.docker_api_timeout_sec)
+    )
 
     # Step 2: resolve task image to a stable digest.
     task_image_digest = await _pull_or_get_digest(

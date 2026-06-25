@@ -66,6 +66,7 @@ from loom_worker.sandbox_singleton import (
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.task_image import TaskImageBuildError, resolve_task_image
+from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
     TrialCacheError,
     evict_stale_cache,
@@ -148,6 +149,20 @@ def _configure_blocking_io_executor(settings: WorkerSettings) -> None:
     )
     asyncio.get_running_loop().set_default_executor(executor)
     logger.info("worker_blocking_io_executor_configured max_workers=%d", max_workers)
+
+
+def _build_worker_object_store(settings: WorkerSettings) -> MinioObjectStore:
+    return MinioObjectStore(
+        endpoint_url=settings.minio_endpoint,
+        access_key=settings.minio_access_key.get_secret_value(),
+        secret_key=settings.minio_secret_key.get_secret_value(),
+        region=settings.minio_region,
+        max_pool_connections=settings.minio_max_pool_connections,
+        connect_timeout=settings.minio_connect_timeout_sec,
+        read_timeout=settings.minio_read_timeout_sec,
+        operation_timeout=settings.minio_operation_timeout_sec,
+        operation_attempts=settings.minio_operation_attempts,
+    )
 
 
 def _docker_registry_auth_summary(
@@ -263,12 +278,7 @@ async def run_worker(settings: WorkerSettings) -> None:
 
         try:
             pool = RunnerPool(max_concurrent=settings.max_concurrent)
-            object_store = MinioObjectStore(
-                endpoint_url=settings.minio_endpoint,
-                access_key=settings.minio_access_key.get_secret_value(),
-                secret_key=settings.minio_secret_key.get_secret_value(),
-                region=settings.minio_region,
-            )
+            object_store = _build_worker_object_store(settings)
             await _ensure_runtime_buckets(object_store)
             idle_exit = _IdleExitTracker(
                 after_seconds=settings.idle_exit_after_seconds,
@@ -541,6 +551,7 @@ async def _spawn_trial(
                 task_config=task_config,
                 task_dir=task_dir,
                 task_checksum=task_checksum,
+                docker_api_timeout_sec=settings.docker_api_timeout_sec,
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task
@@ -613,6 +624,7 @@ async def _spawn_trial(
             driver_factory=lambda: DockerDriver(
                 image=task_image,
                 workspace=task_config.environment.workdir,
+                docker_api_timeout_sec=settings.docker_api_timeout_sec,
             ),
             agent_factory=_default_agent_factory(
                 team_id,
@@ -657,6 +669,13 @@ async def _spawn_trial(
             ),
             sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
             sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
+            sidecar_runtime_factory=lambda: DockerTaskSidecarRuntime(
+                task_config=task_config,
+                task_dir=task_dir,
+                task_checksum=task_checksum,
+                trial_id=trial_id,
+                docker_api_timeout_sec=settings.docker_api_timeout_sec,
+            ),
         )
 
         try:

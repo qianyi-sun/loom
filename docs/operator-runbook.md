@@ -673,6 +673,12 @@ See `docs/architecture/agent-adapter.md` for the architecture.
 | `trial_cache_min_free_gb` | `20` | Capacity backstop — when free disk drops below this, oldest-by-creation entries are evicted first. |
 | `trial_cache_build_lock_timeout_sec` | `1800.0` | Cluster-wide builder-slot TTL. The slot's owner refreshes every 60 s while building. |
 | `subprocess_gateway_url` | unset; k8s manifest sets `http://host.docker.internal:30443/openai/v1` | Sandbox-facing OpenAI-compatible gateway facade URL for subprocess agents. |
+| `docker_api_timeout_sec` | `1800` | Docker SDK API timeout for worker-created clients. Keep this near the largest expected pull/build budget so docker-py does not fail long pulls, Dockerfile builds, or sidecar startup at its shorter default. |
+| `minio_max_pool_connections` | `256` | Worker-side boto3 S3 connection pool size. Size with `max_concurrent` because task materialization, artifacts, and trajectory upload overlap during sweeps. |
+| `minio_connect_timeout_sec` | `5.0` | S3 connect timeout for worker object-store calls. |
+| `minio_read_timeout_sec` | `120.0` | S3 socket read timeout for worker object-store calls. |
+| `minio_operation_timeout_sec` | `300.0` | Wall-clock timeout for each worker S3 wrapper call such as `download_prefix`, `put_object`, multipart part upload, and presign. |
+| `minio_operation_attempts` | `3` | Number of worker S3 operation attempts after timeout/reconnect. Each attempt gets the full operation timeout. |
 
 ### Setting up the optional shared registry (Docker Hub example)
 
@@ -719,6 +725,18 @@ but each worker pays the build cost once).
   → bump `trial_cache_base_image_pull_timeout_sec`; the benchmark's
   task image is bigger than the default 30 min budget can handle on
   the worker's link.
+- **Trial setup fails with Docker SDK read timeout during image pull,
+  Dockerfile build, or sidecar startup** → bump `docker_api_timeout_sec`
+  and verify the worker has Docker Hub/registry auth mounted. The
+  task-level `build_timeout_sec` still bounds Dockerfile builds; this
+  knob prevents docker-py itself from timing out first.
+- **Trial setup fails with `S3 download_prefix timed out` or trajectory /
+  artifact upload timeouts under high concurrency** → first confirm
+  MinIO health and network reachability, then raise
+  `minio_operation_timeout_sec` or `minio_operation_attempts`. If errors
+  coincide with high worker concurrency and connection starvation, raise
+  `minio_max_pool_connections`; if Python setup threads are saturated,
+  tune `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS` separately.
 - **Trial fails with `TrialCacheError: failed to acquire build slot`**
   → check the `active_trial_cache_builds` table for a stuck row past
   its `expires_at`; the next claimant will steal it on its own, but
@@ -1625,6 +1643,13 @@ mock provider and browser automation job.
   as `max(32, min(LOOM_WORKER_MAX_CONCURRENT * 4, 256))` when unset.
   This is the thread pool for blocking Docker, S3/MinIO, Hugging Face,
   and filesystem calls; it is not additional trial capacity.
+- Docker and S3 have separate worker-side timeout/pool knobs. Use
+  `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC` for docker-py read timeouts during
+  large pulls/builds/sidecars, and the `LOOM_WORKER_MINIO_*` timeout and
+  pool knobs for object-store materialization, artifact upload, and
+  trajectory flush pressure. These do not increase trial capacity; they
+  keep each admitted trial from failing because the SDK default is too
+  small for high-concurrency benchmark sweeps.
 - Docker-backed workers need a high open-file limit for high sandbox
   concurrency. The dev and remote-worker compose files set
   `nofile=65536`; equivalent production deployments should set the same

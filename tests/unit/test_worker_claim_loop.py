@@ -20,6 +20,26 @@ class _Settings:
         self.blocking_io_max_workers = blocking_io_max_workers
 
 
+class _ObjectStoreSettings:
+    minio_endpoint = "http://minio:9000"
+    minio_region = "us-east-1"
+    minio_max_pool_connections = 512
+    minio_connect_timeout_sec = 7.5
+    minio_read_timeout_sec = 180.0
+    minio_operation_timeout_sec = 600.0
+    minio_operation_attempts = 4
+
+    class _Secret:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def get_secret_value(self) -> str:
+            return self.value
+
+    minio_access_key = _Secret("access")
+    minio_secret_key = _Secret("secret")
+
+
 def test_blocking_io_worker_count_defaults_from_trial_concurrency() -> None:
     assert (
         ml._resolve_blocking_io_max_workers(  # type: ignore[attr-defined]
@@ -112,6 +132,33 @@ def test_configure_blocking_io_executor_sets_loop_default(
 
     assert created == [(32, "loom-worker-io")]
     assert len(installed) == 1
+
+
+def test_worker_object_store_uses_worker_s3_timeout_and_pool_config(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    created: dict[str, object] = {}
+
+    class _FakeObjectStore:
+        def __init__(self, **kwargs: object) -> None:
+            created.update(kwargs)
+
+    monkeypatch.setattr(ml, "MinioObjectStore", _FakeObjectStore)
+
+    store = ml._build_worker_object_store(_ObjectStoreSettings())  # type: ignore[attr-defined]
+
+    assert isinstance(store, _FakeObjectStore)
+    assert created == {
+        "endpoint_url": "http://minio:9000",
+        "access_key": "access",
+        "secret_key": "secret",
+        "region": "us-east-1",
+        "max_pool_connections": 512,
+        "connect_timeout": 7.5,
+        "read_timeout": 180.0,
+        "operation_timeout": 600.0,
+        "operation_attempts": 4,
+    }
 
 
 def test_docker_registry_auth_summary_reports_only_secret_free_metadata(

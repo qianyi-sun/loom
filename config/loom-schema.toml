@@ -45,6 +45,36 @@ used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "str"
 default     = "us-east-1"
 
+[service_config.minio_max_pool_connections]
+used_by     = ["worker"]
+python_type = "int"
+default     = 256
+description = "Worker-side boto3 S3 connection pool size. Size this with worker concurrency because task materialization, artifact upload, and trajectory upload can overlap heavily during benchmark sweeps."
+
+[service_config.minio_connect_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 5.0
+description = "Worker-side boto3 S3 connect timeout in seconds."
+
+[service_config.minio_read_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 120.0
+description = "Worker-side boto3 S3 socket read timeout in seconds. Keep above transient MinIO latency under high-concurrency materialization/upload pressure."
+
+[service_config.minio_operation_timeout_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 300.0
+description = "Worker-side wall-clock timeout for each S3 operation wrapper such as download_prefix, put_object, multipart part upload, and presign."
+
+[service_config.minio_operation_attempts]
+used_by     = ["worker"]
+python_type = "int"
+default     = 3
+description = "Worker-side S3 operation attempts after timeout/reconnect. Each attempt uses minio_operation_timeout_sec."
+
 [service_config.llm_gateway_url]
 used_by     = ["control-plane"]
 python_type = "HttpUrl"
@@ -509,6 +539,12 @@ default     = "/var/lib/loom/trajectories"
 used_by     = ["worker"]
 python_type = "Path"
 default     = "/var/run/docker.sock"
+
+[service_config.docker_api_timeout_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 1800
+description = "Docker SDK API timeout in seconds for worker-created clients. Keeps large pulls/builds/sidecars from failing at docker-py's shorter default during benchmark sweeps."
 
 [service_config.fixtures_root]
 used_by     = ["worker"]

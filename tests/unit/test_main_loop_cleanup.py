@@ -130,6 +130,7 @@ class _FakeSettings:
     # Phase D: required even when isolation is off because the worker
     # reads it to construct the LocalTrialRunner.
     sandbox_step_jwt_ttl_sec = 600
+    docker_api_timeout_sec = 1800
 
 
 async def _drive_spawn(runner_target: object) -> Path:

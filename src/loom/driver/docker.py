@@ -66,6 +66,7 @@ class DockerDriver:
     capabilities: Capabilities = field(default_factory=_default_caps)
     os: OS = "linux"
     network_policy_baseline: NetworkPolicy = field(default_factory=Public)
+    docker_api_timeout_sec: int | None = None
     _client: Any | None = field(default=None, init=False, repr=False)
     _container: Any | None = field(default=None, init=False, repr=False)
     _state: str = field(default="constructed", init=False)
@@ -79,7 +80,11 @@ class DockerDriver:
 
         opts = options or StartOptions()
         try:
-            self._client = docker.from_env()
+            self._client = (
+                docker.from_env()
+                if self.docker_api_timeout_sec is None
+                else docker.from_env(timeout=self.docker_api_timeout_sec)
+            )
             await asyncio.to_thread(self._ensure_image, opts)
 
             run_kwargs: dict[str, Any] = dict(

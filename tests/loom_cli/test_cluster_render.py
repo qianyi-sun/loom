@@ -272,6 +272,19 @@ def test_worker_manifest_renders_configured_capacity_and_resources() -> None:
     container = worker["spec"]["template"]["spec"]["containers"][0]
     env = [entry for entry in container["env"] if entry["name"] == "LOOM_WORKER_MAX_CONCURRENT"]
     assert env == [{"name": "LOOM_WORKER_MAX_CONCURRENT", "value": "24"}]
+    env_map = {entry["name"]: entry for entry in container["env"]}
+    assert env_map["LOOM_WORKER_DOCKER_API_TIMEOUT_SEC"] == {
+        "name": "LOOM_WORKER_DOCKER_API_TIMEOUT_SEC",
+        "value": "1800",
+    }
+    assert env_map["LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS"] == {
+        "name": "LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS",
+        "value": "256",
+    }
+    assert env_map["LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC"] == {
+        "name": "LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC",
+        "value": "300.0",
+    }
     assert container["resources"] == {
         "requests": {"cpu": "2", "memory": "8Gi"},
         "limits": {"cpu": "32", "memory": "128Gi"},

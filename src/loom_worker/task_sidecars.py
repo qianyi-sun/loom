@@ -63,19 +63,25 @@ class DockerTaskSidecarRuntime:
         task_checksum: str,
         trial_id: UUID,
         health_poll_interval_sec: float = 0.5,
+        docker_api_timeout_sec: int | None = None,
     ) -> None:
         self.task_config = task_config
         self.task_dir = task_dir
         self.task_checksum = task_checksum
         self.trial_id = trial_id
         self.health_poll_interval_sec = health_poll_interval_sec
+        self.docker_api_timeout_sec = docker_api_timeout_sec
         self._client: Any | None = None
         self._containers: list[Any] = []
         self._network: Any | None = None
         self._network_name: str | None = None
 
     async def start(self, network_name: str | None = None) -> str:
-        self._client = docker.from_env()
+        self._client = (
+            docker.from_env()
+            if self.docker_api_timeout_sec is None
+            else docker.from_env(timeout=self.docker_api_timeout_sec)
+        )
         try:
             if network_name is None:
                 network_name = f"loom-sidecars-{self.trial_id}"

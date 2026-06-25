@@ -126,6 +126,33 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
     assert fake_client.closed is True
 
 
+async def test_resolve_task_image_passes_docker_api_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    fake_images = _FakeImages()
+    fake_client = _FakeDockerClient(fake_images)
+    from_env_timeouts: list[float | None] = []
+
+    def _from_env(*, timeout: float | None = None) -> _FakeDockerClient:
+        from_env_timeouts.append(timeout)
+        return fake_client
+
+    monkeypatch.setattr(task_image.docker, "from_env", _from_env)
+
+    await resolve_task_image(
+        task_config=_task_config(dockerfile="environment/Dockerfile"),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        docker_api_timeout_sec=900.0,
+    )
+
+    assert from_env_timeouts == [900.0]
+
+
 async def test_resolve_task_image_builds_from_explicit_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:

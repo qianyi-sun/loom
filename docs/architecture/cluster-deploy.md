@@ -494,6 +494,16 @@ Workers also size their Python blocking-I/O executor from concurrency as
 covers blocking Docker, S3/MinIO, Hugging Face, and filesystem calls and
 must not be counted as extra trial capacity.
 
+Docker SDK and S3 object-store behavior are separately tunable. The worker
+passes `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC` into every worker-created
+docker-py client so large image pulls, task Dockerfile builds, and task
+sidecars do not fail at docker-py's default read timeout. It also passes
+`LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS`, `LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC`,
+`LOOM_WORKER_MINIO_READ_TIMEOUT_SEC`,
+`LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC`, and
+`LOOM_WORKER_MINIO_OPERATION_ATTEMPTS` into the worker object store used for
+task materialization, artifacts, and trajectory upload.
+
 Use the CPU/memory formula as an upper-bound planning heuristic, not as
 the default:
 

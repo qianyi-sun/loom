@@ -20,6 +20,8 @@ spec:
           value: '1.0'
         - name: LOOM_WORKER_CONTROL_PLANE_URL
           value: http://loom-control-plane:8080
+        - name: LOOM_WORKER_DOCKER_API_TIMEOUT_SEC
+          value: '1800'
         - name: LOOM_WORKER_DOCKER_SOCKET
           value: /var/run/docker.sock
         - name: LOOM_WORKER_DRAIN_TIMEOUT_SEC
@@ -39,8 +41,18 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-access-key
+        - name: LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC
+          value: '5.0'
         - name: LOOM_WORKER_MINIO_ENDPOINT
           value: http://loom-minio:9000
+        - name: LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS
+          value: '256'
+        - name: LOOM_WORKER_MINIO_OPERATION_ATTEMPTS
+          value: '3'
+        - name: LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC
+          value: '300.0'
+        - name: LOOM_WORKER_MINIO_READ_TIMEOUT_SEC
+          value: '120.0'
         - name: LOOM_WORKER_MINIO_REGION
           value: us-east-1
         - name: LOOM_WORKER_MINIO_SECRET_KEY

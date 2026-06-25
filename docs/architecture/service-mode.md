@@ -59,7 +59,10 @@ trials with the same task checksum, Dockerfile path, and optional
 assets are not copied into the agent-visible workdir. Before a cache-miss
 build, the worker rejects contexts above `LOOM_TASK_IMAGE_BUILD_MAX_FILES`
 (default 2000) or `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` (default 536870912), and
-`build_timeout_sec` bounds the Docker build call. Tasks may also declare
+`build_timeout_sec` bounds the Docker build call. Worker-created docker-py
+clients also use `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC`, which must be at least
+as large as the largest expected pull/build/sidecar budget so the SDK does not
+time out before the task's own timeout policy. Tasks may also declare
 `environment.sidecars`; Docker-backed workers start those auxiliary containers
 on the same per-trial network, wait for declared healthchecks, pass
 `environment.environment` into the primary sandbox, and clean the sidecars up

@@ -240,3 +240,33 @@ async def test_sidecar_runtime_creates_and_removes_network_when_needed(
         {"name": f"loom-sidecars-{trial_id}", "driver": "bridge"},
     ]
     assert fake_client.networks.created[0].removed is True
+
+
+async def test_sidecar_runtime_passes_docker_api_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    from_env_timeouts: list[float | None] = []
+
+    def _from_env(*, timeout: float | None = None) -> _FakeDockerClient:
+        from_env_timeouts.append(timeout)
+        return fake_client
+
+    monkeypatch.setattr(task_sidecars.docker, "from_env", _from_env)
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        docker_api_timeout_sec=900.0,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert from_env_timeouts == [900.0]

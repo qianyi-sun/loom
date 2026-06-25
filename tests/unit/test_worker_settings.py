@@ -12,6 +12,12 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_MINIO_ENDPOINT",
     "LOOM_WORKER_MINIO_ACCESS_KEY",
     "LOOM_WORKER_MINIO_SECRET_KEY",
+    "LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS",
+    "LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC",
+    "LOOM_WORKER_MINIO_READ_TIMEOUT_SEC",
+    "LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC",
+    "LOOM_WORKER_MINIO_OPERATION_ATTEMPTS",
+    "LOOM_WORKER_DOCKER_API_TIMEOUT_SEC",
     "LOOM_WORKER_MAX_CONCURRENT",
     "LOOM_WORKER_BLOCKING_IO_MAX_WORKERS",
     "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS",
@@ -38,6 +44,12 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://minio:9000")
     monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
     monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS", "512")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC", "7.5")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_READ_TIMEOUT_SEC", "180")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC", "600")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_OPERATION_ATTEMPTS", "4")
+    monkeypatch.setenv("LOOM_WORKER_DOCKER_API_TIMEOUT_SEC", "900")
     monkeypatch.setenv("LOOM_WORKER_MAX_CONCURRENT", "10")
     monkeypatch.setenv("LOOM_WORKER_BLOCKING_IO_MAX_WORKERS", "40")
     monkeypatch.setenv("LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS", "300")
@@ -48,6 +60,12 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     )
     s = WorkerSettings(_env_file=None)
     assert s.max_concurrent == 10
+    assert s.minio_max_pool_connections == 512
+    assert s.minio_connect_timeout_sec == 7.5
+    assert s.minio_read_timeout_sec == 180
+    assert s.minio_operation_timeout_sec == 600
+    assert s.minio_operation_attempts == 4
+    assert s.docker_api_timeout_sec == 900
     assert s.blocking_io_max_workers == 40
     assert s.idle_exit_after_seconds == 300
     assert s.drain_timeout_sec == 600

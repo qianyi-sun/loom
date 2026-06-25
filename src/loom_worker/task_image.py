@@ -60,6 +60,7 @@ async def resolve_task_image(
     task_config: TaskConfig,
     task_dir: Path,
     task_checksum: str,
+    docker_api_timeout_sec: int | None = None,
 ) -> str:
     """Return the Docker image a service worker should use for this task.
 
@@ -95,6 +96,7 @@ async def resolve_task_image(
                 task_dir=task_dir,
                 dockerfile=dockerfile,
                 build_context=build_context,
+                docker_api_timeout_sec=docker_api_timeout_sec,
             ),
             timeout=timeout,
         )
@@ -162,10 +164,15 @@ def _ensure_dockerfile_image(
     task_dir: Path,
     dockerfile: Path,
     build_context: Path,
+    docker_api_timeout_sec: int | None = None,
 ) -> None:
     configured_dockerfile = task_config.environment.dockerfile
     assert configured_dockerfile is not None
-    client: Any = docker.from_env()
+    client: Any = (
+        docker.from_env()
+        if docker_api_timeout_sec is None
+        else docker.from_env(timeout=docker_api_timeout_sec)
+    )
     try:
         try:
             client.images.get(tag)
