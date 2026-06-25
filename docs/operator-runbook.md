@@ -1756,6 +1756,10 @@ mock provider and browser automation job.
   `cluster-config.toml`; the default render is 3 worker replicas at 16
   trials each. Memory scales with the trajectory ring buffer + the
   largest artifact in flight.
+- Remote worker pools should set `LOOM_WORKER_HOSTNAME` to the physical or VM
+  node name before startup. Otherwise Docker Compose workers may register with
+  container hostnames, which makes Monitor and capacity evidence harder to map
+  back to GB10/OLDLAB hosts.
 - Example higher-capacity render config:
 
   ```toml

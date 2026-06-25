@@ -50,6 +50,12 @@ queued x86-specific work. Only tasks submitted with
 use `"any"` only after the image and verifier have been proven credible on
 both architectures.
 
+Set `LOOM_WORKER_HOSTNAME` in each remote worker env file to the physical or
+VM host name, for example `trt-gb10-7`. If it is unset, the worker registers
+with the runtime hostname, which may be only a container ID in Docker Compose.
+Using the host name keeps Monitor, worker inventory, and capacity evidence
+readable when many remote workers attach through the same control plane.
+
 ## Control-node Service Tunnels
 
 When the control node is a Kubernetes cluster and remote workers live outside
@@ -387,6 +393,9 @@ LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
 LOOM_WORKER_MINIO_SECRET_KEY=...
 LOOM_WORKER_MAX_CONCURRENT=5
+# Optional, but recommended for remote pools so UI/DB worker rows identify the
+# physical or VM host instead of the container hostname.
+# LOOM_WORKER_HOSTNAME=worker-host-a
 # Keep these defaults for normal sweeps; raise only after logs show SDK timeouts.
 LOOM_WORKER_DOCKER_API_TIMEOUT_SEC=1800
 LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS=256

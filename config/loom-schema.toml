@@ -462,6 +462,11 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 5
 
+[service_config.hostname]
+used_by     = ["worker"]
+python_type = "str"
+description = "Optional worker hostname override used for registration and fleet observability. Defaults to the runtime hostname when unset."
+
 [service_config.blocking_io_max_workers]
 used_by     = ["worker"]
 python_type = "int"

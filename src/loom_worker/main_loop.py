@@ -23,6 +23,7 @@ import logging
 import os
 import platform
 import shutil
+import socket
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -93,6 +94,12 @@ def _host_cpu_arch() -> str:
     if machine in {"aarch64", "arm64"}:
         return "arm64"
     return "x86_64"
+
+
+def _worker_hostname(configured_hostname: str | None) -> str:
+    if configured_hostname:
+        return configured_hostname
+    return socket.gethostname()
 
 
 _DEFAULT_CAPS = [
@@ -256,7 +263,7 @@ async def run_worker(settings: WorkerSettings) -> None:
         )
 
         info = await cp_client.register(
-            hostname="worker",
+            hostname=_worker_hostname(settings.hostname),
             version="0.0.1",
             capabilities=_DEFAULT_CAPS,
         )

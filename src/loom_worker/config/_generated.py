@@ -28,6 +28,7 @@ class WorkerSettings(BaseSettings):
     fixtures_root: Path | None = None
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     heartbeat_interval_sec: float = 5.0
+    hostname: str | None = None
     idle_exit_after_seconds: float | None = None
     log_level: LogLevel = "info"
     max_concurrent: int = 5

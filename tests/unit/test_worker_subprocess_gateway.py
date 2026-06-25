@@ -1,4 +1,8 @@
-from loom_worker.main_loop import _host_cpu_arch, _sandbox_extra_hosts_for_url
+from loom_worker.main_loop import (
+    _host_cpu_arch,
+    _sandbox_extra_hosts_for_url,
+    _worker_hostname,
+)
 
 
 def test_host_cpu_arch_normalizes_arm64_names(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -23,3 +27,13 @@ def test_host_docker_internal_subprocess_gateway_adds_host_gateway_alias() -> No
 def test_regular_subprocess_gateway_url_needs_no_extra_hosts() -> None:
     assert _sandbox_extra_hosts_for_url("http://10.0.0.5:30443/openai/v1") == ()
     assert _sandbox_extra_hosts_for_url(None) == ()
+
+
+def test_worker_hostname_prefers_configured_value() -> None:
+    assert _worker_hostname("trt-gb10-7") == "trt-gb10-7"
+
+
+def test_worker_hostname_falls_back_to_runtime_hostname(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("loom_worker.main_loop.socket.gethostname", lambda: "worker-abc")
+    assert _worker_hostname(None) == "worker-abc"
+    assert _worker_hostname("") == "worker-abc"
