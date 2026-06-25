@@ -36,6 +36,18 @@ def test_gpu_required():
     assert req.gpu_vendor == "nvidia"
 
 
+def test_cpu_architecture_required():
+    env = EnvironmentConfig(os="linux", cpu_arch="arm64")
+    req = derive_requires_caps(_task(env))
+    assert req.cpu_arch == "arm64"
+
+
+def test_cpu_architecture_defaults_to_x86_64():
+    env = EnvironmentConfig(os="linux")
+    req = derive_requires_caps(_task(env))
+    assert req.cpu_arch == "x86_64"
+
+
 def test_step_requires_no_network_adds_to_set():
     env = EnvironmentConfig(
         os="linux",

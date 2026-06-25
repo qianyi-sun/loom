@@ -80,6 +80,16 @@ class Driver(Protocol):
 
 State machine: `constructed → running → stopped`. No re-start.
 
+## Capability axes
+
+`Capabilities` describes both the sandbox backend contract and the worker host
+where that backend runs. The scheduler currently matches `os`, `cpu_arch`,
+`gpu_vendor`, and `network_policies` from `trials.requires_caps`. `cpu_arch`
+uses worker values `x86_64` or `arm64`; task requirements may also use `any`
+only for images and verifiers proven credible on both architectures. Missing
+legacy trial requirements are treated as `x86_64` so ARM64 worker pools do not
+claim historical x86-specific work.
+
 ## Output buffering
 
 - `exec()` is buffered and capped at `MAX_EXEC_STREAM_BYTES = 10 MB`.

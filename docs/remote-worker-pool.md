@@ -40,6 +40,16 @@ Do not expose those worker-facing endpoints to the public internet. Use
 a private network, VPN, or firewall rules that allow only trusted worker
 hosts to reach them.
 
+Remote workers also advertise their host CPU architecture in
+`workers.capabilities[].cpu_arch`. The worker process auto-detects common Linux
+values (`x86_64`, `aarch64`/`arm64`) and the scheduler matches that against
+`trials.requires_caps.cpu_arch`. Missing legacy trial requirements are treated
+as `x86_64`, so attaching ARM64 hosts such as GB10 cannot accidentally drain
+queued x86-specific work. Only tasks submitted with
+`environment.cpu_arch = "arm64"` or `"any"` can be claimed by ARM64 workers;
+use `"any"` only after the image and verifier have been proven credible on
+both architectures.
+
 ## Control-node Service Tunnels
 
 When the control node is a Kubernetes cluster and remote workers live outside
@@ -576,18 +586,23 @@ Before treating a remote worker pool as usable:
 4. Generate `worker-plan.csv`; every usable node should be `include`,
    and every excluded node needs a reason.
 5. Start one remote worker at `LOOM_WORKER_MAX_CONCURRENT=1`.
-6. Submit a tiny API-model + Docker-terminal evaluation and verify the
-   remote worker claims it.
-7. Confirm the trial reaches a terminal state and artifacts/trajectory
+6. Submit a tiny API-model + Docker-terminal evaluation whose task config
+   declares `environment.cpu_arch` compatible with that worker. For ARM64
+   worker pools, do not rely on legacy tasks with no `cpu_arch` field; they
+   are intentionally treated as x86_64-only.
+7. Verify the remote worker claims it and that incompatible queued work remains
+   untouched. For example, an ARM64 worker must not claim SWE-Bench Verified
+   tasks that use `swebench/sweb.eval.x86_64.*` images.
+8. Confirm the trial reaches a terminal state and artifacts/trajectory
    downloads work. Workers bootstrap both runtime buckets
    (`trajectories` and `artifacts`) before claiming trials; a missing
    bucket or artifact upload failure should produce a terminal failed
    trial, not a succeeded trial with missing outputs.
-8. Scale to the rest of the included worker hosts at the planned
+9. Scale to the rest of the included worker hosts at the planned
    concurrency.
-9. Run a real supported-benchmark load test sized to exceed the planned
+10. Run a real supported-benchmark load test sized to exceed the planned
    slot count.
-10. Check there are no stuck `claimed` / `running` trials, leaked Docker
+11. Check there are no stuck `claimed` / `running` trials, leaked Docker
    containers, missing artifacts, provider rate-limit storms, or host
    swap pressure.
 

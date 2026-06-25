@@ -21,6 +21,7 @@ from loom.models.types import (
     ModelSpec,
     MultiStepRewardStrategy,
     NetworkPolicyKind,
+    RequiredCPUArch,
     VerifierEnvMode,
 )
 
@@ -49,6 +50,7 @@ class TaskSidecarConfig(BaseModel):
 class EnvironmentConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     os: OS
+    cpu_arch: RequiredCPUArch = "x86_64"
     gpu_vendor: GPUVendor = "none"
     docker_image: str | None = None
     dockerfile: PurePosixPath | None = None

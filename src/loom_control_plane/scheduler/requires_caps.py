@@ -29,6 +29,7 @@ def derive_requires_caps(task: TaskConfig) -> RequiredCapabilities:
 
     return RequiredCapabilities(
         os=task.environment.os,
+        cpu_arch=task.environment.cpu_arch,
         gpu_vendor=task.environment.gpu_vendor,
         network_policies=frozenset(needed),
     )

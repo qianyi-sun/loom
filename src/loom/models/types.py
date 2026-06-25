@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict
 # Scalar fields that match Postgres claim-query semantics exactly.
 OS = Literal["linux", "windows"]
 GPUVendor = Literal["none", "nvidia"]
+CPUArch = Literal["x86_64", "arm64"]
+RequiredCPUArch = Literal["x86_64", "arm64", "any"]
 
 # Verifier semantics.
 VerifierEnvMode = Literal["shared", "separate"]

@@ -33,6 +33,10 @@ WITH next AS (
      AND t.attempt_count < q.max_attempts
      AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= NOW())
      AND t.requires_caps->>'os' = ANY(:worker_os)
+     AND (
+       COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
+       OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches)
+     )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
    ORDER BY
@@ -59,6 +63,7 @@ async def claim_one(
     *,
     worker_id: UUID,
     worker_os: list[str],
+    worker_cpu_arches: list[str],
     worker_gpu_vendors: list[str],
     worker_network_policies: list[str],
 ) -> RowMapping | None:
@@ -68,6 +73,7 @@ async def claim_one(
     params: dict[str, Any] = {
         "worker_id": worker_id,
         "worker_os": worker_os,
+        "worker_cpu_arches": worker_cpu_arches,
         "worker_gpu_vendors": worker_gpu_vendors,
         "worker_network_policies": json.dumps(worker_network_policies),
     }

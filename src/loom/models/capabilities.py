@@ -6,7 +6,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from loom.models.types import OS, GPUVendor, NetworkPolicyKind, ResourceMode
+from loom.models.types import (
+    OS,
+    CPUArch,
+    GPUVendor,
+    NetworkPolicyKind,
+    RequiredCPUArch,
+    ResourceMode,
+)
 
 
 class Capabilities(BaseModel):
@@ -15,6 +22,7 @@ class Capabilities(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     os: OS
+    cpu_arch: CPUArch = "x86_64"
     gpu_vendor: GPUVendor
     network_policies: frozenset[NetworkPolicyKind]
     dynamic_network_policy: bool
@@ -40,6 +48,7 @@ class RequiredCapabilities(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     os: OS
+    cpu_arch: RequiredCPUArch = "x86_64"
     gpu_vendor: GPUVendor
     network_policies: frozenset[NetworkPolicyKind]
 
@@ -47,6 +56,7 @@ class RequiredCapabilities(BaseModel):
         """True iff `caps` offers everything this requires."""
         return (
             self.os == caps.os
+            and (self.cpu_arch == "any" or self.cpu_arch == caps.cpu_arch)
             and self.gpu_vendor == caps.gpu_vendor
             and self.network_policies <= caps.network_policies
         )

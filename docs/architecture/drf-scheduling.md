@@ -37,6 +37,10 @@ SELECT t.id
    AND t.attempt_count < q.max_attempts
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= NOW())
    AND t.requires_caps->>'os'         = ANY(:worker_os)
+   AND (
+     COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
+     OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches)
+   )
    AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
    AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
  ORDER BY
@@ -84,13 +88,22 @@ Quota knobs (`team_quotas` table):
 `requires_caps` is **derived** from the task config at submission
 time (`derive_requires_caps` in
 `src/loom_control_plane/scheduler/requires_caps.py`); submitters
-don't write it. Three predicates today:
+don't write it. Four predicates today:
 
 | Predicate          | Comes from task            | Matches against worker      |
 |--------------------|----------------------------|------------------------------|
 | `os`               | container base image       | `worker_os: list[str]`      |
+| `cpu_arch`         | task image architecture    | `worker_cpu_arches: list[str]` |
 | `gpu_vendor`       | `requires.gpu`             | `worker_gpu_vendors`        |
 | `network_policies` | task's egress allow/deny   | `worker_network_policies` (superset) |
+
+`cpu_arch` is intentionally conservative for mixed x86_64/ARM64 fleets.
+Missing legacy `requires_caps.cpu_arch` is treated as `x86_64`, so new ARM64
+workers do not claim pre-existing tasks such as SWE-Bench images whose task
+rows were created before architecture gating existed. Task authors can set
+`environment.cpu_arch = "arm64"` for ARM-only images or
+`environment.cpu_arch = "any"` only after proving the task image and verifier
+are credible on both x86_64 and ARM64.
 
 `gpu_types` (specific SKUs like `A100`, `H100`) was added with the
 Modal driver. It's populated on the worker side, but the scheduler's

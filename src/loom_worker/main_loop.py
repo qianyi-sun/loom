@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import shutil
 import tempfile
 import time
@@ -87,9 +88,17 @@ _VERIFIER_CTORS: dict[str, Callable[..., Verifier]] = {
 }
 
 
+def _host_cpu_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"aarch64", "arm64"}:
+        return "arm64"
+    return "x86_64"
+
+
 _DEFAULT_CAPS = [
     {
         "os": "linux",
+        "cpu_arch": _host_cpu_arch(),
         "gpu_vendor": "none",
         "network_policies": ["public", "no-network", "allowlist"],
         "dynamic_network_policy": True,

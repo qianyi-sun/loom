@@ -42,6 +42,7 @@ async def claim_trial(
         ) from exc
 
     worker_os = sorted({c["os"] for c in caps})
+    worker_cpu_arches = sorted({c.get("cpu_arch", "x86_64") for c in caps})
     worker_gpu = sorted({c["gpu_vendor"] for c in caps})
     worker_network = sorted({
         p for c in caps for p in c["network_policies"]
@@ -53,7 +54,8 @@ async def claim_trial(
         row = await claim_one(
             session,
             worker_id=worker_id,
-            worker_os=worker_os, worker_gpu_vendors=worker_gpu,
+            worker_os=worker_os, worker_cpu_arches=worker_cpu_arches,
+            worker_gpu_vendors=worker_gpu,
             worker_network_policies=worker_network,
         )
         await session.commit()

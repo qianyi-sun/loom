@@ -79,6 +79,7 @@ def test_capabilities_default_gpu_types_empty():
         resource_modes=frozenset(["auto"]),
     )
     assert c.gpu_types == frozenset()
+    assert c.cpu_arch == "x86_64"
 
 
 def test_capabilities_gpu_types_roundtrip():
@@ -94,3 +95,26 @@ def test_capabilities_gpu_types_roundtrip():
     assert "H100" in c.gpu_types
     with pytest.raises(ValidationError):
         c.gpu_types = frozenset()  # type: ignore[misc]
+
+
+def test_required_caps_match_cpu_architecture():
+    worker = Capabilities(
+        os="linux", gpu_vendor="none",
+        network_policies=frozenset(["public"]),
+        dynamic_network_policy=False, mounted_fs=True,
+        resource_modes=frozenset(["auto"]),
+        cpu_arch="arm64",
+    )
+    x86_req = RequiredCapabilities(
+        os="linux", gpu_vendor="none",
+        network_policies=frozenset(["public"]),
+        cpu_arch="x86_64",
+    )
+    any_req = RequiredCapabilities(
+        os="linux", gpu_vendor="none",
+        network_policies=frozenset(["public"]),
+        cpu_arch="any",
+    )
+
+    assert x86_req.satisfied_by(worker) is False
+    assert any_req.satisfied_by(worker) is True

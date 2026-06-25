@@ -309,6 +309,10 @@ WITH next AS (
      AND t.attempt_count < q.max_attempts
      AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= NOW())
      AND t.requires_caps->>'os' = ANY(:worker_os)
+     AND (
+       COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
+       OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches)
+     )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
    ORDER BY (q.in_flight_count * 1.0) / NULLIF(q.fair_share_weight, 0) ASC,
@@ -327,6 +331,11 @@ UPDATE trials t
  RETURNING t.id, t.team_id, t.task_id, t.config, t.requires_caps,
            t.attempt_count;
 ```
+
+The `cpu_arch` predicate is backward-compatible and conservative: legacy trial
+rows without `requires_caps.cpu_arch` are treated as `x86_64`. ARM64 remote
+workers therefore only claim tasks explicitly submitted with
+`environment.cpu_arch = "arm64"` or `"any"`.
 
 Ordering, most-important to least:
 1. Lowest `in_flight_count / fair_share_weight` (Dominant Resource

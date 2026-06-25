@@ -272,6 +272,11 @@ has 500 tasks. Its converter emits per-instance bundles that run the upstream
 registered rows may have `config={}`, readiness must come from a republished
 schema-v3 manifest with embedded validated `TaskConfig` payloads, not from raw
 legacy task-row counts.
+Those emitted SWE-Bench task configs must keep
+`environment.cpu_arch = "x86_64"` unless and until an ARM64-compatible upstream
+image or credible emulation path is explicitly added. Generic Docker capability
+matching is not enough for this benchmark because the upstream image name
+itself is x86_64 specific.
 SWE-Bench rows with no upstream test node ids must emit a self-contained script
 verifier that records a diagnostic check and numeric reward `0`; they should
 not fail the platform because an image lacks pytest or pip support.

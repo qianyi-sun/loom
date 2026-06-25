@@ -161,6 +161,12 @@ aggregate is computed from the steps that completed.
   `LOOM_TASK_IMAGE_BUILD_MAX_BYTES` defaults to 536870912 bytes. If either
   limit is exceeded, the trial fails during setup with an actionable
   diagnostic instead of starting an unbounded Docker build.
+- **CPU architecture:** `cpu_arch = "x86_64"` is the default. Set
+  `cpu_arch = "arm64"` for ARM-only images, or `cpu_arch = "any"` only after
+  the image, verifier, and expected artifacts have been proven credible on both
+  x86_64 and ARM64 workers. Legacy tasks that omit this field are scheduled as
+  x86_64-only so newly attached ARM64 worker pools cannot accidentally claim
+  architecture-specific images.
 - **Auxiliary services:** add `[[environment.sidecars]]` entries for Docker
   services that must run beside the primary sandbox. Sidecars support
   `docker_image` or `dockerfile`/`docker_build_context`, `command`,
