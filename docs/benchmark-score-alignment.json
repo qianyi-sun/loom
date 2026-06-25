@@ -120,9 +120,9 @@
         "justification": "GPQA Extended is a multiple-choice benchmark scored by exact choice accuracy."
       },
       "harbor_support": {
-        "status": "unknown",
-        "parity_target": "upstream GPQA choice evaluator",
-        "decision": "Use Harbor as parity target only after support is confirmed; otherwise replay identical selected choices against the upstream/canonical answer key."
+        "status": "not_supported",
+        "parity_target": "exact letter match against the GPQA Extended dataset row's correct-answer letter",
+        "decision": "Harbor (coder-harbor-cloud) ships no GPQA verifier. Loom's adapter (`GPQAAdapter.convert_instance`) emits a script verifier that extracts the answer letter from `final_answer.txt` and compares to the canonical letter stored in `answer_key.json` (derived from the dataset row). Equivalence is proven by replay: known correct letter → reward 1.0."
       },
       "score_semantics": {
         "task_set": "GPQA extended test rows imported into the gpqa benchmark.",
@@ -141,6 +141,17 @@
             "reference": "canonical GPQA answer option from task metadata",
             "expected_reward": 1.0,
             "replay_method": "Replay a known correct answer choice through Loom and the canonical answer-key scorer."
+          }
+        ]
+      },
+      "layer2_evidence": {
+        "status": "replay_validated",
+        "parity_kind": "replay",
+        "replay_tests": [
+          {
+            "case_id": "gpqa-correct-letter-scores-1",
+            "test_id": "packages/loom-benchmarks/tests/test_gpqa_adapter.py::test_gpqa_verifier_scores_correct_letter",
+            "asserts": "reward={'score': 1.0} when `final_answer.txt` ends with the canonical letter from `answer_key.json`"
           }
         ]
       }
@@ -241,9 +252,9 @@
         "justification": "LiveCodeBench code generation is scored by executing submitted code against hidden/public tests and reporting pass rate."
       },
       "harbor_support": {
-        "status": "unknown",
-        "parity_target": "LiveCodeBench upstream evaluator unless Harbor support is confirmed",
-        "decision": "Replay identical code artifacts through Loom and the upstream LiveCodeBench evaluator before reporting deltas."
+        "status": "not_supported",
+        "parity_target": "upstream LiveCodeBench evaluator semantics — pytest executing IO/functional test cases against the agent's submitted code",
+        "decision": "Harbor ships no LiveCodeBench verifier. Loom's adapter (`LiveCodeBenchAdapter.convert_instance`) decodes the compressed IO/functional test cases from the upstream dataset row and emits them verbatim as pytest test files, so Loom's pytest verifier IS the canonical LiveCodeBench scorer by construction. Functional and IO formats both covered."
       },
       "score_semantics": {
         "task_set": "livecodebench/code_generation_lite test rows imported into livecodebench.",
@@ -262,6 +273,27 @@
             "reference": "LiveCodeBench upstream evaluator for one code_generation_lite task",
             "expected_reward": 1.0,
             "replay_method": "Replay a known passing solution through Loom and the pinned upstream LiveCodeBench evaluator."
+          }
+        ]
+      },
+      "layer2_evidence": {
+        "status": "replay_validated",
+        "parity_kind": "construction",
+        "replay_tests": [
+          {
+            "case_id": "livecodebench-io-tests-pass",
+            "test_id": "packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_solution_passes_subprocess_run",
+            "asserts": "the bundled solution passes pytest end-to-end against the decoded upstream test cases"
+          },
+          {
+            "case_id": "livecodebench-private-cases-decoded",
+            "test_id": "packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_decodes_compressed_private_cases",
+            "asserts": "the adapter correctly decodes the upstream's compressed private test cases before emitting them — guards against the parity claim regressing if the upstream format changes"
+          },
+          {
+            "case_id": "livecodebench-functional-format",
+            "test_id": "packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_functional_cases_call_solution_method",
+            "asserts": "functional-format cases invoke the solution method correctly, matching the upstream evaluator's invocation"
           }
         ]
       }
@@ -327,9 +359,9 @@
         "justification": "MMLU-Pro is scored as exact multiple-choice answer accuracy over the published test rows."
       },
       "harbor_support": {
-        "status": "unknown",
-        "parity_target": "MMLU-Pro upstream answer-key scorer unless Harbor support is confirmed",
-        "decision": "Replay identical selected answers through Loom and the canonical answer-key scorer."
+        "status": "not_supported",
+        "parity_target": "exact letter match against the MMLU-Pro dataset row's answer field",
+        "decision": "Harbor ships no MMLU-Pro verifier. Loom's adapter (`MMLUProAdapter.convert_instance`) emits a script verifier that extracts the last standalone letter from `final_answer.txt` and compares to the canonical answer letter on the dataset row. Equivalence is proven by replay."
       },
       "score_semantics": {
         "task_set": "TIGER-Lab/MMLU-Pro test rows imported into mmlu-pro.",
@@ -350,6 +382,17 @@
             "replay_method": "Replay a known correct answer choice through Loom and the canonical MMLU-Pro answer-key scorer."
           }
         ]
+      },
+      "layer2_evidence": {
+        "status": "replay_validated",
+        "parity_kind": "replay",
+        "replay_tests": [
+          {
+            "case_id": "mmlu-pro-correct-letter-scores-1",
+            "test_id": "packages/loom-benchmarks/tests/test_mmlu_pro_adapter.py::test_mmlu_pro_verifier_scores_last_standalone_letter",
+            "asserts": "reward={'score': 1.0} when `final_answer.txt` ends with the canonical letter; pins the extraction rule against multi-letter reasoning (e.g. \"Reasoning mentions A. Final answer: D\")"
+          }
+        ]
       }
     },
     {
@@ -362,9 +405,9 @@
         "justification": "SkillFlow score credibility depends on replaying the same task artifact through the upstream task verifier semantics bundled with the dataset."
       },
       "harbor_support": {
-        "status": "unknown",
-        "parity_target": "upstream SkillFlow verifier unless Harbor support is confirmed",
-        "decision": "Replay identical produced artifacts through Loom and the upstream SkillFlow verifier path."
+        "status": "not_supported",
+        "parity_target": "upstream SkillFlow bundle's bundled pytest suite — the verifier semantics ARE the canonical scorer",
+        "decision": "Harbor ships no SkillFlow verifier. Loom's SkillFlow adapter passes through the upstream task bundle's structure unchanged: the bundled pre-baked solution + tests pass under pytest end-to-end. The Loom pytest verifier is the canonical scorer by construction."
       },
       "score_semantics": {
         "task_set": "SkillFlow tasks imported from the upstream task bundle.",
@@ -385,6 +428,17 @@
             "replay_method": "Replay a known successful task artifact through Loom and the upstream-compatible SkillFlow verifier."
           }
         ]
+      },
+      "layer2_evidence": {
+        "status": "replay_validated",
+        "parity_kind": "construction",
+        "replay_tests": [
+          {
+            "case_id": "skillflow-solution-runs",
+            "test_id": "packages/loom-benchmarks/tests/test_skillflow_and_skilllearnbench_adapter.py::test_skill_solution_runs[SkillFlowAdapter-skillflow]",
+            "asserts": "the upstream-bundled solution passes pytest end-to-end after `SkillFlowAdapter.convert_instance` materializes the task"
+          }
+        ]
       }
     },
     {
@@ -397,9 +451,9 @@
         "justification": "SkillLearnBench score credibility depends on replaying the same task artifact through the upstream verifier semantics."
       },
       "harbor_support": {
-        "status": "unknown",
-        "parity_target": "upstream SkillLearnBench verifier unless Harbor support is confirmed",
-        "decision": "Replay identical produced artifacts through Loom and the upstream SkillLearnBench verifier path."
+        "status": "not_supported",
+        "parity_target": "upstream SkillLearnBench bundle's bundled pytest suite — the verifier semantics ARE the canonical scorer",
+        "decision": "Same construction as skillflow — the SkillLearnBench adapter passes through the upstream task bundle's structure unchanged and pytest is the canonical evaluator."
       },
       "score_semantics": {
         "task_set": "SkillLearnBench tasks imported from the upstream repository.",
@@ -418,6 +472,17 @@
             "reference": "SkillLearnBench upstream-compatible verifier output for one task",
             "expected_reward": 1.0,
             "replay_method": "Replay a known successful task artifact through Loom and the upstream SkillLearnBench verifier."
+          }
+        ]
+      },
+      "layer2_evidence": {
+        "status": "replay_validated",
+        "parity_kind": "construction",
+        "replay_tests": [
+          {
+            "case_id": "skilllearnbench-solution-runs",
+            "test_id": "packages/loom-benchmarks/tests/test_skillflow_and_skilllearnbench_adapter.py::test_skill_solution_runs[SkillLearnBenchAdapter-skilllearnbench]",
+            "asserts": "the upstream-bundled solution passes pytest end-to-end after `SkillLearnBenchAdapter.convert_instance` materializes the task"
           }
         ]
       }

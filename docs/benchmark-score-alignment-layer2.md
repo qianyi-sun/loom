@@ -107,22 +107,100 @@ unless Harbor ships a verifier for that benchmark.
 - **Known deltas:** same as aime-24.
 - **Verdict:** credible for user-facing reporting.
 
-## Remaining work — Batches 2..N
+## Batch 2 — gpqa, mmlu-pro, livecodebench, skillflow, skilllearnbench
 
-The Layer 2 manifest still records `harbor_support.status="unknown"`
-for these 8 benchmarks; each needs its own Batch entry in this file
-before the manifest is fully validated:
+### gpqa
 
-- `gpqa`, `math-500`, `mmlu-pro` — answer-key scoring; expect
-  similar replay-validated story to aime-24/25.
-- `livecodebench` — pytest-style verifier; expect by-construction
-  story like mbpp/humaneval, but with the LCB test format wrinkles.
-- `skillflow`, `skilllearnbench` — bespoke task bundles; need
-  per-task replay cases.
-- `swe-bench-verified` — patch replay against the SWE-Bench
-  official harness; the most involved of the remaining batches.
-- `terminal-bench-2` — TB2 evaluator; depends on the TB2 sandbox
-  compose-options work tracked under #426.
+- **Parity kind:** replay-validated. The adapter
+  (`packages/loom-benchmarks/loom_benchmarks/adapters/gpqa.py`)
+  emits a script verifier that extracts the answer letter from
+  `final_answer.txt` and compares to the canonical letter stored
+  in `answer_key.json` (derived from the GPQA Extended dataset
+  row). The canonical scorer is exact letter match against the
+  same dataset field.
+- **Replay validation:**
+  `packages/loom-benchmarks/tests/test_gpqa_adapter.py::test_gpqa_verifier_scores_correct_letter`
+  — correct letter → reward `{score: 1.0}`.
+- **Known deltas:** extraction rule is "letter after 'Final
+  answer:' on the last line"; rejects ambiguous outputs (no
+  partial credit, by design).
+- **Verdict:** credible for user-facing reporting.
+
+### mmlu-pro
+
+- **Parity kind:** replay-validated. Same shape as gpqa — script
+  verifier extracts the last standalone letter and compares to the
+  dataset row's `answer` field.
+- **Replay validation:**
+  `packages/loom-benchmarks/tests/test_mmlu_pro_adapter.py::test_mmlu_pro_verifier_scores_last_standalone_letter`
+  — pins the extraction rule against multi-letter reasoning bodies
+  (e.g. "Reasoning mentions A. Final answer: D" → D).
+- **Known deltas:** same convention as gpqa.
+- **Verdict:** credible for user-facing reporting.
+
+### livecodebench
+
+- **Parity kind:** by construction. The adapter
+  (`packages/loom-benchmarks/loom_benchmarks/adapters/livecodebench.py`)
+  decodes the compressed IO/functional test cases from the
+  upstream dataset row and emits them verbatim as pytest test
+  files. Loom's pytest verifier IS the canonical LiveCodeBench
+  scorer — same code path.
+- **Replay validation:** three tests in
+  `packages/loom-benchmarks/tests/test_livecodebench_adapter.py` —
+  `test_livecodebench_solution_passes_subprocess_run` (end-to-end
+  pass against decoded cases),
+  `test_livecodebench_decodes_compressed_private_cases` (guards
+  the decode step against upstream-format drift),
+  `test_livecodebench_functional_cases_call_solution_method` (the
+  functional invocation matches the upstream evaluator's shape).
+- **Known deltas:** one-output pass@1 surrogate, same convention
+  as mbpp/humaneval.
+- **Verdict:** credible for user-facing reporting.
+
+### skillflow
+
+- **Parity kind:** by construction. The adapter passes through
+  the upstream SkillFlow task bundle unchanged. The bundled
+  pre-baked solution + tests pass under pytest end-to-end. Loom's
+  pytest verifier IS the canonical scorer.
+- **Replay validation:**
+  `packages/loom-benchmarks/tests/test_skillflow_and_skilllearnbench_adapter.py::test_skill_solution_runs[SkillFlowAdapter-skillflow]`
+  — bundled solution passes pytest after `convert_instance`.
+- **Known deltas:** none for the parity claim; reward semantics
+  are the task bundle's own (mean task reward over bundled
+  sub-checks).
+- **Verdict:** credible for user-facing reporting.
+
+### skilllearnbench
+
+- **Parity kind:** by construction by inheritance — same adapter
+  family as skillflow, same parametrized test
+  (`[SkillLearnBenchAdapter-skilllearnbench]` variant).
+- **Replay validation:** same `test_skill_solution_runs` test,
+  parametrized by adapter class.
+- **Known deltas:** same as skillflow.
+- **Verdict:** credible for user-facing reporting.
+
+## Remaining work — Batches 3..N
+
+3 v1.0 benchmarks remain. Each is genuinely blocked rather than
+"more of the same":
+
+- **`math-500`** — manifest lists it, but Loom has no adapter
+  module. The benchmark cannot run end-to-end, so there's nothing
+  to validate. Tracked as a separate "missing-adapter" issue (see
+  PR description for batch 2). Layer 2 should run once the
+  adapter ships.
+- **`swe-bench-verified`** — patch-replay against the official
+  SWE-Bench harness is substantial new test infrastructure. The
+  parity story is replay-validated (apply a known-good patch,
+  observe pass/fail via the official `swebench` evaluator). Will
+  be its own batch.
+- **`terminal-bench-2`** — TB2 evaluator integration is in flight
+  on the `codex/issue426-tb2-followup` branch under #426. Layer 2
+  for TB2 lands cleanly once that work merges and there's a
+  stable replay surface.
 
 Each subsequent batch should follow the same shape: confirm Harbor
 support (almost certainly `not_supported`), enumerate the replay
