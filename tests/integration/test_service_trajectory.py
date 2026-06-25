@@ -380,3 +380,139 @@ async def test_stream_unknown_trial_returns_404(
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #5 Slice 3c: /events reader prefers Postgres, falls back to MinIO
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _seed_trial_events_postgres(
+    postgres_url: str, trial_id: UUID,
+    rows: list[dict[str, object]],
+) -> None:
+    """Insert rows into the `trial_events` table directly. The traj_setup
+    fixture only seeds MinIO; tests that want to verify the Postgres-
+    primary path need a way to bypass the worker's normal write path."""
+    from sqlalchemy import insert as sa_insert
+
+    from loom.db.schema import TrialEvent
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        for row in rows:
+            s.execute(sa_insert(TrialEvent).values(
+                trial_id=trial_id, **row,
+            ))
+        s.commit()
+    sync_engine.dispose()
+
+
+async def test_events_reads_from_postgres_when_present(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    """Slice 3c primary path: when `trial_events` has rows for the
+    trial, the endpoint serves from Postgres — not MinIO. Use a
+    distinct payload that doesn't appear in the fixture's MinIO
+    seed so the test can tell which source served the response."""
+    app, raw, _team_id, trial_id = traj_setup
+    _seed_trial_events_postgres(postgres_url, trial_id, [
+        {
+            "seq": 100, "kind": "step_start", "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "seq": 100, "kind": "step_start",
+                "marker": "from-postgres-not-minio",
+            },
+        },
+        {
+            "seq": 101, "kind": "step_end", "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "seq": 101, "kind": "step_end",
+                "marker": "from-postgres-not-minio",
+            },
+        },
+    ])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_id}/events?after_seq=99",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["seq"] for e in body["events"]] == [100, 101]
+    # Marker confirms the Postgres rows served the response, not the
+    # MinIO seed (which contains seqs 0..4 with no `marker` field).
+    assert all(
+        e.get("marker") == "from-postgres-not-minio"
+        for e in body["events"]
+    )
+    assert body["next_after_seq"] == 101
+
+
+async def test_events_falls_back_to_minio_for_legacy_trial(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+) -> None:
+    """Trials whose worker shipped before Slice 3b have 0 rows in
+    `trial_events` but a populated MinIO trajectory. The fixture's
+    seed is exactly that shape — no Postgres rows, but a complete
+    MinIO events.jsonl. The endpoint must fall back transparently
+    so legacy trials' UX isn't broken by the cutover."""
+    app, raw, _team_id, trial_id = traj_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_id}/events",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # MinIO seed: 5 events with seqs 0..4.
+    assert [e["seq"] for e in body["events"]] == [0, 1, 2, 3, 4]
+    assert body["next_after_seq"] == 4
+
+
+async def test_stream_serves_postgres_events_for_terminal_trial(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    """End-to-end: terminal trial with Postgres-backed events streams
+    them via SSE without touching MinIO. Verifies the Slice-3c
+    flip applies to /stream too, not just /events."""
+    app, raw, _team_id, trial_id = traj_setup
+    _seed_trial_events_postgres(postgres_url, trial_id, [
+        {
+            "seq": 200, "kind": "step_start", "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "seq": 200, "kind": "step_start",
+                "marker": "stream-from-postgres",
+            },
+        },
+    ])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc", timeout=10.0,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_id}/stream?after_seq=199",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200
+    messages = _parse_sse(r.text)
+    data_messages = [
+        m for m in messages
+        if "data" in m and m.get("event") != "complete"
+    ]
+    # Just the seq=200 row from Postgres (the MinIO seed has seqs
+    # 0..4 which are below the after_seq=199 cutoff).
+    parsed = [json.loads(m["data"]) for m in data_messages]
+    assert [e["seq"] for e in parsed] == [200]
+    assert parsed[0].get("marker") == "stream-from-postgres"

@@ -1,27 +1,32 @@
 """Trajectory paginated read + authenticated download (spec §5.2) +
-seq-cursor event replay + SSE live stream (#5 Slice 1).
+seq-cursor event replay + SSE live stream (#5 Slice 1 / Slice 3c).
 
-The events.jsonl object lives in the same `trajectories` bucket the
-worker's TrajectoryWriter writes to, at the key
-`<team_id>/<trial_id>/events.jsonl`. We fetch the whole object, split
-on newlines, slice by integer cursor (line index), and return the
-requested page. This is fine for v1 (trajectory files are bounded by
-the trial wall budget and event size); future revisions could move
-to byte-range reads + sidecar index.
+The legacy events.jsonl object lives in the same `trajectories`
+bucket the worker's TrajectoryWriter writes to, at the key
+`<team_id>/<trial_id>/events.jsonl`. Slice 1's first cut of
+`/trials/{id}/events?after_seq=N` + `/trials/{id}/stream` read
+events from there.
 
-#5 Slice 1 adds two new endpoints alongside the legacy /trajectory:
-- `/trials/{id}/events?after_seq=N` — seq-cursor replay (forward-
-  compatible naming for the upcoming Postgres event table in Phase 2).
-- `/trials/{id}/stream` — SSE wrapper that emits an initial replay
-  then polls MinIO for new events until the trial reaches a terminal
-  state or the client disconnects. Backend remains poll-based until
-  Phase 2's event table enables LISTEN/NOTIFY-style push.
+#5 Slice 3c flips both reads to the Postgres `trial_events` table
+(populated by Slice 3a's CP endpoint via Slice 3b's worker
+dual-write). MinIO remains the audit-log copy and the trajectory
+download endpoint; the cursor-based read now hits an indexed table
+instead of fetching + splitting a multi-MB object.
+
+MinIO fallback: a trial whose worker shipped before Slice 3b will
+have 0 rows in `trial_events` but a populated MinIO trajectory. To
+preserve UX for those trials, the route falls back to MinIO when
+Postgres returns no rows AND the trial state suggests events
+should exist. The fallback is removed in a future cleanup pass
+once 3b has been deployed long enough to cover all observable
+trials.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, cast
 from uuid import UUID
@@ -31,13 +36,15 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from loom.db.schema import Trial
+from loom.db.schema import Trial, TrialEvent
 from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
 from loom_service.routes.object_downloads import stream_object_response
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -119,6 +126,30 @@ def _read_events_after_seq(
         body.close()
     out.sort(key=lambda e: e["seq"])
     return out
+
+
+async def _read_events_from_postgres(
+    session: Any, *, trial_id: UUID, after_seq: int, limit: int,
+) -> list[dict[str, Any]]:
+    """Slice 3c primary read path. Pulls payloads from the
+    `trial_events` table indexed on (trial_id, seq).
+
+    The payload column already carries the full typed event body
+    (kind, seq, emitted_at, plus per-type fields), so the response
+    shape matches what `_read_events_after_seq` returns from MinIO —
+    callers can swap reads transparently."""
+    rows = (
+        await session.execute(
+            select(TrialEvent.payload)
+            .where(
+                TrialEvent.trial_id == trial_id,
+                TrialEvent.seq > after_seq,
+            )
+            .order_by(TrialEvent.seq.asc())
+            .limit(limit),
+        )
+    ).all()
+    return [row[0] for row in rows]
 
 
 @router.get("/trials/{trial_id}/trajectory")
@@ -204,6 +235,55 @@ async def download_trajectory(
     )
 
 
+async def _read_events_with_minio_fallback(
+    session: Any,
+    minio_client: Any,
+    *,
+    trial: Trial,
+    bucket: str,
+    after_seq: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Primary: read from `trial_events` (#5 Slice 3c).
+
+    Fallback: if the table is empty for this trial AND the trial has
+    reached a state where the worker should have shipped events
+    (running/succeeded/failed/cancelled), read from MinIO. This
+    preserves UX for trials whose worker shipped before Slice 3b
+    (those have a populated MinIO trajectory but no Postgres rows).
+    The fallback path will be removed in a future cleanup pass.
+
+    Trials still in `queued` or `claimed` correctly return [] from
+    both paths — no events have been emitted yet, so 0 is the right
+    answer regardless of source.
+    """
+    events = await _read_events_from_postgres(
+        session, trial_id=trial.id, after_seq=after_seq, limit=limit,
+    )
+    if events:
+        return events
+    if trial.state in _TERMINAL_TRIAL_STATES or trial.state == "running":
+        # Empty Postgres + a state that should have produced events =
+        # legacy trial. Fall through to MinIO to preserve UX. Log so
+        # the fallback rate is observable and a future cleanup can
+        # remove the path once it drops to ~0.
+        legacy = await asyncio.to_thread(
+            _read_events_after_seq,
+            minio_client,
+            bucket=bucket,
+            key=_key(trial.team_id, trial.id),
+            after_seq=after_seq, limit=limit,
+        )
+        if legacy:
+            logger.info(
+                "events_minio_fallback trial=%s state=%s n=%d "
+                "after_seq=%d — pre-Slice-3b trial, served from MinIO",
+                trial.id, trial.state, len(legacy), after_seq,
+            )
+        return legacy
+    return events
+
+
 @router.get("/trials/{trial_id}/events")
 async def list_events_by_seq(
     request: Request,
@@ -214,10 +294,8 @@ async def list_events_by_seq(
 ) -> dict[str, Any]:
     """Return events with `seq > after_seq`, capped at `limit`.
 
-    Forward-compatible naming for the upcoming Postgres event table
-    (#5 Phase 2): clients consume seq-cursor semantics today and the
-    storage swap stays transparent. Pairs with `/trials/{id}/stream`
-    which uses the same seq cursor.
+    Slice 3c reads from the Postgres `trial_events` table. MinIO is
+    the fallback for legacy trials (worker shipped before Slice 3b).
 
     Use `after_seq=-1` (the default) to start from the beginning;
     `after_seq=N` to resume after event seq `N`. `next_after_seq` in
@@ -229,10 +307,11 @@ async def list_events_by_seq(
     require_scope(ctx, "read:own")
     trial = await _load_trial(s, trial_id, ctx)
 
-    events = _read_events_after_seq(
+    events = await _read_events_with_minio_fallback(
+        s,
         request.app.state.minio_client,
+        trial=trial,
         bucket=settings.trajectories_bucket,
-        key=_key(trial.team_id, trial.id),
         after_seq=after_seq,
         limit=limit,
     )
@@ -286,9 +365,30 @@ async def stream_events(
     session_factory = request.app.state.session_factory
     minio_client = request.app.state.minio_client
     bucket = settings.trajectories_bucket
-    key = _key(trial.team_id, trial.id)
     poll_interval = _DEFAULT_SSE_POLL_INTERVAL_SEC
     max_connection_sec = _DEFAULT_SSE_MAX_CONNECTION_SEC
+
+    async def _read_loop_chunk(
+        seq_cursor: int,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """One poll iteration: read events from Postgres (with MinIO
+        fallback) AND check trial state. Returning both from one
+        helper keeps the per-iteration session lifetime clean."""
+        async with session_factory() as fresh:
+            fresh_trial = (await fresh.execute(
+                select(Trial).where(Trial.id == trial.id),
+            )).scalar_one_or_none()
+            if fresh_trial is None:
+                return [], None
+            evts = await _read_events_with_minio_fallback(
+                fresh,
+                minio_client,
+                trial=fresh_trial,
+                bucket=bucket,
+                after_seq=seq_cursor,
+                limit=200,
+            )
+            return evts, fresh_trial.state
 
     async def event_source() -> AsyncIterator[bytes]:
         current_seq = after_seq
@@ -300,14 +400,7 @@ async def stream_events(
         while True:
             if await request.is_disconnected():
                 return
-            events = await asyncio.to_thread(
-                _read_events_after_seq,
-                minio_client,
-                bucket=bucket,
-                key=key,
-                after_seq=current_seq,
-                limit=200,
-            )
+            events, current_state = await _read_loop_chunk(current_seq)
             for ev in events:
                 yield _sse_format(
                     event_kind=None,
@@ -316,22 +409,12 @@ async def stream_events(
                 )
                 current_seq = int(ev["seq"])
 
-            # Terminal-state detection — re-read trial state from DB.
-            # Once terminal AND we've emitted everything currently
-            # in the JSONL, close the stream cleanly.
-            async with session_factory() as fresh_session:
-                state_row = (await fresh_session.execute(
-                    select(Trial.state).where(Trial.id == trial.id),
-                )).scalar_one_or_none()
-            if state_row in _TERMINAL_TRIAL_STATES:
+            # Terminal-state detection — once terminal AND we've
+            # emitted everything currently available, close cleanly.
+            if current_state in _TERMINAL_TRIAL_STATES:
                 # One more read to flush any events that landed
-                # between the previous poll and the state check.
-                tail = await asyncio.to_thread(
-                    _read_events_after_seq,
-                    minio_client,
-                    bucket=bucket, key=key,
-                    after_seq=current_seq, limit=200,
-                )
+                # between the previous read and the state check.
+                tail, _ = await _read_loop_chunk(current_seq)
                 for ev in tail:
                     yield _sse_format(
                         event_kind=None,
@@ -341,7 +424,7 @@ async def stream_events(
                     current_seq = int(ev["seq"])
                 yield _sse_format(
                     event_kind="complete",
-                    data={"final_state": state_row, "last_seq": current_seq},
+                    data={"final_state": current_state, "last_seq": current_seq},
                 )
                 return
 
