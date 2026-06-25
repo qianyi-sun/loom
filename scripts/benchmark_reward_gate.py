@@ -358,6 +358,8 @@ def _sweep_attempt_failures(
             if state not in TERMINAL_TRIAL_STATES:
                 failures.append(f"{prefix} is not terminal: {state or '<missing>'}")
                 continue
+            if reason == "internal_error" and _task_has_numeric_reward(coverage, trial):
+                continue
             if reason in BENCHMARK_SIDE_FAILURE_REASONS:
                 failures.append(f"{prefix} has benchmark-side failure reason {reason}")
                 continue

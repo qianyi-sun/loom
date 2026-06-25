@@ -384,6 +384,105 @@ def test_sweep_gate_allows_rerun_to_cover_provider_failed_attempt() -> None:
     assert "2 distinct tasks" in results[0].detail
 
 
+def test_sweep_gate_allows_rerun_to_cover_platform_internal_error() -> None:
+    gate = _load_module()
+
+    results = gate.check_reward_sweep(
+        batches=[
+            {
+                "id": "polluted-batch",
+                "state": "finished",
+                "result_status": "partial_failed",
+                "expected_trial_count": 2,
+            },
+            {
+                "id": "gap-rerun",
+                "state": "finished",
+                "result_status": "succeeded",
+                "expected_trial_count": 1,
+            },
+        ],
+        trials_by_batch={
+            "polluted-batch": [
+                {
+                    "id": "trial-1",
+                    "task_id": "skillflow/DMAIC-Quality-Analysis/ok-task",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 1.0,
+                },
+                {
+                    "id": "trial-2",
+                    "task_id": "skillflow/DMAIC-Quality-Analysis/upload-path-with-spaces",
+                    "state": "failed",
+                    "failure_reason": "internal_error",
+                    "aggregate_reward": None,
+                },
+            ],
+            "gap-rerun": [
+                {
+                    "id": "trial-3",
+                    "task_id": "skillflow/DMAIC-Quality-Analysis/upload-path-with-spaces",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 0.0,
+                },
+            ],
+        },
+        expected_benchmark_ids=["skillflow"],
+        expected_task_counts={"skillflow": 2},
+    )
+
+    assert [r.status for r in results] == ["pass"]
+    assert "2 distinct tasks" in results[0].detail
+
+
+def test_sweep_gate_keeps_verifier_errors_fatal_even_after_rerun() -> None:
+    gate = _load_module()
+
+    results = gate.check_reward_sweep(
+        batches=[
+            {
+                "id": "polluted-batch",
+                "state": "finished",
+                "result_status": "partial_failed",
+                "expected_trial_count": 1,
+            },
+            {
+                "id": "gap-rerun",
+                "state": "finished",
+                "result_status": "succeeded",
+                "expected_trial_count": 1,
+            },
+        ],
+        trials_by_batch={
+            "polluted-batch": [
+                {
+                    "id": "trial-1",
+                    "task_id": "skillflow/DMAIC-Quality-Analysis/verifier-broken",
+                    "state": "failed",
+                    "failure_reason": "verifier_error",
+                    "aggregate_reward": None,
+                },
+            ],
+            "gap-rerun": [
+                {
+                    "id": "trial-2",
+                    "task_id": "skillflow/DMAIC-Quality-Analysis/verifier-broken",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 0.0,
+                },
+            ],
+        },
+        expected_benchmark_ids=["skillflow"],
+        expected_task_counts={"skillflow": 1},
+    )
+
+    assert [r.status for r in results] == ["fail"]
+    assert "trial-1 has benchmark-side failure reason verifier_error" in results[0].detail
+
+
 def test_collect_paginated_trials_follows_next_cursor() -> None:
     gate = _load_module()
 

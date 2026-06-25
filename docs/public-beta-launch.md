@@ -186,8 +186,8 @@ The sweep command defaults to the v1.0 benchmark allowlist and calls
 batch ids by benchmark and distinct task id, then requires every runnable task
 to have a succeeded trial with a numeric aggregate reward. Repeat `--batch-id`
 for one-batch-per-benchmark validation or task-level reruns; a later numeric
-reward for the same task covers provider/agent transient failures from an
-earlier batch, while benchmark-side verifier/environment failures still fail
+reward for the same task covers provider/agent/platform transient failures from
+an earlier batch, while benchmark-side verifier/environment failures still fail
 the sweep. Pass `--expected-benchmark` to narrow an intermediate diagnostic
 run.
 

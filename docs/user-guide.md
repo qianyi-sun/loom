@@ -748,8 +748,8 @@ benchmarks. This gate checks that each batch is terminal, fan-out produced the
 expected number of trials, and every v1.0-supported benchmark has distinct
 numeric-reward task coverage equal to `/api/v1/tasks/count`. It treats
 model-correctness scores such as `0` as valid verifier output. A later rerun
-batch can cover an earlier provider/agent transient failure for the same task,
-but missing rewards without rerun coverage, missing allowlist benchmark
+batch can cover an earlier provider/agent/platform transient failure for the
+same task, but missing rewards without rerun coverage, missing allowlist benchmark
 coverage, and benchmark-side verifier or environment failures fail the sweep.
 For a narrower diagnostic, add repeated `--expected-benchmark BENCHMARK_ID`
 arguments.
