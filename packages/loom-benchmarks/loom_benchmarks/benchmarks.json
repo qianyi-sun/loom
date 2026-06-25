@@ -71,6 +71,15 @@
       "params": {"subset": "extended", "rows": "546"}
     },
     {
+      "name": "gpqa-diamond",
+      "display_name": "GPQA Diamond",
+      "series": "reasoning",
+      "upstream": {"kind": "git", "locator": "https://github.com/idavidrein/gpqa.git", "revision": "56686c06f5e19865c153de0fdb11be3890014df7"},
+      "license": {"spdx": "MIT", "url": "https://github.com/idavidrein/gpqa/blob/main/LICENSE"},
+      "splits": ["test"],
+      "params": {"subset": "diamond", "rows": "198"}
+    },
+    {
       "name": "hendrycks-math",
       "display_name": "MATH (Hendrycks)",
       "series": "reasoning",

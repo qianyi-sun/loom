@@ -1,9 +1,17 @@
 """GPQA — graduate-level Google-proof Q&A benchmark.
 
-The official repository ships password-protected CSVs inside dataset.zip.
-For Loom's catalog entry, `gpqa` uses the full official extended set rather
-than the smaller Diamond reporting subset.
-"""
+The official repository ships password-protected CSVs inside dataset.zip:
+``dataset/gpqa_extended.csv`` (546 rows), ``dataset/gpqa_main.csv``
+(~448 rows), and ``dataset/gpqa_diamond.csv`` (198 rows). Loom exposes
+two catalog slugs against the same upstream zip:
+
+* ``gpqa`` — full Extended set (default).
+* ``gpqa-diamond`` — the 198-task Diamond reporting subset, used for
+  paired runs against the Harbor adapter of the same name.
+
+Both share a single adapter class parameterized on
+``self._params["subset"]`` (see the AIME per-year precedent in
+``adapters/aime.py``)."""
 
 from __future__ import annotations
 
@@ -29,8 +37,11 @@ from loom_benchmarks.util import (
 )
 
 _DATASET_PASSWORD = b"deserted-untie-orchid"
-_DATASET_MEMBER = "dataset/gpqa_extended.csv"
-_SUBSET = "extended"
+_DEFAULT_SUBSET = "extended"
+
+
+def _dataset_member(subset: str) -> str:
+    return f"dataset/gpqa_{subset}.csv"
 
 _CHECK_PY = (
     textwrap.dedent(r"""
@@ -92,16 +103,18 @@ class GPQAAdapter(CatalogBackedAdapter):
         source_dir: Path,
         split: str,
     ) -> Iterator[BenchmarkInstance]:
+        subset = self._subset()
         zip_path = self._resolve_dataset_zip(source_dir)
         with zipfile.ZipFile(zip_path) as zf:
-            raw = zf.read(_DATASET_MEMBER, pwd=_DATASET_PASSWORD).decode(
-                "utf-8-sig",
-            )
+            raw = zf.read(
+                _dataset_member(subset),
+                pwd=_DATASET_PASSWORD,
+            ).decode("utf-8-sig")
 
         for record in csv.DictReader(io.StringIO(raw)):
             record_id = str(record["Record ID"]).strip()
             tags = {
-                "gpqa_subset": _SUBSET,
+                "gpqa_subset": subset,
                 "domain": str(record.get("High-level domain", "")).strip(),
                 "subdomain": str(record.get("Subdomain", "")).strip(),
             }
@@ -111,6 +124,9 @@ class GPQAAdapter(CatalogBackedAdapter):
                 raw=dict(record),
                 tags={k: v for k, v in tags.items() if v},
             )
+
+    def _subset(self) -> str:
+        return self._params.get("subset", _DEFAULT_SUBSET)
 
     @staticmethod
     def _resolve_dataset_zip(source_dir: Path) -> Path:
@@ -130,6 +146,7 @@ class GPQAAdapter(CatalogBackedAdapter):
     ) -> ConvertedTask:
         r = instance.raw
         task_id = f"{self.name}/{instance.instance_id}"
+        subset = self._subset()
         out_dir.mkdir(parents=True, exist_ok=True)
 
         choices, correct_letter = _shuffled_choices(
@@ -147,6 +164,7 @@ class GPQAAdapter(CatalogBackedAdapter):
                 choices=choices,
                 domain=str(r.get("High-level domain", "")).strip(),
                 subdomain=str(r.get("Subdomain", "")).strip(),
+                subset=subset,
             ),
         )
         (out_dir / "answer_key.json").write_text(
@@ -155,7 +173,7 @@ class GPQAAdapter(CatalogBackedAdapter):
                     "correct_letter": correct_letter,
                     "correct_answer": str(r["Correct Answer"]).strip(),
                     "record_id": instance.instance_id,
-                    "gpqa_subset": _SUBSET,
+                    "gpqa_subset": subset,
                 },
                 indent=2,
                 sort_keys=True,
@@ -237,6 +255,7 @@ def _render_instruction(
     choices: list[tuple[str, str]],
     domain: str,
     subdomain: str,
+    subset: str,
 ) -> str:
     context = ""
     if domain or subdomain:
@@ -246,7 +265,7 @@ def _render_instruction(
         context += "\n\n"
     rendered_choices = "\n".join(f"{letter}. {answer}" for letter, answer in choices)
     return (
-        f"# GPQA ({_SUBSET})\n\n"
+        f"# GPQA ({subset})\n\n"
         f"{context}"
         f"{question}\n\n"
         f"{rendered_choices}\n\n"
@@ -254,3 +273,15 @@ def _render_instruction(
         "final_answer.txt. The verifier uses the last standalone letter in "
         "that file.\n"
     )
+
+
+class GPQADiamondAdapter(GPQAAdapter):
+    """198-task Diamond reporting subset of GPQA.
+
+    Same upstream zip + verifier as :class:`GPQAAdapter`; the catalog
+    entry's ``params.subset == "diamond"`` flips :meth:`_subset` to
+    read ``dataset/gpqa_diamond.csv`` instead of the Extended CSV.
+    Sibling slug used for paired runs against
+    ``harbor-framework/harbor`` ``adapters/gpqa-diamond``."""
+
+    name = "gpqa-diamond"
