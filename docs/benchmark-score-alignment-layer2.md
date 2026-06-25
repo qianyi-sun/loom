@@ -229,21 +229,79 @@ unless Harbor ships a verifier for that benchmark.
 - **Verdict:** credible for user-facing reporting, with the
   live-runtime gap noted in operator-facing docs.
 
-## Remaining work — Batches 4..N
+## Batch 4 — math-500, terminal-bench-2 (final)
 
-2 v1.0 benchmarks remain. Both are genuinely blocked, not "more
-of the same":
+### math-500
 
-- **`math-500`** — manifest lists it, but Loom has no adapter
-  module. The benchmark cannot run end-to-end, so there's nothing
-  to validate. Tracked as #512 (missing-adapter bug). Layer 2
-  should run once the adapter ships.
-- **`terminal-bench-2`** — TB2 evaluator integration is in flight
-  on the `codex/issue426-tb2-followup` branch under #426. Layer 2
-  for TB2 lands cleanly once that work merges and there's a
-  stable replay surface.
+- **Parity kind:** replay-validated. The `MATH500Adapter` (in
+  `packages/loom-benchmarks/loom_benchmarks/adapters/hendrycks_math.py`,
+  inherits from `HendrycksMATHAdapter`) emits a script verifier
+  that extracts the boxed final answer from `final_answer.txt`
+  and compares it to the canonical `answer` field on the
+  `HuggingFaceH4/MATH-500` row via the boxed-answer math-
+  equivalence routine the MATH paper uses (`\frac{1}{3}` ≡
+  `1/3`, etc.).
+- **Replay validation:** four tests in
+  `packages/loom-benchmarks/tests/test_hendrycks_math_adapter.py` —
+  `test_math500_lists_public_500_problem_test_split` (the pinned
+  `@6e4ed1a` upstream revision matches the canonical 500-row
+  test set), `test_math500_convert_writes_math500_task_id`
+  (task ids namespaced under `math-500/...`),
+  `test_hendrycks_math_verifier_accepts_equivalent_boxed_output`
+  (shared verifier code path scores equivalent answers as 1.0),
+  `test_hendrycks_math_extracts_nested_boxed_answer` (extraction
+  handles nested boxed structures and picks the last one).
+- **Known deltas:** none. The math-equivalence routine matches
+  the upstream MATH paper's `is_equiv` algorithm.
+- **Verdict:** credible for user-facing reporting.
 
-Each subsequent batch should follow the same shape: confirm Harbor
-support (almost certainly `not_supported`), enumerate the replay
-tests that prove Loom's verifier matches the canonical scorer,
-record any deltas, and append a section here.
+### terminal-bench-2
+
+- **Parity kind:** by construction. The TB2 adapter (in
+  `packages/loom-benchmark-terminal-bench-2/`) emits a verifier
+  shim that wraps the upstream TB2 `tests/` directory verbatim —
+  `TEST_DIR` defaults to `/app/environment/tb2-tests` where the
+  upstream test suite is staged in the per-task image. Loom's
+  verifier code path IS the upstream TB2 test runner.
+- **Replay validation:** four tests in
+  `packages/loom-benchmark-terminal-bench-2/tests/test_adapter_convert_instance.py` —
+  `test_convert_copies_reference_solution_for_oracle_smoke`
+  (upstream `reference.sh` is staged + wired into oracle's
+  `solve.sh`), `test_convert_renders_solution_yaml_for_oracle_smoke`
+  (the YAML-solution oracle path actually EXECUTES end-to-end in
+  CI — `subprocess.run(['bash', solve.sh], check=True)` plus
+  asserts on the resulting output file; this is stronger
+  live-runtime evidence than any other v1.0 benchmark in this
+  suite), `test_generated_verifier_shim_emits_loom_verifier_result`
+  (shim emits a well-formed VerifierResult JSON), and
+  `test_convert_writes_verifier_shim` (TEST_DIR points at the
+  upstream test location).
+- **Known deltas:** none on verifier semantics. The shim's
+  result-shape mapping is well-defined and tested.
+- **Verdict:** credible for user-facing reporting. Note: the
+  TB2 in-CI oracle execution provides stronger live-runtime
+  evidence than any other v1.0 benchmark here.
+
+## Coverage summary — all 12 v1.0 benchmarks Layer 2-validated
+
+| Batch | PR | Benchmarks |
+|---|---|---|
+| 1 | #499 | aime-24, aime-25, humaneval, mbpp |
+| 2 | #513 | gpqa, mmlu-pro, livecodebench, skillflow, skilllearnbench |
+| 3 | #514 | swe-bench-verified |
+| 4 | (this PR) | math-500, terminal-bench-2 |
+
+All 12 v1.0-supported benchmarks now have:
+- `harbor_support.status = "not_supported"` with justification
+- `layer2_evidence` citing the adapter test(s) that prove the
+  verifier-semantics parity claim
+- A `Verdict` section in this document marking the benchmark as
+  credible for user-facing reporting
+
+The two known gaps recorded in earlier batches remain:
+- **swe-bench-verified live-runtime parity** — no in-CI execution
+  of the multi-GB per-instance Docker image. Mitigation: operator
+  smoke (oracle batch against N=5 instances).
+- **`hendrycks-math`** is cataloged but explicitly non-v1; it's
+  the broader MATH dataset, and `math-500` is the v1-scoped
+  subset (see codex's #480).
