@@ -4,6 +4,8 @@ import asyncio
 import json
 from uuid import uuid4
 
+import httpx
+
 from loom_worker import main_loop as ml
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.vllm_registry import WorkerVLLMRegistry
@@ -220,6 +222,16 @@ class _ClaimingCP:
         return self.payloads.pop(0)
 
 
+class _FailingClaimCP:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.claim_calls = 0
+
+    async def claim(self, *, worker_id, caps):  # type: ignore[no-untyped-def]
+        self.claim_calls += 1
+        raise self.exc
+
+
 async def test_claim_cycle_fills_available_pool_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     pool = RunnerPool(max_concurrent=3)
     release = asyncio.Event()
@@ -260,3 +272,22 @@ async def test_claim_cycle_fills_available_pool_capacity(monkeypatch) -> None:  
     assert pool.in_flight == 3
     release.set()
     await pool.wait_all(timeout=2.0)
+
+
+async def test_claim_cycle_treats_control_plane_transport_error_as_no_claim() -> None:
+    cp = _FailingClaimCP(httpx.ReadError("control plane disconnected"))
+
+    claimed = await ml._claim_available_trials(  # type: ignore[attr-defined]
+        pool=RunnerPool(max_concurrent=3),
+        settings=_Settings(max_concurrent=3),
+        cp_client=cp,
+        gateway_client=None,
+        object_store=None,
+        worker_id=uuid4(),
+        vllm_registry=WorkerVLLMRegistry(enabled=False),
+        sandbox_allocator=None,
+        sandbox_singleton=None,
+    )
+
+    assert claimed == 0
+    assert cp.claim_calls == 1

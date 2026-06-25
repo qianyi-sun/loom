@@ -453,10 +453,18 @@ async def _claim_available_trials(
 ) -> int:
     claimed = 0
     while pool.in_flight < settings.max_concurrent:
-        trial_payload = await cp_client.claim(
-            worker_id=worker_id,
-            caps=_DEFAULT_CAPS,
-        )
+        try:
+            trial_payload = await cp_client.claim(
+                worker_id=worker_id,
+                caps=_DEFAULT_CAPS,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "trial_claim_transient_error worker_id=%s err=%s",
+                worker_id,
+                exc,
+            )
+            break
         if trial_payload is None:
             break
         await _spawn_trial(
