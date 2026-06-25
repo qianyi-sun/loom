@@ -315,6 +315,63 @@ def _numeric_reward_task_coverage(
     return coverage
 
 
+def _task_has_numeric_reward(
+    coverage: dict[str, set[str]],
+    trial: dict[str, Any],
+) -> bool:
+    task_id = trial.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return False
+    benchmark_id = _trial_benchmark_id(trial)
+    if not benchmark_id:
+        return False
+    return task_id in coverage.get(benchmark_id, set())
+
+
+def _sweep_attempt_failures(
+    *,
+    batches: list[dict[str, Any]],
+    trials_by_batch: dict[str, list[dict[str, Any]]],
+    coverage: dict[str, set[str]],
+) -> list[str]:
+    failures: list[str] = []
+    for batch in batches:
+        batch_id = str(batch.get("id") or "<unknown>")
+        batch_state = str(batch.get("state") or "")
+        if batch_state not in TERMINAL_BATCH_STATES:
+            failures.append(
+                f"{batch_id}: batch state is not terminal: "
+                f"{batch_state or '<missing>'}",
+            )
+
+        trials = trials_by_batch.get(batch_id, [])
+        expected = batch.get("expected_trial_count")
+        if isinstance(expected, int) and len(trials) != expected:
+            failures.append(f"{batch_id}: trial count {len(trials)} != expected {expected}")
+
+        for trial in trials:
+            trial_id = str(trial.get("id") or "<unknown>")
+            state = str(trial.get("state") or "")
+            reason = trial.get("failure_reason")
+            reward = trial.get("aggregate_reward")
+            prefix = f"{batch_id}: {trial_id}"
+            if state not in TERMINAL_TRIAL_STATES:
+                failures.append(f"{prefix} is not terminal: {state or '<missing>'}")
+                continue
+            if reason in BENCHMARK_SIDE_FAILURE_REASONS:
+                failures.append(f"{prefix} has benchmark-side failure reason {reason}")
+                continue
+            if state == "succeeded" and _is_numeric_reward(reward):
+                continue
+            if _task_has_numeric_reward(coverage, trial):
+                continue
+            if state == "succeeded":
+                failures.append(f"{prefix} missing numeric reward")
+            else:
+                failures.append(f"{prefix} ended {state} with failure_reason={reason}")
+    return failures
+
+
 def check_reward_sweep(
     *,
     batches: list[dict[str, Any]],
@@ -322,18 +379,12 @@ def check_reward_sweep(
     expected_benchmark_ids: list[str],
     expected_task_counts: dict[str, int] | None = None,
 ) -> list[CheckResult]:
-    failures: list[str] = []
-    for batch in batches:
-        batch_id = str(batch.get("id") or "<unknown>")
-        batch_results = check_batch_rewards(
-            batch=batch,
-            trials=trials_by_batch.get(batch_id, []),
-        )
-        for result in batch_results:
-            if result.status != "pass":
-                failures.append(f"{batch_id}: {result.detail}")
-
     coverage = _numeric_reward_task_coverage(trials_by_batch)
+    failures = _sweep_attempt_failures(
+        batches=batches,
+        trials_by_batch=trials_by_batch,
+        coverage=coverage,
+    )
     for benchmark_id in expected_benchmark_ids:
         covered_tasks = coverage.get(benchmark_id, set())
         expected_count = (

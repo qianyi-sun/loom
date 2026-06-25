@@ -185,8 +185,11 @@ The sweep command defaults to the v1.0 benchmark allowlist and calls
 `/api/v1/tasks/count` for each benchmark. It groups all trials from the supplied
 batch ids by benchmark and distinct task id, then requires every runnable task
 to have a succeeded trial with a numeric aggregate reward. Repeat `--batch-id`
-for one-batch-per-benchmark validation, or pass `--expected-benchmark` to narrow
-an intermediate diagnostic run.
+for one-batch-per-benchmark validation or task-level reruns; a later numeric
+reward for the same task covers provider/agent transient failures from an
+earlier batch, while benchmark-side verifier/environment failures still fail
+the sweep. Pass `--expected-benchmark` to narrow an intermediate diagnostic
+run.
 
 ## Remote Worker Tunnel Gate
 

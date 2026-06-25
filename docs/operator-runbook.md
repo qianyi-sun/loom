@@ -1425,9 +1425,11 @@ Repeat `--batch-id` when the acceptance sweep uses separate batches. The sweep
 gate queries `/api/v1/tasks/count` for each v1.0-supported benchmark, groups
 trials by benchmark/task id, and requires distinct numeric-reward task coverage
 to match the runnable task count. Numeric rewards, including `0`, count as
-successful benchmark evaluation. Missing rewards, benchmark-side verifier
-errors, task-image/environment failures, incomplete fan-out, or missing
-allowlist benchmark coverage fail the gate.
+successful benchmark evaluation. If a provider/agent transient failure is
+rerun in a later batch and the same task gets a numeric reward, the later
+result supplies the task coverage. Missing rewards without rerun coverage,
+benchmark-side verifier errors, task-image/environment failures, incomplete
+fan-out, or missing allowlist benchmark coverage fail the gate.
 
 Score credibility has a separate Layer 1 gate that is independent of live model
 quality. Before using benchmark scores as release evidence, verify that every

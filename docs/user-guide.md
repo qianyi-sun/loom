@@ -742,10 +742,12 @@ Repeat `--batch-id` when the acceptance run uses separate batches for separate
 benchmarks. This gate checks that each batch is terminal, fan-out produced the
 expected number of trials, and every v1.0-supported benchmark has distinct
 numeric-reward task coverage equal to `/api/v1/tasks/count`. It treats
-model-correctness scores such as `0` as valid verifier output, but fails
-missing rewards, missing allowlist benchmark coverage, and benchmark-side
-verifier or environment failures. For a narrower diagnostic, add repeated
-`--expected-benchmark BENCHMARK_ID` arguments.
+model-correctness scores such as `0` as valid verifier output. A later rerun
+batch can cover an earlier provider/agent transient failure for the same task,
+but missing rewards without rerun coverage, missing allowlist benchmark
+coverage, and benchmark-side verifier or environment failures fail the sweep.
+For a narrower diagnostic, add repeated `--expected-benchmark BENCHMARK_ID`
+arguments.
 
 For public-beta or release deployments, operators should provision the ready
 catalog with `loom datasets provision-public-beta-catalog` before inviting

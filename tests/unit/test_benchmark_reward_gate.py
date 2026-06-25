@@ -331,6 +331,59 @@ def test_sweep_gate_passes_with_full_numeric_task_coverage() -> None:
     assert "3 distinct tasks" in results[0].detail
 
 
+def test_sweep_gate_allows_rerun_to_cover_provider_failed_attempt() -> None:
+    gate = _load_module()
+
+    results = gate.check_reward_sweep(
+        batches=[
+            {
+                "id": "full-batch",
+                "state": "finished",
+                "result_status": "partial_failed",
+                "expected_trial_count": 2,
+            },
+            {
+                "id": "rerun-batch",
+                "state": "finished",
+                "result_status": "succeeded",
+                "expected_trial_count": 1,
+            },
+        ],
+        trials_by_batch={
+            "full-batch": [
+                {
+                    "id": "trial-1",
+                    "task_id": "math-500/test/00001",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 1.0,
+                },
+                {
+                    "id": "trial-2",
+                    "task_id": "math-500/test/00340",
+                    "state": "failed",
+                    "failure_reason": "gateway_error",
+                    "aggregate_reward": None,
+                },
+            ],
+            "rerun-batch": [
+                {
+                    "id": "trial-3",
+                    "task_id": "math-500/test/00340",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "aggregate_reward": 0.0,
+                },
+            ],
+        },
+        expected_benchmark_ids=["math-500"],
+        expected_task_counts={"math-500": 2},
+    )
+
+    assert [r.status for r in results] == ["pass"]
+    assert "2 distinct tasks" in results[0].detail
+
+
 def test_collect_paginated_trials_follows_next_cursor() -> None:
     gate = _load_module()
 
