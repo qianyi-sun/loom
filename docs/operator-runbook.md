@@ -1307,8 +1307,87 @@ workload shape. Halve the `for:` durations for staging.
 | Trials stuck queued | No worker matches `requires_caps` | Inspect `trials.requires_caps` vs registered `workers.capabilities` |
 | Batch finishes `all_failed` with zero child trials | Batch fan-out was rejected by deterministic submission policy/config checks after preview-time checks were bypassed or state changed | Open Batch Detail or `loom eval batch show <id>` and inspect `failure_reason`, `failure_message`, and `fanout_errors`; update the task config, provider/backend selection, permissions, or catalog state before retrying |
 | `POST /api/v1/batches` returns 400 `agent×task capability mismatch` | Selected agent's `requires_capabilities` (from `/api/v1/agents`) isn't satisfied by every task in the filter — e.g. `oracle` against an aime/gpqa task that doesn't ship `solution/solve.sh`; Terminal-Bench-2 is allowed because its adapter emits a wrapper | Resubmit with a compatible task slate (drop the listed incompatible tasks), or drop the incompatible agent from `combinations` |
+| Worker logs `state_patch_error` or DB rejects with `trials_succeeded_has_result` | A writeback path patched `state='succeeded'` before persisting `result` (#416 Slice 4). Constraint blocks the inconsistent row | Inspect `select id, state, result, finished_at from trials where state='succeeded' and result is null` — should be empty post-#416. If non-empty, audit recent worker code for an out-of-order writeback |
 | 429 from Gateway | Provider rate limit | Check `loom_llm_calls_total{provider,result}` panel |
 | Trajectory or artifact uploads failing | MinIO credentials wrong or runtime bucket bootstrap failed | `kubectl logs deploy/loom-worker --tail=200` for `ensure_bucket`, `trajectory_flush_failed`, or `artifact_upload_failed`; verify `mc ls loom-minio/trajectories` and `mc ls loom-minio/artifacts` |
+
+## Trial state/result consistency (#416 Slice 4)
+
+Migration `0039_trials_succeeded_has_result.py` ships a `CHECK
+(state != 'succeeded' OR result IS NOT NULL)` constraint as
+`NOT VALID` — new writes are blocked, but pre-existing legacy rows
+(present in public-beta DBs from before #416 ships) are not
+re-checked at apply time. Apply the migration and inspect the
+NOTICE for the violation count; the count is also surfaced by:
+
+```sql
+SELECT count(*) FROM trials
+ WHERE state = 'succeeded' AND result IS NULL;
+```
+
+Cleanup options for legacy violations:
+
+- **Reclaim and re-run** (preferred when the batch is still useful):
+  ```sql
+  UPDATE trials SET state = 'queued', worker_id = NULL
+   WHERE state = 'succeeded' AND result IS NULL;
+  ```
+  The fan-out idempotency key protects against duplicate child trials;
+  the next sweep picks the row up and re-attempts on a healthy worker.
+
+- **Mark as failed** (when the trial is unrecoverable, e.g. its
+  batch is already terminal or the trajectory artifacts are gone):
+  ```sql
+  UPDATE trials
+     SET state = 'failed',
+         failure_reason = 'missing_result',
+         failure_message = '#416 backfill: state=succeeded with NULL result'
+   WHERE state = 'succeeded' AND result IS NULL;
+  ```
+
+After legacy rows are cleaned up, a follow-up `VALIDATE` migration
+(filed separately when an operator confirms the cleanup) runs the
+full back-check and locks the invariant for the entire table.
+
+## Worker/gateway rolling restart (#416 Slices 1 + 3)
+
+The platform tolerates a rolling worker or gateway restart without
+producing platform-failed trials for in-flight work, subject to the
+following bounds:
+
+- **Worker drain window:** `drain_timeout_sec` (default 600s). The
+  `SIGTERM` handler stops the claim loop, waits up to this for
+  in-flight trials to finish, then cancels remaining trials. Set the
+  k8s deployment's `terminationGracePeriodSeconds >= drain_timeout_sec`
+  or trials will be `SIGKILL`'d mid-finalize.
+- **Gateway rolling restart:** the per-request retry budget is
+  `llm_retry_budget_sec` (default 60s post-#416 Slice 3), with up to
+  `llm_retry_max_attempts=5` attempts and an `llm_retry_max_backoff_sec=8`
+  ceiling on each. This covers a typical k8s `maxUnavailable=1,
+  maxSurge=1` rollout on a 2-replica gateway (~10-30s of transient
+  502s); longer outages exhaust the budget and the trial fails with
+  `gateway_error`.
+- **Orphan trajectory cleanup** (post-#416 Slice 1) no longer deletes
+  JSONLs for trials whose CP state is still `running`/`claimed`/`queued`,
+  regardless of `worker_id`. The reclaim sweep gets the trial back to
+  a healthy worker and the JSONL serves as the forensic record for
+  the prior attempt.
+
+**Operator smoke for the in-flight-trial-across-restart path:**
+
+1. Submit a long-running batch (e.g. an aime sweep, takes ~30s per trial).
+2. While trials are running, restart the worker pod:
+   `kubectl rollout restart deploy/loom-worker -n loom-prod`.
+3. Watch the CP `crash_detector_reclaimed` log line — should report a
+   count matching trials in-flight at SIGTERM time, within
+   `worker_heartbeat_expiry_sec + worker_reclaim_sweep_interval_sec`
+   (default 15+30=45s).
+4. Confirm no trials enter terminal state with `failure_reason IN
+   ('trajectory_flush_failed', 'gateway_error')`. Reclaimed trials
+   should complete normally on the new worker.
+5. Inspect the new worker's startup logs for
+   `orphan_trajectory_preserved` (the slice-1 happy path) rather
+   than `orphan_trajectory_deleted` for the reclaimed trial ids.
 
 ## Backup + restore
 

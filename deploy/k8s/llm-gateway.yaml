@@ -50,13 +50,13 @@ spec:
         - name: LOOM_GW_LLM_RETRY_BASE_BACKOFF_SEC
           value: '0.5'
         - name: LOOM_GW_LLM_RETRY_BUDGET_SEC
-          value: '30.0'
+          value: '60.0'
         - name: LOOM_GW_LLM_RETRY_JITTER_SEC
           value: '0.25'
         - name: LOOM_GW_LLM_RETRY_MAX_ATTEMPTS
-          value: '3'
+          value: '5'
         - name: LOOM_GW_LLM_RETRY_MAX_BACKOFF_SEC
-          value: '4.0'
+          value: '8.0'
         - name: LOOM_GW_LOG_LEVEL
           value: info
         - name: LOOM_GW_METRICS_PORT

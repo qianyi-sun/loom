@@ -27,10 +27,10 @@ class GatewaySettings(BaseSettings):
     google_api_key: SecretStr | None = None
     huggingface_api_key: SecretStr | None = None
     llm_retry_base_backoff_sec: float = 0.5
-    llm_retry_budget_sec: float = 30.0
+    llm_retry_budget_sec: float = 60.0
     llm_retry_jitter_sec: float = 0.25
-    llm_retry_max_attempts: int = 3
-    llm_retry_max_backoff_sec: float = 4.0
+    llm_retry_max_attempts: int = 5
+    llm_retry_max_backoff_sec: float = 8.0
     log_level: LogLevel = "info"
     metrics_port: int = 9101
     openai_api_key: SecretStr | None = None

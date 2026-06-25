@@ -302,14 +302,17 @@ default     = 120.0
 
 # ─── Per-request retry on transient upstream failures (#298 Slice A) ───
 # Retry classification + budget live in `loom_llm_gateway/retry.py`.
-# Defaults are conservative (worst-case ~4s of waits before exhausting
-# 3 attempts) to fit inside subprocess agent client timeouts (60-120s).
+# Defaults are sized to ride out a rolling LLM-gateway / upstream
+# restart window (#416 Slice 3): 5 attempts with up to 8s backoff each,
+# capped at a 60s wall-clock budget. Agent timeouts on TaskConfig are
+# 30min default; keeping the budget at 60s leaves ample headroom for
+# the rest of the agent run.
 
 [service_config.llm_retry_max_attempts]
 used_by     = ["llm-gateway"]
 python_type = "int"
-default     = 3
-description = "Max attempts per upstream LLM request including the initial call. 1 disables retry (#298 Slice A)."
+default     = 5
+description = "Max attempts per upstream LLM request including the initial call. 1 disables retry (#298 Slice A). Bumped to 5 in #416 Slice 3 so a request hitting the middle of a rolling-restart window (k8s `maxUnavailable=1` on a 2-replica gateway is ~10-30s of transient 502s) gets enough chances to land on a healthy replica."
 
 [service_config.llm_retry_base_backoff_sec]
 used_by     = ["llm-gateway"]
@@ -326,14 +329,14 @@ description = "Uniform jitter ±this many seconds added to each backoff wait. Re
 [service_config.llm_retry_max_backoff_sec]
 used_by     = ["llm-gateway"]
 python_type = "float"
-default     = 4.0
-description = "Per-attempt backoff ceiling. Stops exponential growth before subprocess agent timeouts kick in."
+default     = 8.0
+description = "Per-attempt backoff ceiling. Stops exponential growth before subprocess agent timeouts kick in. Bumped from 4s to 8s in #416 Slice 3 to give the rolling-restart window time to settle without burning all 5 attempts in <10s."
 
 [service_config.llm_retry_budget_sec]
 used_by     = ["llm-gateway"]
 python_type = "float"
-default     = 30.0
-description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Sized to leave room within the typical 60-120s subprocess agent timeout for the actual upstream call."
+default     = 60.0
+description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Bumped from 30s to 60s in #416 Slice 3 to cover a full k8s rolling-restart window; well below TaskConfig.agent.timeout_sec (default 1800s)."
 
 [service_config.egress_proxy_url]
 used_by     = ["llm-gateway"]

@@ -536,6 +536,18 @@ class Batch(Base):
 
 class Trial(Base):
     __tablename__ = "trials"
+    __table_args__ = (
+        # #416 Slice 4: a terminal-successful trial must carry its
+        # TrialResult. Writeback in `loom_worker.trial_runner` already
+        # patches `result` before the `state='succeeded'` transition;
+        # this constraint pins the invariant at the DB so any future
+        # writeback regression fails fast at PATCH time instead of
+        # producing rows the SPA/ATIF/#426 reward gate can't consume.
+        CheckConstraint(
+            "state != 'succeeded' OR result IS NOT NULL",
+            name="trials_succeeded_has_result",
+        ),
+    )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
     task_id: Mapped[str] = mapped_column(String, ForeignKey("tasks.id"), nullable=False)
