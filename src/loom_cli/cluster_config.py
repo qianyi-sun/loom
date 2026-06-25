@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
         trajectories_bucket: str = "trajectories"
         worker_capacity: _WorkerCapacityConfig = field(default_factory=_WorkerCapacityConfig)
+        worker_subprocess_gateway_url: str = "http://host.docker.internal:30443/openai/v1"
         worker_trajectory_storage_gi: int = 100
 
         def to_render_context(self) -> dict[str, Any]: ...

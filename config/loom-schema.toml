@@ -703,6 +703,11 @@ python_type = "table"
 description = "Production worker Deployment capacity knobs. One worker pod handles max_concurrent trials; replicas.worker multiplies total in-cluster trial slots."
 fields      = { max_concurrent = 16, cpu_request = "500m", cpu_limit = "8", memory_request = "1Gi", memory_limit = "16Gi" }
 
+[render_config.worker_subprocess_gateway_url]
+python_type = "str"
+default     = "http://host.docker.internal:30443/openai/v1"
+description = "Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; kind-on-host deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward."
+
 [render_config.replicas]
 python_type = "table"
 # egress_xds + egress_proxy default 0 — Phase C is not yet wired

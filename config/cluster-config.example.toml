@@ -22,6 +22,8 @@ postgres_storage_gi = 50
 provider_egress_allowlist = []
 # Object-store bucket used by loom-service for trial trajectories. Set per environment when deployments share an object-store endpoint.
 trajectories_bucket = "trajectories"
+# Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; kind-on-host deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward.
+worker_subprocess_gateway_url = "http://host.docker.internal:30443/openai/v1"
 worker_trajectory_storage_gi = 100
 
 [replicas]

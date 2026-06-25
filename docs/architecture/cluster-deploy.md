@@ -99,11 +99,16 @@ The worker process and the subprocess agent do not share a network
 view. `LOOM_WORKER_GATEWAY_URL` remains the worker-pod URL for
 worker-side gateway clients. Subprocess agents launched inside Docker
 sandboxes use `LOOM_WORKER_SUBPROCESS_GATEWAY_URL`; the default k8s
-manifest sets it to
-`http://host.docker.internal:30443/openai/v1`, which reaches the
+render sets it from `worker_subprocess_gateway_url`, whose default is
+`http://host.docker.internal:30443/openai/v1`. That reaches the
 node-local `loom-gateway-router` hostPort and then the in-cluster
-gateway facade. `DockerDriver` adds the Linux Docker host-gateway
-mapping when that hostname is used.
+gateway facade on bare-node k8s deployments. Kind-on-host deployments
+that launch sandboxes through the platform host Docker socket must
+review host port ownership; if another service owns `30443`, set
+`worker_subprocess_gateway_url` to a dedicated host bridge such as
+`http://host.docker.internal:30444/openai/v1` and keep a durable
+host-side port-forward to `svc/loom-llm-gateway:9100`. `DockerDriver`
+adds the Linux Docker host-gateway mapping when that hostname is used.
 
 ### Network isolation
 

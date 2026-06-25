@@ -161,7 +161,8 @@ can SSH to the candidates:
 export LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
 export LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 # Optional when the sandbox's network view differs from the worker process.
-# For example, use a node-local router or host-gateway URL.
+# For example, use a node-local router or host-gateway URL; replace the
+# port with the operator-selected sandbox bridge port.
 # export LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
 export LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 
@@ -368,7 +369,8 @@ LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
 LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 # Leave unset when the sandbox can use the same gateway URL. Set when
 # subprocess agents run in Docker sandboxes that need a host-gateway or
-# node-local router endpoint.
+# node-local router endpoint; replace the port with the operator-selected
+# sandbox bridge port.
 # LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
 LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 LOOM_WORKER_TOKEN=loom_w_...

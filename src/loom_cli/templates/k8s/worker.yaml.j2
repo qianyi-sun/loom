@@ -18,10 +18,10 @@ spec:
             - name: LOOM_WORKER_MAX_CONCURRENT
               value: {{ worker_capacity.max_concurrent | string | tojson }}
             # Subprocess agents run inside Docker sandboxes, not the worker pod.
-            # They cannot resolve k8s Service DNS, so use the node-local
-            # gateway-router hostPort plus Docker's host-gateway alias.
+            # They cannot resolve k8s Service DNS, so inject the operator-
+            # selected sandbox-facing bridge URL.
             - name: LOOM_WORKER_SUBPROCESS_GATEWAY_URL
-              value: http://host.docker.internal:30443/openai/v1
+              value: {{ worker_subprocess_gateway_url | tojson }}
           volumeMounts:
             - name: trajectories
               mountPath: /var/lib/loom/trajectories

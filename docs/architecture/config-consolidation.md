@@ -134,6 +134,10 @@ default     = "postgres:16"
 [render_config.postgres_storage_gi]
 python_type = "int"
 default     = 50
+
+[render_config.worker_subprocess_gateway_url]
+python_type = "str"
+default     = "http://host.docker.internal:30443/openai/v1"
 ```
 
 ### Field semantics

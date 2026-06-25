@@ -125,6 +125,21 @@ def test_load_config_from_toml_accepts_worker_capacity(tmp_path: Path) -> None:
     assert cfg.worker_capacity.memory_limit == "128Gi"
 
 
+def test_load_config_from_toml_accepts_worker_subprocess_gateway_url(
+    tmp_path: Path,
+) -> None:
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text(
+        'worker_subprocess_gateway_url = "http://host.docker.internal:30444/openai/v1"\n',
+        encoding="utf-8",
+    )
+    cfg = load_cluster_config(cfg_path)
+    assert (
+        cfg.worker_subprocess_gateway_url
+        == "http://host.docker.internal:30444/openai/v1"
+    )
+
+
 def test_load_config_rejects_deprecated_gateway_public_host(
     tmp_path: Path,
 ) -> None:
@@ -209,7 +224,10 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
 
 
 def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
-    docs = _load_docs(render_manifests(ClusterConfig()))
+    cfg = ClusterConfig(
+        worker_subprocess_gateway_url="http://host.docker.internal:30444/openai/v1",
+    )
+    docs = _load_docs(render_manifests(cfg))
     worker = next(
         d
         for d in docs
@@ -218,7 +236,7 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     by_name = {entry["name"]: entry for entry in env}
     assert by_name["LOOM_WORKER_SUBPROCESS_GATEWAY_URL"]["value"] == (
-        "http://host.docker.internal:30443/openai/v1"
+        "http://host.docker.internal:30444/openai/v1"
     )
 
 

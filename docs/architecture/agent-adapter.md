@@ -135,8 +135,11 @@ different network namespaces:
 - `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is optional and is the
   OpenAI-compatible facade base URL as seen from the trial sandbox
   subprocess. Use it when Docker sandboxes cannot resolve the worker
-  pod/container's service DNS. The k8s manifest sets it to
-  `http://host.docker.internal:30443/openai/v1`, and `DockerDriver`
+  pod/container's service DNS. Kubernetes render injects it from
+  `worker_subprocess_gateway_url`, which defaults to
+  `http://host.docker.internal:30443/openai/v1` for the gateway-router
+  hostPort path. Operators can override it for kind-on-host topologies
+  where a different host bridge port is required. `DockerDriver`
   injects `host.docker.internal -> host-gateway` when that hostname is
   used.
 
