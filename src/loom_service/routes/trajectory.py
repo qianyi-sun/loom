@@ -1,5 +1,5 @@
 """Trajectory paginated read + authenticated download (spec §5.2) +
-seq-cursor event replay + SSE live stream (#5 Slice 1 / Slice 3c).
+seq-cursor event replay + SSE live stream (#5 Slices 1 + 3c + 3e).
 
 The legacy events.jsonl object lives in the same `trajectories`
 bucket the worker's TrajectoryWriter writes to, at the key
@@ -7,11 +7,20 @@ bucket the worker's TrajectoryWriter writes to, at the key
 `/trials/{id}/events?after_seq=N` + `/trials/{id}/stream` read
 events from there.
 
-#5 Slice 3c flips both reads to the Postgres `trial_events` table
+#5 Slice 3c flipped both reads to the Postgres `trial_events` table
 (populated by Slice 3a's CP endpoint via Slice 3b's worker
 dual-write). MinIO remains the audit-log copy and the trajectory
-download endpoint; the cursor-based read now hits an indexed table
-instead of fetching + splitting a multi-MB object.
+download endpoint.
+
+#5 Slice 3e replaces the SSE inner poll loop with a psycopg LISTEN
+consumer that waits on the `trial_events_inserted` channel (added
+by migration 0041). Events become push-bound: when a worker insert
+commits, the trigger NOTIFYs, the consumer wakes, and a focused
+incremental read ships the new rows. The fixed `poll_interval`
+fallback still ticks every ~1.5s as a safety valve for missed
+notifications + terminal-state detection (state transitions don't
+trigger NOTIFY). On LISTEN connection error the route degrades to
+pure-poll mode — no UX regression vs. Slice 3c.
 
 MinIO fallback: a trial whose worker shipped before Slice 3b will
 have 0 rows in `trial_events` but a populated MinIO trajectory. To
@@ -25,12 +34,14 @@ trials.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, cast
 from uuid import UUID
 
+import psycopg
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -49,6 +60,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+# Migration 0041's NOTIFY channel; payload is `<trial_id>:<seq>`.
+_LISTEN_CHANNEL = "trial_events_inserted"
 # Default SSE polling cadence — the backend reads the MinIO object on
 # this interval to detect new events. Phase 2 (Postgres event table +
 # LISTEN/NOTIFY) makes this push-based; until then this trades a few
@@ -333,6 +346,74 @@ def _sse_format(event_kind: str | None, data: dict[str, Any], event_id: str | No
     return ("\n".join(lines) + "\n\n").encode("utf-8")
 
 
+def _sqla_url_to_psycopg_dsn(url: str) -> str:
+    """SQLAlchemy uses `postgresql+psycopg://`; psycopg.AsyncConnection
+    wants the bare `postgresql://` scheme."""
+    for prefix in ("postgresql+psycopg://", "postgresql+asyncpg://"):
+        if url.startswith(prefix):
+            return "postgresql://" + url[len(prefix):]
+    return url
+
+
+class _ListenSubscription:
+    """One trial's psycopg LISTEN subscription. Owns the dedicated
+    autocommit connection + the drain task that watches
+    `conn.notifies()` and sets `wake` when a NOTIFY whose payload
+    starts with `<trial_id>:` arrives.
+
+    Use as `async with _ListenSubscription(...) as sub: ...`. On exit
+    the drain task is cancelled and the connection is closed. The
+    connection is opened lazily inside `__aenter__` so a connection
+    failure can be caught + the route can degrade to pure-poll mode
+    without blowing up the request.
+    """
+
+    def __init__(self, dsn: str, trial_id: UUID) -> None:
+        self._dsn = dsn
+        self._target_prefix = f"{trial_id}:"
+        self._conn: psycopg.AsyncConnection[Any] | None = None
+        self._drain_task: asyncio.Task[None] | None = None
+        self.wake = asyncio.Event()
+
+    async def __aenter__(self) -> _ListenSubscription:
+        # Autocommit is required for LISTEN — the connection is a
+        # streaming consumer, not transaction-scoped.
+        self._conn = await psycopg.AsyncConnection.connect(
+            self._dsn, autocommit=True,
+        )
+        await self._conn.execute(f"LISTEN {_LISTEN_CHANNEL}")
+        self._drain_task = asyncio.create_task(self._drain())
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        if self._drain_task is not None:
+            self._drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._drain_task
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                await self._conn.close()
+
+    async def _drain(self) -> None:
+        """Consume the connection's NOTIFY stream forever. Set `wake`
+        on every notification whose payload starts with our trial's
+        prefix; ignore notifications for other trials (multiple SSE
+        streams across many trials all share the same channel)."""
+        assert self._conn is not None
+        try:
+            async for notify in self._conn.notifies():
+                if notify.payload.startswith(self._target_prefix):
+                    self.wake.set()
+        except Exception:
+            # Connection died — the main loop will fall back to its
+            # fixed-interval poll. Log once at WARN so operators see
+            # listen-drop noise without a per-event traceback.
+            logger.warning(
+                "trial_events_listen_drained_err — falling back to poll",
+                exc_info=True,
+            )
+
+
 @router.get("/trials/{trial_id}/stream")
 async def stream_events(
     request: Request,
@@ -349,9 +430,13 @@ async def stream_events(
     than `_DEFAULT_SSE_MAX_CONNECTION_SEC` (clients reconnect with
     the last seen seq as `after_seq`).
 
-    Phase 2 (Postgres event table + LISTEN/NOTIFY) will replace the
-    inner poll with push semantics; the on-wire contract here stays
-    stable so callers don't change.
+    Slice 3e: when a worker insert commits, migration 0041's trigger
+    fires NOTIFY on `trial_events_inserted` and the inner loop wakes
+    immediately to read+ship the new rows. The fixed `poll_interval`
+    fallback still ticks as a safety valve for missed notifications
+    AND for terminal-state detection (state transitions don't
+    trigger NOTIFY). On LISTEN connection error the route degrades
+    to pure-poll mode without a UX regression.
 
     The frontend should still implement an `useAdaptivePolling`
     fallback for environments without working `EventSource` (some
@@ -367,6 +452,7 @@ async def stream_events(
     bucket = settings.trajectories_bucket
     poll_interval = _DEFAULT_SSE_POLL_INTERVAL_SEC
     max_connection_sec = _DEFAULT_SSE_MAX_CONNECTION_SEC
+    listen_dsn = _sqla_url_to_psycopg_dsn(str(settings.db_url))
 
     async def _read_loop_chunk(
         seq_cursor: int,
@@ -390,6 +476,21 @@ async def stream_events(
             )
             return evts, fresh_trial.state
 
+    async def _open_subscription() -> _ListenSubscription | None:
+        """Best-effort LISTEN setup. On error (Postgres unreachable
+        on autocommit, channel ACL issue) return None and let the
+        loop fall back to pure-poll behavior."""
+        sub = _ListenSubscription(listen_dsn, trial.id)
+        try:
+            await sub.__aenter__()
+            return sub
+        except Exception:
+            logger.warning(
+                "trial_events_listen_open_failed — pure-poll mode",
+                exc_info=True,
+            )
+            return None
+
     async def event_source() -> AsyncIterator[bytes]:
         current_seq = after_seq
         loop = asyncio.get_running_loop()
@@ -397,48 +498,70 @@ async def stream_events(
         # Emit a comment line up front so any proxy that buffers SSE
         # gets a flush before the first real event lands.
         yield b": stream open\n\n"
-        while True:
-            if await request.is_disconnected():
-                return
-            events, current_state = await _read_loop_chunk(current_seq)
-            for ev in events:
-                yield _sse_format(
-                    event_kind=None,
-                    data=ev,
-                    event_id=str(ev["seq"]),
-                )
-                current_seq = int(ev["seq"])
-
-            # Terminal-state detection — once terminal AND we've
-            # emitted everything currently available, close cleanly.
-            if current_state in _TERMINAL_TRIAL_STATES:
-                # One more read to flush any events that landed
-                # between the previous read and the state check.
-                tail, _ = await _read_loop_chunk(current_seq)
-                for ev in tail:
+        subscription = await _open_subscription()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                events, current_state = await _read_loop_chunk(current_seq)
+                for ev in events:
                     yield _sse_format(
                         event_kind=None,
                         data=ev,
                         event_id=str(ev["seq"]),
                     )
                     current_seq = int(ev["seq"])
-                yield _sse_format(
-                    event_kind="complete",
-                    data={"final_state": current_state, "last_seq": current_seq},
-                )
-                return
 
-            # Connection-budget exhaustion: client reconnects with
-            # `after_seq=current_seq` to resume — standard SSE
-            # Last-Event-ID semantics.
-            if loop.time() - started_at >= max_connection_sec:
-                yield _sse_format(
-                    event_kind="reconnect",
-                    data={"reason": "max_connection_sec", "last_seq": current_seq},
-                )
-                return
+                # Terminal-state detection — once terminal AND we've
+                # emitted everything currently available, close cleanly.
+                if current_state in _TERMINAL_TRIAL_STATES:
+                    # One more read to flush any events that landed
+                    # between the previous read and the state check.
+                    tail, _ = await _read_loop_chunk(current_seq)
+                    for ev in tail:
+                        yield _sse_format(
+                            event_kind=None,
+                            data=ev,
+                            event_id=str(ev["seq"]),
+                        )
+                        current_seq = int(ev["seq"])
+                    yield _sse_format(
+                        event_kind="complete",
+                        data={"final_state": current_state, "last_seq": current_seq},
+                    )
+                    return
 
-            await asyncio.sleep(poll_interval)
+                # Connection-budget exhaustion: client reconnects with
+                # `after_seq=current_seq` to resume — standard SSE
+                # Last-Event-ID semantics.
+                if loop.time() - started_at >= max_connection_sec:
+                    yield _sse_format(
+                        event_kind="reconnect",
+                        data={"reason": "max_connection_sec", "last_seq": current_seq},
+                    )
+                    return
+
+                # Wait for either: a NOTIFY matching our trial fires
+                # (push), or `poll_interval` elapses (fallback for
+                # missed notifies + terminal-state polling). The wake
+                # event is cleared AFTER the wait so any NOTIFY that
+                # lands while we were emitting events above isn't
+                # lost — drain may have set wake during the yield
+                # iterator's pause.
+                if subscription is not None:
+                    try:
+                        await asyncio.wait_for(
+                            subscription.wake.wait(),
+                            timeout=poll_interval,
+                        )
+                    except TimeoutError:
+                        pass
+                    subscription.wake.clear()
+                else:
+                    await asyncio.sleep(poll_interval)
+        finally:
+            if subscription is not None:
+                await subscription.__aexit__(None, None, None)
 
     return StreamingResponse(
         event_source(),

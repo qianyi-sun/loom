@@ -516,3 +516,108 @@ async def test_stream_serves_postgres_events_for_terminal_trial(
     parsed = [json.loads(m["data"]) for m in data_messages]
     assert [e["seq"] for e in parsed] == [200]
     assert parsed[0].get("marker") == "stream-from-postgres"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #5 Slice 3e: SSE inner loop wakes on NOTIFY (LISTEN consumer)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_stream_wakes_on_listen_notify_mid_run(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    """End-to-end LISTEN/NOTIFY. Open the SSE stream against a
+    running trial that already has its initial-replay row in
+    Postgres. Mid-stream, a side task inserts a new event row +
+    flips the trial to `succeeded`. The route's LISTEN consumer
+    must wake on migration 0041's NOTIFY so the new row lands
+    before the deterministic terminal-state path closes the
+    stream — proves the push path actually fires."""
+    import asyncio as asyncio_local
+
+    from sqlalchemy import update as sa_update
+
+    from loom.db.schema import Trial
+
+    app, raw, _team_id, trial_id = traj_setup
+
+    # Flip the trial back to `running` so the stream stays open
+    # long enough to observe a mid-run insert.
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            sa_update(Trial).where(Trial.id == trial_id).values(state="running"),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    # Initial-replay row (seq=300) so the opening Postgres read has
+    # something to emit; subsequent push has to come from NOTIFY.
+    _seed_trial_events_postgres(postgres_url, trial_id, [
+        {
+            "seq": 300, "kind": "step_start", "source": "worker",
+            "schema_version": 1,
+            "payload": {
+                "seq": 300, "kind": "step_start",
+                "marker": "initial-replay",
+            },
+        },
+    ])
+
+    async def insert_then_terminate() -> None:
+        """+0.3s after stream open: insert a NOTIFY-target event,
+        then flip the trial to `succeeded` so the stream closes."""
+        await asyncio_local.sleep(0.3)
+        _seed_trial_events_postgres(postgres_url, trial_id, [
+            {
+                "seq": 301, "kind": "step_end", "source": "worker",
+                "schema_version": 1,
+                "payload": {
+                    "seq": 301, "kind": "step_end",
+                    "marker": "fired-by-notify",
+                },
+            },
+        ])
+        await asyncio_local.sleep(0.2)
+        sync = create_engine(postgres_url)
+        slx = sessionmaker(sync)
+        with slx() as s:
+            s.execute(
+                sa_update(Trial)
+                .where(Trial.id == trial_id)
+                .values(state="succeeded"),
+            )
+            s.commit()
+        sync.dispose()
+
+    side_task = asyncio_local.create_task(insert_then_terminate())
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc", timeout=10.0,
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_id}/stream?after_seq=299",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    await side_task
+
+    assert r.status_code == 200
+    messages = _parse_sse(r.text)
+    data_messages = [
+        m for m in messages
+        if "data" in m and m.get("event") != "complete"
+    ]
+    parsed = [json.loads(m["data"]) for m in data_messages]
+    seqs = [e["seq"] for e in parsed]
+    # Both events landed: seq=300 from the opening Postgres read
+    # AND seq=301 from the LISTEN consumer waking the loop.
+    assert seqs == [300, 301]
+    assert parsed[1].get("marker") == "fired-by-notify"
+    # Final state event present.
+    complete = next(m for m in messages if m.get("event") == "complete")
+    payload = json.loads(complete["data"])
+    assert payload["final_state"] == "succeeded"
+    assert payload["last_seq"] == 301

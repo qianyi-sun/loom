@@ -95,6 +95,11 @@ async def traj_setup(
             id=trial_id, task_id=task_id, team_id=team_id,
             state="succeeded", config={}, requires_caps={},
             submitted_at=now,
+            # `trials_succeeded_has_result` CHECK (migration 0039 from
+            # #416 Slice 4) requires result IS NOT NULL when state is
+            # `succeeded`. Empty dict satisfies the constraint without
+            # needing a real verifier projection in the fixture.
+            result={},
         ))
         s.commit()
 
