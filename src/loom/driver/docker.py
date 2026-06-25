@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import io
 import logging
+import shlex
 import tarfile
 import threading
 from collections.abc import AsyncIterator, Mapping
@@ -443,7 +444,7 @@ class DockerDriver:
         tar_bytes = await asyncio.to_thread(_build_tar)
 
         # Ensure parent dir exists in the container.
-        await self.exec(f"mkdir -p {dst.parent.as_posix()}", user="root")
+        await self.exec(f"mkdir -p {shlex.quote(dst.parent.as_posix())}", user="root")
 
         def _put() -> None:
             ok = container.put_archive(path=str(dst.parent), data=tar_bytes)

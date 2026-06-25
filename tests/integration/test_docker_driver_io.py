@@ -67,3 +67,17 @@ async def test_upload_creates_nested_parent(docker_driver, tmp_path: Path):  # t
     await docker_driver.upload(src, PurePosixPath("/workspace/deep/nested/file.txt"))
     r = await docker_driver.exec("cat /workspace/deep/nested/file.txt")
     assert r.stdout == b"x"
+
+
+async def test_upload_creates_parent_when_path_contains_spaces(
+    docker_driver,
+    tmp_path: Path,
+):  # type: ignore[no-untyped-def]
+    src = tmp_path / "in.txt"
+    src.write_bytes(b"path with spaces\n")
+
+    dst = PurePosixPath("/workspace/dir with spaces/file.txt")
+    await docker_driver.upload(src, dst)
+
+    r = await docker_driver.exec("cat '/workspace/dir with spaces/file.txt'")
+    assert r.stdout == b"path with spaces\n"
