@@ -239,7 +239,13 @@ class LocalTrialRunner:
             sandbox_extra_hosts=self.sandbox_extra_hosts,
         )
 
-        async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
+        deferred_success_patch: tuple[str, str | None, str | None] | None = None
+
+        async def _send_state_patch(
+            state: str,
+            fr: str | None,
+            fm: str | None = None,
+        ) -> bool:
             # Trial expects an `Awaitable[None]` callback. We adapt our
             # bool-returning callback by logging when the Control Plane
             # rejects with a fence (False) and swallowing other errors so a
@@ -252,11 +258,24 @@ class LocalTrialRunner:
                         "worker lost claim",
                         self.trial_id, state,
                     )
+                    return False
+                return True
             except Exception as exc:
                 logger.warning(
                     "state_patch_error trial=%s state=%s err=%s",
                     self.trial_id, state, exc,
                 )
+                return False
+
+        async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
+            nonlocal deferred_success_patch
+            if (
+                state == TrialState.SUCCEEDED.value
+                and self.output_projection_callback is not None
+            ):
+                deferred_success_patch = (state, fr, fm)
+                return
+            await _send_state_patch(state, fr, fm)
 
         trial = Trial(ctx=ctx, state_patch=_patch)
         # Phase D: when a rotator is configured, wrap the trial body
@@ -275,7 +294,25 @@ class LocalTrialRunner:
                     ),
                 )
             result = await trial.run()
-            await self._patch_output_projection(result)
+            if result.state == TrialState.SUCCEEDED:
+                projection_ok = await self._patch_output_projection(result)
+                if not projection_ok:
+                    result.state = TrialState.FAILED
+                    result.failure_reason = FailureReason.TRAJECTORY_FLUSH_FAILED
+                    result.failure_message = (
+                        result.failure_message
+                        or "successful trial output projection was not accepted "
+                        "by the control plane"
+                    )
+                    result.finished_at = datetime.now(UTC)
+                    await _send_state_patch(
+                        result.state.value,
+                        result.failure_reason.value,
+                        result.failure_message,
+                    )
+                    return result
+                if deferred_success_patch is not None:
+                    await _send_state_patch(*deferred_success_patch)
             return result
         except Exception:
             logger.exception("trial_runner_uncaught_exception trial=%s", self.trial_id)
@@ -332,11 +369,11 @@ class LocalTrialRunner:
                         self.trial_id, sandbox_bridge.name,
                     )
 
-    async def _patch_output_projection(self, result: TrialResult) -> None:
+    async def _patch_output_projection(self, result: TrialResult) -> bool:
         if self.output_projection_callback is None:
-            return
+            return True
         if result.state != TrialState.SUCCEEDED:
-            return
+            return True
         result_payload = _build_result_payload(result)
         trajectory_index = _build_trajectory_index(result)
         try:
@@ -349,11 +386,14 @@ class LocalTrialRunner:
                     "output_projection_patch_fenced trial=%s — worker lost claim",
                     self.trial_id,
                 )
+                return False
+            return True
         except Exception as exc:
             logger.warning(
                 "output_projection_patch_error trial=%s err=%s",
                 self.trial_id, exc,
             )
+            return False
 
     async def _resolve_gateway(self) -> LLMGatewayClient:
         """Pick the gateway client for this trial.

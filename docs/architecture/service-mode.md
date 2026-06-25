@@ -196,8 +196,6 @@ all scale horizontally. Postgres is the durability boundary.
         |                      |                      |              |    row before resp)    to Postgres)
         |                      |                      |              |                          |
         |                      |                      |              | verifier.run()           |
-        |                      |                      | <-- PATCH -- | state=succeeded|failed   |
-        |                      |                      |   (fenced)   |                          |
         |                      |                      |              | finalize (always runs):  |
         |                      |                      |              |  1. last trajectory part |
         |                      |                      |              |  2. maybe fetch llm_calls|
@@ -208,6 +206,8 @@ all scale horizontally. Postgres is the durability boundary.
         |                      |                      |              |  4. upload atif.json     |
         |                      |                      |              | PATCH /trajectory_index  |
         |                      |                      |              |   (result + output index)|
+        |                      |                      | <-- PATCH -- | state=succeeded|failed   |
+        |                      |                      |   (fenced)   |                          |
         |                      |                      |              | --- stop --> [delete sandbox]
         |                      |                      |              |                          |
    GET /trials/{id} ----------> GET /api/v1/         | <-- SELECT --|                          |
@@ -233,8 +233,16 @@ returns 409. Two Workers can never both think they own a trial.
 `False` return (the Worker logs + abandons the trial). The trial
 stays in whatever state the new owner has put it in.
 
-After a successful trial finalizes, the Worker also sends a fenced
-`PATCH /trials/{id}/trajectory_index` carrying two durable projections:
+After a successful trial finalizes, the Worker sends a fenced
+`PATCH /trials/{id}/trajectory_index` before reporting terminal
+`state=succeeded`. This ordering keeps Control Plane state atomic from
+the user's perspective: a trial should not persist as `succeeded`
+without the result projection needed for reward gates and detail APIs.
+If that projection is rejected or fails, the Worker reports
+`trajectory_flush_failed` instead of success so the run remains
+diagnosable and rerunnable.
+
+The projection carries two durable outputs:
 
 - `trials.result`: the serialized `TrialResult` plus an
   `aggregate_reward` scalar for list/batch rollups. Trial and batch

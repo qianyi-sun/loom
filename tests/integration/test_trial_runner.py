@@ -459,6 +459,78 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     }]
 
 
+async def test_runner_does_not_report_success_when_output_projection_fails(  # type: ignore[no-untyped-def]
+    hello_task, tmp_path: Path,
+):
+    state_calls: list[tuple[str, str | None, str | None]] = []
+    projection_calls = 0
+
+    async def fake_state_patch(
+        state: str,
+        failure_reason: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
+        state_calls.append((state, failure_reason, failure_message))
+        return True
+
+    async def fake_output_projection(
+        result_payload: dict[str, Any],
+        trajectory_index: dict[str, Any],
+    ) -> bool:
+        nonlocal projection_calls
+        projection_calls += 1
+        assert result_payload["aggregate_reward"] == 1.0
+        assert trajectory_index["trajectory_uri"].endswith("/events.jsonl")
+        return False
+
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        if cmd.startswith("find "):
+            return ExecResult(
+                return_code=0,
+                stdout=b"/workspace/result.txt\x00",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.01,
+            )
+        return ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        )
+
+    trial_id = uuid4()
+    team_id = uuid4()
+    driver = FakeDriver(exec_handler=handler)
+    driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
+    runner = LocalTrialRunner(
+        trial_id=trial_id, team_id=team_id,
+        task_config=_task_config(artifacts=["result.txt"]),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=lambda: driver,
+        agent_factory=lambda task_dir, _gw, _model, _name:
+            OracleAgent(task_dir=task_dir, trial_id=trial_id),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+        output_projection_callback=fake_output_projection,
+    )
+
+    result = await runner.run()
+
+    assert projection_calls == 1
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.TRAJECTORY_FLUSH_FAILED
+    assert not any(call[0] == "succeeded" for call in state_calls)
+    assert any(
+        call[0] == "failed"
+        and call[1] == FailureReason.TRAJECTORY_FLUSH_FAILED.value
+        for call in state_calls
+    )
+
+
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
     hello_task, tmp_path: Path, caplog,
 ):
