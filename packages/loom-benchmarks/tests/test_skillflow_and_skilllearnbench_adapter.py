@@ -347,6 +347,39 @@ def _stage_upstream_skill(
     return skill_dir
 
 
+def test_skilllearnbench_emits_oracle_eligible_true_when_solve_sh_present(
+    tmp_path: Path,
+) -> None:
+    family = "stock-data-visualization"
+    task = "stock-data-visualization-1"
+    bundle = _write_real_bundle(tmp_path, family=family, task=task)
+    (bundle / "solution").mkdir()
+    (bundle / "solution" / "solve.sh").write_text(
+        "#!/bin/bash\necho oracle\n",
+    )
+
+    instances = list(
+        SkillLearnBenchAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+
+    assert instances[0].tags["oracle_eligible"] == "true"
+
+
+def test_skilllearnbench_emits_oracle_eligible_false_when_solve_sh_absent(
+    tmp_path: Path,
+) -> None:
+    family = "chinese-poem-generator"
+    task = "chinese-poem-generator-1"
+    _write_real_bundle(tmp_path, family=family, task=task)
+
+    instances = list(
+        SkillLearnBenchAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+
+    assert instances[0].tags["oracle_eligible"] == "false"
+    assert instances[0].tags["method"] == "human_authored"
+
+
 def test_skilllearnbench_injects_method_skills_into_bundle(
     tmp_path: Path,
 ) -> None:

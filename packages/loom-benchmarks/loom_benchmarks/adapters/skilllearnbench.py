@@ -9,8 +9,9 @@ method IS the system under test for SkillLearnBench: agents read the
 copied skills at runtime and the score reflects skill quality.
 
 This adapter is otherwise a passthrough on top of `SkillFlowAdapter`;
-it overrides `list_instances` to stash the upstream root + emit a
-`method` tag, and overrides `_convert_bundle_instance` to overlay the
+it overrides `list_instances` to stash the upstream root + emit
+`method` and `oracle_eligible` tags, and overrides
+`_convert_bundle_instance` to overlay the
 chosen method's per-family skill bundle on top of the empty `skills/`
 placeholder that the parent class writes.
 
@@ -44,13 +45,25 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
         for inst in super().list_instances(source_dir=source_dir, split=split):
             raw = dict(inst.raw)
             raw["__upstream_root"] = str(source_dir)
-            tags = {**inst.tags, "method": self.skill_method}
+            tags = {
+                **inst.tags,
+                "method": self.skill_method,
+                "oracle_eligible": self._oracle_eligible_tag(inst),
+            }
             yield BenchmarkInstance(
                 instance_id=inst.instance_id,
                 split=inst.split,
                 raw=raw,
                 tags=tags,
             )
+
+    @staticmethod
+    def _oracle_eligible_tag(instance: BenchmarkInstance) -> str:
+        source_path = instance.raw.get("__source_path")
+        if not source_path:
+            return "false"
+        solve = Path(str(source_path)) / "solution" / "solve.sh"
+        return "true" if solve.is_file() else "false"
 
     def _convert_bundle_instance(
         self,
