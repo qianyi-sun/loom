@@ -64,10 +64,11 @@ clients also use `LOOM_WORKER_DOCKER_API_TIMEOUT_SEC`, which must be at least
 as large as the largest expected pull/build/sidecar budget so the SDK does not
 time out before the task's own timeout policy. Tasks may also declare
 `environment.sidecars`; Docker-backed workers start those auxiliary containers
-on the same per-trial network, wait for declared healthchecks, pass
-`environment.environment` into the primary sandbox, and clean the sidecars up
-after the trial. This checks the trial sandbox boundary, not the `loom-worker`
-container. A clean runtime audit is necessary before flipping an external adapter to
+on the same per-trial network, wait for declared healthchecks through the final
+Docker probe's timeout window, pass `environment.environment` into the primary
+sandbox, and clean the sidecars up after the trial. This checks the trial
+sandbox boundary, not the `loom-worker` container. A clean runtime audit is
+necessary before flipping an external adapter to
 `service_mode_ready=true`; it still must be followed by a live end-to-end
 smoke that proves the adapter can finish a platform trial. Use
 `loom agents smoke-runtime --image <trial-sandbox-image>` for that second

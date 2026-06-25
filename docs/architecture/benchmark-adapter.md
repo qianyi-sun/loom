@@ -167,7 +167,8 @@ that context, while workspace materialization skips `.loom-build` so hidden
 build assets are not uploaded into the agent-visible workdir. Sidecars are for
 auxiliary Docker services required by the task; Docker-backed workers start
 them on the same per-trial network as the primary sandbox and wait for declared
-healthchecks before running the agent.
+healthchecks through the final Docker probe's timeout window before running the
+agent.
 
 ## Publish/Register Boundary
 

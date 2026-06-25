@@ -270,3 +270,50 @@ async def test_sidecar_runtime_passes_docker_api_timeout(
     await runtime.stop()
 
     assert from_env_timeouts == [900.0]
+
+
+async def test_sidecar_health_wait_allows_probe_at_interval_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clock = {"now": 0.0}
+    loop = task_sidecars.asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda: clock["now"])
+
+    async def _fake_sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    monkeypatch.setattr(task_sidecars.asyncio, "sleep", _fake_sleep)
+
+    class _BoundaryContainer:
+        name = "loom-sidecar-trial-server"
+
+        def __init__(self) -> None:
+            self.reload_calls = 0
+            self.attrs: dict[str, Any] = {
+                "State": {"Health": {"Status": "starting"}},
+            }
+
+        def reload(self) -> None:
+            self.reload_calls += 1
+            status = "healthy" if clock["now"] >= 10.5 else "starting"
+            self.attrs = {"State": {"Health": {"Status": status}}}
+
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0.5,
+    )
+    container = _BoundaryContainer()
+    healthcheck = HealthcheckSpec(
+        command="curl -f http://localhost:8000",
+        interval_sec=10.0,
+        timeout_sec=5.0,
+        retries=1,
+    )
+
+    await runtime._wait_for_healthy(container, healthcheck)
+
+    assert container.reload_calls > 1

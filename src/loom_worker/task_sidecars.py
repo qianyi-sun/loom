@@ -255,9 +255,12 @@ class DockerTaskSidecarRuntime:
         healthcheck: HealthcheckSpec,
     ) -> None:
         loop = asyncio.get_running_loop()
+        probe_attempts = max(healthcheck.retries, 1)
         deadline = loop.time() + max(
             healthcheck.start_period_sec
-            + healthcheck.interval_sec * max(healthcheck.retries, 1),
+            + healthcheck.interval_sec * probe_attempts
+            + healthcheck.timeout_sec
+            + self.health_poll_interval_sec,
             healthcheck.timeout_sec,
             1.0,
         )

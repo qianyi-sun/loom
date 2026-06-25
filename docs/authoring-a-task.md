@@ -166,9 +166,9 @@ aggregate is computed from the steps that completed.
   `docker_image` or `dockerfile`/`docker_build_context`, `command`,
   `environment`, `hostname`, `depends_on`, and `healthcheck`. Docker-backed
   workers start them on the same per-trial network as the main container and
-  wait for declared healthchecks before running the agent. Use
-  `[environment].environment` for environment variables that belong on the
-  primary sandbox container.
+  wait for declared healthchecks through the final Docker probe's timeout window
+  before running the agent. Use `[environment].environment` for environment
+  variables that belong on the primary sandbox container.
 - **Sandbox create options:** `extra_hosts`, `dns`, and `tmpfs` are primary
   sandbox container options, applied when Docker-backed workers create the
   container. Use them only when the task definition depends on custom hostname
