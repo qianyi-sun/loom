@@ -371,8 +371,10 @@ async def test_trial_run_cancellation_stashes_result(
     assert trial.result.state == TrialState.CANCELLED
 
 
-async def test_trial_run_agent_error_marks_failed(hello_task: Path, tmp_path: Path):
-    """Agent error → trial state FAILED; failure_reason is set."""
+async def test_trial_run_unscored_agent_error_marks_failed(
+    hello_task: Path, tmp_path: Path,
+):
+    """Agent error without a usable verifier score remains a platform failure."""
     task = TaskConfig(
         schema_version="1",
         task=TaskMetadata(id="hello", name="hello"),
@@ -398,7 +400,7 @@ async def test_trial_run_agent_error_marks_failed(hello_task: Path, tmp_path: Pa
         trial_config=stub_trial_config(),
         driver=FakeDriver(exec_handler=handler),
         agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
-        verifier=_AlwaysPassVerifier(),
+        verifier=_MissingTestsVerifier(),
         object_store=store,
         local_trajectory_path=tmp_path / "events.jsonl",
     )
@@ -407,6 +409,48 @@ async def test_trial_run_agent_error_marks_failed(hello_task: Path, tmp_path: Pa
     assert result.failure_reason == FailureReason.AGENT_ERROR
     assert result.steps[0].error is not None
     assert result.steps[0].error.phase == "agent"
+
+
+async def test_trial_run_scored_agent_error_stays_succeeded(
+    hello_task: Path, tmp_path: Path,
+):
+    """Agent errors with explicit verifier rewards remain scored outcomes."""
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="oracle"),
+        verifier=VerifierDefaults(name="structured"),
+        steps=[StepConfig(name="main")],
+    )
+    handler = command_table_handler({
+        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            return_code=42, stdout=b"", stderr=b"oops",
+            truncated=False, duration_sec=0.01,
+        ),
+    })
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id, team_id=uuid4(),
+        task_config=task, task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver=FakeDriver(exec_handler=handler),
+        agent=OracleAgent(task_dir=hello_task, trial_id=trial_id),
+        verifier=_ScoredVerifierError(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert result.failure_reason is None
+    assert result.reward == {"valid": 0.0}
+    assert result.steps[0].error is not None
+    assert result.steps[0].error.phase == "agent"
+    assert result.steps[0].verifier_result is not None
+    assert result.steps[0].verifier_result.error is not None
 
 
 async def test_trial_run_empty_reward_verifier_error_marks_failed(

@@ -44,6 +44,27 @@ def test_step_agent_error_promotes_to_agent_error() -> None:
     assert failure == (FailureReason.AGENT_ERROR, "solve.sh missing")
 
 
+def test_scored_verifier_result_suppresses_agent_error_terminal_failure() -> None:
+    failure = _first_terminal_step_failure(
+        _trial_result(
+            StepResult(
+                step_name="main",
+                error=StepError(
+                    phase="agent",
+                    reason="exception",
+                    message="solve.sh exited rc=1",
+                    occurred_at=datetime.now(UTC),
+                ),
+                verifier_result=VerifierResult(
+                    rewards={"passed": 0.0, "pytest_pass_rate": 0.0},
+                ),
+            )
+        )
+    )
+
+    assert failure is None
+
+
 def test_empty_reward_verifier_error_promotes_to_verifier_error() -> None:
     failure = _first_terminal_step_failure(
         _trial_result(

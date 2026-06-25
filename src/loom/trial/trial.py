@@ -494,9 +494,17 @@ def _merge_extra_hosts(
 
 def _first_terminal_step_failure(result: TrialResult) -> tuple[FailureReason, str | None] | None:
     for step in result.steps:
-        if step.error is not None:
-            return _failure_from_step_error(step.error)
         verifier_result = step.verifier_result
+        if step.error is not None:
+            # Coding benchmark agents can exit non-zero after producing code; if
+            # the verifier still produced a numeric score, keep the platform run
+            # successful and let the reward carry model/agent correctness.
+            if not (
+                step.error.phase == "agent"
+                and verifier_result is not None
+                and verifier_result.rewards
+            ):
+                return _failure_from_step_error(step.error)
         if (
             verifier_result is not None
             and verifier_result.error is not None
