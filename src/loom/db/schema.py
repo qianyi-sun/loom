@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     ARRAY,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Float,
@@ -24,6 +25,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -688,6 +690,72 @@ class LlmCall(Base):
     # suffered retries without parsing logs.
     attempt: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1"), default=1,
+    )
+
+
+class TrialEvent(Base):
+    """One row per typed trajectory event a trial emits (#5 Slice 3a).
+
+    Writers append events here so Phase 2's SSE endpoint can flip
+    from MinIO-poll-based to LISTEN/NOTIFY push, and so analytics /
+    debug paths can query by kind/source without scanning the
+    per-trial MinIO JSONL.
+
+    `seq` is the event's logical sequence within its trial (matches
+    the existing `_EventBase.seq` envelope field in
+    `loom.models.trajectory`). UNIQUE (trial_id, seq) doubles as the
+    idempotency key — workers INSERT ... ON CONFLICT DO NOTHING so
+    a retry after a partial batch ack doesn't dupe.
+
+    `payload` is the full typed event body (matching the Pydantic
+    union); `kind` mirrors `payload.kind` so cursor reads can filter
+    without unpacking JSONB; `source` records the emitting subsystem
+    ('worker' | 'control-plane' | future 'scheduler' | etc.); and
+    `schema_version` lets readers interpret payloads against the
+    version they were emitted under.
+
+    `created_at` is the DB insert time (NOT the worker's
+    `emitted_at` which lives in payload) — used as a tie-breaker
+    for ORDER BY when seq is ambiguous and for retention sweeps.
+    """
+    __tablename__ = "trial_events"
+    __table_args__ = (
+        CheckConstraint("seq >= 0", name="trial_events_seq_nonneg_check"),
+        CheckConstraint(
+            "schema_version >= 1",
+            name="trial_events_schema_version_positive_check",
+        ),
+        UniqueConstraint(
+            "trial_id", "seq", name="trial_events_trial_seq_uidx",
+        ),
+        Index(
+            "trial_events_trial_created_at_idx",
+            "trial_id", "created_at",
+        ),
+        Index("trial_events_kind_idx", "kind"),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+        default=uuid4,
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1"), default=1,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
