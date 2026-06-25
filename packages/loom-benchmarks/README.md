@@ -35,10 +35,24 @@ SPA marks the benchmark ready.
 code repository contains runners and examples, but the benchmark instances are
 published as task bundles under `test_tasks/`.
 
-`skilllearnbench` uses the upstream task-bundle shape under
+`skilllearnbench` points at `github.com/cxcscmu/SkillLearnBench` pinned at
+revision `2d714f2` and uses the upstream task-bundle shape under
 `tasks/<family>/<task>/`. Both adapters still support the legacy
 per-instance `manifest.json` fixture format used by older Loom tests, but real
 publication should consume the official bundle directories.
+
+SkillLearnBench tasks `COPY skills /root/.<agent>/skills`, where `skills/`
+lives at the upstream repo root (not in the bundle), as
+`skills/<method>/<family>/<skill-name>/`. The chosen method IS the system
+under test — the agent reads those copied skills at runtime and the score
+reflects skill quality. The adapter materializes the chosen
+`skills/<skill_method>/<family>/` into each converted bundle before checksum.
+`skill_method` is sourced from the catalog entry's `params.skill_method`
+(default `human_authored`); additional methods (e.g.
+`b1-one-shot-claude-sonnet-4-6`) are added as sibling catalog rows sharing
+the same upstream. The adapter also emits an `oracle_eligible` task tag
+derived from upstream `solution/solve.sh` presence; 27 of the 100 upstream
+SLB tasks are agent-only by design and tag `oracle_eligible=false`.
 
 For official bundles, the adapter copies each task directory, preserves the
 upstream `environment/Dockerfile`, writes a Loom-owned `task.toml`, and adds a

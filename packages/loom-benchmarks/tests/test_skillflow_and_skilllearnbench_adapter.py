@@ -347,6 +347,40 @@ def _stage_upstream_skill(
     return skill_dir
 
 
+def test_skilllearnbench_skill_method_reads_catalog_params() -> None:
+    # Catalog ships `params.skill_method=human_authored` for the SLB
+    # entry — confirm the adapter actually reads it (not just the
+    # fallback default).
+    assert SkillLearnBenchAdapter._params.get("skill_method") == "human_authored"
+    assert SkillLearnBenchAdapter().skill_method == "human_authored"
+
+
+def test_skilllearnbench_skill_method_overrideable_via_params(
+    tmp_path: Path,
+) -> None:
+    """An alternate catalog entry (e.g. a `b1-*` method row) flowing
+    through `_params` overrides which upstream `skills/<method>/`
+    directory the adapter materializes."""
+    family = "stock-data-visualization"
+    task = "stock-data-visualization-1"
+    _write_real_bundle(tmp_path, family=family, task=task)
+    _stage_upstream_skill(
+        tmp_path, method="b1-one-shot-claude-sonnet-4-6",
+        family=family, skill_body="# b1 sonnet\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+    adapter._params = {"skill_method": "b1-one-shot-claude-sonnet-4-6"}
+
+    inst = next(iter(adapter.list_instances(source_dir=tmp_path, split="test")))
+    out_dir = tmp_path / "out"
+    adapter.convert_instance(inst, out_dir=out_dir)
+
+    assert inst.tags["method"] == "b1-one-shot-claude-sonnet-4-6"
+    assert (
+        out_dir / "skills" / "main-skill" / "SKILL.md"
+    ).read_text() == "# b1 sonnet\n"
+
+
 def test_skilllearnbench_emits_oracle_eligible_true_when_solve_sh_present(
     tmp_path: Path,
 ) -> None:

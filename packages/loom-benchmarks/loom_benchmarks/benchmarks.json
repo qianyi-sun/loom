@@ -141,9 +141,10 @@
       "name": "skilllearnbench",
       "display_name": "SkillLearnBench",
       "series": "skill",
-      "upstream": {"kind": "git", "locator": "https://github.com/cxcscmu/SkillLearnBench.git", "revision": "main"},
+      "upstream": {"kind": "git", "locator": "https://github.com/cxcscmu/SkillLearnBench.git", "revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46"},
       "license": {"spdx": "NOASSERTION", "url": "https://github.com/cxcscmu/SkillLearnBench/blob/main/LICENSE"},
-      "splits": ["test"]
+      "splits": ["test"],
+      "params": {"skill_method": "human_authored"}
     },
     {
       "name": "swe-bench",

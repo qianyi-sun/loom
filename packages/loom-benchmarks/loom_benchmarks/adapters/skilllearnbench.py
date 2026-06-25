@@ -15,8 +15,10 @@ it overrides `list_instances` to stash the upstream root + emit
 chosen method's per-family skill bundle on top of the empty `skills/`
 placeholder that the parent class writes.
 
-`skill_method` is a class attribute today; the catalog-parameterized
-form (multiple entries under one upstream) is a follow-up.
+`skill_method` is read from the catalog entry's `params.skill_method`,
+defaulting to `human_authored` (the canonical reference baseline).
+Future method coverage adds catalog rows with the same upstream and a
+different slug + `skill_method` value — no adapter code change needed.
 """
 
 from __future__ import annotations
@@ -33,11 +35,9 @@ from loom_benchmarks.util import sha256_of_dir
 class SkillLearnBenchAdapter(SkillFlowAdapter):
     name = "skilllearnbench"
 
-    # The "method under evaluation" — name of a directory under
-    # upstream `skills/`. `human_authored` is the canonical reference
-    # baseline. Additional methods (`b1-one-shot-claude-sonnet-4-6`
-    # etc.) ship as separate catalog entries in a follow-up.
-    skill_method: str = "human_authored"
+    @property
+    def skill_method(self) -> str:
+        return self._params.get("skill_method") or "human_authored"
 
     def list_instances(
         self, *, source_dir: Path, split: str,
