@@ -14,10 +14,14 @@ from loom_service.task_compat import (
 )
 
 
-def _config(verifier_name: str) -> dict[str, object]:
+def _config(
+    verifier_name: str,
+    *,
+    task_id: str = "local/task-0",
+) -> dict[str, object]:
     """Minimal TaskConfig-shaped dict — only the field the heuristic
-    looks at (`verifier.name`) needs to be present."""
-    return {"verifier": {"name": verifier_name}}
+    looks at (`verifier.name`) needs to be present for most cases."""
+    return {"task": {"id": task_id}, "verifier": {"name": verifier_name}}
 
 
 def test_oracle_agent_declares_solution_solve_sh_requirement() -> None:
@@ -49,12 +53,26 @@ def test_pytest_verifier_task_provides_solve_sh_capability() -> None:
 
 
 def test_script_verifier_task_does_not_provide_solve_sh() -> None:
-    """aime/gpqa/mmlu-pro/bfcl tasks use the `script` verifier and
-    ship no solve.sh. Oracle can't run them — this is the failure
-    pattern #320 set out to block at submit time."""
+    """aime/gpqa/mmlu-pro tasks use the `script` verifier and ship no
+    solve.sh. Oracle can't run them — this is the failure pattern #320
+    set out to block at submit time."""
     assert task_provides_capability(
         _config("script"), "solution_solve_sh",
     ) is False
+
+
+def test_terminal_bench_script_task_provides_solve_sh_capability() -> None:
+    """Terminal-Bench-2 uses the script verifier, but its adapter wraps
+    upstream `solution.sh` / `solution.yaml` references as
+    `solution/solve.sh`, so oracle compatibility must not be inferred from
+    verifier name alone."""
+    assert task_provides_capability(
+        _config(
+            "script",
+            task_id="terminal-bench-2/simple-web-scraper",
+        ),
+        "solution_solve_sh",
+    ) is True
 
 
 def test_unknown_capability_fails_closed() -> None:
@@ -87,18 +105,27 @@ def test_task_supports_agent_requires_all_capabilities() -> None:
 
 def test_filter_tasks_by_agent_capability_splits_compat_and_incompat() -> None:
     """The (compatible, incompatible) split mirrors the matrix
-    runner's #316 evidence: pytest tasks for oracle land in
-    `compatible`, script tasks land in `incompatible`."""
+    runner's #316 evidence: tasks with oracle-compatible solution
+    wrappers land in `compatible`, script-only tasks land in
+    `incompatible`."""
     configs = {
         "mbpp/100": _config("pytest"),
         "aime-25/2025-I/2": _config("script"),
         "humaneval/0": _config("pytest"),
+        "terminal-bench-2/simple-web-scraper": _config(
+            "script",
+            task_id="terminal-bench-2/simple-web-scraper",
+        ),
         "gpqa/q1": _config("script"),
     }
     compat, incompat = filter_tasks_by_agent_capability(
         task_configs=configs, required=frozenset({"solution_solve_sh"}),
     )
-    assert compat == ["mbpp/100", "humaneval/0"]
+    assert compat == [
+        "mbpp/100",
+        "humaneval/0",
+        "terminal-bench-2/simple-web-scraper",
+    ]
     assert incompat == ["aime-25/2025-I/2", "gpqa/q1"]
 
 

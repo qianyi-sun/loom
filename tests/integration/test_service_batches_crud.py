@@ -1871,11 +1871,10 @@ async def test_post_batch_rejects_oracle_against_non_pytest_tasks(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    """oracle hard-requires `solution/solve.sh`; only pytest-verifier
-    benchmarks ship one (mbpp / humaneval / livecodebench). Submitting
-    `agent_name=oracle` against an aime/gpqa-style script-verifier task
-    used to deterministically AgentError mid-trial. After #320, the
-    preflight rejects upfront with a structured detail."""
+    """oracle hard-requires `solution/solve.sh`; aime/gpqa-style
+    script-verifier tasks do not ship one. Submitting `agent_name=oracle`
+    against those tasks used to deterministically AgentError mid-trial.
+    After #320, the preflight rejects upfront with a structured detail."""
     _app, raw, _team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -1918,6 +1917,51 @@ async def test_post_batch_rejects_oracle_against_non_pytest_tasks(
     assert "oracle" in detail
     assert "local/script-only-0" in detail
     assert "solve.sh" in detail
+
+
+async def test_post_batch_allows_oracle_against_terminal_bench_tasks(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """Terminal-Bench-2 uses the script verifier, but its adapter emits
+    `solution/solve.sh` wrappers for oracle reference runs."""
+    _app, raw, _team_id = camp_setup
+    task_id = "terminal-bench-2/simple-web-scraper"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="y" * 64,
+                config=_script_verifier_task_config(task_id),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "oracle-on-terminal-bench-task",
+                "task_filter": {
+                    "task_ids": [task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                },
+            },
+        )
+    assert r.status_code == 201, r.text
 
 
 async def test_post_batch_allows_oracle_against_pytest_tasks(

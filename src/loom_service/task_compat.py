@@ -17,12 +17,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-# Heuristic key: tasks whose verifier is `pytest` are produced by
-# adapters that always co-emit `solution/solve.sh` next to a
-# `solution/_reference.py` (the post-#388/#414 stub layout).
-# Adapters with a different verifier (`script`, `default`, ...) ship
-# no solve.sh, so oracle has nothing to upload.
+# Heuristic key: tasks whose verifier is `pytest` are produced by adapters
+# that always co-emit `solution/solve.sh` next to a `solution/_reference.py`
+# (the post-#388/#414 stub layout). Terminal-Bench-2 is the known V1
+# exception: it uses the script verifier, but its adapter wraps upstream
+# `solution.sh` / `solution.yaml` as `solution/solve.sh`.
 _PYTEST_VERIFIER = "pytest"
+_TASK_ID_SOLUTION_SOLVE_SH_PREFIXES = ("terminal-bench-2/",)
 
 
 def task_provides_capability(
@@ -31,12 +32,11 @@ def task_provides_capability(
     """Best-effort derivation: does the materialized bundle expose
     the named agent capability?
 
-    `solution_solve_sh` is granted iff the task's verifier is `pytest`.
-    Every current adapter that emits `solution/solve.sh` pairs it with
-    a pytest verifier (mbpp, humaneval, livecodebench); the inverse
-    also holds — non-pytest verifiers (script, default, ...) don't
-    co-emit solve.sh. A future adapter that breaks the convention can
-    add an explicit task tag override (out of V1 scope).
+    `solution_solve_sh` is granted when the task's verifier is `pytest`,
+    or when a known adapter emits `solution/solve.sh` under a different
+    verifier contract. A future adapter that breaks the convention should
+    add an explicit capability marker instead of broadening every script
+    verifier task.
 
     Unknown capabilities return False — fail closed so a typo in
     `AgentEntry.requires_capabilities` doesn't silently permit
@@ -45,8 +45,13 @@ def task_provides_capability(
     if capability == "solution_solve_sh":
         verifier = task_config.get("verifier") or {}
         if isinstance(verifier, Mapping):
-            return verifier.get("name") == _PYTEST_VERIFIER
-        return False
+            if verifier.get("name") == _PYTEST_VERIFIER:
+                return True
+        task = task_config.get("task") or {}
+        task_id = task.get("id") if isinstance(task, Mapping) else None
+        return isinstance(task_id, str) and task_id.startswith(
+            _TASK_ID_SOLUTION_SOLVE_SH_PREFIXES,
+        )
     return False
 
 

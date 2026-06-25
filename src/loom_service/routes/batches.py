@@ -217,8 +217,8 @@ async def _reject_agent_task_incompat(
     detail = (
         f"agent×task capability mismatch — {pairs}. The listed agents "
         f"cannot run these tasks at the platform level (e.g. oracle "
-        f"requires `solution/solve.sh`, which non-pytest-verifier "
-        f"benchmarks do not ship). Submit per-agent batches with the "
+        f"requires a benchmark adapter that ships `solution/solve.sh`). "
+        f"Submit per-agent batches with the "
         f"compatible task slate, or drop the incompatible agent."
     )
     _reject_submission(
