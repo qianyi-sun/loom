@@ -1,0 +1,528 @@
+"""Host-local GB10 node-agent commands.
+
+The agent is pull-based: each GB10 host fetches desired state from the Control
+Plane, compares it with its local Docker Compose env file, and applies changes
+locally. The Control Plane never receives host SSH credentials.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import httpx
+from dotenv import dotenv_values
+
+from loom_cli.admin_cmd import (
+    _DEFAULT_ADMIN_TOKEN_SOURCE,
+    _DEFAULT_CP_URL,
+    _resolve_admin_token,
+)
+
+AGENT_VERSION = "gb10-agent-v1"
+_SECRET_KEY_PARTS = (
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASS",
+    "API_KEY",
+    "CREDENTIAL",
+)
+_SECRET_VALUE_PREFIXES = (
+    "loom_w_",
+    "loom_admin_",
+    "sk-",
+)
+
+
+@dataclass(frozen=True)
+class DesiredState:
+    environment: str
+    pool_name: str
+    image_tag: str
+    max_concurrent: int
+    env_config_version: str
+    rollout_policy: dict[str, Any]
+    env: dict[str, str]
+    force: bool = False
+    previous_image_tag: str | None = None
+    previous_max_concurrent: int | None = None
+    previous_env_config_version: str | None = None
+    previous_env: dict[str, str] | None = None
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> DesiredState:
+        return cls(
+            environment=str(data["environment"]),
+            pool_name=str(data["pool_name"]),
+            image_tag=str(data["image_tag"]),
+            max_concurrent=int(data["max_concurrent"]),
+            env_config_version=str(data["env_config_version"]),
+            rollout_policy=dict(data.get("rollout_policy") or {}),
+            env={str(k): str(v) for k, v in dict(data.get("env") or {}).items()},
+            force=bool(data.get("force", False)),
+            previous_image_tag=data.get("previous_image_tag"),
+            previous_max_concurrent=data.get("previous_max_concurrent"),
+            previous_env_config_version=data.get("previous_env_config_version"),
+            previous_env={
+                str(k): str(v)
+                for k, v in dict(data.get("previous_env") or {}).items()
+            },
+        )
+
+    def rollback_target(self) -> DesiredState:
+        if (
+            self.previous_image_tag is None
+            or self.previous_max_concurrent is None
+            or self.previous_env_config_version is None
+        ):
+            raise ValueError("desired state does not include a previous version")
+        return DesiredState(
+            environment=self.environment,
+            pool_name=self.pool_name,
+            image_tag=self.previous_image_tag,
+            max_concurrent=int(self.previous_max_concurrent),
+            env_config_version=self.previous_env_config_version,
+            rollout_policy={"mode": "all"},
+            env=dict(self.previous_env or {}),
+            force=True,
+        )
+
+
+@dataclass(frozen=True)
+class LocalWorkerState:
+    hostname: str
+    image_tag: str
+    pool_name: str
+    max_concurrent: int
+    env_config_version: str
+
+
+@dataclass(frozen=True)
+class AgentPlan:
+    environment: str
+    pool_name: str
+    hostname: str
+    needs_apply: bool
+    changes: list[str]
+    blocked_reason: str | None
+    desired: dict[str, Any]
+    current: dict[str, Any]
+
+
+def _env_int(values: dict[str, str | None], key: str, default: int) -> int:
+    raw = values.get(key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw))
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an integer; got {raw!r}") from exc
+
+
+def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWorkerState:
+    values = dotenv_values(env_file)
+    return LocalWorkerState(
+        hostname=hostname or str(values.get("LOOM_WORKER_HOSTNAME") or socket.gethostname()),
+        image_tag=str(values.get("LOOM_IMAGE_TAG") or "dev"),
+        pool_name=str(values.get("LOOM_WORKER_POOL_NAME") or "remote-worker"),
+        max_concurrent=_env_int(values, "LOOM_WORKER_MAX_CONCURRENT", 5),
+        env_config_version=str(values.get("LOOM_WORKER_ENV_CONFIG_VERSION") or ""),
+    )
+
+
+def _can_apply_to_host(
+    desired: DesiredState,
+    local: LocalWorkerState,
+    *,
+    force: bool,
+) -> str | None:
+    if force or desired.force:
+        return None
+    policy = desired.rollout_policy or {}
+    if policy.get("mode") != "canary":
+        return None
+    canary_hosts = {str(host) for host in policy.get("canary_hosts", [])}
+    if local.hostname not in canary_hosts:
+        return "waiting_for_canary"
+    return None
+
+
+def build_plan(
+    desired: DesiredState,
+    local: LocalWorkerState,
+    *,
+    force: bool = False,
+) -> AgentPlan:
+    changes: list[str] = []
+    if local.image_tag != desired.image_tag:
+        changes.append("image_tag")
+    if local.pool_name != desired.pool_name:
+        changes.append("pool_name")
+    if local.max_concurrent != desired.max_concurrent:
+        changes.append("max_concurrent")
+    if local.env_config_version != desired.env_config_version:
+        changes.append("env_config_version")
+    blocked_reason = None
+    if changes:
+        blocked_reason = _can_apply_to_host(desired, local, force=force)
+    return AgentPlan(
+        environment=desired.environment,
+        pool_name=desired.pool_name,
+        hostname=local.hostname,
+        needs_apply=bool(changes),
+        changes=changes,
+        blocked_reason=blocked_reason,
+        desired={
+            "image_tag": desired.image_tag,
+            "pool_name": desired.pool_name,
+            "max_concurrent": desired.max_concurrent,
+            "env_config_version": desired.env_config_version,
+        },
+        current={
+            "image_tag": local.image_tag,
+            "pool_name": local.pool_name,
+            "max_concurrent": local.max_concurrent,
+            "env_config_version": local.env_config_version,
+        },
+    )
+
+
+def render_env_updates(env_file: Path, updates: dict[str, str]) -> str:
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
+    remaining = dict(updates)
+    rendered: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            rendered.append(line)
+            continue
+        key, _ = line.split("=", 1)
+        if key in remaining:
+            rendered.append(f"{key}={remaining.pop(key)}")
+        else:
+            rendered.append(line)
+    for key, value in remaining.items():
+        rendered.append(f"{key}={value}")
+    return "\n".join(rendered) + "\n"
+
+
+def _desired_env_updates(desired: DesiredState) -> dict[str, str]:
+    updates = {
+        "LOOM_IMAGE_TAG": desired.image_tag,
+        "LOOM_WORKER_POOL_NAME": desired.pool_name,
+        "LOOM_WORKER_MAX_CONCURRENT": str(desired.max_concurrent),
+        "LOOM_WORKER_ENV_CONFIG_VERSION": desired.env_config_version,
+    }
+    updates.update(desired.env)
+    return updates
+
+
+def _redact_preview(key: str, value: str) -> str:
+    upper_key = key.upper()
+    if (
+        any(part in upper_key for part in _SECRET_KEY_PARTS)
+        or any(value.strip().startswith(prefix) for prefix in _SECRET_VALUE_PREFIXES)
+    ):
+        return "<redacted>"
+    return value
+
+
+def _print_env_update_preview(updates: dict[str, str]) -> None:
+    print("dry-run: would update env keys:")
+    for key, value in updates.items():
+        print(f"  {key}={_redact_preview(key, value)}")
+
+
+def _fetch_desired_state(args: argparse.Namespace) -> DesiredState:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    url = (
+        f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/"
+        f"{args.environment}/{args.pool_name}/desired-state"
+    )
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"could not reach CP at {url}: {exc}") from exc
+    if response.status_code != 200:
+        raise RuntimeError(f"CP returned {response.status_code}: {response.text}")
+    return DesiredState.from_api(response.json())
+
+
+def _publish_desired_state(args: argparse.Namespace, desired: DesiredState) -> None:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    url = (
+        f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/"
+        f"{desired.environment}/{desired.pool_name}/desired-state"
+    )
+    body = {
+        "image_tag": desired.image_tag,
+        "max_concurrent": desired.max_concurrent,
+        "env_config_version": desired.env_config_version,
+        "rollout_policy": desired.rollout_policy,
+        "env": desired.env,
+        "force": desired.force,
+    }
+    try:
+        response = httpx.put(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json=body,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"could not reach CP at {url}: {exc}") from exc
+    if response.status_code != 200:
+        raise RuntimeError(f"CP returned {response.status_code}: {response.text}")
+
+
+def _report_node(
+    args: argparse.Namespace,
+    *,
+    desired: DesiredState,
+    local: LocalWorkerState,
+    apply_state: str,
+    last_apply_result: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError:
+        return
+    url = (
+        f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/"
+        f"{desired.environment}/{desired.pool_name}/nodes/{local.hostname}/report"
+    )
+    body = {
+        "current_image_tag": local.image_tag,
+        "current_max_concurrent": local.max_concurrent,
+        "current_env_config_version": local.env_config_version,
+        "apply_state": apply_state,
+        "last_apply_result": last_apply_result,
+        "error_message": error_message,
+        "agent_version": AGENT_VERSION,
+        "compose_project_dir": str(Path(args.compose_file[0]).resolve().parent)
+        if getattr(args, "compose_file", None)
+        else None,
+    }
+    try:
+        httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json=body,
+            timeout=10.0,
+        )
+    except httpx.RequestError:
+        return
+
+
+def _print_plan(plan: AgentPlan, *, json_output: bool) -> None:
+    if json_output:
+        json.dump(asdict(plan), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return
+    print(f"{plan.environment}/{plan.pool_name} on {plan.hostname}")
+    if not plan.needs_apply:
+        print("  already current")
+    elif plan.blocked_reason:
+        print(f"  blocked: {plan.blocked_reason}")
+    else:
+        print(f"  changes: {', '.join(plan.changes)}")
+
+
+def _plan(args: argparse.Namespace) -> int:
+    try:
+        desired = _fetch_desired_state(args)
+        if args.rollback:
+            desired = desired.rollback_target()
+        local = load_local_state(args.env_file, hostname=args.hostname)
+        plan = build_plan(desired, local, force=args.force)
+    except (RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    _print_plan(plan, json_output=args.format == "json")
+    return 0
+
+
+def _run(argv: list[str], *, dry_run: bool) -> None:
+    if dry_run:
+        print("dry-run:", " ".join(argv))
+        return
+    subprocess.run(argv, check=True)
+
+
+def _write_temp_env_file(env_file: Path, rendered: str) -> Path:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        delete=False,
+        dir=env_file.parent,
+        prefix=f".{env_file.name}.",
+        suffix=".tmp",
+    ) as f:
+        f.write(rendered)
+        temp_path = Path(f.name)
+    temp_path.chmod(0o600)
+    return temp_path
+
+
+def _apply(args: argparse.Namespace) -> int:
+    try:
+        desired = _fetch_desired_state(args)
+        if args.rollback:
+            desired = desired.rollback_target()
+            if args.dry_run:
+                print("dry-run: would publish rollback target to Control Plane")
+            else:
+                _publish_desired_state(args, desired)
+        local = load_local_state(args.env_file, hostname=args.hostname)
+        plan = build_plan(desired, local, force=args.force)
+    except (RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    if plan.blocked_reason:
+        _report_node(
+            args,
+            desired=desired,
+            local=local,
+            apply_state="blocked",
+            last_apply_result=plan.blocked_reason,
+        )
+        _print_plan(plan, json_output=args.format == "json")
+        return 0
+    if not plan.needs_apply:
+        _report_node(
+            args,
+            desired=desired,
+            local=local,
+            apply_state="applied",
+            last_apply_result="already current",
+        )
+        _print_plan(plan, json_output=args.format == "json")
+        return 0
+
+    temp_env_file: Path | None = None
+    try:
+        updates = _desired_env_updates(desired)
+        rendered = render_env_updates(args.env_file, updates)
+        compose_env_file = args.env_file
+        if args.dry_run:
+            _print_env_update_preview(updates)
+        else:
+            temp_env_file = _write_temp_env_file(args.env_file, rendered)
+            compose_env_file = temp_env_file
+        compose_base = [
+            "docker",
+            "compose",
+            "--env-file",
+            str(compose_env_file),
+        ]
+        for compose_file in args.compose_file:
+            compose_base.extend(["-f", str(compose_file)])
+        _run([*compose_base, "pull", args.service], dry_run=args.dry_run)
+        _run(
+            [
+                *compose_base,
+                "stop",
+                "--timeout",
+                str(args.drain_timeout_sec),
+                args.service,
+            ],
+            dry_run=args.dry_run,
+        )
+        _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+        if not args.dry_run:
+            args.env_file.write_text(rendered, encoding="utf-8")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _report_node(
+            args,
+            desired=desired,
+            local=local,
+            apply_state="failed",
+            error_message=str(exc),
+        )
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    finally:
+        if temp_env_file is not None:
+            temp_env_file.unlink(missing_ok=True)
+
+    refreshed = load_local_state(args.env_file, hostname=local.hostname)
+    _report_node(
+        args,
+        desired=desired,
+        local=refreshed,
+        apply_state="rolled_back" if args.rollback else "applied",
+        last_apply_result="docker compose worker restarted",
+    )
+    return _plan(args)
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--cp-url", default=_DEFAULT_CP_URL)
+    parser.add_argument("--admin-token", default=_DEFAULT_ADMIN_TOKEN_SOURCE)
+    parser.add_argument("--environment", required=True)
+    parser.add_argument("--pool-name", required=True)
+    parser.add_argument("--hostname", default=None)
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        required=True,
+        help="Host-local remote-worker env file to inspect/update.",
+    )
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+
+
+def dispatch(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="loom worker gb10-agent",
+        description="Pull and apply GB10 remote-worker desired state.",
+    )
+    sub = parser.add_subparsers(dest="gb10_cmd", required=True)
+
+    p_plan = sub.add_parser("plan", help="Show local drift from desired state.")
+    _add_common_args(p_plan)
+    p_plan.set_defaults(handler=_plan)
+
+    p_apply = sub.add_parser(
+        "apply",
+        help="Update env file and restart Docker Compose worker with drain.",
+    )
+    _add_common_args(p_apply)
+    p_apply.add_argument(
+        "--compose-file",
+        action="append",
+        type=Path,
+        required=True,
+        help=(
+            "Docker Compose file that defines the worker service. Repeat for "
+            "GB10 host-network overrides."
+        ),
+    )
+    p_apply.add_argument("--service", default="worker")
+    p_apply.add_argument("--drain-timeout-sec", type=int, default=600)
+    p_apply.add_argument("--dry-run", action="store_true")
+    p_apply.set_defaults(handler=_apply)
+
+    args = parser.parse_args(argv)
+    return int(args.handler(args))

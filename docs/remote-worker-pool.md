@@ -408,6 +408,83 @@ stale record temporarily blocks replacement on the same nodelist so the
 controller does not double-submit during a noisy Slurm or heartbeat transition;
 the next reconcile can replace missing capacity on another allowed node.
 
+## GB10 Node-Agent Lifecycle
+
+GB10 hosts are fixed Docker Compose workers, not Slurm allocations. Their
+lifecycle manager is pull-based: the Control Plane stores desired non-secret
+state, and a host-local node-agent applies it from each GB10 node. The Control
+Plane does not SSH into GB10 and does not store worker tokens, MinIO
+credentials, provider keys, or sudo material.
+
+Desired state is stored per `(environment, pool_name)` and includes:
+
+- worker image tag (`LOOM_IMAGE_TAG`);
+- pool name (`LOOM_WORKER_POOL_NAME`);
+- per-worker trial concurrency (`LOOM_WORKER_MAX_CONCURRENT`);
+- env/config version (`LOOM_WORKER_ENV_CONFIG_VERSION`, node-agent local only);
+- rollout policy such as canary hosts.
+
+Write desired state through the CP admin API:
+
+```bash
+curl -sS -X PUT \
+  -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  http://control-node.lan:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
+  -d '{
+    "image_tag": "public-beta-<commit>",
+    "max_concurrent": 10,
+    "env_config_version": "gb10-env-2026-06-26",
+    "rollout_policy": {
+      "mode": "canary",
+      "canary_hosts": ["trt-gb10-1"]
+    }
+  }'
+```
+
+Inspect desired state and per-host reports:
+
+```bash
+loom admin gb10-workers status \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN
+```
+
+On each GB10 host, the node-agent reads the host-local
+`.env.remote-worker` file, compares it with Control Plane desired state, writes
+only non-secret env updates, then runs Docker Compose locally. The apply path
+uses `docker compose stop --timeout <seconds> worker`, so the worker receives
+SIGTERM and uses the existing drain path before restart.
+
+```bash
+loom worker gb10-agent plan \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --env-file /home/trt/loom-remote-worker/.env.remote-worker
+
+loom worker gb10-agent apply \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --compose-file deploy/docker-compose.remote-worker.yml \
+  --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml
+```
+
+`apply --dry-run` prints only the non-secret env keys that would be changed and
+the Docker Compose commands that would run. Rollback apply publishes the
+previous desired image/concurrency/env version back to the Control Plane before
+local Compose changes, so the periodic timer does not reapply the bad desired
+state.
+
+For systemd service/timer templates and GB10-specific paths, see
+`deploy/worker-pools/gb10/`. Manual Docker Compose remains the break-glass
+fallback when the node-agent timer, token, or CP desired-state API is
+unavailable.
+
 ## Start A Remote Worker
 
 On the worker host, copy the example env file to an untracked file:

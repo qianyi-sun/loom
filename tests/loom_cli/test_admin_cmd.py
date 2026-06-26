@@ -440,6 +440,89 @@ def test_slurm_workers_status_json_format_emits_raw_json(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# loom admin gb10-workers status
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_gb10_workers_status_gets_cp_rollout_state_without_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = url
+        captured["headers"] = headers
+        return _StubResponse(
+            200,
+            json_data={
+                "desired_states": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "image_tag": "2026-06-26-gb10",
+                        "max_concurrent": 10,
+                        "env_config_version": "gb10-env-v2",
+                        "previous_image_tag": "2026-06-25-gb10",
+                    },
+                ],
+                "nodes": [
+                    {
+                        "environment": "production",
+                        "pool_name": "gb10-arm64",
+                        "hostname": "trt-gb10-1",
+                        "apply_state": "applied",
+                        "current_image_tag": "2026-06-26-gb10",
+                        "desired_image_tag": "2026-06-26-gb10",
+                        "current_max_concurrent": 10,
+                        "desired_max_concurrent": 10,
+                        "current_env_config_version": "gb10-env-v2",
+                        "desired_env_config_version": "gb10-env-v2",
+                        "last_apply_result": "ok",
+                        "error_message": None,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main([
+        "admin", "gb10-workers", "status",
+        "--cp-url", "http://cp:8080/",
+    ])
+    assert rc == 0
+    assert captured["url"] == "http://cp:8080/admin/gb10-worker-pools/status"
+    assert captured["headers"]["Authorization"] == "Bearer admin-secret"
+
+    out = capsys.readouterr().out
+    assert "production/gb10-arm64" in out
+    assert "2026-06-26-gb10" in out
+    assert "trt-gb10-1" in out
+    assert "applied" in out
+    assert "gb10-env-v2" in out
+    assert "loom_w_secret" not in out
+
+
+def test_gb10_workers_status_json_format_emits_raw_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {"desired_states": [], "nodes": []}
+
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(200, json_data=payload)
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main(["admin", "gb10-workers", "status", "--format", "json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+# ──────────────────────────────────────────────────────────────────────
 # loom admin tokens team — uses loom_service /api/v1/tokens
 # ──────────────────────────────────────────────────────────────────────
 
