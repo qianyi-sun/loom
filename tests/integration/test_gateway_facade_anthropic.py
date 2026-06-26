@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -400,8 +401,36 @@ async def test_facade_rejects_missing_connection_id_header(
     assert "x-loom-provider-connection-id" in r.json()["detail"]
 
 
-async def test_facade_rejects_stream_true(facade_setup) -> None:
+async def test_facade_streams_sse_and_records_final_usage(
+    facade_setup, postgres_url: str,
+) -> None:
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    captures["response"] = httpx.Response(  # type: ignore[index]
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=(
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\","
+            "\"type\":\"message\",\"role\":\"assistant\","
+            "\"model\":\"claude-opus-4-7\",\"content\":[],"
+            "\"usage\":{\"input_tokens\":100,\"output_tokens\":1,"
+            "\"cache_creation_input_tokens\":20,"
+            "\"cache_read_input_tokens\":30}}}\n\n"
+            "event: content_block_start\n"
+            "data: {\"type\":\"content_block_start\",\"index\":0,"
+            "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,"
+            "\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+            "event: message_delta\n"
+            "data: {\"type\":\"message_delta\","
+            "\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},"
+            "\"usage\":{\"output_tokens\":50}}\n\n"
+            "event: message_stop\n"
+            "data: {\"type\":\"message_stop\"}\n\n"
+        ),
+    )
+
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
         transport=transport, base_url="http://gw",
@@ -419,9 +448,31 @@ async def test_facade_rejects_stream_true(facade_setup) -> None:
                 "stream": True,
             },
         )
-    assert r.status_code == 501
-    assert "stream=true" in r.json()["detail"]
-    assert len(captures["requests"]) == 0  # type: ignore[arg-type]
+    assert r.status_code == 200, r.text
+    assert "text/event-stream" in r.headers["content-type"]
+    assert "event: message_start" in r.text
+    assert "event: message_stop" in r.text
+
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+    assert len(requests) == 1
+    upstream_payload = json.loads(requests[0].content)
+    assert upstream_payload["stream"] is True
+    assert requests[0].headers["x-api-key"] == "sk-ant-XYZ"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["dialect"] == "anthropic_facade"
+    assert row["model"] == "claude-opus-4-7"
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 50
+    extras = row["provider_extras"]
+    assert extras["cache_creation_input_tokens"] == 20
+    assert extras["cache_read_input_tokens"] == 30
+    assert float(row["cost_usd"]) == pytest.approx(0.00105, abs=1e-7)
 
 
 # ──────────────────────────────────────────────────────────────────────

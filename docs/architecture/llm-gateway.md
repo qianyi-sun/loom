@@ -49,11 +49,12 @@ normalisation (TokenUsage → cost) happens *next to* the forward, not
 *after* it.
 
 Most streaming routes remain disabled at v1 where cost attribution
-depends on a final usage block. OpenAI Responses is the exception for
-Codex 0.141+ compatibility: the Gateway accepts
-`stream=true` on `/v1/responses` and `/openai/v1/responses`, forwards
-the request to the selected OpenAI-compatible provider, and records
-usage from a terminal `response.completed` SSE event when present.
+depends on a final usage block. OpenAI Responses and the Anthropic
+provider facade are the exceptions: the Gateway accepts `stream=true`
+on `/v1/responses`, `/openai/v1/responses`, and
+`/anthropic/v1/messages`, forwards the native SSE stream to the
+selected provider, and records usage from the terminal usage-bearing
+SSE event when present.
 
 ## Dispatch contract
 
@@ -140,7 +141,7 @@ or BYO OpenAI-compatible dispatch because:
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
-| `stream=true`                          | Allowed for OpenAI Responses provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |
+| `stream=true`                          | Allowed for OpenAI Responses and Anthropic provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |
 | Model not in team allowlist            | 403; no upstream call                 |
 
 A failed call still produces an `llm_calls` row when the upstream

@@ -30,17 +30,19 @@ Wire shape (MVP):
 - Body: Anthropic Messages API shape, passed through.
 
 Out of scope for this route:
-- Streaming (`stream=true` returns 501 — Anthropic streams via SSE
-  and the final `usage` block is needed for cost attribution).
 - Egress proxy routing (Phase 3).
 """
 
 from __future__ import annotations
 
+import json
+import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from starlette.responses import StreamingResponse
 
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
@@ -55,6 +57,7 @@ from loom_llm_gateway.routes._facade_common import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Only `anthropic` connections route through this facade. A `custom`
 # connection that happens to speak Anthropic is a misconfiguration:
@@ -85,7 +88,7 @@ def _step_authorization_for_anthropic_client(
     return None
 
 
-@router.post("/anthropic/v1/messages")
+@router.post("/anthropic/v1/messages", response_model=None)
 async def anthropic_messages_facade(
     request: Request,
     payload: dict[str, Any],
@@ -94,7 +97,7 @@ async def anthropic_messages_facade(
     x_loom_provider_connection_id: str | None = Header(
         default=None, alias="x-loom-provider-connection-id",
     ),
-) -> dict[str, Any]:
+) -> dict[str, Any] | StreamingResponse:
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
 
@@ -113,19 +116,6 @@ async def anthropic_messages_facade(
         ctx, x_loom_provider_connection_id,
     )
 
-    # Same rationale as openai facade: SSE breaks cost attribution
-    # because the final `usage` block needs to be visible at the route
-    # level. v1.5 ships SSE passthrough.
-    if payload.get("stream"):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "stream=true not yet supported on the facade "
-                "(cost attribution needs the final usage block). "
-                "Set stream=false."
-            ),
-        )
-
     if not isinstance(payload.get("model"), str) or not payload["model"]:
         raise HTTPException(status_code=400, detail="`model` is required")
 
@@ -138,13 +128,7 @@ async def anthropic_messages_facade(
         api_key = await decrypt_facade_api_key(session, row)
 
     upstream_url = f"{row.base_url.rstrip('/')}/v1/messages"
-    upstream_headers = {
-        # Anthropic uses x-api-key (not Authorization). Matches the
-        # existing /v1/messages route's header convention.
-        "x-api-key": api_key,
-        "anthropic-version": _ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
+    upstream_headers = _anthropic_upstream_headers(request, api_key)
     # #190 PR-C2: when egress mode is on, this resolves to a
     # per-connection_id client whose CONNECT carries the routing
     # header Envoy matches against. When off (default), it returns
@@ -152,6 +136,19 @@ async def anthropic_messages_facade(
     upstream: httpx.AsyncClient = await (
         request.app.state.egress_client_pool.get(connection_id)
     )
+
+    if payload.get("stream"):
+        return await _stream_anthropic_messages(
+            request=request,
+            upstream=upstream,
+            upstream_url=upstream_url,
+            payload=payload,
+            upstream_headers=upstream_headers,
+            api_key=api_key,
+            row=row,
+            ctx=ctx,
+        )
+
     try:
         outcome = await send_with_retry(
             lambda: upstream.post(
@@ -236,3 +233,218 @@ async def anthropic_messages_facade(
         )
 
     return body
+
+
+def _anthropic_upstream_headers(
+    request: Request, api_key: str,
+) -> dict[str, str]:
+    # Anthropic uses x-api-key (not Authorization). Matches the existing
+    # /v1/messages route's header convention.
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": (
+            request.headers.get("anthropic-version") or _ANTHROPIC_VERSION
+        ),
+        "content-type": "application/json",
+    }
+    accept = request.headers.get("accept")
+    if accept:
+        headers["accept"] = accept
+    anthropic_beta = request.headers.get("anthropic-beta")
+    if anthropic_beta:
+        headers["anthropic-beta"] = anthropic_beta
+    return headers
+
+
+async def _stream_anthropic_messages(
+    *,
+    request: Request,
+    upstream: httpx.AsyncClient,
+    upstream_url: str,
+    payload: dict[str, Any],
+    upstream_headers: dict[str, str],
+    api_key: str,
+    row: Any,
+    ctx: Any,
+) -> StreamingResponse:
+    stream_cm = upstream.stream(
+        "POST",
+        upstream_url,
+        json=payload,
+        headers=upstream_headers,
+        timeout=request.app.state.settings.upstream_timeout_sec,
+        follow_redirects=False,
+    )
+    try:
+        upstream_response = await stream_cm.__aenter__()
+    except httpx.TimeoutException as e:
+        raise HTTPException(
+            status_code=504,
+            detail=f"upstream timeout against {upstream_url}: {e}",
+        ) from e
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"upstream request error against {upstream_url}: "
+                f"{type(e).__name__}: {e}"
+            ),
+        ) from e
+
+    if upstream_response.status_code >= 400:
+        body = await upstream_response.aread()
+        await stream_cm.__aexit__(None, None, None)
+        excerpt = redact_api_key(body.decode(errors="replace"), api_key)
+        raise HTTPException(
+            status_code=upstream_response.status_code,
+            detail=(
+                f"upstream returned {upstream_response.status_code}: "
+                f"{excerpt}"
+            ),
+        )
+
+    return StreamingResponse(
+        _iter_anthropic_sse_and_record_usage(
+            request=request,
+            response=upstream_response,
+            stream_cm=stream_cm,
+            row=row,
+            ctx=ctx,
+            model=payload["model"],
+        ),
+        media_type=upstream_response.headers.get(
+            "content-type", "text/event-stream",
+        ),
+        status_code=upstream_response.status_code,
+    )
+
+
+async def _iter_anthropic_sse_and_record_usage(
+    *,
+    request: Request,
+    response: httpx.Response,
+    stream_cm: Any,
+    row: Any,
+    ctx: Any,
+    model: str,
+) -> AsyncIterator[bytes]:
+    tracker = _AnthropicStreamUsageTracker()
+    try:
+        async for chunk in response.aiter_bytes():
+            tracker.feed(chunk)
+            yield chunk
+        tracker.finish()
+        await _record_anthropic_usage_from_stream(
+            request=request,
+            row=row,
+            ctx=ctx,
+            model=model,
+            usage_body=tracker.usage_body(),
+        )
+    finally:
+        await stream_cm.__aexit__(None, None, None)
+
+
+class _AnthropicStreamUsageTracker:
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._usage: dict[str, int] = {}
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer += chunk.decode("utf-8", errors="replace")
+        self._buffer = self._buffer.replace("\r\n", "\n")
+        while "\n\n" in self._buffer:
+            block, self._buffer = self._buffer.split("\n\n", 1)
+            self._process_block(block)
+
+    def finish(self) -> None:
+        if self._buffer.strip():
+            self._process_block(self._buffer)
+        self._buffer = ""
+
+    def usage_body(self) -> dict[str, Any]:
+        return {"usage": dict(self._usage)}
+
+    def _process_block(self, block: str) -> None:
+        data_lines = []
+        for line in block.splitlines():
+            if not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:")
+            if data.startswith(" "):
+                data = data[1:]
+            data_lines.append(data)
+        if not data_lines:
+            return
+        data = "\n".join(data_lines).strip()
+        if not data or data == "[DONE]":
+            return
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        message = event.get("message")
+        if isinstance(message, dict):
+            self._merge_usage(message.get("usage"))
+        self._merge_usage(event.get("usage"))
+
+    def _merge_usage(self, usage: object) -> None:
+        if not isinstance(usage, dict):
+            return
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            value = usage.get(key)
+            if value is None:
+                continue
+            try:
+                self._usage[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+
+
+async def _record_anthropic_usage_from_stream(
+    *,
+    request: Request,
+    row: Any,
+    ctx: Any,
+    model: str,
+    usage_body: dict[str, Any],
+) -> None:
+    usage = DIALECTS["anthropic"].extract_tokens(usage_body)
+    if usage.input_tokens == 0 and usage.output_tokens == 0:
+        logger.warning(
+            "anthropic facade stream completed without usage block "
+            "trial_id=%s step_id=%s model=%s",
+            ctx.trial_id,
+            ctx.step_id,
+            model,
+        )
+        return
+
+    cost_usd, rate_card_hash = await compute_facade_cost_usd(
+        row,
+        model,
+        usage,
+        rate_card_cache=request.app.state.rate_card_cache,
+    )
+
+    async with request.app.state.session_factory() as audit_session:
+        await record_call(
+            audit_session,
+            team_id=ctx.team_id,
+            trial_id=ctx.trial_id,
+            step_id=ctx.step_id,
+            dialect=_FACADE_DIALECT,
+            model=model,
+            usage=usage,
+            cost_usd=cost_usd,
+            rate_card_hash=rate_card_hash,
+            provider=row.provider_type,
+            attempt=1,
+        )
