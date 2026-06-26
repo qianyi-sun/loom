@@ -118,6 +118,12 @@ import time. `loom_cli/__init__.py` eager-imports
    exits, best-effort kills the streaming exec handle so a timed-out
    adapter does not keep running in the sandbox
 
+For stdout-JSONL adapters, non-zero `AgentError` messages include a
+redacted diagnostic summary from terminal result/error events and
+permission-denial records when those signals are present. This keeps
+API, CLI, and web trial detail diagnosable even when the external CLI
+writes the actionable failure cause to stdout instead of stderr.
+
 The adapter package supplies metadata, argv construction, and capture
 logic. CLI installation into the trial sandbox is handled at trial
 spawn time via the adapter's `install_script` (see [Per-trial agent

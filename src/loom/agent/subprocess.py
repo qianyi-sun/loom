@@ -34,7 +34,7 @@ from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import AgentThoughtEvent, EventKind
 from loom.models.types import OS, ModelSpec
-from loom.security.redaction import redact_text
+from loom.security.redaction import redact_mapping, redact_text
 from loom.trajectory.writer import TrajectoryWriter
 from loom_worker.control_plane_client import StepTokenClient
 
@@ -249,6 +249,7 @@ class SubprocessAgent:
         event_seq = 0
         useful_events = 0
         capture_warning: dict[str, object] | None = None
+        failure_diagnostics = _AdapterFailureDiagnostics()
         process_finished = False
         try:
             async for event in self.adapter.capture_events(
@@ -261,6 +262,7 @@ class SubprocessAgent:
                 # by Plan 11 task 4) or pre-validates against the event union.
                 # For v1 we use write_raw_dict to stay decoupled.
                 payload = event.model_dump()
+                failure_diagnostics.observe(payload)
                 # #321: capture helpers emit a synthetic terminal event
                 # `{"kind": "stream_capture_warning", ...}` when they
                 # silently dropped malformed lines. Hold onto the last one
@@ -303,6 +305,9 @@ class SubprocessAgent:
 
         if rc != 0:
             detail = f"{self.adapter.name} exited rc={rc} on step {step_id}"
+            diagnostics = failure_diagnostics.format_summary()
+            if diagnostics:
+                detail = f"{detail}; stdout: {diagnostics}"
             if stderr_tail:
                 # Redact provider keys / bearer tokens / signed URLs
                 # from the captured stderr before it lands in the
@@ -356,6 +361,197 @@ def _adapter_payload_to_content(payload: dict[str, object]) -> str:
     if isinstance(line, str):
         return line
     return json.dumps(payload, sort_keys=True)
+
+
+@dataclass
+class _AdapterFailureDiagnostics:
+    terminal_error: str | None = None
+    fallback_error: str | None = None
+    permission_denials: int = 0
+    first_permission_denial: str | None = None
+
+    def observe(self, payload: dict[str, object]) -> None:
+        terminal_error = _extract_terminal_error(payload)
+        if terminal_error is not None:
+            if _is_terminal_result_error(payload):
+                self.terminal_error = terminal_error
+            elif self.terminal_error is None:
+                self.fallback_error = terminal_error
+
+        denial_count, first_denial = _extract_permission_denials(payload)
+        if denial_count:
+            self.permission_denials += denial_count
+            if self.first_permission_denial is None:
+                self.first_permission_denial = first_denial
+
+    def format_summary(self) -> str:
+        parts: list[str] = []
+        error = self.terminal_error or self.fallback_error
+        if error:
+            parts.append(error)
+        if self.permission_denials:
+            denial = f"permission_denials={self.permission_denials}"
+            if self.first_permission_denial:
+                denial = f"{denial} (first: {self.first_permission_denial})"
+            parts.append(denial)
+        return "; ".join(parts)
+
+
+def _is_terminal_result_error(payload: dict[str, object]) -> bool:
+    return payload.get("type") == "result" and payload.get("is_error") is True
+
+
+def _extract_terminal_error(payload: dict[str, object]) -> str | None:
+    if _is_terminal_result_error(payload):
+        return _extract_diagnostic_text(
+            payload,
+            ("result", "error", "message", "detail", "details", "reason"),
+        )
+
+    if payload.get("is_error") is True:
+        return _extract_diagnostic_text(
+            payload,
+            ("error", "message", "detail", "details", "reason", "result"),
+        )
+
+    event_type = payload.get("type")
+    event_subtype = payload.get("subtype")
+    if (
+        (isinstance(event_type, str) and "error" in event_type.lower())
+        or (isinstance(event_subtype, str) and "error" in event_subtype.lower())
+    ):
+        return _extract_diagnostic_text(
+            payload,
+            ("error", "message", "detail", "details", "reason", "result"),
+        )
+
+    return None
+
+
+def _extract_diagnostic_text(
+    payload: dict[str, object],
+    candidate_keys: Sequence[str],
+) -> str | None:
+    for key in candidate_keys:
+        if key not in payload:
+            continue
+        text = _diagnostic_value_to_text(payload[key])
+        if text:
+            return _redact_diagnostic_text(text)
+    return None
+
+
+def _diagnostic_value_to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool | int | float):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_diagnostic_value_to_text(item) for item in value[:5]]
+        return "; ".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in (
+            "text",
+            "content",
+            "message",
+            "error",
+            "detail",
+            "details",
+            "reason",
+            "result",
+        ):
+            if key in value:
+                text = _diagnostic_value_to_text(value[key])
+                if text:
+                    return text
+        return json.dumps(redact_mapping(value), sort_keys=True)
+    return str(value).strip()
+
+
+def _redact_diagnostic_text(value: str, *, limit: int = 500) -> str:
+    return redact_text(value, limit=limit).strip()
+
+
+def _extract_permission_denials(payload: dict[str, object]) -> tuple[int, str | None]:
+    count = 0
+    first: str | None = None
+
+    def add_denial(value: object) -> None:
+        nonlocal count, first
+        if isinstance(value, list):
+            count += len(value)
+            if first is None and value:
+                first = _summarize_permission_denial(value[0])
+            return
+        if isinstance(value, dict):
+            explicit_count = value.get("count")
+            if isinstance(explicit_count, int):
+                count += explicit_count
+            else:
+                count += 1
+            if first is None:
+                first = _summarize_permission_denial(value)
+            return
+        if isinstance(value, int):
+            count += value
+            return
+        if isinstance(value, str):
+            count += 1
+            if first is None:
+                first = _redact_diagnostic_text(value)
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "permission_denial":
+                add_denial(value)
+                return
+            for key, item in value.items():
+                normalized = key.lower().replace("-", "_")
+                if normalized in {
+                    "permission_denial",
+                    "permission_denials",
+                    "permission_denial_count",
+                    "permissiondenial",
+                    "permissiondenials",
+                    "permissiondenialcount",
+                }:
+                    add_denial(item)
+                else:
+                    walk(item)
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return count, first
+
+
+def _summarize_permission_denial(value: object) -> str | None:
+    if isinstance(value, str):
+        return _redact_diagnostic_text(value)
+    if not isinstance(value, dict):
+        return None
+
+    tool = _first_string_value(value, ("tool_name", "tool", "name"))
+    pattern = _first_string_value(value, ("pattern", "command", "input", "reason"))
+    if tool and pattern:
+        return _redact_diagnostic_text(f"{tool} {pattern}")
+    if tool:
+        return _redact_diagnostic_text(tool)
+    if pattern:
+        return _redact_diagnostic_text(pattern)
+    return _redact_diagnostic_text(json.dumps(redact_mapping(value), sort_keys=True))
+
+
+def _first_string_value(value: dict[str, object], keys: Sequence[str]) -> str | None:
+    for key in keys:
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    return None
 
 
 async def _collect_stream_tail(
