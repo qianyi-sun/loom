@@ -159,7 +159,12 @@ The Codex CLI adapter runs Codex 0.141+ in Responses API mode. Codex
 constructs requests as `<base_url>/responses`, so the adapter
 idempotently appends `/v1` when the injected base URL is bare
 (`http://llm-gateway:9100` -> `http://llm-gateway:9100/v1`) and leaves
-existing `/v1` facade URLs unchanged.
+existing `/v1` facade URLs unchanged. For OpenAI-compatible provider
+connections whose upstream is chat-only, the gateway Responses facade
+can recover from the upstream missing-`messages` `/responses` error by
+issuing one `/chat/completions` call and synthesizing the Responses
+JSON/SSE that Codex parses. This is a provider-connection compatibility
+path, not a Codex adapter mode; Codex itself still speaks Responses.
 
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client

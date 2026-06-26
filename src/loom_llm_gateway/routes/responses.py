@@ -32,6 +32,13 @@ from loom_llm_gateway.routes._facade_common import (
     resolve_provider_connection_id,
     verify_facade_auth,
 )
+from loom_llm_gateway.routes.responses_chat_compat import (
+    chat_completion_to_responses,
+    decode_chat_completion_body,
+    responses_payload_to_chat_completion,
+    should_fallback_to_chat_completions,
+    synthetic_responses_http_response,
+)
 
 router = APIRouter()
 
@@ -93,6 +100,56 @@ async def responses(
             dialect="facade_openai_responses",
         )
         if upstream_response.status_code >= 400:
+            if should_fallback_to_chat_completions(
+                upstream_response, payload,
+            ):
+                chat_payload = responses_payload_to_chat_completion(payload)
+                chat_response, attempt = await _post_upstream_chat_completion(
+                    upstream=upstream,
+                    upstream_url=f"{row.base_url.rstrip('/')}/chat/completions",
+                    payload=chat_payload,
+                    api_key=api_key,
+                    request=request,
+                    settings=settings,
+                )
+                if chat_response.status_code >= 400:
+                    excerpt = redact_api_key(chat_response.text, api_key)
+                    raise HTTPException(
+                        status_code=chat_response.status_code,
+                        detail=(
+                            "chat-completions fallback upstream returned "
+                            f"{chat_response.status_code}: {excerpt}"
+                        ),
+                    )
+                chat_body = decode_chat_completion_body(chat_response)
+                body_or_stream = chat_completion_to_responses(
+                    chat_body,
+                    model_name=model_name,
+                    stream=bool(payload.get("stream")),
+                )
+                usage = _extract_responses_usage(body_or_stream)
+                cost, rate_card_hash = await compute_facade_cost_usd(
+                    row,
+                    model_name,
+                    usage,
+                    rate_card_cache=request.app.state.rate_card_cache,
+                )
+                await _record_responses_call(
+                    request=request,
+                    team_id=ctx.team_id,
+                    trial_id=ctx.trial_id,
+                    step_id=ctx.step_id,
+                    model_name=model_name,
+                    usage=usage,
+                    cost_usd=cost,
+                    rate_card_hash=rate_card_hash,
+                    provider=row.provider_type,
+                    attempt=attempt,
+                )
+                return _responses_result(
+                    synthetic_responses_http_response(body_or_stream),
+                    body_or_stream,
+                )
             excerpt = redact_api_key(upstream_response.text, api_key)
             raise HTTPException(
                 status_code=upstream_response.status_code,
@@ -201,6 +258,45 @@ async def _post_upstream_responses(
             ),
             settings=settings,
             dialect=dialect,
+        )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=f"upstream timeout against {upstream_url}: {exc}",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"upstream request error against {upstream_url}: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+    return outcome.response, outcome.attempt
+
+
+async def _post_upstream_chat_completion(
+    *,
+    upstream: httpx.AsyncClient,
+    upstream_url: str,
+    payload: dict[str, Any],
+    api_key: str,
+    request: Request,
+    settings: Any,
+) -> tuple[httpx.Response, int]:
+    headers = _upstream_headers(request, api_key)
+    headers["accept"] = "application/json"
+    try:
+        outcome = await send_with_retry(
+            lambda: upstream.post(
+                upstream_url,
+                json=payload,
+                headers=headers,
+                timeout=settings.upstream_timeout_sec,
+                follow_redirects=False,
+            ),
+            settings=settings,
+            dialect="facade_openai_chat_compat",
         )
     except httpx.TimeoutException as exc:
         raise HTTPException(
