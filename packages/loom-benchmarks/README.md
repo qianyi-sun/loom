@@ -51,8 +51,11 @@ reflects skill quality. The adapter materializes the chosen
 (default `human_authored`); additional methods (e.g.
 `b1-one-shot-claude-sonnet-4-6`) are added as sibling catalog rows sharing
 the same upstream. The adapter also emits an `oracle_eligible` task tag
-derived from upstream `solution/solve.sh` presence; 27 of the 100 upstream
-SLB tasks are agent-only by design and tag `oracle_eligible=false`.
+derived from upstream `solution/solve.sh` suitability; 58 of the 100 upstream
+SLB tasks form the deterministic oracle slate and 42 tag
+`oracle_eligible=false`. The excluded tasks are agent-only, require external
+oracle secrets, or ship known-bad upstream oracle solutions whose `solve.sh`
+does not match the task/tests.
 
 For official bundles, the adapter copies each task directory, preserves the
 upstream `environment/Dockerfile`, writes a Loom-owned `task.toml`, and adds a
@@ -71,11 +74,17 @@ bundle root so mixed upstream Dockerfiles can still resolve local assets such
 as spreadsheets or `data/`. SkillFlow solution scripts that reference files
 under absolute `/solution/...` are normalized at conversion time so oracle
 smoke runs can execute the materialized `solution/solve.sh` from the solution
-directory. The shim runs the upstream
-`tests/test.sh`, reads `/logs/verifier/reward.txt`, and converts that reward
-into Loom's structured `VerifierResult` JSON. Instance ids are derived from
-the relative bundle path and sanitized so spaces or shell-significant
-characters in upstream folder names cannot create invalid catalog task ids.
+directory. SkillLearnBench conversion also rewrites unsupported classic-Docker
+heredoc `RUN <<EOF` forms into copied shell scripts and normalizes
+Python-to-Scala oracle output back to the task root when the upstream verifier
+expects root-level artifacts. The shim runs the upstream
+`tests/test.sh` from the task root, reads `/logs/verifier/reward.txt`, and
+converts that reward into Loom's structured `VerifierResult` JSON. When the
+upstream test writes `/logs/verifier/output.log`, the shim includes the log
+tail in `structured.output_log_tail` so reward-0 verifier failures remain
+diagnosable after the sandbox is removed. Instance ids are derived from the
+relative bundle path and sanitized so spaces or shell-significant characters
+in upstream folder names cannot create invalid catalog task ids.
 
 ## LiveCodeBench coverage
 

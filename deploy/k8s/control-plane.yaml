@@ -18,6 +18,12 @@ spec:
               value: "0.0.0.0"
             - name: LOOM_CP_BIND_PORT
               value: "8080"
+            - name: LOOM_CP_DB_MAX_OVERFLOW
+              value: "40"
+            - name: LOOM_CP_DB_POOL_SIZE
+              value: "20"
+            - name: LOOM_CP_DB_POOL_TIMEOUT_SEC
+              value: "30.0"
             - name: LOOM_CP_DB_URL
               valueFrom:
                 secretKeyRef:
@@ -93,7 +99,7 @@ spec:
                   name: loom-secrets
                   key: step-jwt-signing-key
             - name: LOOM_CP_WORKER_HEARTBEAT_EXPIRY_SEC
-              value: "15"
+              value: "120"
             - name: LOOM_CP_WORKER_RECLAIM_SWEEP_INTERVAL_SEC
               value: "30"
 

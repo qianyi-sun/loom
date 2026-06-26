@@ -682,8 +682,17 @@ See `docs/architecture/agent-adapter.md` for the architecture.
 
 ### Config knobs (`config/loom-schema.toml`, `[service_config]`)
 
+DB-backed token `last_seen_at` / `last_used_at` updates are debounced to one
+write per token per 60 seconds. If high-concurrency worker sweeps show
+`QueuePool limit` errors or many sessions waiting on `UPDATE tokens`, verify
+that debounce path first; raising `db_pool_size` and `db_max_overflow` alone can
+increase queued connections without removing the token-row write hotspot.
+
 | Key | Default | What it does |
 |---|---|---|
+| `db_pool_size` | `20` | Control Plane SQLAlchemy DB connection pool size. Size with concurrent worker heartbeats, claims, state patches, and trajectory index writes. |
+| `db_max_overflow` | `40` | Control Plane SQLAlchemy overflow connections above `db_pool_size` for short writeback bursts. |
+| `db_pool_timeout_sec` | `30.0` | Timeout while a Control Plane request waits for a DB connection from the pool. Pool timeouts show up as HTTP 500s on claim/state/writeback paths and can leave worker trials stuck before `running`. |
 | `trial_cache_registry_repo` | `""` (unset) | Registry path to share layered images across workers (Docker Hub / GHCR / ECR / self-hosted). When unset, each worker caches locally. |
 | `trial_cache_registry_pull_timeout_sec` | `15.0` | Per-attempt timeout for the registry pull. |
 | `trial_cache_base_image_pull_timeout_sec` | `1800.0` | Per-attempt timeout for the underlying task-image pull (SWE-Bench instance images are 1–2 GB). |
@@ -1381,7 +1390,7 @@ following bounds:
 3. Watch the CP `crash_detector_reclaimed` log line — should report a
    count matching trials in-flight at SIGTERM time, within
    `worker_heartbeat_expiry_sec + worker_reclaim_sweep_interval_sec`
-   (default 15+30=45s).
+   (default 120+30=150s).
 4. Confirm no trials enter terminal state with `failure_reason IN
    ('trajectory_flush_failed', 'gateway_error')`. Reclaimed trials
    should complete normally on the new worker.

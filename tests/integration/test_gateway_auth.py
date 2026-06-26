@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, insert
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import Team, Token
@@ -59,6 +59,29 @@ async def test_verify_valid_token(db_session: AsyncSession):
     assert ctx is not None
     assert ctx.team_id == team_id
     assert "submit" in ctx.scopes
+
+
+async def test_verify_token_debounces_last_seen_update(
+    db_session: AsyncSession,
+):
+    raw = "loom_team_debounce"
+    await _insert_token(db_session, raw=raw, type_="team")
+    token_hash = hashlib.sha256(raw.encode()).digest()
+
+    ctx = await verify_bearer_token(db_session, f"Bearer {raw}")
+    assert ctx is not None
+    first_seen = await db_session.scalar(
+        select(Token.last_seen_at).where(Token.token_hash == token_hash),
+    )
+    assert first_seen is not None
+
+    ctx = await verify_bearer_token(db_session, f"Bearer {raw}")
+    assert ctx is not None
+    second_seen = await db_session.scalar(
+        select(Token.last_seen_at).where(Token.token_hash == token_hash),
+    )
+
+    assert second_seen == first_seen
 
 
 async def test_missing_bearer_returns_none(db_session: AsyncSession):

@@ -20,6 +20,9 @@ class ControlPlaneSettings(BaseSettings):
     admin_secret_file: Path | None = None
     bind_host: str = "0.0.0.0"
     bind_port: int = 8080
+    db_max_overflow: int = 40
+    db_pool_size: int = 20
+    db_pool_timeout_sec: float = 30.0
     db_url: PostgresDsn
     dev_reload: bool = False
     llm_gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
@@ -51,7 +54,7 @@ class ControlPlaneSettings(BaseSettings):
     slurm_worker_controller_stale_after_seconds: int = 300
     slurm_worker_controller_time_limit: str = "7-00:00:00"
     step_jwt_signing_key: SecretStr
-    worker_heartbeat_expiry_sec: int = 15
+    worker_heartbeat_expiry_sec: int = 120
     worker_reclaim_sweep_interval_sec: int = 30
 
 

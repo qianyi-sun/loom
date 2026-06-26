@@ -239,7 +239,7 @@ def test_control_plane_lifespan_validates_schema_before_background_tasks(
     monkeypatch.setattr(
         control_plane_app,
         "create_async_engine",
-        lambda _db_url: _FakeEngine(),
+        lambda _db_url, **_kwargs: _FakeEngine(),
     )
     monkeypatch.setattr(control_plane_app.boto3, "client", lambda *_, **__: object())
     monkeypatch.setattr(

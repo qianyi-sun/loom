@@ -14,6 +14,21 @@
     "default": "8080",
     "required": false
   },
+  "db_max_overflow": {
+    "annotation": "<class 'int'>",
+    "default": "40",
+    "required": false
+  },
+  "db_pool_size": {
+    "annotation": "<class 'int'>",
+    "default": "20",
+    "required": false
+  },
+  "db_pool_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
   "db_url": {
     "annotation": "<class 'pydantic.networks.PostgresDsn'>",
     "default": "PydanticUndefined",
@@ -171,7 +186,7 @@
   },
   "worker_heartbeat_expiry_sec": {
     "annotation": "<class 'int'>",
-    "default": "15",
+    "default": "120",
     "required": false
   },
   "worker_reclaim_sweep_interval_sec": {

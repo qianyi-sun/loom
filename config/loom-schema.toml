@@ -16,6 +16,24 @@ required    = true
 secret      = { key_per_service = { control-plane = "cp-db-url", llm-gateway = "gw-db-url", loom-service = "svc-db-url" } }
 description = "Postgres connection string. Per-service Secret keys so DB credentials rotate independently."
 
+[service_config.db_pool_size]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 20
+description = "Control Plane SQLAlchemy DB connection pool size. Size this for concurrent worker heartbeats, claims, state patches, and trajectory index writes."
+
+[service_config.db_max_overflow]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 40
+description = "Control Plane SQLAlchemy DB overflow connections above db_pool_size for short writeback bursts."
+
+[service_config.db_pool_timeout_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 30.0
+description = "Control Plane SQLAlchemy timeout in seconds when waiting for a DB connection from the pool."
+
 [service_config.step_jwt_signing_key]
 used_by     = ["control-plane", "llm-gateway"]
 python_type = "SecretStr"
@@ -131,7 +149,7 @@ default_per_service = { control-plane = 9090, llm-gateway = 9101, worker = 9090 
 [service_config.worker_heartbeat_expiry_sec]
 used_by     = ["control-plane"]
 python_type = "int"
-default     = 15
+default     = 120
 
 [service_config.worker_reclaim_sweep_interval_sec]
 used_by     = ["control-plane"]

@@ -54,6 +54,11 @@
     "default": "5.0",
     "required": false
   },
+  "hostname": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
   "idle_exit_after_seconds": {
     "annotation": "float | None",
     "default": "None",

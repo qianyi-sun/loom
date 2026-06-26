@@ -59,7 +59,13 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 def create_app(settings: ControlPlaneSettings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(str(settings.db_url))
+        engine = create_async_engine(
+            str(settings.db_url),
+            pool_pre_ping=True,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_sec,
+        )
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)

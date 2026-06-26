@@ -28,7 +28,7 @@ _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 
 # Fallback delete window for non-terminal JSONLs. Reclaim sweeps trials
 # whose worker heartbeat is more than `worker_heartbeat_expiry_sec`
-# (default 15s) stale, so under normal operation a still-running trial
+# (default 120s) stale, so under normal operation a still-running trial
 # either transitions to terminal or gets re-queued within minutes. A
 # JSONL that's still tagged non-terminal a full day later means the
 # reclaim sweep is broken or the trial is wedged in CP — delete the

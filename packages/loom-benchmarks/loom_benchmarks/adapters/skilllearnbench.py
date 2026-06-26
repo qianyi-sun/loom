@@ -31,6 +31,25 @@ from loom_benchmarks.adapters.skillflow import SkillFlowAdapter
 from loom_benchmarks.base import BenchmarkInstance, ConvertedTask
 from loom_benchmarks.util import sha256_of_dir
 
+_UPSTREAM_BAD_ORACLE_INSTANCE_IDS = frozenset({
+    # Upstream ships the same Pacific Plate solve.sh for these variants,
+    # but their instructions/tests target different geospatial queries.
+    "earthquake-plate-calculation/earthquake-plate-calculation-2",
+    "earthquake-plate-calculation/earthquake-plate-calculation-3",
+    "earthquake-plate-calculation/earthquake-plate-calculation-4",
+    "earthquake-plate-calculation/earthquake-plate-calculation-5",
+    # Public-beta replay showed every upstream organize oracle returns reward
+    # 0.0; variants 1 and 6 also raise FileNotFoundError for a paper absent
+    # from their Dockerfile paper list.
+    "organize-messy-files/organize-messy-files-1",
+    "organize-messy-files/organize-messy-files-2",
+    "organize-messy-files/organize-messy-files-3",
+    "organize-messy-files/organize-messy-files-4",
+    "organize-messy-files/organize-messy-files-5",
+    "organize-messy-files/organize-messy-files-6",
+})
+_EXTERNAL_ORACLE_ENV_NAMES = frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+
 
 class SkillLearnBenchAdapter(SkillFlowAdapter):
     name = "skilllearnbench"
@@ -59,11 +78,27 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
 
     @staticmethod
     def _oracle_eligible_tag(instance: BenchmarkInstance) -> str:
+        if instance.instance_id in _UPSTREAM_BAD_ORACLE_INSTANCE_IDS:
+            return "false"
         source_path = instance.raw.get("__source_path")
         if not source_path:
             return "false"
-        solve = Path(str(source_path)) / "solution" / "solve.sh"
+        bundle = Path(str(source_path))
+        if SkillLearnBenchAdapter._requires_external_oracle_env(bundle):
+            return "false"
+        solve = bundle / "solution" / "solve.sh"
         return "true" if solve.is_file() else "false"
+
+    @staticmethod
+    def _requires_external_oracle_env(bundle: Path) -> bool:
+        compose = bundle / "environment" / "docker-compose.yaml"
+        if not compose.exists():
+            return False
+        text = compose.read_text()
+        return any(
+            f"{name}=${{{name}}}" in text
+            for name in _EXTERNAL_ORACLE_ENV_NAMES
+        )
 
     def _convert_bundle_instance(
         self,
@@ -75,10 +110,15 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
         result = super()._convert_bundle_instance(
             instance, out_dir=out_dir, task_id=task_id,
         )
+        normalized = self._normalize_oracle_root_outputs(instance, out_dir=out_dir)
+        normalized = (
+            self._rewrite_classic_docker_unsupported_heredocs(out_dir)
+            or normalized
+        )
         injected = self._inject_skills(instance, out_dir=out_dir)
-        if not injected:
+        if not injected and not normalized:
             return result
-        # Skill injection mutated the bundle after super() hashed it.
+        # Skill injection/normalization mutated the bundle after super() hashed it.
         return ConvertedTask(
             task_id=result.task_id,
             checksum=sha256_of_dir(out_dir),
@@ -116,4 +156,111 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
                 shutil.copytree(child, dest, dirs_exist_ok=True)
             else:
                 shutil.copy2(child, dest)
+        return True
+
+    @staticmethod
+    def _normalize_oracle_root_outputs(
+        instance: BenchmarkInstance, *, out_dir: Path,
+    ) -> bool:
+        if not instance.instance_id.startswith("python-scala-translation/"):
+            return False
+        changed = False
+        for source, target in (
+            (out_dir / "localtest" / "build.sbt", out_dir / "build.sbt"),
+            (
+                out_dir / "environment" / "scala_tokenizer" / "src"
+                / "test" / "scala" / "tokenizer" / "TokenizerSpec.scala",
+                out_dir / "TokenizerSpec.scala",
+            ),
+        ):
+            if source.exists() and not target.exists():
+                shutil.copy2(source, target)
+                changed = True
+        solve_sh = out_dir / "solution" / "solve.sh"
+        if not solve_sh.exists():
+            return changed
+        text = solve_sh.read_text()
+        if "Tokenizer.scala" not in text:
+            return changed
+        marker = "LOOM_PYTHON_SCALA_ROOT_OUTPUT_NORMALIZED"
+        if marker in text:
+            return changed
+        solve_sh.write_text(
+            text.rstrip()
+            + "\n\n"
+            + "# LOOM_PYTHON_SCALA_ROOT_OUTPUT_NORMALIZED\n"
+            + 'script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"\n'
+            + 'task_root="$script_dir"\n'
+            + 'if [ "$(basename "$task_root")" = "solution" ]; then\n'
+            + '    task_root="$(CDPATH= cd -- "$task_root/.." && pwd)"\n'
+            + "fi\n"
+            + 'if [ -f "Tokenizer.scala" ]; then\n'
+            + '    cp "Tokenizer.scala" "$task_root/Tokenizer.scala"\n'
+            + "fi\n",
+        )
+        return True
+
+    @classmethod
+    def _rewrite_classic_docker_unsupported_heredocs(cls, out_dir: Path) -> bool:
+        dockerfile = out_dir / "environment" / "Dockerfile"
+        if not dockerfile.exists():
+            return False
+        original = dockerfile.read_text()
+        lines = original.splitlines()
+        rewritten: list[str] = []
+        scripts: list[tuple[str, list[str]]] = []
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx]
+            stripped = line.strip()
+            if not stripped.startswith("RUN <<"):
+                rewritten.append(line)
+                idx += 1
+                continue
+
+            delimiter = stripped.removeprefix("RUN <<").strip()
+            if (
+                len(delimiter) >= 2
+                and delimiter[0] == delimiter[-1]
+                and delimiter[0] in {"'", '"'}
+            ):
+                delimiter = delimiter[1:-1]
+            if not delimiter:
+                rewritten.append(line)
+                idx += 1
+                continue
+
+            body: list[str] = []
+            idx += 1
+            while idx < len(lines) and lines[idx].strip() != delimiter:
+                body.append(lines[idx])
+                idx += 1
+            if idx >= len(lines):
+                rewritten.append(line)
+                rewritten.extend(body)
+                continue
+
+            idx += 1
+            script_name = f".loom-heredoc-run-{len(scripts) + 1}.sh"
+            scripts.append((script_name, body))
+            copy_source = (
+                f"environment/{script_name}"
+                if cls._dockerfile_uses_root_build_context(out_dir)
+                else script_name
+            )
+            rewritten.append(f"COPY {copy_source} /tmp/{script_name}")
+            rewritten.append(f"RUN /bin/bash /tmp/{script_name}")
+
+        if not scripts:
+            return False
+
+        for script_name, body in scripts:
+            script = dockerfile.parent / script_name
+            script.write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                + "\n".join(body).rstrip()
+                + "\n",
+            )
+        dockerfile.write_text("\n".join(rewritten) + "\n")
         return True

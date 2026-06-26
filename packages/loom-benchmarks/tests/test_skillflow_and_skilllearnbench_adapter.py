@@ -237,6 +237,37 @@ def test_skilllearnbench_uses_root_build_context_for_root_assets(
     assert (out_dir / "DATA" / "records.json").read_text() == "[]\n"
 
 
+def test_skillflow_verifier_runs_upstream_tests_from_task_root_and_reports_log_tail(
+    tmp_path: Path,
+) -> None:
+    bundle = _write_real_bundle(
+        tmp_path,
+        family="workflow",
+        task="cwd-sensitive-verifier-task",
+    )
+    (bundle / "tests" / "test.sh").write_text(
+        "#!/bin/bash\n"
+        "echo verifier cwd is $(pwd) > /logs/verifier/output.log\n"
+        "test -f task-root-marker.txt\n"
+        "echo 0 > /logs/verifier/reward.txt\n",
+    )
+    (bundle / "task-root-marker.txt").write_text("root\n")
+    adapter = SkillFlowAdapter()
+    inst = BenchmarkInstance(
+        instance_id="workflow/cwd-sensitive-verifier-task",
+        split="test",
+        raw={"__source_path": str(bundle)},
+    )
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+
+    run_sh = (out_dir / "verifier" / "run.sh").read_text()
+    assert 'cd "$TASK_DIR"' in run_sh
+    assert 'bash "$TASK_DIR/tests/test.sh"' in run_sh
+    assert '"output_log_tail": output_log_tail' in run_sh
+
+
 def test_skilllearnbench_mirrors_environment_copy_sources_for_root_context(
     tmp_path: Path,
 ) -> None:
@@ -397,6 +428,162 @@ def test_skilllearnbench_emits_oracle_eligible_true_when_solve_sh_present(
     )
 
     assert instances[0].tags["oracle_eligible"] == "true"
+
+
+def test_skilllearnbench_marks_known_bad_upstream_oracle_solutions_ineligible(
+    tmp_path: Path,
+) -> None:
+    family = "earthquake-plate-calculation"
+    for index in range(1, 7):
+        task = f"{family}-{index}"
+        bundle = _write_real_bundle(tmp_path, family=family, task=task)
+        (bundle / "solution").mkdir()
+        (bundle / "solution" / "solve.sh").write_text(
+            "#!/bin/bash\n"
+            "echo oracle\n",
+        )
+
+    instances = list(
+        SkillLearnBenchAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+    tags_by_id = {
+        instance.instance_id: instance.tags["oracle_eligible"]
+        for instance in instances
+    }
+
+    assert tags_by_id == {
+        f"{family}/{family}-1": "true",
+        f"{family}/{family}-2": "false",
+        f"{family}/{family}-3": "false",
+        f"{family}/{family}-4": "false",
+        f"{family}/{family}-5": "false",
+        f"{family}/{family}-6": "true",
+    }
+
+
+def test_skilllearnbench_marks_organize_oracle_solutions_ineligible(
+    tmp_path: Path,
+) -> None:
+    family = "organize-messy-files"
+    for index in range(1, 7):
+        task = f"{family}-{index}"
+        bundle = _write_real_bundle(tmp_path, family=family, task=task)
+        (bundle / "solution").mkdir()
+        (bundle / "solution" / "solve.sh").write_text(
+            "#!/bin/bash\n"
+            "python3 solution.py\n",
+        )
+
+    instances = list(
+        SkillLearnBenchAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+
+    assert {
+        instance.instance_id: instance.tags["oracle_eligible"]
+        for instance in instances
+    } == {f"{family}/{family}-{index}": "false" for index in range(1, 7)}
+
+
+def test_skilllearnbench_marks_external_secret_oracle_tasks_ineligible(
+    tmp_path: Path,
+) -> None:
+    family = "github-repo-analytics"
+    task = "github-repo-analytics-1"
+    bundle = _write_real_bundle(tmp_path, family=family, task=task)
+    (bundle / "solution").mkdir()
+    (bundle / "solution" / "solve.sh").write_text(
+        "#!/bin/bash\n"
+        "gh api graphql\n",
+    )
+    (bundle / "environment" / "docker-compose.yaml").write_text(
+        "services:\n"
+        "  main:\n"
+        "    environment:\n"
+        "      - GH_TOKEN=${GH_TOKEN}\n",
+    )
+
+    instances = list(
+        SkillLearnBenchAdapter().list_instances(source_dir=tmp_path, split="test"),
+    )
+
+    assert instances[0].tags["oracle_eligible"] == "false"
+
+
+def test_skilllearnbench_normalizes_python_scala_oracle_output_to_task_root(
+    tmp_path: Path,
+) -> None:
+    family = "python-scala-translation"
+    task = "python-scala-translation-1"
+    bundle = _write_real_bundle(tmp_path, family=family, task=task)
+    (bundle / "solution").mkdir()
+    (bundle / "localtest").mkdir()
+    (bundle / "localtest" / "build.sbt").write_text(
+        'name := "scala-tokenizer"\n',
+    )
+    spec_dir = bundle / "environment" / "scala_tokenizer" / "src" / "test" / "scala" / "tokenizer"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "TokenizerSpec.scala").write_text(
+        "package tokenizer\nclass TokenizerSpec\n",
+    )
+    (bundle / "solution" / "solve.sh").write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "cat <<'EOF' > Tokenizer.scala\n"
+        "object Tokenizer\n"
+        "EOF\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+    inst = next(iter(adapter.list_instances(source_dir=tmp_path, split="test")))
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+    result = subprocess.run(
+        ["bash", "solve.sh"],
+        cwd=out_dir / "solution",
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert (out_dir / "Tokenizer.scala").read_text() == "object Tokenizer\n"
+    assert (out_dir / "build.sbt").read_text() == 'name := "scala-tokenizer"\n'
+    assert (
+        out_dir / "TokenizerSpec.scala"
+    ).read_text() == "package tokenizer\nclass TokenizerSpec\n"
+
+
+def test_skilllearnbench_rewrites_organize_heredoc_run_for_classic_docker_build(
+    tmp_path: Path,
+) -> None:
+    family = "organize-messy-files"
+    task = "organize-messy-files-1"
+    bundle = _write_real_bundle(tmp_path, family=family, task=task)
+    dockerfile = bundle / "environment" / "Dockerfile"
+    dockerfile.write_text(
+        "FROM ubuntu:24.04\n"
+        "WORKDIR /root\n"
+        "SHELL [\"/bin/bash\", \"-o\", \"pipefail\", \"-c\"]\n"
+        "RUN <<'EOF'\n"
+        "set -euo pipefail\n"
+        "mkdir -p /root/papers/all\n"
+        "touch /root/papers/all/2312.10793v3.pdf\n"
+        "EOF\n"
+        "COPY skills /root/.codex/skills\n",
+    )
+    adapter = SkillLearnBenchAdapter()
+    inst = next(iter(adapter.list_instances(source_dir=tmp_path, split="test")))
+    out_dir = tmp_path / "out"
+
+    adapter.convert_instance(inst, out_dir=out_dir)
+
+    rewritten = (out_dir / "environment" / "Dockerfile").read_text()
+    script = out_dir / "environment" / ".loom-heredoc-run-1.sh"
+    assert "RUN <<'EOF'" not in rewritten
+    assert "COPY environment/.loom-heredoc-run-1.sh" in rewritten
+    assert "RUN /bin/bash /tmp/.loom-heredoc-run-1.sh" in rewritten
+    assert "touch /root/papers/all/2312.10793v3.pdf" in script.read_text()
 
 
 def test_skilllearnbench_emits_oracle_eligible_false_when_solve_sh_absent(

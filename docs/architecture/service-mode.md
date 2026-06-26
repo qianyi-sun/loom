@@ -409,7 +409,9 @@ revoking their own team API tokens do not need an admin actor, but they must
 hold `tokens:manage`.
 
 `tokens` table tracks `last_seen_at` and `last_used_at` per token for rotation
-hygiene. The
+hygiene. DB-backed bearer verification debounces those timestamp writes to at
+most once per token per 60 seconds so worker heartbeats, claims, and writebacks
+do not serialize on one shared token row under high concurrency. The
 `admin_audit_events` table records the first #10 backend audit surface: team
 registration approve/reject and service-token admin mint/revoke. Wider admin
 mutation audit coverage should be added deliberately as follow-up work.

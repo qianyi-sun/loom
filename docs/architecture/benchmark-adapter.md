@@ -159,7 +159,13 @@ Terminal-Bench-2 tasks use `/app`, so their script verifier path is
 Adapters that generate `verifier/run.sh` must also declare
 `[verifier.args].script_path`. Writing the script into the bundle is not enough:
 `ScriptVerifier` is constructed from task config and will fail before running
-the benchmark when `script_path` is absent.
+the benchmark when `script_path` is absent. If the generated script wraps an
+upstream `tests/test.sh`, run that upstream script from the materialized task
+root rather than from the verifier directory or an inherited cwd, because many
+third-party test scripts resolve inputs and expected outputs with relative
+paths. Wrappers should also preserve useful upstream logs, for example by
+copying a bounded `/logs/verifier/output.log` tail into the structured
+verifier payload.
 
 `environment.docker_build_context` lets an adapter keep Docker build-only
 files under a subdirectory such as `.loom-build/client`. The worker builds from

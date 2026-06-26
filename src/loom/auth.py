@@ -30,6 +30,7 @@ from loom.admin_secret import AdminSecretVerifier
 from loom.db.schema import Token
 
 _STEP_JWT_PREFIX = "loom_step_"
+_TOKEN_TOUCH_DEBOUNCE = timedelta(seconds=60)
 
 _ROLE_SCOPES: dict[str, list[str]] = {
     "viewer": ["read:own"],
@@ -210,11 +211,17 @@ async def verify_bearer_token(
     team_id = row.team_id
     expires_at = row.expires_at
     now = datetime.now(UTC)
-    await session.execute(
-        update(Token)
-        .where(Token.token_hash == token_hash)
-        .values(last_used_at=now, last_seen_at=now),
-    )
+    touch_cutoff = now - _TOKEN_TOUCH_DEBOUNCE
+    if row.last_seen_at is None or row.last_seen_at <= touch_cutoff:
+        await session.execute(
+            update(Token)
+            .where(Token.token_hash == token_hash)
+            .where(
+                (Token.last_seen_at.is_(None))
+                | (Token.last_seen_at <= touch_cutoff),
+            )
+            .values(last_used_at=now, last_seen_at=now),
+        )
     await session.commit()
 
     return AuthContext(

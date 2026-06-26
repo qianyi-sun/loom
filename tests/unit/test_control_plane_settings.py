@@ -23,8 +23,17 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOOM_CP_BIND_PORT", "8080")
     s = ControlPlaneSettings(_env_file=None)
     assert s.bind_port == 8080
-    assert s.worker_heartbeat_expiry_sec == 15
+    assert s.worker_heartbeat_expiry_sec == 120
     assert s.worker_reclaim_sweep_interval_sec == 30
+    assert s.db_pool_size == 20
+    assert s.db_max_overflow == 40
+    assert s.db_pool_timeout_sec == 30.0
+    assert s.worker_heartbeat_expiry_sec >= (
+        # The worker heartbeat thread uses a 5s synchronous HTTP timeout and
+        # a 5s interval. High-I/O benchmark hosts must tolerate several
+        # transient timeout cycles plus one reclaim sweep before losing claims.
+        (5 + 5) * 4 + s.worker_reclaim_sweep_interval_sec
+    )
     assert s.slurm_worker_controller_enabled is False
     assert s.slurm_worker_controller_pool_name == "oldlab"
     assert s.slurm_worker_controller_requested_concurrency == 6

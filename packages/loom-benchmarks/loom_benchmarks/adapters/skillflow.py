@@ -378,6 +378,7 @@ rm -f /logs/verifier/reward.txt
 if [ -d "$TASK_DIR/tests" ]; then
     cp -R "$TASK_DIR/tests/." /tests/
 fi
+cd "$TASK_DIR"
 verifier_rc=0
 if [ -f "$TASK_DIR/tests/test.sh" ]; then
     if bash "$TASK_DIR/tests/test.sh"; then
@@ -398,6 +399,13 @@ out = Path(sys.argv[1])
 verifier_rc = int(sys.argv[2])
 reward_path = Path("/logs/verifier/reward.txt")
 raw = reward_path.read_text().strip() if reward_path.exists() else "0"
+output_log_path = Path("/logs/verifier/output.log")
+output_log_tail = None
+if output_log_path.exists():
+    output_log_tail = output_log_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )[-4000:]
 try:
     score = float(raw)
 except ValueError:
@@ -416,6 +424,7 @@ out.write_text(json.dumps({
     "structured": {
         "reward_raw": raw,
         "test_sh_returncode": verifier_rc,
+        "output_log_tail": output_log_tail,
     },
 }))
 PY

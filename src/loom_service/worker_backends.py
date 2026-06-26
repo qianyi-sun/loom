@@ -9,8 +9,8 @@ A backend is "active" iff at least one row in `workers` satisfies BOTH:
 1. `status = 'active'` — set on register, flipped to 'shutting-down' on
    SIGTERM via the worker's own teardown path.
 2. `last_seen_at >= now() - 30 seconds` — heartbeat freshness check.
-   The worker beats every 5s (`worker_heartbeat_expiry_sec` default 15s
-   on CP's crash detector). Without this predicate, a worker that
+   The worker beats every 5s; this freshness window is intentionally shorter
+   than CP's crash-detector reclaim expiry. Without this predicate, a worker that
    crashes without SIGTERM keeps `status='active'` forever, defeating
    PR #63's reject-when-no-worker check (issue #68).
 
@@ -29,12 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.db.schema import Worker
 
 # Freshness window — 30s = 6 heartbeat intervals. Generous enough to
-# ride out network blips without keeping a dead worker in the catalog
-# longer than the crash detector keeps its trials reserved.
-# Kept here (not a setting) because the value should match the CP's
-# crash-detector expiry; tuning both in lockstep would require a
-# coordinated env-var change anyway. Bump if heartbeat interval
-# changes (`loom_worker.config.heartbeat_interval_sec`).
+# ride out network blips without keeping a dead worker visible to users.
+# This must remain shorter than the CP crash-detector expiry so new
+# submissions stop using a stale worker before in-flight trials are reclaimed.
+# Bump if heartbeat interval changes (`loom_worker.config.heartbeat_interval_sec`).
 _HEARTBEAT_FRESHNESS_SEC = 30
 
 
