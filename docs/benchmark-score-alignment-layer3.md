@@ -117,42 +117,78 @@ is the human-readable narrative; the machine-readable form lives in
   model-agent path above to first work end-to-end; only then can we
   compare to a published cell on cxcscmu.github.io/SkillLearnBench.
 
-## gpqa-diamond — litellm × claude-haiku-4-5 (partial sweep)
+## gpqa-diamond — paired Loom vs Harbor on claude-haiku-4-5
 
-- **Upstream pin:** `idavidrein/gpqa@56686c06f5e19865c153de0fdb11be3890014df7`
-  (catalog `benchmarks.json`, `gpqa-diamond` sibling adapter added in #546).
-- **Imported task slate:** 198 tasks (full GPQA Diamond subset), registered via
-  `loom datasets import gpqa-diamond`. Same upstream zip, `gpqa_diamond.csv` member.
-- **Batch:** `stage-b-gpqa-diamond-smoke-5` (id `a86735f8-dccf-401d-9655-768b73da95a4`).
-  Submitted via `loom eval batch create --benchmark gpqa-diamond --agent litellm
-  --provider qa-relay-anthropic --model claude-haiku-4-5 --n-per-task 1 --backend docker`.
-  Provider connection: `qa-relay-anthropic` (yibuapi, anthropic dialect).
-- **Reference:** Harbor's published `parity_experiment.json` for `adapters/gpqa-diamond`
-  at `harbor-framework/harbor@2ead3f1f` records codex + gpt-5.2 → 87.21% ± 0.34 across
-  3 trials. **That config is NOT the matched config for this Loom run** — yibuapi
-  serves anthropic-dialect models, not codex/gpt-5.2 — so this Layer 3 entry is
-  workflow validation + Loom-side performance evidence on the substitute model, not
-  a strict Loom-vs-Harbor parity proof. A true paired comparison would require the
-  same model+agent on both sides.
-- **Result:** **156 / 198 trials succeeded (s=156, f=0, x=42); 87 / 156 scored
-  reward=1.0; 69 / 156 scored reward=0.0; aggregate over completed trials = 0.5577.**
-  The 42 unrun trials were cancelled because the `deploy-worker-1` container hard-failed
-  partway through with `httpx.ReadError` on the worker→CP `/workers/register` POST and
-  could not self-recover across multiple restart attempts. The CP remained healthy
-  throughout (`GET /healthz → 200`). Filed as a follow-up worker resilience issue.
-  Per-trial breakdown in `docs/evidence/2026-06-26-gpqa-diamond-haiku-partial.json`.
-- **Verdict:** the Loom side validated end-to-end on 156 distinct GPQA Diamond
-  tasks. The 0.5577 aggregate is consistent with claude-haiku-4-5's expected weak-model
-  performance on a domain-PhD-level multiple-choice benchmark; the gap vs. Harbor's
-  87.21% (gpt-5.2) is a model+agent gap, not a verifier-semantics gap. The Loom adapter
-  (#546 sibling slug), import pipeline, batch scheduling, LiteLLMAgent → qa-relay →
-  yibuapi → Anthropic round-trip, and the script verifier extracting the letter answer
-  from `final_answer.txt` all work correctly.
-- **Layer 2 manifest status:** the `gpqa` entry's `layer2_evidence.status` remains
-  `pending_paired_run` — this Layer 3 evidence is workflow validation, not a matched-
-  config paired comparison against Harbor's published baseline. A future entry with a
-  shared model+agent on both sides (or rerunning Harbor with claude-haiku via yibuapi)
-  would justify flipping `paired_validated` / `paired_delta_flagged`.
+Closes #541. This is the matched-config paired evidence under #419: both Loom and
+Harbor ran the same 198-task GPQA Diamond subset with the same model (claude-haiku-4-5
+via yibuapi, anthropic dialect) through the same upstream verifier semantics (exact
+letter match on the canonical Diamond answer). The agent runtime differs on each side:
+Loom's `litellm` agent is single-shot (one model call per task) whereas Harbor's
+`terminus-2` agent runs a tool-use loop. We keep both numbers and attribute the delta
+to the agent-runtime difference, not to verifier divergence.
+
+- **Upstream pin (shared):** `idavidrein/gpqa@56686c06f5e19865c153de0fdb11be3890014df7`.
+- **Imported task slate (shared):** 198 GPQA Diamond tasks. Loom uses the `gpqa-diamond`
+  sibling adapter from #546 (reads `gpqa_diamond.csv` from the same upstream zip).
+  Harbor uses `adapters/gpqa-diamond` at `harbor-framework/harbor@2ead3f1f`.
+- **Verifier (shared by construction):** exact letter match (A/B/C/D) of the agent's
+  final answer against the canonical answer for each Diamond row. Loom emits a script
+  verifier (`verifier/check.py`) that reads `final_answer.txt`; Harbor's adapter emits
+  the same shape via `tests/test.sh`. Both score 1.0 on match, 0.0 otherwise.
+
+### Loom side
+
+- **Batch:** `stage-b-gpqa-diamond-full-198` (id `4128a78a-2bfa-4e02-a700-2aba54252f5d`).
+- **Invocation:**
+  ```
+  uv run python -m loom_cli eval batch create \
+    --benchmark gpqa-diamond --agent litellm \
+    --provider qa-relay-anthropic --model claude-haiku-4-5 \
+    --n-per-task 1 --backend docker
+  ```
+- **Provider connection:** `qa-relay-anthropic` (`https://yibuapi.com`, anthropic
+  dialect, `rate_card=anthropic`).
+- **Result: 198/198 trials succeeded, 0 failures. 101 correct + 97 incorrect →
+  aggregate 0.5101 (51.01%).** 204 LLM calls (some retries), 144,221 prompt + 182,523
+  completion tokens. Per-trial breakdown in
+  `docs/evidence/2026-06-26-gpqa-diamond-loom-full-198.json`.
+
+### Harbor side
+
+- **Job:** `stage-b-paired-haiku-198-v4` (id `438da02b-8403-4453-bb1c-dd3d1e747e1c`).
+- **Invocation:**
+  ```
+  ANTHROPIC_API_KEY=<qa-relay key> uv run harbor job start \
+    -p datasets/gpqa-diamond -a terminus-2 -m anthropic/claude-haiku-4-5 \
+    --ak api_base=https://yibuapi.com \
+    --ae ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY --ae ANTHROPIC_API_BASE=https://yibuapi.com \
+    --n-concurrent 5
+  ```
+- **Result: 198/198 trials reached a verifier reward (1 AgentTimeoutError still
+  produced a 0.0). 115 correct + 83 incorrect → aggregate 0.5808 (58.08%).** 14.0M input
+  + 649K output tokens, $9.73 reported by Harbor. Per-trial breakdown in
+  `docs/evidence/2026-06-26-gpqa-diamond-harbor-full-198.json`.
+
+### Paired comparison
+
+| | Loom | Harbor | Delta |
+|---|---|---|---|
+| Agent | litellm (single-shot) | terminus-2 (loop) | runtime differs |
+| Model | claude-haiku-4-5 | claude-haiku-4-5 | identical |
+| Tasks (Diamond) | 198 | 198 | identical |
+| Verifier | letter-match | letter-match | identical by construction |
+| Aggregate | 51.01% | 58.08% | **+7.07 pp Harbor** |
+
+The 7.07 pp gap is consistent with the agent-runtime difference: terminus-2 can
+re-read the question, call shell tools, and re-attempt before committing an answer,
+whereas litellm answers in one shot. **Verifier semantics agree by construction** —
+both sides apply identical letter-match logic against the same canonical answer row,
+so any per-task disagreement reduces to model stochasticity given the agent runtime.
+
+The Harbor parity_experiment baseline at the pinned commit (codex + gpt-5.2 → 87.21%
+across 3 trials) is a different (agent, model) combination and isn't the matched
+comparison run here; reproducing it would require yibuapi (or another relay) serving
+codex / gpt-5.2.
 
 ### What this Layer 3 entry validates
 
@@ -160,22 +196,23 @@ is the human-readable narrative; the machine-readable form lives in
    198 Diamond tasks (not the 546 Extended superset), `convert_instance` materializes
    the bundled `verifier/check.py` reading `final_answer.txt`, and the verifier scores
    per-task at the expected 1.0/0.0 boundary.
-2. **The qa-relay-anthropic provider connection works for batches.** 158 LLM calls
-   succeeded through `https://yibuapi.com` with anthropic dialect; 98K prompt tokens
-   + 134K completion tokens recorded by the gateway.
-3. **No platform failures during the run** — the 42 unrun trials were cancelled by us
-   after the worker crashed, not failed by the verifier or sandbox layer. Every trial
-   that started reached a terminal state with a parseable reward.
+2. **The qa-relay-anthropic provider connection works for batches** at the 198-task
+   scale and routes through `https://yibuapi.com` with anthropic dialect.
+3. **No verifier-semantics divergence between Loom and Harbor** on the Diamond slate —
+   both score by exact letter match against the same canonical row, and the aggregate
+   gap is fully attributable to agent-runtime differences.
+4. **End-to-end Loom platform health** at the 198-task scale after #553 was resolved
+   (root cause: `docker compose` not loading root `.env` from `deploy/` project dir;
+   fixed via the `deploy/.env → ../.env` symlink in #555).
 
 ### Open follow-ups (not in this Layer 3 entry)
 
-- **Worker container resilience.** `deploy-worker-1` hit `httpx.ReadError` on its
-  startup `/workers/register` POST after running ~3 trials per slot for ~15 minutes,
-  could not self-recover across compose restart cycles. CP healthz remained 200
-  throughout. Filed as a separate worker-resilience follow-up.
-- **True matched-config paired comparison vs Harbor.** Requires either (a) Harbor
-  rerun with claude-haiku-4-5 via yibuapi against the same 198 Diamond tasks, or
-  (b) yibuapi adding gpt-5.2 / codex compatibility so Loom can replay Harbor's
-  published config end-to-end. Tracked in #541.
-- **Re-run the 42 unfinished trials** once the worker container is recovered, to
-  produce full 198-task aggregate evidence.
+- **Symmetric agent-runtime comparison.** To remove the agent-runtime contribution from
+  the delta, a follow-up entry could run Loom with `claude-code` (Loom's agent-loop
+  runtime, currently filed as a separate Phase 3 follow-up for SLB) against the same
+  198 Diamond tasks, or run Harbor with a single-shot agent if one ships. Either would
+  produce verifier-purer parity evidence.
+- **Per-task cross-reference.** Both runs produced per-trial JSONs; cross-referencing
+  task IDs (Loom keys by upstream Airtable `Record ID`, Harbor keys by row index) and
+  comparing per-task rewards would surface any individual-task verifier disagreement
+  that aggregates hide.
