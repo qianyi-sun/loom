@@ -271,6 +271,10 @@ The node-agent token currently uses the CP admin surface and must include the
 `admin:gb10_workers` scope. Keep it host-local and rotate it with the same
 care as other admin credentials.
 
+GB10 hosts install `uv` under `/home/trt/.local/bin`; the node-agent systemd
+unit sets PATH explicitly so the timer works from a non-interactive user
+service environment.
+
 Install the node-agent service and timer:
 
 ```bash
