@@ -420,6 +420,32 @@ export interface components {
         has_default_backend: boolean;
         status: "blocked" | "waiting" | "running" | "idle" | string;
       };
+      resources: components["schemas"]["ResourceSummary"];
+    };
+    ResourceSummary: {
+      aggregate: components["schemas"]["ResourceAggregate"];
+      pools: components["schemas"]["ResourcePool"][];
+    };
+    ResourceAggregate: {
+      active_workers: number;
+      total_slots: number;
+      occupied_slots: number;
+      free_slots: number;
+      running_tasks: number;
+      starting_tasks: number;
+      queued_tasks: number;
+    };
+    ResourcePool: {
+      pool_name: string;
+      backend: string;
+      cpu_arch: string;
+      active_workers: number;
+      total_slots: number;
+      occupied_slots: number;
+      free_slots: number;
+      running_tasks: number;
+      starting_tasks: number;
+      queued_tasks: number;
     };
     Trial: {
       id: string;

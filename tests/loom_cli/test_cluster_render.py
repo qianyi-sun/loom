@@ -601,6 +601,19 @@ def test_render_worker_max_concurrent_schema_default() -> None:
     assert concurrent_entries[0]["value"] == "16"
 
 
+def test_render_worker_pool_name_schema_default() -> None:
+    """Fixed Kubernetes workers should register under an explicit pool."""
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    worker = next(
+        d for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+    )
+    env_list = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    pool_entries = [e for e in env_list if e["name"] == "LOOM_WORKER_POOL_NAME"]
+    assert len(pool_entries) == 1
+    assert pool_entries[0]["value"] == "k8s-worker"
+
+
 def test_render_can_override_service_object_buckets() -> None:
     """Environment-specific cluster configs must not share artifact or
     trajectory buckets by accident when they use the same object-store

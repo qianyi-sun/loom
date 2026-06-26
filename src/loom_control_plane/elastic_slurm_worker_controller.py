@@ -275,6 +275,7 @@ def build_sbatch_request(
     export = ",".join((
         "ALL",
         f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
+        f"LOOM_WORKER_POOL_NAME={config.pool_name}",
         f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
         f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
     ))
@@ -656,6 +657,7 @@ async def run_elastic_slurm_worker_controller_loop(
 def _worker_env(config: ElasticSlurmWorkerControllerConfig) -> dict[str, str]:
     return {
         "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
+        "LOOM_WORKER_POOL_NAME": config.pool_name,
         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
     }

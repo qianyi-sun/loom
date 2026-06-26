@@ -14,9 +14,11 @@ spec:
       containers:
         - name: worker
           image: loom-worker:{{ image_tag }}
-          {{ env_macros.env_block("worker", schema, skip_names=("max_concurrent",)) | indent(10) }}
+          {{ env_macros.env_block("worker", schema, skip_names=("max_concurrent", "pool_name")) | indent(10) }}
             - name: LOOM_WORKER_MAX_CONCURRENT
               value: {{ worker_capacity.max_concurrent | string | tojson }}
+            - name: LOOM_WORKER_POOL_NAME
+              value: "k8s-worker"
             # Subprocess agents run inside Docker sandboxes, not the worker pod.
             # They cannot resolve k8s Service DNS, so inject the operator-
             # selected sandbox-facing bridge URL.

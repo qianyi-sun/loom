@@ -59,6 +59,8 @@ class HttpControlPlaneClient:
         hostname: str,
         version: str,
         capabilities: list[dict[str, Any]],
+        max_concurrent: int = 1,
+        pool_name: str = "default",
     ) -> dict[str, Any]:
         client, owned = self._http()
         try:
@@ -68,6 +70,8 @@ class HttpControlPlaneClient:
                     "hostname": hostname,
                     "version": version,
                     "capabilities": capabilities,
+                    "max_concurrent": max_concurrent,
+                    "pool_name": pool_name,
                 },
             )
             r.raise_for_status()

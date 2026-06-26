@@ -318,6 +318,8 @@ class Worker(Base):
     hostname: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
     capabilities: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    pool_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'default'"))
     registered_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)

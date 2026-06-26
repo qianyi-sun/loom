@@ -55,6 +55,10 @@ VM host name, for example `trt-gb10-7`. If it is unset, the worker registers
 with the runtime hostname, which may be only a container ID in Docker Compose.
 Using the host name keeps Monitor, worker inventory, and capacity evidence
 readable when many remote workers attach through the same control plane.
+Set `LOOM_WORKER_POOL_NAME` to the stable pool identity shared by similar
+workers, for example `gb10-arm64`, `oldlab`, or `remote-worker`. Monitor,
+`loom resources status`, and Prometheus slot metrics group capacity by this
+pool name plus backend and CPU architecture.
 
 ## Control-node Service Tunnels
 
@@ -428,6 +432,7 @@ LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
 LOOM_WORKER_MINIO_SECRET_KEY=...
 LOOM_WORKER_MAX_CONCURRENT=5
+LOOM_WORKER_POOL_NAME=remote-worker
 # Optional, but recommended for remote pools so UI/DB worker rows identify the
 # physical or VM host instead of the container hostname.
 # LOOM_WORKER_HOSTNAME=worker-host-a
@@ -523,6 +528,10 @@ the task dir empty — the trial then fails at agent start.
 Per-host trial concurrency is controlled by `LOOM_WORKER_MAX_CONCURRENT`.
 The remote-worker compose default is 5 for first contact, but production
 capacity should come from the inventory and capacity-plan flow above.
+Remote workers also advertise `LOOM_WORKER_POOL_NAME`; use one stable value
+per capacity pool so `loom resources status --json`, Monitor, and
+`loom_worker_pool_*` metrics report slots by the same grouping operators use
+for deployment and evidence.
 
 Elastic Slurm workers should also set
 `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` in the remote-worker env file. When
@@ -601,6 +610,13 @@ Use this formula for the initial ceiling:
 
 ```text
 total_trial_concurrency = worker_host_count * LOOM_WORKER_MAX_CONCURRENT
+```
+
+After startup, verify the same slot accounting exposed in the browser:
+
+```bash
+loom resources status
+loom resources status --json
 ```
 
 Recommended rollout:

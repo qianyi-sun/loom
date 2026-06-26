@@ -267,6 +267,8 @@ async def run_worker(settings: WorkerSettings) -> None:
             hostname=_worker_hostname(settings.hostname),
             version="0.0.1",
             capabilities=_DEFAULT_CAPS,
+            max_concurrent=max(1, settings.max_concurrent),
+            pool_name=settings.pool_name,
         )
         worker_id = UUID(info["worker_id"])
         logger.info("worker_registered worker_id=%s", worker_id)

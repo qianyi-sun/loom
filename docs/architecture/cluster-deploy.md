@@ -481,7 +481,10 @@ process handles N concurrent trials via the existing asyncio Semaphore,
 gated by `LOOM_WORKER_MAX_CONCURRENT`. In Kubernetes render output this
 comes from `[worker_capacity].max_concurrent` in `cluster-config.toml`;
 the default render is three worker replicas at 16 trials each, or 48
-in-cluster slots before remote workers are attached. The service-mode
+in-cluster slots before remote workers are attached. Rendered Kubernetes
+workers advertise `LOOM_WORKER_POOL_NAME=k8s-worker` so Monitor,
+`loom resources status`, and slot metrics group the baseline separately from
+remote GB10/OLDLAB pools. The service-mode
 worker runtime default remains conservative for non-rendered local
 processes, so production operators should use cluster render config
 rather than hand-patching the Deployment env block. The old

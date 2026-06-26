@@ -117,7 +117,7 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--partition=cpu",
         "--cpus-per-task=12",
         "--mem=58000M",
-        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom",
+        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom",
     )
     assert "docker compose --env-file \"$LOOM_REMOTE_WORKER_ENV_FILE\"" in request.stdin
     assert "cd \"$LOOM_REMOTE_WORKER_REPO_DIR\"" in request.stdin

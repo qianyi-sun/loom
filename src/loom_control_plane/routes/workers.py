@@ -112,6 +112,28 @@ async def register_worker(
             status_code=400, detail=f"invalid capabilities: {exc.errors()}",
         ) from exc
 
+    raw_max_concurrent = payload.get("max_concurrent", 1)
+    try:
+        max_concurrent = int(raw_max_concurrent)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="max_concurrent must be a positive integer",
+        ) from exc
+    if max_concurrent < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="max_concurrent must be a positive integer",
+        )
+
+    raw_pool_name = payload.get("pool_name", "default")
+    pool_name = str(raw_pool_name).strip()
+    if not pool_name:
+        raise HTTPException(
+            status_code=400,
+            detail="pool_name must be a non-empty string",
+        )
+
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
         await session.execute(insert(Worker).values(
@@ -119,6 +141,8 @@ async def register_worker(
             hostname=payload.get("hostname", "unknown"),
             version=payload.get("version", "unknown"),
             capabilities=validated_caps,
+            max_concurrent=max_concurrent,
+            pool_name=pool_name,
             registered_at=datetime.now(UTC),
             last_seen_at=datetime.now(UTC),
             status="active",

@@ -9,10 +9,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Token
+from loom.db.schema import Token, Worker
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -33,6 +33,7 @@ def worker_token(postgres_url: str) -> Iterator[str]:
         yield raw
     finally:
         with session_factory() as s:
+            s.execute(delete(Worker))
             s.execute(delete(Token))
             s.commit()
         engine.dispose()
@@ -76,6 +77,43 @@ def test_register_with_valid_capabilities(app, worker_token):  # type: ignore[no
         body = r.json()
         assert "worker_id" in body
         assert body["heartbeat_interval_sec"] > 0
+
+
+def test_register_persists_worker_capacity_and_pool(
+    app,
+    worker_token,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        r = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={
+                "hostname": "trt-gb10-7",
+                "version": "0.1",
+                "capabilities": [_VALID_CAP],
+                "max_concurrent": 10,
+                "pool_name": "gb10-arm64",
+            },
+        )
+        assert r.status_code == 200, r.text
+        worker_id = r.json()["worker_id"]
+
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT max_concurrent, pool_name "
+                    "FROM workers WHERE id = :worker_id"
+                ),
+                {"worker_id": worker_id},
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row[0] == 10
+    assert row[1] == "gb10-arm64"
 
 
 def test_register_rejects_missing_capabilities(app, worker_token):  # type: ignore[no-untyped-def]

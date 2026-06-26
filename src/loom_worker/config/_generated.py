@@ -42,6 +42,7 @@ class WorkerSettings(BaseSettings):
     minio_read_timeout_sec: float = 120.0
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    pool_name: str = "default"
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
     sandbox_singleton_secrets_dir: str = "/var/lib/loom/sandbox-secrets"

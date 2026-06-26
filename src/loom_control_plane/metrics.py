@@ -44,6 +44,30 @@ WORKERS_ACTIVE = Gauge(
     "Workers with fresh heartbeat",
 )
 
+WORKER_POOL_TOTAL_SLOTS = Gauge(
+    "loom_worker_pool_total_slots",
+    "Fresh active worker execution slots by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_OCCUPIED_SLOTS = Gauge(
+    "loom_worker_pool_occupied_slots",
+    "Claimed and running trials assigned to fresh workers by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_FREE_SLOTS = Gauge(
+    "loom_worker_pool_free_slots",
+    "Unoccupied fresh active worker execution slots by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_WORKERS = Gauge(
+    "loom_worker_pool_workers",
+    "Fresh active worker processes by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
 WORKER_RECLAIM_TOTAL = Counter(
     "loom_worker_reclaim_total",
     "Trials reclaimed by crash detector",

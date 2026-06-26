@@ -109,6 +109,7 @@ Evidence date: 2026-06-25.
   the local tunnel endpoints.
 - Every host runs one Docker Compose worker container.
 - Per-host trial concurrency is currently `LOOM_WORKER_MAX_CONCURRENT=2`.
+- Every host advertises `LOOM_WORKER_POOL_NAME=gb10-arm64`.
 - Total configured GB10 trial capacity is therefore `15 * 2 = 30` slots.
 - Canary batch `b18d1a92-909a-443f-a768-f0aae8229cea` finished `succeeded`.
   Trial `6e833772-ae85-4bf0-9621-904cb9bca0ea` was claimed by
@@ -186,6 +187,7 @@ LOOM_WORKER_GATEWAY_URL=http://127.0.0.1:19100
 LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:19100
 LOOM_WORKER_MINIO_ENDPOINT=http://127.0.0.1:19000
 LOOM_WORKER_MAX_CONCURRENT=2
+LOOM_WORKER_POOL_NAME=gb10-arm64
 LOOM_WORKER_HOSTNAME=trt-gb10-N
 LOOM_WORKER_SANDBOX_WORKER_INDEX=N
 LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=31536000
@@ -356,4 +358,5 @@ worker cache state.
 
 If a host becomes unstable, lower `LOOM_WORKER_MAX_CONCURRENT` first, restart
 that host's worker, and record the observed bottleneck before raising capacity
-again.
+again. Use `loom resources status` to confirm the GB10 row reports the expected
+occupied/total slot count before starting another sweep.
