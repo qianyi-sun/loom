@@ -368,6 +368,16 @@ def _run(argv: list[str], *, dry_run: bool) -> None:
     subprocess.run(argv, check=True)
 
 
+def _pull_or_build(compose_base: list[str], service: str, *, dry_run: bool) -> None:
+    try:
+        _run([*compose_base, "pull", service], dry_run=dry_run)
+    except subprocess.CalledProcessError:
+        sys.stderr.write(
+            "warning: docker compose pull failed; building worker image locally\n",
+        )
+        _run([*compose_base, "build", service], dry_run=dry_run)
+
+
 def _write_temp_env_file(env_file: Path, rendered: str) -> Path:
     with tempfile.NamedTemporaryFile(
         "w",
@@ -437,7 +447,7 @@ def _apply(args: argparse.Namespace) -> int:
         ]
         for compose_file in args.compose_file:
             compose_base.extend(["-f", str(compose_file)])
-        _run([*compose_base, "pull", args.service], dry_run=args.dry_run)
+        _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
         _run(
             [
                 *compose_base,

@@ -218,6 +218,77 @@ def test_apply_failure_leaves_env_file_retryable(
     )
 
 
+def test_apply_builds_local_worker_image_when_registry_pull_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=old-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=5\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=old-env\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text(
+        "services:\n"
+        "  worker:\n"
+        "    image: loom-worker:${LOOM_IMAGE_TAG:-dev}\n"
+        "    build:\n"
+        "      context: ..\n"
+        "      dockerfile: deploy/Dockerfile.worker\n",
+        encoding="utf-8",
+    )
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="new-image",
+        max_concurrent=10,
+        env_config_version="new-env",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
+
+    def _run(argv, *, dry_run):  # type: ignore[no-untyped-def]
+        commands.append(list(argv))
+        if argv[-2:] == ["pull", "worker"]:
+            raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(gb10_agent, "_run", _run)
+
+    rc = gb10_agent._apply(SimpleNamespace(
+        cp_url="http://cp:8080",
+        admin_token="env:LOOM_ADMIN_TOKEN",
+        environment="production",
+        pool_name="gb10-arm64",
+        hostname="trt-gb10-1",
+        env_file=env_file,
+        compose_file=[compose_file],
+        service="worker",
+        drain_timeout_sec=600,
+        dry_run=False,
+        rollback=False,
+        force=False,
+        format="text",
+    ))
+
+    assert rc == 0
+    assert [command[-2:] for command in commands] == [
+        ["pull", "worker"],
+        ["build", "worker"],
+        ["600", "worker"],
+        ["-d", "worker"],
+    ]
+    rendered = env_file.read_text(encoding="utf-8")
+    assert "LOOM_IMAGE_TAG=new-image" in rendered
+    assert "LOOM_WORKER_ENV_CONFIG_VERSION=new-env" in rendered
+
+
 def test_rollback_apply_publishes_previous_state_to_control_plane(
     tmp_path: Path,
     monkeypatch,
