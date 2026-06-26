@@ -47,7 +47,7 @@ async def test_oracle_runs_solve_script(
     writer: TrajectoryWriter, task_dir: Path,
 ):
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"solved\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -62,8 +62,7 @@ async def test_oracle_runs_solve_script(
         mcp=[], skills_dir=None, step_id="main",
     )
 
-    assert PurePosixPath("/workspace/solve.sh") in driver.filesystem
-    assert driver.filesystem[PurePosixPath("/workspace/solve.sh")].startswith(b"#!/bin/sh")
+    assert PurePosixPath("/workspace/solve.sh") not in driver.filesystem
 
     from loom.models.trajectory import EventKind
     from loom.trajectory.reader import TrajectoryReader
@@ -71,6 +70,41 @@ async def test_oracle_runs_solve_script(
     exec_events = list(reader.iter_kind(EventKind.ENV_EXEC))
     assert len(exec_events) == 1
     assert exec_events[0].trial_id == trial_id
+    assert exec_events[0].cwd == "/workspace/solution"
+
+
+async def test_oracle_runs_materialized_solution_script_from_solution_dir(
+    writer: TrajectoryWriter, task_dir: Path,
+):
+    expected_cmd = (
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh"
+    )
+    seen: list[tuple[str, PurePosixPath | None]] = []
+
+    def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
+        seen.append((cmd, cwd))
+        if cmd == expected_cmd and cwd == PurePosixPath("/workspace/solution"):
+            return ExecResult(
+                return_code=0, stdout=b"solved\n", stderr=b"",
+                truncated=False, duration_sec=0.05,
+            )
+        return ExecResult(
+            return_code=127, stdout=b"", stderr=b"unexpected oracle path",
+            truncated=False, duration_sec=0.01,
+        )
+
+    driver = FakeDriver(exec_handler=handler)
+    await driver.start(options=StartOptions())
+
+    trial_id = uuid4()
+    agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
+    await agent.run(
+        instruction="hello", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert seen == [(expected_cmd, PurePosixPath("/workspace/solution"))]
+    assert PurePosixPath("/workspace/solve.sh") not in driver.filesystem
 
 
 async def test_oracle_runs_from_custom_workdir(
@@ -80,7 +114,7 @@ async def test_oracle_runs_from_custom_workdir(
 
     def handler(cmd, user, cwd, env):  # type: ignore[no-untyped-def]
         seen.append(cwd)
-        if cmd == "chmod +x /app/solve.sh && /app/solve.sh":
+        if cmd == "chmod +x /app/solution/solve.sh && /app/solution/solve.sh":
             return ExecResult(
                 return_code=0, stdout=b"solved\n", stderr=b"",
                 truncated=False, duration_sec=0.05,
@@ -104,14 +138,14 @@ async def test_oracle_runs_from_custom_workdir(
         mcp=[], skills_dir=None, step_id="main",
     )
 
-    assert PurePosixPath("/app/solve.sh") in driver.filesystem
-    assert seen == [PurePosixPath("/app")]
+    assert PurePosixPath("/app/solve.sh") not in driver.filesystem
+    assert seen == [PurePosixPath("/app/solution")]
 
     from loom.models.trajectory import EventKind
     from loom.trajectory.reader import TrajectoryReader
     reader = TrajectoryReader(writer.local_path)
     exec_events = list(reader.iter_kind(EventKind.ENV_EXEC))
-    assert exec_events[0].cwd == "/app"
+    assert exec_events[0].cwd == "/app/solution"
 
 
 async def test_oracle_missing_solve_raises(writer: TrajectoryWriter, tmp_path: Path):
@@ -136,7 +170,7 @@ async def test_oracle_nonzero_exit_raises(writer: TrajectoryWriter, task_dir: Pa
     trial fails with AGENT_ERROR rather than silently 'succeeding'."""
     from loom.errors import AgentError
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=2, stdout=b"", stderr=b"oops",
             truncated=False, duration_sec=0.01,
         ),

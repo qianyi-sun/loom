@@ -84,7 +84,7 @@ async def test_trial_run_happy_path(hello_task: Path, tmp_path: Path):
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -141,7 +141,7 @@ async def test_trial_run_respects_environment_workdir(
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /app/solve.sh && /app/solve.sh": ExecResult(
+        "chmod +x /app/solution/solve.sh && /app/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -201,7 +201,7 @@ async def test_trial_run_passes_task_sandbox_start_options(
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -293,7 +293,7 @@ async def test_trial_run_state_patch_failure_doesnt_kill_trial(
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -386,7 +386,7 @@ async def test_trial_run_unscored_agent_error_marks_failed(
     # No matching command → falls through to default ExecResult(rc=0) → solve.sh exits 0.
     # Force agent error by passing a handler that returns non-zero.
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=42, stdout=b"", stderr=b"oops",
             truncated=False, duration_sec=0.01,
         ),
@@ -424,7 +424,7 @@ async def test_trial_run_scored_agent_error_stays_succeeded(
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=42, stdout=b"", stderr=b"oops",
             truncated=False, duration_sec=0.01,
         ),
@@ -466,7 +466,7 @@ async def test_trial_run_empty_reward_verifier_error_marks_failed(
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -507,7 +507,7 @@ async def test_trial_run_scored_verifier_error_stays_succeeded(
         steps=[StepConfig(name="main")],
     )
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),

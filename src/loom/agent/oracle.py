@@ -30,6 +30,10 @@ _SOLVE_SCRIPT_NAME = "solve.sh"
 class OracleAgent:
     """Runs `solution/solve.sh` from a task directory inside the sandbox.
 
+    The trial loop materializes the full task bundle into `workdir` before
+    invoking the agent; OracleAgent executes that materialized script from
+    `workdir/solution` so scripts can resolve sibling files normally.
+
     `trial_id` is required so emitted events carry the correct attribution.
     Pass the trial's UUID from the worker's TrialContext; do NOT try to
     derive it from any other source.
@@ -66,11 +70,10 @@ class OracleAgent:
                 f"OracleAgent requires {local_solve}; not found",
             )
 
-        dst = self.workdir / _SOLVE_SCRIPT_NAME
-
-        await env.upload(local_solve, dst)
-        cmd = f"chmod +x {dst.as_posix()} && {dst.as_posix()}"
-        result: ExecResult = await env.exec(cmd, cwd=self.workdir)
+        solution_dir = self.workdir / "solution"
+        remote_solve = solution_dir / _SOLVE_SCRIPT_NAME
+        cmd = f"chmod +x {remote_solve.as_posix()} && {remote_solve.as_posix()}"
+        result: ExecResult = await env.exec(cmd, cwd=solution_dir)
 
         await trajectory.append(EnvExecEvent(
             emitted_at=datetime.now(UTC),
@@ -79,7 +82,7 @@ class OracleAgent:
             seq=0,
             cmd=cmd,
             user=None,
-            cwd=self.workdir.as_posix(),
+            cwd=solution_dir.as_posix(),
             return_code=result.return_code,
             stdout_bytes=len(result.stdout),
             stderr_bytes=len(result.stderr),

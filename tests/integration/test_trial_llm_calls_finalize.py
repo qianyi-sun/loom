@@ -58,7 +58,7 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
     )
     handler = command_table_handler(
         {
-            "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
                 return_code=0,
                 stdout=b"hello\n",
                 stderr=b"",
@@ -317,7 +317,7 @@ async def test_trial_skips_fetcher_when_none(tmp_path: Path) -> None:
     )
     handler = command_table_handler(
         {
-            "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
                 return_code=0,
                 stdout=b"hello\n",
                 stderr=b"",

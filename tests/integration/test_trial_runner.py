@@ -102,7 +102,7 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
         return True
 
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -163,7 +163,7 @@ async def test_runner_starts_sidecars_and_uses_returned_network(
         return True
 
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -225,7 +225,7 @@ async def test_runner_swallows_state_patch_exception(  # type: ignore[no-untyped
         return True
 
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -280,7 +280,7 @@ async def test_runner_marks_failed_when_trajectory_upload_cannot_start(  # type:
         return True
 
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -542,7 +542,7 @@ async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
         return state != "running"  # Pretend `running` PATCH was fenced
 
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),
@@ -586,7 +586,7 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
         return OracleAgent(task_dir=task_dir, trial_id=uuid4())
 
     handler = command_table_handler({
-        "chmod +x /workspace/solve.sh && /workspace/solve.sh": ExecResult(
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
             return_code=0, stdout=b"hello\n", stderr=b"",
             truncated=False, duration_sec=0.05,
         ),

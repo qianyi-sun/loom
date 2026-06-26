@@ -70,8 +70,8 @@ the adapter mirrors Dockerfile sources found under `environment/` into the
 bundle root so mixed upstream Dockerfiles can still resolve local assets such
 as spreadsheets or `data/`. SkillFlow solution scripts that reference files
 under absolute `/solution/...` are normalized at conversion time so oracle
-smoke runs can execute the copied `solve.sh` from the task workdir root. The
-shim runs the upstream
+smoke runs can execute the materialized `solution/solve.sh` from the solution
+directory. The shim runs the upstream
 `tests/test.sh`, reads `/logs/verifier/reward.txt`, and converts that reward
 into Loom's structured `VerifierResult` JSON. Instance ids are derived from
 the relative bundle path and sanitized so spaces or shell-significant

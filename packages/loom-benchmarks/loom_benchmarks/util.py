@@ -135,14 +135,11 @@ def oracle_copy_reference_solve_script(
     full pipeline (without acting as a free pass for other agents
     that may not have written a real solution).
 
-    Path note: the script handles two invocation patterns. OracleAgent
-    uploads it to `<workdir>/solve.sh` and execs with `cwd=<workdir>`,
-    so `dirname` is `.` (workdir-root) and `_reference.py` lives at
-    `./solution/_reference.py`. Adapter unit tests invoke it as
-    `bash solution/solve.sh` with `cwd=<tmp_path>`, so `dirname` is
-    `solution` and `_reference.py` lives at `solution/_reference.py`.
-    The script probes both layouts and cds into whichever has the
-    reference.
+    Path note: OracleAgent runs the materialized script at
+    `<workdir>/solution/solve.sh` with `cwd=<workdir>/solution`.
+    Adapter unit tests may also invoke it as `bash solution/solve.sh`
+    with `cwd=<tmp_path>`. The script probes both layouts and cds into
+    whichever has the reference.
     """
     solution_dir.mkdir(parents=True, exist_ok=True)
     solve_sh = solution_dir / "solve.sh"
