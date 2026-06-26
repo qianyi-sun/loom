@@ -19,7 +19,9 @@ The first four Layer 2 batches (PRs #499, #513, #514, #517) mistakenly
 named `coder-harbor-cloud` (a Huawei agent platform) as the Harbor
 parity target. The real reference is `harbor-framework/harbor` at
 commit `2ead3f1f2462f6f7260aca5ef2377cd7e309ff06`. The correction is
-tracked under #419 sub-issue #538, and the pinned adapter inventory at
+tracked under canonical #32, with historical archive sub-issue
+carinrc/loom#538 preserving the original correction context. The pinned
+adapter inventory at
 that commit is captured in
 [`docs/research/harbor-adapter-snapshot-2026-06-25.md`](research/harbor-adapter-snapshot-2026-06-25.md).
 All sections below reference the real Harbor.
@@ -36,9 +38,9 @@ for them.
 
 | Benchmark | Harbor parity | Adapter at pinned commit | Layer 2 evidence |
 |---|---|---|---|
-| `aime-24` | supported | [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) | pending paired run |
-| `aime-25` | supported | [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) (shared with aime-24) | pending paired run |
-| `gpqa` | supported (Diamond) | [`adapters/gpqa-diamond`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/gpqa-diamond) | pending paired run |
+| `aime-24` | supported | [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) | paired-validated with `aime-25`: Loom 23.33% vs Harbor 53.33% |
+| `aime-25` | supported | [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) (shared with aime-24) | paired-validated with `aime-24`: Loom 23.33% vs Harbor 53.33% |
+| `gpqa` | supported (Diamond) | [`adapters/gpqa-diamond`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/gpqa-diamond) | paired-validated on Diamond: Loom 51.01% vs Harbor 58.08% |
 | `livecodebench` | supported | [`adapters/livecodebench`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/livecodebench) | pending paired run |
 | `swe-bench-verified` | supported | [`adapters/swebench`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/swebench) | pending paired run |
 | `humaneval` | not supported | (`adapters/humanevalfix` is a different task set) | replay-validated |
@@ -49,14 +51,18 @@ for them.
 | `skillflow` | not supported | — | replay-validated |
 | `skilllearnbench` | not supported | — | replay-validated |
 
-## Benchmarks with Harbor parity (pending paired runs)
+## Benchmarks with Harbor parity
 
 These five benchmarks have a real Harbor adapter at the pinned commit.
 Loom's adapter and Harbor's adapter implement the same parity target
 via independent code paths, so end-to-end matched-config paired runs
 are the appropriate evidence — stronger than the by-construction
-claims used by the earlier (incorrect) Layer 2 batches. The paired
-runs themselves are tracked in Stage B child issues under #419.
+claims used by the earlier (incorrect) Layer 2 batches.
+
+Three of the five now have paired validation evidence: AIME 2024/2025
+share one 60-task Harbor slate, and GPQA is validated on Harbor's
+198-task Diamond subset. LiveCodeBench and SWE-Bench Verified remain
+pending paired runs tracked by canonical #21 and #20.
 
 The replay tests listed below remain the Layer 2 evidence that Loom's
 verifier semantics are well-defined and behave as documented; they
@@ -66,36 +72,39 @@ implementation.
 ### aime-24
 
 - **Harbor adapter:** [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) at `harbor-framework/harbor@2ead3f1f`.
-- **Published Harbor baseline:** none at the pinned commit; Stage B must establish it.
+- **Published Harbor baseline:** none at the pinned commit; the paired run below establishes the same-config Harbor baseline.
 - **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/aime.py`.
-- **Layer 2 status:** `pending_paired_run`.
+- **Layer 2 status:** `paired_validated` through the combined 60-task AIME 2024/2025 paired run.
+- **Paired result:** Loom `litellm` + `claude-haiku-4-5` scored 14/60 (23.33%) across `aime-24` and `aime-25`; Harbor `terminus-2` + the same model scored 32/60 (53.33%). The +30.00 pp Harbor delta is attributed to agent-runtime differences; both systems use last-integer exact match against the canonical answer.
 - **Replay tests (verifier semantics):**
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_run_sh_is_self_contained_and_writes_verifier_result`
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_rejects_wrong_answer`
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_picks_last_integer`
-- **Stage B paired run:** tracked in [#540](https://github.com/carinrc/loom/issues/540).
+- **Evidence:** historical archive issue [carinrc/loom#540](https://github.com/carinrc/loom/issues/540) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5).
 
 ### aime-25
 
 - **Harbor adapter:** [`adapters/aime`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime) — shared with aime-24; Harbor's adapter covers both years through one verifier.
-- **Published Harbor baseline:** none at the pinned commit; Stage B must establish it.
+- **Published Harbor baseline:** none at the pinned commit; the paired run below establishes the same-config Harbor baseline.
 - **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/aime_2025.py` (shares script-verifier infrastructure with Loom's aime-24 adapter, mirroring Harbor's single-adapter approach).
-- **Layer 2 status:** `pending_paired_run`.
+- **Layer 2 status:** `paired_validated` through the combined 60-task AIME 2024/2025 paired run.
+- **Paired result:** Loom `litellm` + `claude-haiku-4-5` scored 14/60 (23.33%) across `aime-24` and `aime-25`; Harbor `terminus-2` + the same model scored 32/60 (53.33%). The +30.00 pp Harbor delta is attributed to agent-runtime differences; both systems use last-integer exact match against the canonical answer.
 - **Replay tests (verifier semantics):**
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_2025_emits_script_path`
   - `packages/loom-benchmarks/tests/test_aime_adapter.py::test_aime_checker_extracts_last_integer`
-- **Stage B paired run:** tracked in [#540](https://github.com/carinrc/loom/issues/540).
+- **Evidence:** historical archive issue [carinrc/loom#540](https://github.com/carinrc/loom/issues/540) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5).
 
 ### gpqa
 
 - **Harbor adapter:** [`adapters/gpqa-diamond`](https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/gpqa-diamond) — covers the Diamond subset (198 tasks) only.
 - **Published Harbor baseline:** codex + gpt-5.2, 3 trials, 198 Diamond tasks — Harbor 87.21% ± 0.34 vs. `XuandongZhao/gpqa-harbor-adapter` original 87.88% ± 0.58.
 - **Loom adapter:** `packages/loom-benchmarks/loom_benchmarks/adapters/gpqa.py` — currently emits the **Extended** subset.
-- **Subset complication:** Diamond (Harbor) vs. Extended (Loom) is a structural mismatch. Stage B must either reconfigure Loom to Diamond or document the subset gap as a blocker for parity.
-- **Layer 2 status:** `pending_paired_run`.
+- **Subset note:** Harbor ships Diamond only, while Loom's primary `gpqa` score semantics cover the 546-task Extended slate. The paired evidence uses Loom's `gpqa-diamond` sibling adapter on the same 198 Diamond tasks; exact-letter verifier semantics are identical across Diamond and Extended, so the Diamond evidence validates the verifier path. An Extended-vs-Extended paired run would be a future entry.
+- **Layer 2 status:** `paired_validated` on GPQA Diamond.
+- **Paired result:** Loom `litellm` + `claude-haiku-4-5` scored 101/198 (51.01%); Harbor `terminus-2` + the same model scored 115/198 (58.08%). The +7.07 pp Harbor delta is attributed to agent-runtime differences, not verifier divergence.
 - **Replay tests (verifier semantics):**
   - `packages/loom-benchmarks/tests/test_gpqa_adapter.py::test_gpqa_verifier_scores_correct_letter`
-- **Stage B paired run:** tracked in [#541](https://github.com/carinrc/loom/issues/541).
+- **Evidence:** historical archive issue [carinrc/loom#541](https://github.com/carinrc/loom/issues/541) closed with paired evidence; narrative and per-trial files are in [`benchmark-score-alignment-layer3.md`](benchmark-score-alignment-layer3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5).
 
 ### livecodebench
 
@@ -109,7 +118,7 @@ implementation.
   - `packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_solution_passes_subprocess_run`
   - `packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_decodes_compressed_private_cases`
   - `packages/loom-benchmarks/tests/test_livecodebench_adapter.py::test_livecodebench_functional_cases_call_solution_method`
-- **Stage B paired run:** tracked in [#542](https://github.com/carinrc/loom/issues/542).
+- **Stage B paired run:** tracked in canonical [#21](https://github.com/qianyi-sun/loom/issues/21); old [carinrc/loom#542](https://github.com/carinrc/loom/issues/542) is archive provenance only.
 
 ### swe-bench-verified
 
@@ -124,7 +133,7 @@ implementation.
   - `packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_empty_test_node_lists_emit_script_verifier_reward_zero` (guards the #388 false-positive: empty node-id lists must NOT silently pass)
   - `packages/loom-benchmarks/tests/test_swe_bench_verified_adapter.py::test_image_slug_replaces_double_underscore` (per-instance image-name encoding pins the runtime to the upstream eval image)
 - **Known limitation:** no CI test pulls the multi-GB `swebench/sweb.eval.x86_64.<slug>` image to execute `solve.sh` + pytest end-to-end. Image size × image count (500) makes per-instance CI execution impractical. Mitigation: operator smoke — submit an oracle batch with N=5 SWE-Bench Verified instances and verify all 5 reach `state=succeeded` with the bundled patch.
-- **Stage B paired run:** tracked in [#543](https://github.com/carinrc/loom/issues/543).
+- **Stage B paired run:** tracked in canonical [#20](https://github.com/qianyi-sun/loom/issues/20); old [carinrc/loom#543](https://github.com/carinrc/loom/issues/543) is archive provenance only.
 
 ## Benchmarks without a Harbor adapter (upstream-canonical equivalence)
 
