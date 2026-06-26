@@ -47,7 +47,7 @@ spec:
 
               If pods are CrashLoopBackOff, check worker-token in
               `loom-secrets` and the upstream CP/Postgres reachability.
-            runbook_url: "https://github.com/carinrc/loom/blob/dev/docs/operator-runbook.md#production-alerts"
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#production-alerts"
 
         # Queue is growing without trials advancing. Either workers
         # are saturated or trials are arriving faster than workers
@@ -136,7 +136,7 @@ spec:
                      WHERE state='failed' GROUP BY 1 ORDER BY 2 DESC;
                 - Consider raising max_attempts on the affected batch or
                   switching to a healthy provider connection.
-            runbook_url: "https://github.com/carinrc/loom/blob/dev/docs/operator-runbook.md#production-alerts"
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/operator-runbook.md#production-alerts"
 
     - name: loom.platform.latency
       interval: 30s

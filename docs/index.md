@@ -125,6 +125,9 @@ Start with the overview, drill into the area you care about:
 - **[contributor-quickstart.md](contributor-quickstart.md)** — repo
   layout, dev setup, tests + coverage gates, workflow + merge
   mechanics
+- **[repo-migration.md](repo-migration.md)** — canonical repository URL,
+  migrated GitHub settings, issue-tracker status, and local remote update
+  commands
 
 ## Reference
 

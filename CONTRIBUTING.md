@@ -1,5 +1,10 @@
 # Contributing
 
+> **Canonical repository:** use
+> [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches and
+> pull requests. Links to `carinrc/loom` below refer to the historical tracker
+> unless and until the remaining issues are recreated in this repository.
+
 > **Current state (2026-06-18):** Loom is public-readiness hardened
 > and is operated as an issue-scoped GitHub-flow project. Normal
 > changes land through PRs into `dev`; `main` remains reserved for

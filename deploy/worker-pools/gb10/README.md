@@ -159,7 +159,7 @@ for i in $(seq 1 15); do
     set -euo pipefail
     mkdir -p ~/loom-remote-worker
     if [ ! -d ~/loom-remote-worker/loom/.git ]; then
-      git clone https://github.com/carinrc/loom.git ~/loom-remote-worker/loom
+      git clone https://github.com/qianyi-sun/loom.git ~/loom-remote-worker/loom
     fi
     cd ~/loom-remote-worker/loom
     git fetch origin dev

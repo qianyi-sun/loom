@@ -4,6 +4,14 @@ For people working on Loom itself, not just running it. End-user
 docs live in [`user-guide.md`](user-guide.md) +
 [`operator-runbook.md`](operator-runbook.md).
 
+The canonical public development repository is
+[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom):
+
+```bash
+git clone https://github.com/qianyi-sun/loom.git
+cd loom
+```
+
 ## Repo layout
 
 ```
