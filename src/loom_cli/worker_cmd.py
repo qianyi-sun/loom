@@ -133,6 +133,11 @@ def _cache_stats_handler(args: argparse.Namespace) -> int:
 
 
 def dispatch(argv: list[str]) -> int:
+    if argv and argv[0] == "gb10-agent":
+        from loom_cli.gb10_agent import dispatch as gb10_agent_dispatch
+
+        return gb10_agent_dispatch(argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="loom worker",
         description=(

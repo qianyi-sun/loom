@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Loom GB10 node-agent desired-state reconcile periodically
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=loom-gb10-node-agent.service
+
+[Install]
+WantedBy=timers.target

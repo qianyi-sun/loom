@@ -257,6 +257,84 @@ def _slurm_workers_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gb10_workers_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    url = f"{args.cp_url.rstrip('/')}/admin/gb10-worker-pools/status"
+    params: dict[str, str] = {}
+    if args.environment:
+        params["environment"] = args.environment
+    if args.pool_name:
+        params["pool_name"] = args.pool_name
+    try:
+        if params:
+            resp = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {admin_token}"},
+                params=params,
+                timeout=10.0,
+            )
+        else:
+            resp = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {admin_token}"},
+                timeout=10.0,
+            )
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach CP at {url}: {e}\n")
+        return 2
+
+    if resp.status_code != 200:
+        sys.stderr.write(
+            f"error: CP returned {resp.status_code}: {resp.text}\n",
+        )
+        return 1
+
+    data = resp.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    desired_states = data.get("desired_states", [])
+    nodes = data.get("nodes", [])
+    sys.stdout.write("GB10 worker lifecycle:\n")
+    sys.stdout.write("Desired states:\n")
+    if not desired_states:
+        sys.stdout.write("  no desired states recorded\n")
+    for row in desired_states:
+        previous = row.get("previous_image_tag") or "-"
+        sys.stdout.write(
+            f"  {row['environment']}/{row['pool_name']} "
+            f"image={row['image_tag']} "
+            f"max={row['max_concurrent']} "
+            f"env={row['env_config_version']} "
+            f"previous={previous}\n",
+        )
+    sys.stdout.write("Nodes:\n")
+    if not nodes:
+        sys.stdout.write("  no node reports recorded\n")
+    for node in nodes:
+        result = node.get("last_apply_result") or "-"
+        error = node.get("error_message") or "-"
+        sys.stdout.write(
+            f"  {node['hostname']} {node['environment']}/{node['pool_name']} "
+            f"{node['apply_state']} "
+            f"image={node.get('current_image_tag') or '-'}/"
+            f"{node.get('desired_image_tag') or '-'} "
+            f"max={node.get('current_max_concurrent') or '-'}/"
+            f"{node.get('desired_max_concurrent') or '-'} "
+            f"env={node.get('current_env_config_version') or '-'}/"
+            f"{node.get('desired_env_config_version') or '-'} "
+            f"result={result} error={error}\n",
+        )
+    return 0
+
+
 _KNOWN_TEAM_SCOPES = (
     "read:own",
     "submit",
@@ -674,6 +752,24 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_slurm_status.set_defaults(handler=_slurm_workers_status)
+
+    p_gb10 = sub.add_parser(
+        "gb10-workers",
+        help="Inspect GB10 Docker Compose worker lifecycle status.",
+    )
+    gb10_sub = p_gb10.add_subparsers(dest="gb10_op", required=True)
+    p_gb10_status = gb10_sub.add_parser(
+        "status",
+        help="Show GB10 desired state and per-host rollout status.",
+    )
+    _add_common_args(p_gb10_status)
+    p_gb10_status.add_argument("--environment", default=None)
+    p_gb10_status.add_argument("--pool-name", default=None)
+    p_gb10_status.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="Output format.",
+    )
+    p_gb10_status.set_defaults(handler=_gb10_workers_status)
 
     p_team = tok_sub.add_parser(
         "team",

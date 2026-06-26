@@ -188,6 +188,7 @@ LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:19100
 LOOM_WORKER_MINIO_ENDPOINT=http://127.0.0.1:19000
 LOOM_WORKER_MAX_CONCURRENT=2
 LOOM_WORKER_POOL_NAME=gb10-arm64
+LOOM_WORKER_ENV_CONFIG_VERSION=manual-v1
 LOOM_WORKER_HOSTNAME=trt-gb10-N
 LOOM_WORKER_SANDBOX_WORKER_INDEX=N
 LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=31536000
@@ -202,6 +203,12 @@ LOOM_WORKER_MINIO_OPERATION_ATTEMPTS=3
 
 The same file must also contain the environment's worker token and MinIO
 credentials. Do not print those values in issue comments, logs, or PRs.
+
+`LOOM_WORKER_ENV_CONFIG_VERSION` is a host-local lifecycle marker for the
+GB10 node-agent. It is read from the env file by Docker Compose and the
+node-agent, but it is not passed into the worker container. This lets the
+node-agent compare local env/config state with Control Plane desired state
+without storing worker tokens or MinIO credentials in the Control Plane.
 
 Start or restart workers:
 
@@ -239,6 +246,133 @@ for i in $(seq 1 15); do
 done
 wait
 ```
+
+## Node-Agent Lifecycle Manager
+
+The first lifecycle-management slice uses a host-local pull agent. Operators
+write desired state to the Control Plane, and each GB10 host periodically runs
+`loom worker gb10-agent apply` to compare the desired image tag, pool name,
+trial concurrency, and env/config version with its local env file. The Control
+Plane does not SSH into GB10 hosts and does not store worker tokens or MinIO
+credentials.
+
+Create `/home/trt/loom-remote-worker/gb10-node-agent.env` on every host with
+mode `600`:
+
+```bash
+LOOM_GB10_CP_URL=http://127.0.0.1:18081
+LOOM_GB10_ENVIRONMENT=production
+LOOM_GB10_POOL_NAME=gb10-arm64
+LOOM_GB10_DRAIN_TIMEOUT_SEC=600
+LOOM_GB10_NODE_AGENT_TOKEN=loom_admin_...
+```
+
+The node-agent token currently uses the CP admin surface and must include the
+`admin:gb10_workers` scope. Keep it host-local and rotate it with the same
+care as other admin credentials.
+
+Install the node-agent service and timer:
+
+```bash
+for i in $(seq 1 15); do
+  h=trt-gb10-$i
+  ssh "$h" "
+    set -euo pipefail
+    mkdir -p ~/.config/systemd/user
+    cp ~/loom-remote-worker/loom/deploy/worker-pools/gb10/loom-gb10-node-agent.service \
+      ~/.config/systemd/user/loom-gb10-node-agent.service
+    cp ~/loom-remote-worker/loom/deploy/worker-pools/gb10/loom-gb10-node-agent.timer \
+      ~/.config/systemd/user/loom-gb10-node-agent.timer
+    systemctl --user daemon-reload
+    systemctl --user enable --now loom-gb10-node-agent.timer
+  " &
+done
+wait
+```
+
+Before enabling fleet-wide apply, inspect one host:
+
+```bash
+cd /home/trt/loom-remote-worker/loom
+uv run loom worker gb10-agent plan \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --hostname trt-gb10-1 \
+  --env-file /home/trt/loom-remote-worker/.env.remote-worker
+```
+
+Use `apply --dry-run` to preview the non-secret env keys and Docker Compose
+commands that would run. Dry-run output does not print the full
+`.env.remote-worker` file because that file also contains worker and MinIO
+credentials.
+
+Set desired state through the CP admin API. This example canaries only
+`trt-gb10-1`; after it reports `applied`, change `rollout_policy` to
+`{"mode":"all"}` or expand `canary_hosts`.
+
+```bash
+curl -sS -X PUT \
+  -H "Authorization: Bearer $LOOM_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:18081/admin/gb10-worker-pools/production/gb10-arm64/desired-state \
+  -d '{
+    "image_tag": "public-beta-<commit>",
+    "max_concurrent": 10,
+    "env_config_version": "gb10-env-2026-06-26",
+    "rollout_policy": {
+      "mode": "canary",
+      "canary_hosts": ["trt-gb10-1"]
+    }
+  }'
+```
+
+Inspect rollout state:
+
+```bash
+loom admin gb10-workers status \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN
+
+loom admin gb10-workers status \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --format json
+```
+
+The node-agent applies updates by writing non-secret keys in
+`.env.remote-worker`, then running `docker compose pull`, `docker compose stop
+--timeout <drain-timeout> worker`, and `docker compose up -d worker`. The stop
+path sends SIGTERM to the worker, which uses the existing worker drain logic
+before the container exits. Use `--force` only for an explicit emergency
+override.
+
+Retry a failed rollout by fixing the local cause and restarting the service:
+
+```bash
+systemctl --user start loom-gb10-node-agent.service
+```
+
+Rollback publishes the previous desired image/concurrency/env version back to
+the Control Plane first, then applies it locally. This keeps the periodic
+node-agent timer from reapplying the bad desired state after a manual rollback:
+
+```bash
+uv run loom worker gb10-agent apply \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --env-file /home/trt/loom-remote-worker/.env.remote-worker \
+  --compose-file deploy/docker-compose.remote-worker.yml \
+  --compose-file /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml \
+  --rollback \
+  --force
+```
+
+The manual Docker Compose commands remain the break-glass fallback when the
+node-agent token, timer, or CP desired-state API is unavailable.
 
 Enable lingering for the `trt` user on every GB10 host through the site's
 privileged admin path so the user service starts after reboot even before an

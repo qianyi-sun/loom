@@ -9,13 +9,23 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, text
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Token
+from loom_control_plane.gb10_worker_lifecycle import (
+    GB10NodeReport,
+    UnsafeDesiredEnvError,
+    desired_state_to_dict,
+    fetch_lifecycle_status,
+    get_desired_state,
+    node_status_to_dict,
+    record_node_report,
+    upsert_desired_state,
+)
 from loom_control_plane.slurm_worker_jobs import (
     SlurmWorkerJobObservation,
     fetch_slurm_worker_job_status,
@@ -59,6 +69,28 @@ class _SlurmWorkerObservation(BaseModel):
 class _SlurmWorkerReconcileRequest(BaseModel):
     observations: list[_SlurmWorkerObservation] = Field(default_factory=list)
     stale_after_seconds: int = Field(default=300, ge=0)
+
+
+class _GB10DesiredStatePayload(BaseModel):
+    image_tag: str
+    max_concurrent: int = Field(gt=0)
+    env_config_version: str
+    rollout_policy: dict[str, Any] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
+    force: bool = False
+
+
+class _GB10NodeReportPayload(BaseModel):
+    current_image_tag: str | None = None
+    current_max_concurrent: int | None = Field(default=None, gt=0)
+    current_env_config_version: str | None = None
+    apply_state: str = "unknown"
+    last_apply_result: str | None = None
+    error_message: str | None = None
+    agent_version: str | None = None
+    compose_project_dir: str | None = None
+    worker_id: UUID | None = None
+    last_apply_at: datetime | None = None
 
 
 async def _require_admin_scope(
@@ -246,3 +278,101 @@ async def get_slurm_worker_job_status(
         "summary": summary.as_list(),
         "jobs": jobs,
     }
+
+
+@router.put("/gb10-worker-pools/{environment}/{pool_name}/desired-state")
+async def put_gb10_worker_pool_desired_state(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _GB10DesiredStatePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_desired_state(
+                session,
+                environment=environment,
+                pool_name=pool_name,
+                image_tag=payload.image_tag,
+                max_concurrent=payload.max_concurrent,
+                env_config_version=payload.env_config_version,
+                rollout_policy=payload.rollout_policy,
+                env=payload.env,
+                force=payload.force,
+            )
+            await session.commit()
+            return desired_state_to_dict(row)
+    except UnsafeDesiredEnvError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/gb10-worker-pools/{environment}/{pool_name}/desired-state")
+async def get_gb10_worker_pool_desired_state(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    async with request.app.state.session_factory() as session:
+        row = await get_desired_state(
+            session,
+            environment=environment,
+            pool_name=pool_name,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="GB10 desired state not found")
+    return desired_state_to_dict(row)
+
+
+@router.post("/gb10-worker-pools/{environment}/{pool_name}/nodes/{hostname}/report")
+async def report_gb10_worker_node_status(
+    environment: str,
+    pool_name: str,
+    hostname: str,
+    request: Request,
+    payload: _GB10NodeReportPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    async with request.app.state.session_factory() as session:
+        row = await record_node_report(
+            session,
+            environment=environment,
+            pool_name=pool_name,
+            hostname=hostname,
+            report=GB10NodeReport(
+                current_image_tag=payload.current_image_tag,
+                current_max_concurrent=payload.current_max_concurrent,
+                current_env_config_version=payload.current_env_config_version,
+                apply_state=payload.apply_state,
+                last_apply_result=payload.last_apply_result,
+                error_message=payload.error_message,
+                agent_version=payload.agent_version,
+                compose_project_dir=payload.compose_project_dir,
+                worker_id=payload.worker_id,
+                last_apply_at=payload.last_apply_at,
+            ),
+        )
+        await session.commit()
+        return node_status_to_dict(row)
+
+
+@router.get("/gb10-worker-pools/status")
+async def get_gb10_worker_pool_status(
+    request: Request,
+    environment: str | None = Query(default=None),
+    pool_name: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, list[dict[str, object]]]:
+    await _require_admin_scope(request, authorization, "admin:gb10_workers")
+    async with request.app.state.session_factory() as session:
+        return await fetch_lifecycle_status(
+            session,
+            environment=environment,
+            pool_name=pool_name,
+        )

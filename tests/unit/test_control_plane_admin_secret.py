@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from loom.admin_secret import AdminSecretConfigError
+from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
+from loom.auth import verify_bearer_token
 from loom_control_plane.app import _load_admin_secret_verifier
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -55,3 +56,16 @@ def test_load_admin_secret_verifier_requires_file_in_production(
 
     with pytest.raises(AdminSecretConfigError, match="admin secret"):
         _load_admin_secret_verifier(_settings(admin_secret_file=None))
+
+
+async def test_file_backed_admin_secret_grants_gb10_worker_scope() -> None:
+    verifier = AdminSecretVerifier.from_token(RAW_ADMIN_TOKEN)
+
+    ctx = await verify_bearer_token(
+        object(),  # type: ignore[arg-type]
+        f"Bearer {RAW_ADMIN_TOKEN}",
+        admin_verifier=verifier,
+    )
+
+    assert ctx is not None
+    assert "admin:gb10_workers" in ctx.scopes

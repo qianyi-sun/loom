@@ -408,6 +408,148 @@ class SlurmWorkerJob(Base):
     )
 
 
+class GB10WorkerPoolDesiredState(Base):
+    __tablename__ = "gb10_worker_pool_desired_states"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(environment)) > 0",
+            name="gb10_worker_pool_desired_states_environment_nonempty_check",
+        ),
+        CheckConstraint(
+            "length(trim(pool_name)) > 0",
+            name="gb10_worker_pool_desired_states_pool_name_nonempty_check",
+        ),
+        CheckConstraint(
+            "length(trim(image_tag)) > 0",
+            name="gb10_worker_pool_desired_states_image_tag_nonempty_check",
+        ),
+        CheckConstraint(
+            "max_concurrent > 0",
+            name="gb10_worker_pool_desired_states_max_concurrent_positive_check",
+        ),
+        CheckConstraint(
+            "length(trim(env_config_version)) > 0",
+            name="gb10_worker_pool_desired_states_env_version_nonempty_check",
+        ),
+        UniqueConstraint(
+            "environment",
+            "pool_name",
+            name="gb10_worker_pool_desired_states_environment_pool_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    image_tag: Mapped[str] = mapped_column(Text, nullable=False)
+    max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False)
+    env_config_version: Mapped[str] = mapped_column(Text, nullable=False)
+    rollout_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    env: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    force: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    previous_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_env_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_env: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class GB10WorkerNodeStatus(Base):
+    __tablename__ = "gb10_worker_node_statuses"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(environment)) > 0",
+            name="gb10_worker_node_statuses_environment_nonempty_check",
+        ),
+        CheckConstraint(
+            "length(trim(pool_name)) > 0",
+            name="gb10_worker_node_statuses_pool_name_nonempty_check",
+        ),
+        CheckConstraint(
+            "length(trim(hostname)) > 0",
+            name="gb10_worker_node_statuses_hostname_nonempty_check",
+        ),
+        CheckConstraint(
+            "current_max_concurrent IS NULL OR current_max_concurrent > 0",
+            name="gb10_worker_node_statuses_current_max_positive_check",
+        ),
+        CheckConstraint(
+            "desired_max_concurrent IS NULL OR desired_max_concurrent > 0",
+            name="gb10_worker_node_statuses_desired_max_positive_check",
+        ),
+        CheckConstraint(
+            "apply_state IN ('unknown', 'idle', 'applying', 'draining', 'applied', 'blocked', 'failed', 'rolled_back')",
+            name="gb10_worker_node_statuses_apply_state_check",
+        ),
+        UniqueConstraint(
+            "environment",
+            "pool_name",
+            "hostname",
+            name="gb10_worker_node_statuses_environment_pool_host_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    hostname: Mapped[str] = mapped_column(Text, nullable=False)
+    worker_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="SET NULL"), nullable=True,
+    )
+    current_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_env_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desired_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desired_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    desired_env_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apply_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'unknown'"),
+        default="unknown",
+    )
+    last_apply_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    compose_project_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    last_apply_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class Batch(Base):
     """One row per submitted batch (Plan 19 + Plan 28 rename).
 

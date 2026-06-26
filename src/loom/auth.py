@@ -173,7 +173,12 @@ async def verify_bearer_token(
         return AuthContext(
             token_hash=admin_verifier.token_hash,
             type="admin",
-            scopes=["admin:tokens", "admin:rate_cards", "admin:slurm_workers"],
+            scopes=[
+                "admin:tokens",
+                "admin:rate_cards",
+                "admin:slurm_workers",
+                "admin:gb10_workers",
+            ],
             team_id=None,
             expires_at=None,
         )
