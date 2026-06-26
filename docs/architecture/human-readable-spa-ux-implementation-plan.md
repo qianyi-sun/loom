@@ -698,7 +698,7 @@ Expected:
 Use these only after human approval to create the issue stack:
 
 ```bash
-gh issue create --repo carinrc/loom \
+gh issue create --repo qianyi-sun/loom \
   --title "[UX] Make SPA default views human-readable while preserving diagnostics" \
   --label "workstream:product-design,workstream:mvp,type:feature,priority:P1,area:web,area:docs" \
   --body-file docs/architecture/human-readable-spa-ux.md
