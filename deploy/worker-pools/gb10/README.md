@@ -342,11 +342,12 @@ loom admin gb10-workers status \
 ```
 
 The node-agent applies updates by writing non-secret keys in
-`.env.remote-worker`, then running `docker compose pull`, `docker compose stop
---timeout <drain-timeout> worker`, and `docker compose up -d worker`. The stop
-path sends SIGTERM to the worker, which uses the existing worker drain logic
-before the container exits. Use `--force` only for an explicit emergency
-override.
+`.env.remote-worker`, then running `docker compose pull`. If the worker image
+tag is not available from a registry, it falls back to `docker compose build`
+from the host-local checkout before running `docker compose stop --timeout
+<drain-timeout> worker` and `docker compose up -d worker`. The stop path sends
+SIGTERM to the worker, which uses the existing worker drain logic before the
+container exits. Use `--force` only for an explicit emergency override.
 
 Retry a failed rollout by fixing the local cause and restarting the service:
 
