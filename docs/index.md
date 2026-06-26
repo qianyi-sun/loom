@@ -66,6 +66,16 @@ Start with the overview, drill into the area you care about:
 - **[architecture/run-library.md](architecture/run-library.md)** —
   org-wide completed-run metadata, safe shared artifacts, clone/reuse
   provenance, and the team boundary for shared results
+- **[architecture/pipeline-platform-governance.md](architecture/pipeline-platform-governance.md)** —
+  post-v1 governance baseline for pipeline extensibility, typed
+  artifacts, RunGraph, recipes, plugins, SkillMarkdown injection, and
+  data-production planning
+- **[architecture/adr-typed-artifacts-lineage-sharing.md](architecture/adr-typed-artifacts-lineage-sharing.md)** —
+  post-v1 ADR for typed artifact base schema, lineage, clone/reuse,
+  retention, redaction, and Run Library sharing policy
+- **[architecture/adr-skill-artifact-injection.md](architecture/adr-skill-artifact-injection.md)** —
+  post-v1 ADR for SkillMarkdown artifacts and generic trial-time skill
+  injection
 - **[architecture/cli-mode.md](architecture/cli-mode.md)** — how the
   `loom` CLI reuses `Trial.run()` statelessly with no server stack
 - **[architecture/local-llm.md](architecture/local-llm.md)** — local
