@@ -145,6 +145,9 @@ different network namespaces:
   `claude-code` receives `/anthropic`, and Gemini receives `/google`.
   `DockerDriver` injects `host.docker.internal -> host-gateway` when
   that hostname is used.
+  The `claude-code` invocation also sets
+  `--permission-mode bypassPermissions` so headless benchmark workers
+  do not stop for interactive Bash/Write/Edit approvals.
 
 The Codex CLI adapter runs Codex 0.141+ in Responses API mode. Codex
 constructs requests as `<base_url>/responses`, so the adapter

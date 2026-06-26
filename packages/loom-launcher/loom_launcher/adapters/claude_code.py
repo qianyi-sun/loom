@@ -90,6 +90,7 @@ class ClaudeCodeAdapter:
             (
                 f"cd {shlex.quote(str(workdir))} && "
                 f"claude --verbose --output-format stream-json "
+                f"--permission-mode bypassPermissions "
                 f"--model {shlex.quote(model.name)} "
                 f"--print {shlex.quote(instruction)}"
             ),

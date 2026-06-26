@@ -1,7 +1,8 @@
 """ClaudeCodeAdapter contract: sh -c wrapper + stream-json capture.
 
 Verifies Amendment A12.1: --print, no --workdir flag (wrapped in
-sh -c "cd ... && claude ..."), telemetry+auto-update disabled via env.
+sh -c "cd ... && claude ..."), non-interactive permissions,
+telemetry+auto-update disabled via env.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ def test_build_invocation_argv_uses_sh_c_cd_and_print() -> None:
     assert "claude --verbose --output-format stream-json" in cmd
     assert "--model claude-sonnet-4" in cmd
     assert "--print 'solve fizzbuzz'" in cmd
+    assert "--permission-mode bypassPermissions" in cmd
     # Telemetry / auto-update disabled via env, NOT flags.
     assert env["DISABLE_TELEMETRY"] == "1"
     assert env["CLAUDE_CODE_AUTO_UPDATE"] == "false"
