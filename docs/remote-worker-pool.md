@@ -449,7 +449,12 @@ docker compose \
 For GB10-style hosts, keep `LOOM_WORKER_GATEWAY_URL` pointed at
 `http://127.0.0.1:19100` for the worker process and set
 `LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:19100` so
-subprocess agents inside trial sandboxes can also reach the gateway.
+subprocess agents inside trial sandboxes can also reach the gateway. The
+worker normalizes that sandbox-facing URL by adapter dialect before
+injecting SDK env vars, so OpenAI-compatible adapters receive
+`http://host.docker.internal:19100/openai/v1`, Anthropic adapters receive
+`http://host.docker.internal:19100/anthropic`, and Gemini adapters receive
+`http://host.docker.internal:19100/google`.
 
 Watch registration and claim activity:
 

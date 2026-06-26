@@ -179,6 +179,66 @@ async def test_subprocess_agent_can_use_sandbox_facing_gateway_url(
         await http.aclose()
 
 
+async def test_claude_code_uses_anthropic_facade_from_openai_subprocess_url(
+    tmp_path: Path,
+    mocked_cp_client,
+) -> None:
+    """#539: the k8s sandbox URL defaults to the OpenAI facade for
+    OpenAI-compatible subprocess agents, but Anthropic adapters need the
+    sibling Anthropic facade as their SDK base URL.
+    """
+    cp, http = mocked_cp_client
+    captured_env: dict[str, str] = {}
+
+    def _capture_streaming(argv, env_vars, cwd, user):
+        captured_env.update(env_vars)
+        return scripted_streaming_handler(
+            stdout_chunks=[b'{"type": "assistant", "text": "ok"}\n'],
+            stderr_chunks=[],
+            return_code=0,
+        )(argv, env_vars, cwd, user)
+
+    try:
+        driver = FakeDriver(streaming_handler=_capture_streaming)
+        await driver.start()
+        adapter = get_adapter("claude-code")
+        assert adapter is not None
+        agent = SubprocessAgent(
+            adapter=adapter,
+            model=ModelSpec(provider="anthropic", name="claude-sonnet-4-6"),
+            cp_client=cp,
+            gateway_url="http://worker-only-gateway:9100",
+            agent_gateway_url="http://host.docker.internal:30443/openai/v1",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+
+        async with TrajectoryWriter(
+            local_path=tmp_path / "trajectory.jsonl",
+            store=store,
+            bucket="trajectories",
+            key="t/t/events.jsonl",
+            min_part_bytes=0,
+        ) as trajectory:
+            await agent.run(
+                instruction="x",
+                env=driver,
+                trajectory=trajectory,
+                mcp=[],
+                skills_dir=None,
+                step_id="main",
+            )
+
+        assert captured_env["ANTHROPIC_BASE_URL"] == (
+            "http://host.docker.internal:30443/anthropic"
+        )
+        assert captured_env["ANTHROPIC_API_KEY"] == "loom_step_test-mocked-token"
+        await driver.stop()
+    finally:
+        await http.aclose()
+
+
 async def test_subprocess_agent_raises_on_agent_exit_nonzero(
     tmp_path: Path,
     mocked_cp_client,

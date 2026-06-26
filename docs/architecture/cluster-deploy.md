@@ -102,9 +102,13 @@ sandboxes use `LOOM_WORKER_SUBPROCESS_GATEWAY_URL`; the default k8s
 render sets it from `worker_subprocess_gateway_url`, whose default is
 `http://host.docker.internal:30443/openai/v1`. That reaches the
 node-local `loom-gateway-router` hostPort and then the in-cluster
-gateway facade on bare-node k8s deployments. Kind-on-host deployments
-that launch sandboxes through the platform host Docker socket must
-review host port ownership; if another service owns `30443`, set
+gateway facade on bare-node k8s deployments. The worker treats this as
+the sandbox-facing gateway-router URL and normalizes it by adapter
+dialect before setting SDK environment variables: OpenAI adapters use
+`/openai/v1`, Anthropic adapters use `/anthropic`, and Gemini adapters
+use `/google`. Kind-on-host deployments that launch sandboxes through
+the platform host Docker socket must review host port ownership; if
+another service owns `30443`, set
 `worker_subprocess_gateway_url` to a dedicated host bridge such as
 `http://host.docker.internal:30444/openai/v1` and keep a durable
 host-side port-forward to `svc/loom-llm-gateway:9100`. `DockerDriver`

@@ -133,15 +133,18 @@ different network namespaces:
 - `LOOM_WORKER_GATEWAY_URL` is the worker process's URL for
   worker-side clients such as `LiteLLMAgent`.
 - `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is optional and is the
-  OpenAI-compatible facade base URL as seen from the trial sandbox
-  subprocess. Use it when Docker sandboxes cannot resolve the worker
-  pod/container's service DNS. Kubernetes render injects it from
+  gateway-router URL as seen from the trial sandbox subprocess. Use it
+  when Docker sandboxes cannot resolve the worker pod/container's
+  service DNS. Kubernetes render injects it from
   `worker_subprocess_gateway_url`, which defaults to
   `http://host.docker.internal:30443/openai/v1` for the gateway-router
   hostPort path. Operators can override it for kind-on-host topologies
-  where a different host bridge port is required. `DockerDriver`
-  injects `host.docker.internal -> host-gateway` when that hostname is
-  used.
+  where a different host bridge port is required. Before invoking a
+  subprocess adapter, the worker normalizes this URL by
+  `endpoint_dialect`: OpenAI-compatible adapters keep `/openai/v1`,
+  `claude-code` receives `/anthropic`, and Gemini receives `/google`.
+  `DockerDriver` injects `host.docker.internal -> host-gateway` when
+  that hostname is used.
 
 The Codex CLI adapter runs Codex 0.141+ in Responses API mode. Codex
 constructs requests as `<base_url>/responses`, so the adapter

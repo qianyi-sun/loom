@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from loom_launcher.adapter import AgentAdapter, SandboxAccess
@@ -116,6 +117,43 @@ def _bridge_model(model: ModelSpec) -> LauncherModelSpec:
     )
 
 
+def _gateway_url_for_adapter(base_url: str, adapter: AgentAdapter) -> str:
+    """Return the sandbox-facing gateway base URL for the adapter dialect.
+
+    `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` may be a bare gateway-router host URL
+    (`...:30443`) or the OpenAI facade (`.../openai/v1`) because the first
+    subprocess agents were OpenAI-compatible. SDKs append their own provider
+    paths after the configured root, so each adapter receives the facade root
+    for its declared dialect.
+    """
+    parts = urlsplit(base_url.rstrip("/"))
+    path = parts.path.rstrip("/")
+    dialect = adapter.endpoint_dialect
+
+    if dialect in {"openai_chat", "openai_responses"}:
+        if not path or path == "/openai":
+            return urlunsplit(parts._replace(path="/openai/v1"))
+        return urlunsplit(parts._replace(path=path))
+
+    if dialect == "gemini":
+        if not path or path in {"/openai", "/openai/v1"} or path.startswith("/openai/v1/"):
+            return urlunsplit(parts._replace(path="/google"))
+        if path == "/google":
+            return urlunsplit(parts._replace(path=path))
+        return base_url
+
+    if dialect != "anthropic":
+        return base_url
+
+    if path == "/anthropic":
+        return urlunsplit(parts._replace(path=path))
+    if path in {"/openai", "/openai/v1"} or path.startswith("/openai/v1/"):
+        return urlunsplit(parts._replace(path="/anthropic"))
+    if not path:
+        return urlunsplit(parts._replace(path="/anthropic"))
+    return base_url
+
+
 @dataclass
 class SubprocessAgent:
     """Generic AgentRuntime wrapping any loom_launcher AgentAdapter.
@@ -179,7 +217,10 @@ class SubprocessAgent:
             ) from exc
 
         # 2. Build env + argv via the adapter.
-        base_url = self.agent_gateway_url or self.gateway_url
+        base_url = _gateway_url_for_adapter(
+            self.agent_gateway_url or self.gateway_url,
+            self.adapter,
+        )
         env_vars: dict[str, str] = {
             self.adapter.api_key_env: step_token,
             self.adapter.base_url_env: base_url,

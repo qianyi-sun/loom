@@ -655,12 +655,15 @@ Subprocess agents call the LLM Gateway from inside the trial sandbox,
 not from the worker process. Keep `LOOM_WORKER_GATEWAY_URL` pointed at
 the worker-reachable gateway URL, and set
 `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` when the sandbox needs a different
-OpenAI-compatible facade URL. Kubernetes workers get that sandbox-facing
-URL from `worker_subprocess_gateway_url` in `cluster-config.toml`; the
-default is `http://host.docker.internal:30443/openai/v1`, matching the
-rendered gateway-router hostPort. Kind-on-host deployments where another
-host service already owns `30443`, such as platform-dev with the shared
-dev compose stack, should set:
+sandbox-facing URL. Kubernetes workers get it from
+`worker_subprocess_gateway_url` in `cluster-config.toml`; the default is
+`http://host.docker.internal:30443/openai/v1`, matching the rendered
+gateway-router hostPort and preserving the OpenAI-compatible subprocess
+path. At launch time the worker normalizes that URL by adapter dialect:
+OpenAI adapters use `/openai/v1`, Anthropic adapters use the sibling
+`/anthropic` facade, and Gemini adapters use `/google`. Kind-on-host
+deployments where another host service already owns `30443`, such as
+platform-dev with the shared dev compose stack, should set:
 
 ```toml
 worker_subprocess_gateway_url = "http://host.docker.internal:30444/openai/v1"
@@ -699,7 +702,7 @@ increase queued connections without removing the token-row write hotspot.
 | `trial_cache_ttl_hours` | `168` (7d) | Layered images older than this are pruned on the next eviction sweep. |
 | `trial_cache_min_free_gb` | `20` | Capacity backstop — when free disk drops below this, oldest-by-creation entries are evicted first. |
 | `trial_cache_build_lock_timeout_sec` | `1800.0` | Cluster-wide builder-slot TTL. The slot's owner refreshes every 60 s while building. |
-| `subprocess_gateway_url` | unset; k8s render injects `worker_subprocess_gateway_url` | Sandbox-facing OpenAI-compatible gateway facade URL for subprocess agents. |
+| `subprocess_gateway_url` | unset; k8s render injects `worker_subprocess_gateway_url` | Sandbox-facing gateway URL for subprocess agents. It may be the OpenAI facade default or a bare gateway-router URL; the worker normalizes it to the adapter's facade dialect before injecting SDK env vars. |
 | `docker_api_timeout_sec` | `1800` | Docker SDK API timeout for worker-created clients. Keep this near the largest expected pull/build budget so docker-py does not fail long pulls, Dockerfile builds, or sidecar startup at its shorter default. |
 | `minio_max_pool_connections` | `256` | Worker-side boto3 S3 connection pool size. Size with `max_concurrent` because task materialization, artifacts, and trajectory upload overlap during sweeps. |
 | `minio_connect_timeout_sec` | `5.0` | S3 connect timeout for worker object-store calls. |
