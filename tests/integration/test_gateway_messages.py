@@ -6,6 +6,7 @@ Anthropic-shaped response. The route then records cost into llm_calls.
 """
 
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -232,6 +233,158 @@ async def test_messages_redacts_upstream_error_detail(gateway_setup):  # type: i
     assert "X-Amz-Signature=abc" not in detail
     assert "loom-llm-gateway" not in detail
     assert "[REDACTED" in detail
+
+
+def _sse_block(event: str, data: dict) -> bytes:
+    """Build one Anthropic-shaped SSE block."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _canned_anthropic_stream() -> bytes:
+    """Sample Anthropic SSE stream with the same totals as the
+    non-streaming canned response — 100 input, 20 cache_write, 30
+    cache_read, 50 output (final cumulative count)."""
+    return b"".join([
+        _sse_block("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": "msg_stream",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [],
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 20,
+                    "cache_read_input_tokens": 30,
+                    "output_tokens": 1,
+                },
+            },
+        }),
+        _sse_block("content_block_start", {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        }),
+        _sse_block("content_block_delta", {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello"},
+        }),
+        _sse_block("content_block_stop", {
+            "type": "content_block_stop", "index": 0,
+        }),
+        _sse_block("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 50},
+        }),
+        _sse_block("message_stop", {"type": "message_stop"}),
+    ])
+
+
+async def test_messages_stream_passthrough_records_llm_call(  # type: ignore[no-untyped-def]
+    gateway_setup, postgres_url,
+):
+    """Streaming requests get the upstream SSE bytes forwarded verbatim,
+    and `_extract_stream_usage` recovers the same token totals the
+    non-streaming path records from the final JSON body."""
+    app, step_jwt, team_id, trial_id = gateway_setup
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/messages"
+        assert request.headers["x-api-key"] == "test-anthropic-key"
+        payload = json.loads(request.content)
+        assert payload["stream"] is True
+        return httpx.Response(
+            200,
+            content=_canned_anthropic_stream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    await app.state.upstream_client.aclose()
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        timeout=app.state.settings.upstream_timeout_sec,
+    )
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        async with client.stream(
+            "POST",
+            "/v1/messages",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={
+                "model": "claude-opus-4-7",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        ) as r:
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("text/event-stream")
+            body_bytes = b""
+            async for chunk in r.aiter_bytes():
+                body_bytes += chunk
+    assert body_bytes == _canned_anthropic_stream()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+    assert row["step_id"] == "main"
+    assert row["dialect"] == "anthropic"
+    assert row["model"] == "claude-opus-4-7"
+    assert row["input_tokens"] == 100
+    # Final cumulative output_tokens from message_delta (50, not initial 1).
+    assert row["output_tokens"] == 50
+    assert float(row["cost_usd"]) == pytest.approx(0.00567, abs=1e-6)
+
+
+async def test_messages_stream_upstream_error_raises_no_llm_call(  # type: ignore[no-untyped-def]
+    gateway_setup, postgres_url,
+):
+    """Upstream returns 429 (not an SSE stream); the route must surface
+    the error to the client and NOT write a partial llm_calls row."""
+    app, step_jwt, _team_id, _trial_id = gateway_setup
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "rate_limited"})
+
+    await app.state.upstream_client.aclose()
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        timeout=app.state.settings.upstream_timeout_sec,
+    )
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/v1/messages",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={
+                "model": "claude-opus-4-7",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+    assert r.status_code == 429
+    assert "rate_limited" in r.json()["detail"]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert rows == []
 
 
 async def test_messages_rejects_missing_model(gateway_setup):  # type: ignore[no-untyped-def]

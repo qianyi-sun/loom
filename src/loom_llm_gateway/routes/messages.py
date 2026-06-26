@@ -5,18 +5,32 @@ Per amendment A9.1, this route does NOT round-trip through LiteLLM
 separation). Instead, we httpx-passthrough to Anthropic's native
 endpoint and forward the response verbatim. The Gateway extracts the
 `usage` block for cost attribution + llm_calls insertion.
+
+Streaming responses are forwarded byte-for-byte to the client while
+SSE events are tee-parsed to extract usage from `message_start`
+(input + cache token counts) and `message_delta` (final cumulative
+output token count). Cost is recorded after the upstream stream
+completes — or on client disconnect, with whatever usage was
+accumulated up to that point. The sibling `/anthropic/v1/messages`
+facade ships its own tracker (#561) keyed on per-connection
+credentials; both derive the same `(input, output, cache)` totals
+from the upstream stream.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from starlette.responses import StreamingResponse
 
-from loom.auth import verify_bearer_token
+from loom.auth import AuthContext, verify_bearer_token
 from loom.models.types import ModelSpec
-from loom_llm_gateway.dialect import DIALECTS
+from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -30,13 +44,15 @@ router = APIRouter()
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 
+logger = logging.getLogger(__name__)
+
 
 @router.post("/v1/messages")
 async def messages(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
+) -> Any:
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
 
@@ -62,15 +78,14 @@ async def messages(
     if not isinstance(model_name, str) or not model_name:
         raise HTTPException(status_code=400, detail="`model` is required")
 
-    # Plan 9 audit fix: streaming responses lose the final usage block on
-    # mid-stream connection close + can't be cost-attributed atomically.
-    # v1 refuses stream=true; clients that want SSE must wait for v1.5.
     if payload.get("stream"):
-        raise HTTPException(
-            status_code=400,
-            detail="stream=true not supported on the Gateway in v1 "
-                   "(cost attribution requires the final usage block; "
-                   "v1.5 will add SSE passthrough)",
+        return await _stream_messages(
+            request=request,
+            payload=payload,
+            ctx=ctx,
+            settings=settings,
+            api_key=api_key,
+            model_name=model_name,
         )
 
     # 1. Forward to Anthropic native endpoint.
@@ -132,3 +147,188 @@ async def messages(
             attempt=outcome.attempt,
         )
     return body
+
+
+def _extract_stream_usage(
+    event_name: str,
+    data: dict[str, Any],
+    accum: dict[str, int],
+) -> None:
+    """Update `accum` with token counts surfaced by one parsed SSE event.
+
+    Anthropic's stream emits `input_tokens`, `cache_creation_input_tokens`,
+    and `cache_read_input_tokens` on `message_start` (inside the
+    embedded `message.usage` block) and a final cumulative
+    `output_tokens` on `message_delta` (in the top-level `usage` block).
+    """
+    if event_name == "message_start":
+        msg = data.get("message") or {}
+        u = msg.get("usage") or {}
+        accum["input_tokens"] = int(u.get("input_tokens", 0))
+        v = u.get("cache_creation_input_tokens")
+        if v is not None:
+            accum["cache_creation_input_tokens"] = int(v)
+        v = u.get("cache_read_input_tokens")
+        if v is not None:
+            accum["cache_read_input_tokens"] = int(v)
+        # `message_start` carries an initial output_tokens (typically 1
+        # for the role token); `message_delta` overwrites with the
+        # cumulative final count.
+        accum["output_tokens"] = int(u.get("output_tokens", 0))
+    elif event_name == "message_delta":
+        u = data.get("usage") or {}
+        if "output_tokens" in u:
+            accum["output_tokens"] = int(u["output_tokens"])
+
+
+def _parse_sse_blocks(buffer: bytes) -> tuple[list[tuple[str, dict[str, Any]]], bytes]:
+    """Split `buffer` on SSE event boundaries (\\n\\n), parse each
+    complete block into `(event_name, data_dict)`, and return the
+    parsed events plus the remaining tail."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    while True:
+        sep = buffer.find(b"\n\n")
+        if sep < 0:
+            break
+        block, buffer = buffer[:sep], buffer[sep + 2:]
+        event_name: str | None = None
+        data_chunks: list[str] = []
+        for line in block.split(b"\n"):
+            if line.startswith(b"event: "):
+                event_name = line[len(b"event: "):].decode("utf-8", "replace")
+            elif line.startswith(b"data: "):
+                data_chunks.append(line[len(b"data: "):].decode("utf-8", "replace"))
+        if event_name is None or not data_chunks:
+            continue
+        try:
+            data = json.loads("\n".join(data_chunks))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            events.append((event_name, data))
+    return events, buffer
+
+
+async def _stream_messages(
+    *,
+    request: Request,
+    payload: dict[str, Any],
+    ctx: AuthContext,
+    settings: GatewaySettings,
+    api_key: str,
+    model_name: str,
+) -> StreamingResponse:
+    """Tee-passthrough Anthropic's SSE stream: forward upstream bytes
+    to the client verbatim while parsing events to extract the usage
+    counts needed for cost attribution. `record_call` runs after the
+    stream completes, even on client disconnect.
+
+    Streaming is not retried — the upstream bytes already in flight
+    cannot be rewound. Clients see one upstream attempt and decide
+    whether to reissue.
+    """
+    upstream: httpx.AsyncClient = request.app.state.upstream_client
+    stream_ctx = upstream.stream(
+        "POST",
+        f"{ANTHROPIC_BASE_URL}/v1/messages",
+        json=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        timeout=settings.upstream_timeout_sec,
+    )
+    upstream_response = await stream_ctx.__aenter__()
+
+    if upstream_response.status_code >= 400:
+        try:
+            body = await upstream_response.aread()
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+        excerpt = redact_api_key(body.decode("utf-8", "replace"), api_key)
+        raise HTTPException(
+            status_code=upstream_response.status_code,
+            detail=f"anthropic upstream returned {upstream_response.status_code}: "
+                   f"{excerpt}",
+        )
+
+    content_type = upstream_response.headers.get(
+        "content-type", "text/event-stream",
+    )
+
+    async def event_iter() -> Any:
+        accum: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        buffer = b""
+        try:
+            async for chunk in upstream_response.aiter_bytes():
+                yield chunk
+                buffer += chunk
+                events, buffer = _parse_sse_blocks(buffer)
+                for name, data in events:
+                    _extract_stream_usage(name, data, accum)
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+            await _record_stream_call(
+                request=request,
+                ctx=ctx,
+                model_name=model_name,
+                accum=accum,
+            )
+
+    return StreamingResponse(event_iter(), media_type=content_type)
+
+
+async def _record_stream_call(
+    *,
+    request: Request,
+    ctx: AuthContext,
+    model_name: str,
+    accum: dict[str, int],
+) -> None:
+    """Write the streamed call's usage + cost to `llm_calls`. Skips
+    when no usage was accumulated (upstream produced no SSE blocks
+    before the stream ended — e.g. immediate client disconnect)."""
+    if accum["input_tokens"] == 0 and accum["output_tokens"] == 0:
+        logger.warning(
+            "anthropic stream produced no usage events; skipping cost record",
+            extra={"trial_id": str(ctx.trial_id), "step_id": ctx.step_id},
+        )
+        return
+    # The outer route already 403'd when any of these were None; the
+    # asserts narrow types for mypy without changing runtime behavior.
+    assert ctx.team_id is not None
+    assert ctx.trial_id is not None
+    assert ctx.step_id is not None
+    extras = {
+        k: accum[k]
+        for k in ("cache_creation_input_tokens", "cache_read_input_tokens")
+        if k in accum
+    }
+    usage = TokenUsage(
+        input_tokens=accum["input_tokens"],
+        output_tokens=accum["output_tokens"],
+        provider_extras=extras,
+    )
+    table = await request.app.state.rate_card_cache.get()
+    entry = lookup_entry(table, ModelSpec(provider="anthropic", name=model_name))
+    cost = compute_cost_usd(
+        entry,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+    )
+    async with request.app.state.session_factory() as session:
+        await record_call(
+            session,
+            team_id=ctx.team_id,
+            trial_id=ctx.trial_id,
+            step_id=ctx.step_id,
+            dialect="anthropic",
+            model=model_name,
+            usage=usage,
+            cost_usd=cost,
+            rate_card_hash=hash_table(table),
+            attempt=1,
+        )
