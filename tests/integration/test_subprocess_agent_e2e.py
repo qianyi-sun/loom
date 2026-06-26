@@ -233,7 +233,8 @@ async def test_claude_code_uses_anthropic_facade_from_openai_subprocess_url(
         assert captured_env["ANTHROPIC_BASE_URL"] == (
             "http://host.docker.internal:30443/anthropic"
         )
-        assert captured_env["ANTHROPIC_API_KEY"] == "loom_step_test-mocked-token"
+        assert captured_env["ANTHROPIC_AUTH_TOKEN"] == "loom_step_test-mocked-token"
+        assert "ANTHROPIC_API_KEY" not in captured_env
         await driver.stop()
     finally:
         await http.aclose()

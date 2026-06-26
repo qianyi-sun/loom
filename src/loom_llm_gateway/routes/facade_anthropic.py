@@ -22,6 +22,9 @@ Difference from `/v1/messages`:
 Wire shape (MVP):
 - `Authorization: Bearer loom_step_<jwt>` — step-scoped JWT minted
   by control-plane.
+- `x-api-key: loom_step_<jwt>` — equivalent auth carrier used by
+  stock Anthropic SDK/CLI clients. The facade consumes this JWT and
+  replaces it with the stored provider key on the upstream request.
 - `x-loom-provider-connection-id: <uuid>` — required header.
   (Eventually folded into the JWT scope; see #72.)
 - Body: Anthropic Messages API shape, passed through.
@@ -72,11 +75,22 @@ _FACADE_DIALECT = "anthropic_facade"
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
+def _step_authorization_for_anthropic_client(
+    authorization: str | None, x_api_key: str | None,
+) -> str | None:
+    if authorization:
+        return authorization
+    if x_api_key:
+        return f"Bearer {x_api_key}"
+    return None
+
+
 @router.post("/anthropic/v1/messages")
 async def anthropic_messages_facade(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
     x_loom_provider_connection_id: str | None = Header(
         default=None, alias="x-loom-provider-connection-id",
     ),
@@ -86,7 +100,11 @@ async def anthropic_messages_facade(
 
     async with request.app.state.session_factory() as session:
         ctx = await verify_facade_auth(
-            session, authorization, signing_key,
+            session,
+            _step_authorization_for_anthropic_client(
+                authorization, x_api_key,
+            ),
+            signing_key,
         )
     assert ctx.team_id is not None
     assert ctx.trial_id is not None

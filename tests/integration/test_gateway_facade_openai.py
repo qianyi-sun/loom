@@ -35,6 +35,7 @@ from loom.db.schema import (
 from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 
 # Same deterministic test key the provider_connections route tests
@@ -153,6 +154,11 @@ async def facade_setup(
         transport=httpx.MockTransport(_handler),
         timeout=settings.upstream_timeout_sec,
     )
+    app.state.egress_client_pool = EgressClientPool(
+        upstream_client=app.state.upstream_client,
+        proxy_url="",
+        upstream_timeout_sec=settings.upstream_timeout_sec,
+    )
 
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
@@ -164,6 +170,7 @@ async def facade_setup(
     try:
         yield app, step_jwt, team_id, trial_id, connection_id, captures  # type: ignore[misc]
     finally:
+        await app.state.egress_client_pool.aclose()
         await app.state.upstream_client.aclose()
         await async_engine.dispose()
         with session_local() as s:
@@ -593,9 +600,15 @@ async def test_facade_returns_502_on_upstream_request_error(
     def _raise(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused")
 
+    await app.state.egress_client_pool.aclose()  # type: ignore[attr-defined]
     await app.state.upstream_client.aclose()  # type: ignore[attr-defined]
     app.state.upstream_client = httpx.AsyncClient(  # type: ignore[attr-defined]
         transport=httpx.MockTransport(_raise),
+    )
+    app.state.egress_client_pool = EgressClientPool(  # type: ignore[attr-defined]
+        upstream_client=app.state.upstream_client,  # type: ignore[attr-defined]
+        proxy_url="",
+        upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
         app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
@@ -612,9 +625,15 @@ async def test_facade_returns_504_on_upstream_timeout(
     def _raise(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("read timeout")
 
+    await app.state.egress_client_pool.aclose()  # type: ignore[attr-defined]
     await app.state.upstream_client.aclose()  # type: ignore[attr-defined]
     app.state.upstream_client = httpx.AsyncClient(  # type: ignore[attr-defined]
         transport=httpx.MockTransport(_raise),
+    )
+    app.state.egress_client_pool = EgressClientPool(  # type: ignore[attr-defined]
+        upstream_client=app.state.upstream_client,  # type: ignore[attr-defined]
+        proxy_url="",
+        upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
         app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},

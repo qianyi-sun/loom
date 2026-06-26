@@ -35,6 +35,7 @@ from loom.db.schema import (
 from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -139,6 +140,11 @@ async def facade_setup(
         transport=httpx.MockTransport(_handler),
         timeout=settings.upstream_timeout_sec,
     )
+    app.state.egress_client_pool = EgressClientPool(
+        upstream_client=app.state.upstream_client,
+        proxy_url="",
+        upstream_timeout_sec=settings.upstream_timeout_sec,
+    )
 
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
@@ -150,6 +156,7 @@ async def facade_setup(
     try:
         yield app, step_jwt, team_id, trial_id, connection_id, captures  # type: ignore[misc]
     finally:
+        await app.state.egress_client_pool.aclose()
         await app.state.upstream_client.aclose()
         await async_engine.dispose()
         with session_local() as s:
@@ -164,24 +171,36 @@ async def facade_setup(
         sync_engine.dispose()
 
 
-async def _post(app: object, jwt: str, **headers: str) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
-    body = {
+def _messages_body() -> dict[str, object]:
+    return {
         "model": "claude-opus-4-7",
         "max_tokens": 1024,
         "messages": [{"role": "user", "content": "hi"}],
     }
+
+
+async def _post_with_headers(
+    app: object, headers: dict[str, str],
+) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
         transport=transport, base_url="http://gw",
     ) as client:
         return await client.post(
             "/anthropic/v1/messages",
-            headers={
-                "Authorization": f"Bearer {jwt}",
-                **headers,
-            },
-            json=body,
+            headers=headers,
+            json=_messages_body(),
         )
+
+
+async def _post(app: object, jwt: str, **headers: str) -> httpx.Response:
+    return await _post_with_headers(
+        app,
+        {
+            "Authorization": f"Bearer {jwt}",
+            **headers,
+        },
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -235,6 +254,36 @@ async def test_facade_forwards_with_xapikey_and_records_llm_call(
     #                       = 0.0003 + 0.00075 = 0.00105
     assert float(row["cost_usd"]) == pytest.approx(0.00105, abs=1e-7)
     assert "operator-supplied" in row["rate_card_hash"]
+
+
+async def test_facade_accepts_step_jwt_from_anthropic_x_api_key_header(
+    facade_setup, postgres_url: str,
+) -> None:
+    app, jwt, team_id, trial_id, conn_id, captures = facade_setup
+    r = await _post_with_headers(
+        app,
+        {
+            "x-api-key": jwt,
+            "x-loom-provider-connection-id": str(conn_id),
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+    assert len(requests) == 1
+    up = requests[0]
+    assert up.headers["x-api-key"] == "sk-ant-XYZ"
+    assert up.headers["x-api-key"] != jwt
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["team_id"] == team_id
+    assert row["trial_id"] == trial_id
+    assert row["dialect"] == "anthropic_facade"
 
 
 async def test_facade_rate_card_pricing_includes_cache_tokens(
@@ -530,9 +579,15 @@ async def test_facade_returns_504_on_upstream_timeout(facade_setup) -> None:
     def _raise(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("read timeout")
 
+    await app.state.egress_client_pool.aclose()  # type: ignore[attr-defined]
     await app.state.upstream_client.aclose()  # type: ignore[attr-defined]
     app.state.upstream_client = httpx.AsyncClient(  # type: ignore[attr-defined]
         transport=httpx.MockTransport(_raise),
+    )
+    app.state.egress_client_pool = EgressClientPool(  # type: ignore[attr-defined]
+        upstream_client=app.state.upstream_client,  # type: ignore[attr-defined]
+        proxy_url="",
+        upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
         app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
