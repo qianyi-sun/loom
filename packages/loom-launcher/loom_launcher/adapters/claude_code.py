@@ -57,7 +57,17 @@ class ClaudeCodeAdapter:
     name: str = "claude-code"
     supports_os: frozenset[str] = frozenset({"linux"})
     endpoint_dialect: str = "anthropic"
-    api_key_env: str = "ANTHROPIC_API_KEY"
+    # Claude Code CLI honors two auth env vars: `ANTHROPIC_API_KEY` sends
+    # the value as `x-api-key` (Anthropic's own header), while
+    # `ANTHROPIC_AUTH_TOKEN` sends it as `Authorization: Bearer <value>`.
+    # Loom's gateway routes (`/v1/messages`, `/anthropic/v1/messages`,
+    # facade endpoints) authenticate via `verify_bearer_token`, which
+    # only accepts the Bearer header. Using the auth-token env keeps the
+    # in-container CLI talking to the gateway with the header shape the
+    # gateway expects. Bare upstream Anthropic clients can still set
+    # `ANTHROPIC_API_KEY` for their own runs; this only changes what
+    # Loom's subprocess agent flow puts into the env.
+    api_key_env: str = "ANTHROPIC_AUTH_TOKEN"
     base_url_env: str = "ANTHROPIC_BASE_URL"
     model_name_template: str = "{model_id}"
     supports_multi_turn: bool = True

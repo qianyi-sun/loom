@@ -207,6 +207,16 @@ services:
     environment:
       LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
       LOOM_WORKER_GATEWAY_URL: http://llm-gateway:9100
+      # Trial containers spawned by the worker are NOT on `deploy_default`,
+      # so the compose-internal `llm-gateway` DNS name doesn't resolve there.
+      # Override the agent-facing gateway URL to the host-mapped port so the
+      # in-trial agent CLI (claude-code, codex, etc.) can reach the gateway.
+      # `_sandbox_extra_hosts_for_url` adds the matching `host-gateway`
+      # mapping to each trial container when this URL's hostname is
+      # `host.docker.internal`. Without this, real-model trials get
+      # `FailedToOpenSocket` retries until they exhaust the agent's retry
+      # budget (10× by default for claude-code).
+      LOOM_WORKER_SUBPROCESS_GATEWAY_URL: http://host.docker.internal:9100
       LOOM_WORKER_TOKEN: "${LOOM_WORKER_TOKEN:-placeholder}"
       LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
       LOOM_WORKER_MINIO_ACCESS_KEY: loomdev
