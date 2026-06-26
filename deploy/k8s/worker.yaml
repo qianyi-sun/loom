@@ -99,6 +99,8 @@ spec:
           value: '1'
         - name: LOOM_WORKER_MAX_CONCURRENT
           value: '16'
+        - name: LOOM_WORKER_POOL_NAME
+          value: k8s-worker
         # Subprocess agents run inside Docker sandboxes, not the worker pod.
         # They cannot resolve k8s Service DNS, so inject the operator-
         # selected sandbox-facing bridge URL.

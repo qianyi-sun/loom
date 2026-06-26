@@ -33,6 +33,7 @@ def test_renders_worker_includes_optional_paths() -> None:
     assert "fixtures_root: Path | None = None" in src
     assert "benchmark_cache: Path | None = None" in src
     assert "docker_socket: Path = Path(\"/var/run/docker.sock\")" in src
+    assert "pool_name: str = \"default\"" in src
 
 
 def test_rendered_settings_compiles_and_matches_snapshot(tmp_path: Path) -> None:

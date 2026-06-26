@@ -164,9 +164,26 @@ async def overview_setup(
         ))
         s.execute(insert(Worker).values(
             id=uuid4(),
-            hostname="fresh-worker",
+            hostname="trt-gb10-1",
             version="test",
-            capabilities=[{"backend": "docker"}, {"backend": "fake"}],
+            capabilities=[{"backend": "docker", "cpu_arch": "arm64"}],
+            max_concurrent=10,
+            pool_name="gb10-arm64",
+            registered_at=now,
+            last_seen_at=now,
+            status="active",
+        ))
+        fresh_x86_worker_id = uuid4()
+        s.execute(insert(Worker).values(
+            id=fresh_x86_worker_id,
+            hostname="public-beta-x86-1",
+            version="test",
+            capabilities=[
+                {"backend": "docker", "cpu_arch": "x86_64"},
+                {"backend": "fake", "cpu_arch": "x86_64"},
+            ],
+            max_concurrent=2,
+            pool_name="public-beta-x86",
             registered_at=now,
             last_seen_at=now,
             status="active",
@@ -175,7 +192,9 @@ async def overview_setup(
             id=stale_worker_id,
             hostname="stale-worker",
             version="test",
-            capabilities=[{"backend": "modal"}],
+            capabilities=[{"backend": "modal", "cpu_arch": "x86_64"}],
+            max_concurrent=99,
+            pool_name="stale-pool",
             registered_at=now - timedelta(minutes=10),
             last_seen_at=now - timedelta(minutes=10),
             status="active",
@@ -216,10 +235,11 @@ async def overview_setup(
             expected_trial_count=100,
             backend="docker",
         ))
-        for state, batch_id in (
-            ("queued", old_batch_id),
-            ("running", latest_batch_id),
-            ("succeeded", latest_batch_id),
+        for state, batch_id, worker_id in (
+            ("queued", old_batch_id, None),
+            ("claimed", latest_batch_id, fresh_x86_worker_id),
+            ("running", latest_batch_id, fresh_x86_worker_id),
+            ("succeeded", latest_batch_id, None),
         ):
             s.execute(insert(Trial).values(
                 id=uuid4(),
@@ -229,6 +249,8 @@ async def overview_setup(
                 config={"agent_name": "oracle"},
                 requires_caps={},
                 state=state,
+                worker_id=worker_id,
+                result={"aggregate_reward": 1.0} if state == "succeeded" else None,
                 submitted_at=now,
             ))
         s.execute(insert(Trial).values(
@@ -333,7 +355,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
     } == body["benchmark_readiness"]
     assert body["benchmark_readiness"]["blocked"][0]["id"] == "gaia"
     assert body["worker_health"] == {
-        "active": 1,
+        "active": 2,
         "available_backends": ["docker", "fake"],
         "has_default_backend": True,
     }
@@ -345,7 +367,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
     }
     assert body["run_activity"]["trials"] == {
         "queued": 1,
-        "claimed": 0,
+        "claimed": 1,
         "running": 1,
         "succeeded": 1,
         "failed": 0,
@@ -402,7 +424,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
     assert body["state_counts"]["trials"] == {
         "queued": 1,
-        "claimed": 0,
+        "claimed": 1,
         "running": 1,
         "succeeded": 1,
         "failed": 0,
@@ -410,14 +432,49 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
     assert body["queue"] == {
         "queued": 1,
-        "claimed": 0,
+        "claimed": 1,
         "running": 1,
-        "waiting": 1,
-        "active_workers": 1,
+        "waiting": 2,
+        "active_workers": 2,
         "available_backends": ["docker", "fake"],
         "has_default_backend": True,
         "status": "waiting",
     }
+    assert body["resources"]["aggregate"] == {
+        "active_workers": 2,
+        "total_slots": 12,
+        "occupied_slots": 2,
+        "free_slots": 10,
+        "running_tasks": 1,
+        "starting_tasks": 1,
+        "queued_tasks": 1,
+    }
+    assert body["resources"]["pools"] == [
+        {
+            "pool_name": "gb10-arm64",
+            "backend": "docker",
+            "cpu_arch": "arm64",
+            "active_workers": 1,
+            "total_slots": 10,
+            "occupied_slots": 0,
+            "free_slots": 10,
+            "running_tasks": 0,
+            "starting_tasks": 0,
+            "queued_tasks": 1,
+        },
+        {
+            "pool_name": "public-beta-x86",
+            "backend": "docker",
+            "cpu_arch": "x86_64",
+            "active_workers": 1,
+            "total_slots": 2,
+            "occupied_slots": 2,
+            "free_slots": 0,
+            "running_tasks": 1,
+            "starting_tasks": 1,
+            "queued_tasks": 1,
+        },
+    ]
 
 
 async def test_overview_marks_operator_prerequisites_separately(
@@ -428,6 +485,7 @@ async def test_overview_marks_operator_prerequisites_separately(
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        s.execute(update(Trial).values(worker_id=None))
         s.execute(delete(Worker))
         s.execute(update(Task).values(benchmark_id=None))
         s.commit()

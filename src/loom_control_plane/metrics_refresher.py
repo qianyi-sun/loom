@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from loom.resource_pools import get_resource_pool_summary
 from loom_control_plane.metrics import (
     QUEUE_DEPTH,
     SLURM_WORKER_ACTIVE_SLOTS,
@@ -36,6 +37,10 @@ from loom_control_plane.metrics import (
     SLURM_WORKER_STALE_JOBS,
     SLURM_WORKER_STALE_SLOTS,
     TRIALS_INFLIGHT,
+    WORKER_POOL_FREE_SLOTS,
+    WORKER_POOL_OCCUPIED_SLOTS,
+    WORKER_POOL_TOTAL_SLOTS,
+    WORKER_POOL_WORKERS,
     WORKERS_ACTIVE,
 )
 from loom_control_plane.slurm_worker_jobs import (
@@ -84,6 +89,13 @@ _SLURM_WORKER_GAUGES = (
     SLURM_WORKER_IDLE_EXITS,
 )
 
+_WORKER_POOL_GAUGES = (
+    WORKER_POOL_TOTAL_SLOTS,
+    WORKER_POOL_OCCUPIED_SLOTS,
+    WORKER_POOL_FREE_SLOTS,
+    WORKER_POOL_WORKERS,
+)
+
 
 async def refresh_once(session: Any, *, expiry_sec: int) -> None:
     """Run all three refresh queries and update the gauges.
@@ -118,6 +130,25 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
         QUEUE_DEPTH.labels(team_id=team_id).set(int(depth))
     for team_id, state, cnt in inflight_rows:
         TRIALS_INFLIGHT.labels(team_id=team_id, state=state).set(int(cnt))
+
+    resource_summary = await get_resource_pool_summary(
+        session,
+        freshness_sec=expiry_sec,
+    )
+    for gauge in _WORKER_POOL_GAUGES:
+        gauge.clear()
+    for pool in resource_summary["pools"]:
+        labels = {
+            "pool_name": str(pool["pool_name"]),
+            "backend": str(pool["backend"]),
+            "cpu_arch": str(pool["cpu_arch"]),
+        }
+        WORKER_POOL_TOTAL_SLOTS.labels(**labels).set(int(pool["total_slots"]))
+        WORKER_POOL_OCCUPIED_SLOTS.labels(**labels).set(
+            int(pool["occupied_slots"]),
+        )
+        WORKER_POOL_FREE_SLOTS.labels(**labels).set(int(pool["free_slots"]))
+        WORKER_POOL_WORKERS.labels(**labels).set(int(pool["active_workers"]))
 
     slurm_summary = summarize_jobs(await fetch_slurm_worker_metric_rows(session))
     for gauge in _SLURM_WORKER_GAUGES:

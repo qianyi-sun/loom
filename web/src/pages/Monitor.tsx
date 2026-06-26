@@ -173,14 +173,18 @@ function queueStatusVariant(status: string): StatusVariant {
 
 function queueStatusText(summary: MonitorSummary): string {
   const { active_workers, running, status, waiting } = summary.queue;
+  const resources = summary.resources?.aggregate;
   if (status === "blocked") {
     return "No active workers; queued trials cannot start.";
   }
   if (status === "waiting") {
+    if (resources) {
+      return `${stateCount(waiting, "waiting")} for ${plural(resources.free_slots, "free slot")}.`;
+    }
     return `${stateCount(waiting, "waiting")} for ${plural(active_workers, "active worker")}.`;
   }
   if (status === "running") {
-    return `${stateCount(running, "running")} with no queued backlog.`;
+    return `${stateCount(resources?.running_tasks ?? running, "running")} with no queued backlog.`;
   }
   return "No queued or running trials in this scope.";
 }
@@ -198,6 +202,70 @@ function CountBox({
         {label}
       </p>
       <p className="mt-1 text-sm font-semibold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function ResourcePoolBreakdown({
+  resources,
+}: {
+  resources: MonitorSummary["resources"];
+}): JSX.Element | null {
+  if (!resources?.pools.length) return null;
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <thead>
+          <tr className="bg-slate-50/50">
+            {[
+              "Pool",
+              "Backend",
+              "Arch",
+              "Slots",
+              "Running",
+              "Starting",
+              "Queued",
+              "Workers",
+            ].map((h) => (
+              <th
+                key={h}
+                className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {resources.pools.map((pool) => (
+            <tr
+              key={`${pool.pool_name}:${pool.backend}:${pool.cpu_arch}`}
+              className="bg-white"
+            >
+              <td className="px-3 py-2 font-medium text-slate-900">
+                {pool.pool_name}
+              </td>
+              <td className="px-3 py-2 text-slate-700">{pool.backend}</td>
+              <td className="px-3 py-2 text-slate-700">{pool.cpu_arch}</td>
+              <td className="px-3 py-2 font-mono text-xs text-slate-900">
+                {pool.occupied_slots}/{pool.total_slots}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.running_tasks}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.starting_tasks}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.queued_tasks}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.active_workers}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -286,6 +354,7 @@ function MonitorHealthSummary({
       </Card>
     );
   }
+  const resources = data.resources?.aggregate;
   return (
     <Card>
       <Card.Header
@@ -301,20 +370,24 @@ function MonitorHealthSummary({
       <Card.Body className="space-y-4">
         <div className="grid gap-3 md:grid-cols-4">
           <CountBox
-            label="Workers"
-            value={plural(data.queue.active_workers, "active worker")}
+            label="Concurrent tasks"
+            value={
+              resources
+                ? `${resources.occupied_slots} / ${resources.total_slots}`
+                : stateCount(data.queue.running + data.queue.claimed, "active")
+            }
           />
           <CountBox
             label="Queued"
-            value={stateCount(data.queue.queued, "queued")}
+            value={stateCount(resources?.queued_tasks ?? data.queue.queued, "queued")}
           />
           <CountBox
             label="Running"
-            value={stateCount(data.queue.running, "running")}
+            value={stateCount(resources?.running_tasks ?? data.queue.running, "running")}
           />
           <CountBox
-            label="Failed"
-            value={stateCount(data.state_counts.trials.failed, "failed")}
+            label="Starting"
+            value={stateCount(resources?.starting_tasks ?? data.queue.claimed, "starting")}
           />
         </div>
         <div className="grid gap-3 text-sm md:grid-cols-2">
@@ -323,6 +396,11 @@ function MonitorHealthSummary({
               Queue health
             </p>
             <p className="mt-1 text-slate-700">{queueStatusText(data)}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              <span>{plural(data.queue.active_workers, "active worker")}</span>
+              <span className="px-1">·</span>
+              <span>{stateCount(data.state_counts.trials.failed, "failed")}</span>
+            </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
             <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
@@ -335,6 +413,7 @@ function MonitorHealthSummary({
             </p>
           </div>
         </div>
+        <ResourcePoolBreakdown resources={data.resources} />
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
           <span>
             Batches: {data.state_counts.batches.submitted} submitted,{" "}

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 
 from loom.db.schema import Batch, Trial
+from loom.resource_pools import get_resource_pool_summary
 from loom_service.auth_guards import require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.monitor_filters import (
@@ -21,6 +22,7 @@ from loom_service.monitor_filters import (
     resolve_monitor_team_filter,
 )
 from loom_service.worker_backends import (
+    _HEARTBEAT_FRESHNESS_SEC,
     get_active_backends,
     get_active_worker_count,
 )
@@ -109,6 +111,20 @@ async def get_monitor_summary(
         model=model,
         state=None,
     )
+    resource_trials_stmt = select(
+        Trial.state,
+        Trial.worker_id,
+        Trial.requires_caps,
+    ).select_from(Trial)
+    resource_trials_stmt = apply_trial_monitor_filters(
+        resource_trials_stmt,
+        target_team=target_team,
+        batch_id=batch_id,
+        benchmark_id=benchmark_id,
+        agent=agent,
+        model=model,
+        state=None,
+    )
     batch_counts = await _counts(
         session,
         batch_counts_stmt,
@@ -124,6 +140,11 @@ async def get_monitor_summary(
 
     active_backends = sorted(await get_active_backends(session))
     active_workers = await get_active_worker_count(session)
+    resources = await get_resource_pool_summary(
+        session,
+        freshness_sec=_HEARTBEAT_FRESHNESS_SEC,
+        trial_stmt=resource_trials_stmt,
+    )
     queued = trial_counts["queued"]
     claimed = trial_counts["claimed"]
     running = trial_counts["running"]
@@ -156,4 +177,5 @@ async def get_monitor_summary(
                 active_workers=active_workers,
             ),
         },
+        "resources": resources,
     }

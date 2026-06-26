@@ -27,13 +27,50 @@ const monitorSummaryPayload = {
   },
   queue: {
     queued: 1,
-    claimed: 0,
+    claimed: 1,
     running: 2,
-    waiting: 1,
-    active_workers: 1,
+    waiting: 2,
+    active_workers: 2,
     available_backends: ["docker", "fake"],
     has_default_backend: true,
     status: "waiting",
+  },
+  resources: {
+    aggregate: {
+      active_workers: 2,
+      total_slots: 12,
+      occupied_slots: 3,
+      free_slots: 9,
+      running_tasks: 2,
+      starting_tasks: 1,
+      queued_tasks: 1,
+    },
+    pools: [
+      {
+        pool_name: "gb10-arm64",
+        backend: "docker",
+        cpu_arch: "arm64",
+        active_workers: 1,
+        total_slots: 10,
+        occupied_slots: 1,
+        free_slots: 9,
+        running_tasks: 1,
+        starting_tasks: 0,
+        queued_tasks: 1,
+      },
+      {
+        pool_name: "public-beta-x86",
+        backend: "docker",
+        cpu_arch: "x86_64",
+        active_workers: 1,
+        total_slots: 2,
+        occupied_slots: 2,
+        free_slots: 0,
+        running_tasks: 1,
+        starting_tasks: 1,
+        queued_tasks: 1,
+      },
+    ],
   },
 };
 
@@ -311,13 +348,20 @@ describe("Monitor human-readable labels", () => {
     });
 
     expect(await screen.findByText("Monitor health")).toBeInTheDocument();
-    expect(screen.getByText("1 active worker")).toBeInTheDocument();
+    expect(screen.getByText("3 / 12")).toBeInTheDocument();
+    expect(screen.getByText("Concurrent tasks")).toBeInTheDocument();
+    expect(screen.getByText("2 active workers")).toBeInTheDocument();
     expect(screen.getByText("1 queued")).toBeInTheDocument();
     expect(screen.getByText("2 running")).toBeInTheDocument();
+    expect(screen.getByText("1 starting")).toBeInTheDocument();
     expect(screen.getByText("docker, fake")).toBeInTheDocument();
     expect(
-      screen.getByText("1 waiting for 1 active worker."),
+      screen.getByText("2 waiting for 9 free slots."),
     ).toBeInTheDocument();
+    expect(screen.getByText("gb10-arm64")).toBeInTheDocument();
+    expect(screen.getByText("public-beta-x86")).toBeInTheDocument();
+    expect(screen.getByText("1/10")).toBeInTheDocument();
+    expect(screen.getByText("2/2")).toBeInTheDocument();
 
     await waitFor(() => {
       const summaryRequest = fetchMock.mock.calls.find(([input]) =>

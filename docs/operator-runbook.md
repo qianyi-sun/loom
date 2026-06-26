@@ -1295,7 +1295,7 @@ the `groups` block into your `prometheus.yml`.
 | `LoomWorkerReclaimsSpiking` | warning | `rate(loom_worker_reclaim_total[5m]) > 0.5` for 10m | Crash detector is reclaiming > 30 trials/min. Workers are dying mid-trial. | `kubectl describe pod -n loom -l app=loom-worker \| grep -A2 "Last State\|OOMKilled\|Reason"`. |
 | `LoomStatePatchTimeouts` | warning | `rate(loom_state_patch_total{result="timeout"}[5m]) > 0` for 5m | Fenced state-PATCH is timing out; workers retry, eventually the crash detector reclaims. | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres`; check Postgres connections + active queries; consider rolling back recent CP image. |
 | `LoomClaimLatencyP95High` | warning | `histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m]))) > 1.0` for 15m | DRF claim scan p95 > 1 second. Workers spinning instead of running. | Verify `trials(state, submitted_at)` index is hot; check `pg_stat_statements` for the claim query. |
-| Slurm worker capacity low | warning | No default alert; inspect `loom_slurm_worker_desired_slots`, `loom_slurm_worker_active_slots`, `loom_slurm_worker_pending_slots`, and `loom_slurm_worker_stale_slots` by environment/pool. | Elastic Slurm jobs were requested but are pending, stale, failed, cancelled, or exited idle. | `loom admin slurm-workers status --cp-url <private-cp-url>`; inspect pending reasons, stale records, failed submissions, and `squeue`/`sacct` for the recorded job ids. |
+| Slurm worker capacity low | warning | No default alert; inspect `loom_slurm_worker_desired_slots`, `loom_slurm_worker_active_slots`, `loom_slurm_worker_pending_slots`, and `loom_slurm_worker_stale_slots` by environment/pool. | Elastic Slurm jobs were requested but are pending, stale, failed, cancelled, or exited idle. | `loom admin slurm-workers status --cp-url <private-cp-url>` and `loom resources status`; inspect pending reasons, stale records, failed submissions, and `squeue`/`sacct` for the recorded job ids. |
 | `LoomLLMGatewayDown` | **critical** | `up{job=~".*loom-llm-gateway.*"} == 0` for 5m | Prometheus cannot scrape Gateway, so provider-call metrics are blind. | `kubectl get pods -n loom -l app=loom-llm-gateway`; `kubectl logs -n loom -l app=loom-llm-gateway --tail=200`. |
 | `LoomGatewayProviderErrorRate` | warning | provider-level `loom_gateway_llm_calls_total{result!="ok"}` ratio > 5% for 10m | A provider is failing calls; common causes are expired keys, provider outage, SSRF/egress policy, or dialect drift. | `kubectl logs -n loom -l app=loom-llm-gateway --since=15m`; run `loom providers test <connection-name>`; check provider status. |
 | `LoomGatewayCostSpike` | warning | `increase(loom_gateway_cost_usd_total[30m]) > 10` per team for 10m | A team accumulated more than $10 provider-attributed Gateway cost in 30 minutes. This is an alert only, not quota enforcement. | Inspect Gateway cost dashboard by `team_id`; check recent batches and provider configuration; disable the team or rotate provider secrets if spend is unintended. |
@@ -1773,6 +1773,10 @@ mock provider and browser automation job.
   `cluster-config.toml`; the default render is 3 worker replicas at 16
   trials each. Memory scales with the trajectory ring buffer + the
   largest artifact in flight.
+- Monitor and `loom resources status` show concurrent task slots as
+  `occupied / total` and group them by worker resource pool. Kubernetes render
+  labels the baseline pool as `k8s-worker`; remote workers should set
+  `LOOM_WORKER_POOL_NAME` to stable names such as `oldlab` or `gb10-arm64`.
 - Remote worker pools should set `LOOM_WORKER_HOSTNAME` to the physical or VM
   node name before startup. Otherwise Docker Compose workers may register with
   container hostnames, which makes Monitor and capacity evidence harder to map
@@ -1850,13 +1854,15 @@ mock provider and browser automation job.
   and evidence under `deploy/worker-pools/gb10/`. GB10 hosts attach through
   private loopback worker-service tunnels, run the worker compose service with
   `network_mode: host`, and set `LOOM_WORKER_HOSTNAME=trt-gb10-N` so Monitor
-  and database evidence map workers to physical hosts. Keep Docker data-root,
-  worker trajectory cache, benchmark cache, and trial scratch on each node's
-  local ext4 disk; do not put those hot paths on `/shared_work`. Current
-  public-beta validation uses `trt-gb10-1..15` at
-  `LOOM_WORKER_MAX_CONCURRENT=2`, for 30 configured ARM64 slots. After every
-  rollout, confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
-  active and run the local plus GB10 `check-remote` tunnel gates before
+  and database evidence map workers to physical hosts. Set
+  `LOOM_WORKER_POOL_NAME=gb10-arm64` so slot summaries and metrics group the
+  hosts together. Keep Docker data-root, worker trajectory cache, benchmark
+  cache, and trial scratch on each node's local ext4 disk; do not put those hot
+  paths on `/shared_work`. Current public-beta validation uses
+  `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=2`, for 30 configured ARM64
+  slots. After every rollout, confirm the OLDLAB-1
+  `loom-remote-worker-tunnel-watchdog.timer` is active, run the local plus GB10
+  `check-remote` tunnel gates, and check `loom resources status` before
   treating the pool as healthy.
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
