@@ -46,15 +46,26 @@ different owner:
 New repository must have the same owner as the current repository
 ```
 
-Until issues are manually recreated or GitHub transfer constraints change, the
-old tracker remains the historical source:
+Because GitHub blocks cross-owner issue transfer, the 37 open issues were
+manually recreated in `qianyi-sun/loom` on 2026-06-26. Each recreated issue
+has a migration header pointing to the original `carinrc/loom` issue and has
+the original labels, milestone, assignees, and comments copied over.
+
+The old tracker remains the historical source for original issue numbers,
+closed issues, old pull requests, and immutable source comments:
 
 - Open issues: <https://github.com/carinrc/loom/issues?q=is%3Aissue%20state%3Aopen>
 - v1.0 milestone: <https://github.com/carinrc/loom/milestone/10>
 - Old roadmap project: <https://github.com/orgs/carinrc/projects/3>
 
-The migration-time open issue index is copied into
-[`qianyi-sun/loom#24`](https://github.com/qianyi-sun/loom/issues/24).
+The active recreated issue set is tracked in:
+
+- New open issues: <https://github.com/qianyi-sun/loom/issues?q=is%3Aissue%20state%3Aopen>
+- New roadmap project: <https://github.com/users/qianyi-sun/projects/3>
+
+The temporary migration index
+[`qianyi-sun/loom#24`](https://github.com/qianyi-sun/loom/issues/24) is closed
+and superseded by the individual recreated issues.
 
 ## Validation PR
 
