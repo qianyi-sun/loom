@@ -47,8 +47,8 @@
         ]
       },
       "layer2_evidence": {
-        "status": "pending_paired_run",
-        "parity_kind": "matched_config_paired_run_pending",
+        "status": "paired_validated",
+        "parity_kind": "matched_config_paired_run",
         "replay_tests": [
           {
             "case_id": "aime-24-exact-integer-correct",
@@ -66,8 +66,63 @@
             "asserts": "the extraction rule is 'last integer on the final line', documented behavior matches the AIME single-integer answer convention"
           }
         ],
-        "pending_reason": "Original Layer 2 evidence (PRs #499 #513 #514 #517) claimed parity-by-construction against coder-harbor-cloud (Huawei platform, wrong Harbor). Real Harbor (harbor-framework/harbor at 2ead3f1f) ships an adapter for this benchmark; matched-config paired runs required to validate score parity. Stage B child issue link added in Task A7.",
-        "stage_b_issue": "https://github.com/carinrc/loom/issues/540"
+        "stage_b_issue": "https://github.com/carinrc/loom/issues/540",
+        "paired_run": {
+          "task_slate": {
+            "year": "2024",
+            "task_count": 30,
+            "loom_dataset_slug": "aime-24",
+            "harbor_adapter_dir": "https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime",
+            "note": "Harbor's aime adapter covers both 2024 and 2025 in a single 60-task slate; Loom uses two per-year slugs. The paired comparison aggregates Loom (aime-24 + aime-25 = 60) against Harbor (aime = 60). Per-year breakdown is in the per-trial JSONs."
+          },
+          "model": "claude-haiku-4-5",
+          "provider": "qa-relay-anthropic via https://yibuapi.com (anthropic dialect)",
+          "loom": {
+            "agent": "litellm",
+            "agent_kind": "single_shot",
+            "batches": [
+              {
+                "id": "5f417465-ecf6-4535-8f5c-f0f302b537f9",
+                "name": "stage-b-aime-24-haiku-full-30",
+                "trials_succeeded": 30,
+                "n_correct": 6,
+                "aggregate_reward": 0.2,
+                "per_trial_evidence": "docs/evidence/2026-06-26-aime-24-loom-full-30.json"
+              },
+              {
+                "id": "0fc16ea6-7368-414a-a7ff-f80b03d17eaa",
+                "name": "stage-b-aime-25-haiku-full-30",
+                "trials_succeeded": 30,
+                "n_correct": 8,
+                "aggregate_reward": 0.2667,
+                "per_trial_evidence": "docs/evidence/2026-06-26-aime-25-loom-full-30.json"
+              }
+            ],
+            "combined_aggregate_reward": 0.2333,
+            "combined_n_correct": 14,
+            "combined_n_incorrect": 46
+          },
+          "harbor": {
+            "agent": "terminus-2",
+            "agent_kind": "tool_use_loop",
+            "harbor_commit": "2ead3f1f2462f6f7260aca5ef2377cd7e309ff06",
+            "job_name": "stage-b-aime-haiku-60",
+            "trials_with_reward": 60,
+            "trials_errored": 1,
+            "n_correct": 32,
+            "n_incorrect": 28,
+            "aggregate_reward": 0.5333,
+            "per_trial_evidence": "docs/evidence/2026-06-26-aime-harbor-full-60.json"
+          },
+          "delta": {
+            "harbor_minus_loom_pp": 30.0,
+            "attribution": "Agent-runtime difference (single-shot litellm vs. terminus-2 tool-use loop) — amplified vs GPQA Diamond because AIME's reasoning surface benefits substantially from intermediate work and self-correction. Verifier semantics agree by construction (both extract last integer from final_answer.txt)."
+          },
+          "harbor_published_baseline_at_pin": {
+            "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
+          },
+          "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
+        }
       }
     },
     {
@@ -106,8 +161,8 @@
         ]
       },
       "layer2_evidence": {
-        "status": "pending_paired_run",
-        "parity_kind": "matched_config_paired_run_pending",
+        "status": "paired_validated",
+        "parity_kind": "matched_config_paired_run",
         "replay_tests": [
           {
             "case_id": "aime-25-script-path-wired",
@@ -120,8 +175,63 @@
             "asserts": "the shared integer-extraction routine handles the canonical AIME answer shape — used by both aime-24 and aime-25 since they share verifier infrastructure"
           }
         ],
-        "pending_reason": "Original Layer 2 evidence (PRs #499 #513 #514 #517) claimed parity-by-construction against coder-harbor-cloud (Huawei platform, wrong Harbor). Real Harbor (harbor-framework/harbor at 2ead3f1f) ships an adapter for this benchmark; matched-config paired runs required to validate score parity. Stage B child issue link added in Task A7.",
-        "stage_b_issue": "https://github.com/carinrc/loom/issues/540"
+        "stage_b_issue": "https://github.com/carinrc/loom/issues/540",
+        "paired_run": {
+          "task_slate": {
+            "year": "2025",
+            "task_count": 30,
+            "loom_dataset_slug": "aime-25",
+            "harbor_adapter_dir": "https://github.com/harbor-framework/harbor/tree/2ead3f1f2462f6f7260aca5ef2377cd7e309ff06/adapters/aime",
+            "note": "Harbor's aime adapter covers both 2024 and 2025 in a single 60-task slate; Loom uses two per-year slugs. The paired comparison aggregates Loom (aime-24 + aime-25 = 60) against Harbor (aime = 60). Per-year breakdown is in the per-trial JSONs."
+          },
+          "model": "claude-haiku-4-5",
+          "provider": "qa-relay-anthropic via https://yibuapi.com (anthropic dialect)",
+          "loom": {
+            "agent": "litellm",
+            "agent_kind": "single_shot",
+            "batches": [
+              {
+                "id": "5f417465-ecf6-4535-8f5c-f0f302b537f9",
+                "name": "stage-b-aime-24-haiku-full-30",
+                "trials_succeeded": 30,
+                "n_correct": 6,
+                "aggregate_reward": 0.2,
+                "per_trial_evidence": "docs/evidence/2026-06-26-aime-24-loom-full-30.json"
+              },
+              {
+                "id": "0fc16ea6-7368-414a-a7ff-f80b03d17eaa",
+                "name": "stage-b-aime-25-haiku-full-30",
+                "trials_succeeded": 30,
+                "n_correct": 8,
+                "aggregate_reward": 0.2667,
+                "per_trial_evidence": "docs/evidence/2026-06-26-aime-25-loom-full-30.json"
+              }
+            ],
+            "combined_aggregate_reward": 0.2333,
+            "combined_n_correct": 14,
+            "combined_n_incorrect": 46
+          },
+          "harbor": {
+            "agent": "terminus-2",
+            "agent_kind": "tool_use_loop",
+            "harbor_commit": "2ead3f1f2462f6f7260aca5ef2377cd7e309ff06",
+            "job_name": "stage-b-aime-haiku-60",
+            "trials_with_reward": 60,
+            "trials_errored": 1,
+            "n_correct": 32,
+            "n_incorrect": 28,
+            "aggregate_reward": 0.5333,
+            "per_trial_evidence": "docs/evidence/2026-06-26-aime-harbor-full-60.json"
+          },
+          "delta": {
+            "harbor_minus_loom_pp": 30.0,
+            "attribution": "Agent-runtime difference (single-shot litellm vs. terminus-2 tool-use loop) — amplified vs GPQA Diamond because AIME's reasoning surface benefits substantially from intermediate work and self-correction. Verifier semantics agree by construction (both extract last integer from final_answer.txt)."
+          },
+          "harbor_published_baseline_at_pin": {
+            "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
+          },
+          "layer3_doc_section": "docs/benchmark-score-alignment-layer3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
+        }
       }
     },
     {

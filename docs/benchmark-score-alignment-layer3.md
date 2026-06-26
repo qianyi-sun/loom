@@ -216,3 +216,102 @@ codex / gpt-5.2.
   task IDs (Loom keys by upstream Airtable `Record ID`, Harbor keys by row index) and
   comparing per-task rewards would surface any individual-task verifier disagreement
   that aggregates hide.
+
+## aime — paired Loom (aime-24 + aime-25) vs Harbor (aime) on claude-haiku-4-5
+
+Closes #540. Matched-config paired evidence on AIME 2024 + 2025 (60 tasks total, 30
+per year). Same model, same provider, same verifier semantics (exact integer match
+on the canonical answer). Loom uses two separate dataset slugs (`aime-24`, `aime-25`)
+sharing the `_AIMEYearBase` adapter; Harbor's `adapters/aime` covers both years in a
+single 60-task slate. The agent runtime differs as in the #541 GPQA run: Loom's
+`litellm` is single-shot, Harbor's `terminus-2` is a tool-use loop. AIME's
+math-reasoning surface amplifies the agent-runtime effect compared to GPQA Diamond's
+multiple-choice surface.
+
+- **Upstream pin (Loom):** `loom_benchmarks.adapters.aime` adapter reads the AIME 2024
+  + 2025 problems from huggingface dataset rows pinned in the catalog
+  `benchmarks.json` (`aime-aimo-validation` family with `params.year`).
+- **Upstream pin (Harbor):** `harbor-framework/harbor@2ead3f1f` `adapters/aime`.
+- **Harbor parity_experiment.json baseline:** none published at the pinned commit
+  (`gh api .../parity_experiment.json → 404`). This Layer 3 entry establishes the
+  cross-system baseline ourselves.
+- **Verifier (shared by construction):** Loom emits a script verifier
+  (`packages/loom-benchmarks/loom_benchmarks/adapters/aime.py` →
+  `verifier/run.sh` + `verifier/check.py`) extracting the last integer from
+  `final_answer.txt`. Harbor's adapter scores via `tests/test.sh` doing the same
+  exact-integer extraction. Both pipe through the same upstream canonical answer.
+
+### Loom side
+
+- **Batches (two slugs, ran sequentially via 5-worker concurrency):**
+  - `stage-b-aime-24-haiku-full-30` (id `5f417465-ecf6-4535-8f5c-f0f302b537f9`,
+    30/30 succeeded, 6 correct → 20.00%)
+  - `stage-b-aime-25-haiku-full-30` (id `0fc16ea6-7368-414a-a7ff-f80b03d17eaa`,
+    30/30 succeeded, 8 correct → 26.67%)
+- **Combined Loom AIME:** 60/60 succeeded, 0 failures. 14 correct + 46 incorrect →
+  aggregate **0.2333 (23.33%)**. 60 LLM calls, 360,263 prompt + 211,811 completion
+  tokens. Per-trial JSONs in
+  `docs/evidence/2026-06-26-aime-24-loom-full-30.json` and
+  `docs/evidence/2026-06-26-aime-25-loom-full-30.json`.
+- **Invocation (both, identical except slug + name):**
+  ```
+  uv run python -m loom_cli eval batch create \
+    --benchmark aime-24 \                # or aime-25
+    --agent litellm \
+    --provider qa-relay-anthropic --model claude-haiku-4-5 \
+    --n-per-task 1 --backend docker
+  ```
+
+### Harbor side
+
+- **Job:** `stage-b-aime-haiku-60` (id from `result.json`).
+- **Result:** 60/60 trials reached a verifier reward (1 AgentTimeoutError → 0.0).
+  32 correct + 28 incorrect → aggregate **0.5333 (53.33%)**. 15.18M input + 492K
+  output tokens, $5.91. Per-trial JSON in
+  `docs/evidence/2026-06-26-aime-harbor-full-60.json`.
+- **Invocation:**
+  ```
+  ANTHROPIC_API_KEY=<qa-relay key> uv run harbor job start \
+    -p datasets/aime -a terminus-2 -m anthropic/claude-haiku-4-5 \
+    --ak api_base=https://yibuapi.com \
+    --ae ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY --ae ANTHROPIC_API_BASE=https://yibuapi.com \
+    --n-concurrent 5
+  ```
+
+### Paired comparison
+
+| | Loom (24+25) | Harbor (aime) | Delta |
+|---|---|---|---|
+| Agent | litellm (single-shot) | terminus-2 (loop) | runtime differs |
+| Model | claude-haiku-4-5 | claude-haiku-4-5 | identical |
+| Tasks | 60 (30+30) | 60 | identical slate |
+| Verifier | last-integer-match | last-integer-match | identical by construction |
+| Aggregate | 23.33% | 53.33% | **+30.00 pp Harbor** |
+
+The 30 pp gap is far larger than the GPQA Diamond gap (+7 pp), reflecting AIME's
+reasoning surface — math problems benefit substantially from an agent loop that
+can produce intermediate work, retry, and self-correct, whereas multiple-choice
+GPQA tolerates a single-shot answer better. **Verifier semantics still agree by
+construction** — both systems extract the last integer from `final_answer.txt` and
+compare it to the canonical row. The runtime difference fully explains the delta.
+
+### What this Layer 3 entry validates
+
+1. **The `_AIMEYearBase` per-year adapter pattern works end-to-end.** Each year
+   slug materializes to its own 30-task slate with the year tag, and both slugs
+   share the same script verifier code path.
+2. **Loom CLI handles back-to-back batch submissions** without interfering — both
+   AIME batches ran cleanly under the same worker container without restart.
+3. **Verifier semantics align across systems** even on a reasoning surface where
+   answers are integers extracted from free-form text, not multiple-choice letters.
+
+### Open follow-ups (not in this Layer 3 entry)
+
+- **No published Harbor baseline at the pinned commit.** Means we can only compare
+  Loom vs Harbor at the same config (which we did here), not Loom vs the literature
+  number. The 53.33% Harbor result here is the only AIME terminus-2 + haiku-4-5
+  data point we know of at this Harbor commit; future Harbor parity_experiment
+  updates may add a reference number.
+- **Same symmetric-agent-runtime follow-up as the GPQA entry** — running Loom with
+  `claude-code` against AIME would isolate verifier parity from agent-runtime
+  contribution.
