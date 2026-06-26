@@ -72,6 +72,12 @@ SLURM_WORKER_PENDING_SLOTS = Gauge(
     labelnames=("environment", "pool_name"),
 )
 
+SLURM_WORKER_STALE_SLOTS = Gauge(
+    "loom_slurm_worker_stale_slots",
+    "Stale Slurm worker slots by environment and pool",
+    labelnames=("environment", "pool_name"),
+)
+
 SLURM_WORKER_RUNNING_JOBS = Gauge(
     "loom_slurm_worker_running_jobs",
     "Running Slurm worker jobs by environment and pool",
@@ -81,6 +87,12 @@ SLURM_WORKER_RUNNING_JOBS = Gauge(
 SLURM_WORKER_PENDING_JOBS = Gauge(
     "loom_slurm_worker_pending_jobs",
     "Pending Slurm worker jobs by environment and pool",
+    labelnames=("environment", "pool_name"),
+)
+
+SLURM_WORKER_STALE_JOBS = Gauge(
+    "loom_slurm_worker_stale_jobs",
+    "Stale Slurm worker jobs by environment and pool",
     labelnames=("environment", "pool_name"),
 )
 

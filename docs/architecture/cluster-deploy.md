@@ -202,8 +202,9 @@ and the kind smoke runs it before `kubectl apply` — see #77.
 Out-of-cluster remote workers are a separate private-network integration, not
 public Ingress. When a staging deployment uses them, operators expose only the
 worker-facing Control Plane, Gateway, and MinIO endpoints on trusted LAN/VPN
-addresses with `scripts/ops/worker_service_tunnels.py` systemd units and verify
-those URLs from the worker hosts after every rollout.
+addresses with `scripts/ops/worker_service_tunnels.py` systemd units, keep the
+tunnel watchdog timer active, and verify those URLs from the worker hosts after
+every rollout.
 
 Docker-backed worker nodes must also run with an open-file limit high enough
 for concurrent sandbox/container cleanup. Compose-based dev and remote-worker

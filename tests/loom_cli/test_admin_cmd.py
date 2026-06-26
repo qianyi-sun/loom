@@ -380,6 +380,8 @@ def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
                         "pending_slots": 6,
                         "running_jobs": 2,
                         "pending_jobs": 1,
+                        "stale_slots": 6,
+                        "stale_jobs": 1,
                         "failed_submissions": 0,
                         "cancelled_pending_jobs": 0,
                         "idle_exits": 1,
@@ -413,6 +415,8 @@ def test_slurm_workers_status_gets_cp_capacity_without_printing_secrets(
     out = capsys.readouterr().out
     assert "production/oldlab" in out
     assert "desired=18 active=12 pending=6" in out
+    assert "stale=6" in out
+    assert "stale_jobs=1" in out
     assert "13441" in out
     assert "loom_w_secret" not in out
     assert "<redacted>" in out

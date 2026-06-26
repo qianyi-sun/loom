@@ -9,6 +9,8 @@ from loom_control_plane.metrics import (
     SLURM_WORKER_PENDING_JOBS,
     SLURM_WORKER_PENDING_SLOTS,
     SLURM_WORKER_RUNNING_JOBS,
+    SLURM_WORKER_STALE_JOBS,
+    SLURM_WORKER_STALE_SLOTS,
     STATE_PATCH_TOTAL,
     TRIALS_INFLIGHT,
     TRIALS_STATE_TOTAL,
@@ -36,8 +38,10 @@ def test_slurm_worker_capacity_metrics_are_bounded_by_pool():
     assert SLURM_WORKER_DESIRED_SLOTS._labelnames == expected
     assert SLURM_WORKER_ACTIVE_SLOTS._labelnames == expected
     assert SLURM_WORKER_PENDING_SLOTS._labelnames == expected
+    assert SLURM_WORKER_STALE_SLOTS._labelnames == expected
     assert SLURM_WORKER_RUNNING_JOBS._labelnames == expected
     assert SLURM_WORKER_PENDING_JOBS._labelnames == expected
+    assert SLURM_WORKER_STALE_JOBS._labelnames == expected
     assert SLURM_WORKER_FAILED_SUBMISSIONS._labelnames == expected
     assert SLURM_WORKER_CANCELLED_PENDING_JOBS._labelnames == expected
     assert SLURM_WORKER_IDLE_EXITS._labelnames == expected

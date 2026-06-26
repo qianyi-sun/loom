@@ -33,6 +33,8 @@ from loom_control_plane.metrics import (
     SLURM_WORKER_PENDING_JOBS,
     SLURM_WORKER_PENDING_SLOTS,
     SLURM_WORKER_RUNNING_JOBS,
+    SLURM_WORKER_STALE_JOBS,
+    SLURM_WORKER_STALE_SLOTS,
     TRIALS_INFLIGHT,
     WORKERS_ACTIVE,
 )
@@ -73,8 +75,10 @@ _SLURM_WORKER_GAUGES = (
     SLURM_WORKER_DESIRED_SLOTS,
     SLURM_WORKER_ACTIVE_SLOTS,
     SLURM_WORKER_PENDING_SLOTS,
+    SLURM_WORKER_STALE_SLOTS,
     SLURM_WORKER_RUNNING_JOBS,
     SLURM_WORKER_PENDING_JOBS,
+    SLURM_WORKER_STALE_JOBS,
     SLURM_WORKER_FAILED_SUBMISSIONS,
     SLURM_WORKER_CANCELLED_PENDING_JOBS,
     SLURM_WORKER_IDLE_EXITS,
@@ -126,8 +130,10 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
         SLURM_WORKER_DESIRED_SLOTS.labels(**labels).set(capacity.desired_slots)
         SLURM_WORKER_ACTIVE_SLOTS.labels(**labels).set(capacity.active_slots)
         SLURM_WORKER_PENDING_SLOTS.labels(**labels).set(capacity.pending_slots)
+        SLURM_WORKER_STALE_SLOTS.labels(**labels).set(capacity.stale_slots)
         SLURM_WORKER_RUNNING_JOBS.labels(**labels).set(capacity.running_jobs)
         SLURM_WORKER_PENDING_JOBS.labels(**labels).set(capacity.pending_jobs)
+        SLURM_WORKER_STALE_JOBS.labels(**labels).set(capacity.stale_jobs)
         SLURM_WORKER_FAILED_SUBMISSIONS.labels(**labels).set(
             capacity.failed_submissions,
         )

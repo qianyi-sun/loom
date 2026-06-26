@@ -10,6 +10,7 @@ terminal-owned port-forward processes.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -70,6 +71,13 @@ def unit_name(spec: TunnelSpec) -> str:
     return f"loom-remote-worker-tunnel-{spec.name}.service"
 
 
+def unit_name_for_tunnel_name(name: str) -> str:
+    known = {spec.name for spec in DEFAULT_TUNNELS}
+    if name not in known:
+        raise KeyError(f"unknown tunnel {name!r}; expected one of {sorted(known)}")
+    return f"loom-remote-worker-tunnel-{name}.service"
+
+
 def render_systemd_unit(
     spec: TunnelSpec,
     *,
@@ -109,6 +117,102 @@ def render_systemd_unit(
             "",
         ]
     )
+
+
+def watchdog_service_name() -> str:
+    return "loom-remote-worker-tunnel-watchdog.service"
+
+
+def watchdog_timer_name() -> str:
+    return "loom-remote-worker-tunnel-watchdog.timer"
+
+
+def render_watchdog_systemd_service(
+    *,
+    script_path: str,
+    env_file: str,
+    state_file: str,
+    timeout_sec: float,
+    failure_threshold: int,
+) -> str:
+    command = [
+        script_path,
+        "watchdog",
+        "--env-file",
+        env_file,
+        "--state-file",
+        state_file,
+        "--timeout-sec",
+        str(timeout_sec).removesuffix(".0"),
+        "--failure-threshold",
+        str(failure_threshold),
+    ]
+    exec_start = " ".join(shlex.quote(part) for part in command)
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Loom remote-worker tunnel watchdog",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            f"ExecStart={exec_start}",
+            "",
+        ]
+    )
+
+
+def render_watchdog_systemd_timer(*, interval_sec: int) -> str:
+    if interval_sec < 1:
+        raise ValueError("interval_sec must be >= 1")
+    interval = str(interval_sec)
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Run Loom remote-worker tunnel watchdog",
+            "",
+            "[Timer]",
+            f"OnBootSec={interval}",
+            f"OnUnitActiveSec={interval}",
+            "AccuracySec=5",
+            f"Unit={watchdog_service_name()}",
+            "",
+            "[Install]",
+            "WantedBy=timers.target",
+            "",
+        ]
+    )
+
+
+def write_watchdog_systemd_units(
+    output_dir: Path,
+    *,
+    script_path: str,
+    env_file: str,
+    state_file: str,
+    timeout_sec: float,
+    failure_threshold: int,
+    interval_sec: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    service = output_dir / watchdog_service_name()
+    timer = output_dir / watchdog_timer_name()
+    service.write_text(
+        render_watchdog_systemd_service(
+            script_path=script_path,
+            env_file=env_file,
+            state_file=state_file,
+            timeout_sec=timeout_sec,
+            failure_threshold=failure_threshold,
+        ),
+        encoding="utf-8",
+    )
+    timer.write_text(
+        render_watchdog_systemd_timer(interval_sec=interval_sec),
+        encoding="utf-8",
+    )
+    return [service, timer]
 
 
 def write_systemd_units(
@@ -256,6 +360,62 @@ def probe_health_urls(
     return results
 
 
+def _load_watchdog_state(state_file: Path) -> dict[str, int]:
+    if not state_file.exists():
+        return {}
+    try:
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    state: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            state[str(key)] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return state
+
+
+def _write_watchdog_state(state_file: Path, state: dict[str, int]) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_file.with_suffix(state_file.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(state_file)
+
+
+def apply_watchdog_results(
+    results: list[ProbeResult],
+    *,
+    state_file: Path,
+    failure_threshold: int,
+) -> list[str]:
+    if failure_threshold < 1:
+        raise ValueError("failure_threshold must be >= 1")
+
+    state = _load_watchdog_state(state_file)
+    restarted: list[str] = []
+    for result in results:
+        if result.ok:
+            state[result.name] = 0
+            continue
+        failures = state.get(result.name, 0) + 1
+        state[result.name] = failures
+        if failures < failure_threshold:
+            continue
+        unit = unit_name_for_tunnel_name(result.name)
+        subprocess.run(["systemctl", "--user", "restart", unit], check=True)
+        state[result.name] = 0
+        restarted.append(unit)
+
+    _write_watchdog_state(state_file, state)
+    return restarted
+
+
 def _iter_hosts(hostfile: Path) -> list[str]:
     hosts: list[str] = []
     for raw_line in hostfile.read_text(encoding="utf-8").splitlines():
@@ -315,6 +475,29 @@ def _run_print_check_script(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_watchdog(args: argparse.Namespace) -> int:
+    env = load_env_file(Path(args.env_file))
+    results = probe_health_urls(
+        worker_health_urls(env),
+        timeout_sec=args.timeout_sec,
+    )
+    restarted = apply_watchdog_results(
+        results,
+        state_file=Path(args.state_file).expanduser(),
+        failure_threshold=args.failure_threshold,
+    )
+    for result in results:
+        status = "ok" if result.ok else "failed"
+        print(f"{result.name}={status} url={result.url} {result.detail}")
+    for unit in restarted:
+        print(f"restarted={unit}")
+    # `check` is the rollout gate that exits non-zero on failed probes. The
+    # watchdog is a periodic self-healer; after it records state or restarts a
+    # unit successfully, the systemd oneshot should not remain failed merely
+    # because the pre-restart probe saw the stale tunnel.
+    return 0
+
+
 def _run_render_systemd(args: argparse.Namespace) -> int:
     written = write_systemd_units(
         Path(args.output_dir),
@@ -348,6 +531,40 @@ def _run_install_systemd(args: argparse.Namespace) -> int:
     subprocess.run(["systemctl", "--user", "restart", *unit_names], check=True)
     for name in unit_names:
         print(f"enabled {name}")
+    return 0
+
+
+def _run_render_watchdog_systemd(args: argparse.Namespace) -> int:
+    written = write_watchdog_systemd_units(
+        Path(args.output_dir),
+        script_path=args.script_path,
+        env_file=args.env_file,
+        state_file=args.state_file,
+        timeout_sec=args.timeout_sec,
+        failure_threshold=args.failure_threshold,
+        interval_sec=args.interval_sec,
+    )
+    for path in written:
+        print(path)
+    return 0
+
+
+def _run_install_watchdog_systemd(args: argparse.Namespace) -> int:
+    unit_dir = Path(args.output_dir).expanduser()
+    written = write_watchdog_systemd_units(
+        unit_dir,
+        script_path=args.script_path,
+        env_file=args.env_file,
+        state_file=args.state_file,
+        timeout_sec=args.timeout_sec,
+        failure_threshold=args.failure_threshold,
+        interval_sec=args.interval_sec,
+    )
+    names = [path.name for path in written]
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", watchdog_timer_name()], check=True)
+    for name in names:
+        print(f"installed {name}")
     return 0
 
 
@@ -387,6 +604,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install.set_defaults(func=_run_install_systemd)
 
+    render_watchdog = subparsers.add_parser(
+        "render-watchdog-systemd",
+        help="Render a systemd user service/timer for tunnel health self-healing.",
+    )
+    render_watchdog.add_argument("--output-dir", required=True)
+    render_watchdog.add_argument("--env-file", required=True)
+    render_watchdog.add_argument(
+        "--script-path",
+        default=str(Path(__file__).resolve()),
+    )
+    render_watchdog.add_argument(
+        "--state-file",
+        default="~/.local/state/loom/remote-worker-tunnel-watchdog.json",
+    )
+    render_watchdog.add_argument("--timeout-sec", type=float, default=5)
+    render_watchdog.add_argument("--failure-threshold", type=int, default=3)
+    render_watchdog.add_argument("--interval-sec", type=int, default=30)
+    render_watchdog.set_defaults(func=_run_render_watchdog_systemd)
+
+    install_watchdog = subparsers.add_parser(
+        "install-watchdog-systemd",
+        help="Install and enable the systemd user tunnel watchdog timer.",
+    )
+    install_watchdog.add_argument(
+        "--output-dir",
+        default="~/.config/systemd/user",
+    )
+    install_watchdog.add_argument("--env-file", required=True)
+    install_watchdog.add_argument(
+        "--script-path",
+        default=str(Path(__file__).resolve()),
+    )
+    install_watchdog.add_argument(
+        "--state-file",
+        default="~/.local/state/loom/remote-worker-tunnel-watchdog.json",
+    )
+    install_watchdog.add_argument("--timeout-sec", type=float, default=5)
+    install_watchdog.add_argument("--failure-threshold", type=int, default=3)
+    install_watchdog.add_argument("--interval-sec", type=int, default=30)
+    install_watchdog.set_defaults(func=_run_install_watchdog_systemd)
+
     check = subparsers.add_parser(
         "check",
         help="Probe worker-facing tunnel URLs from the current host.",
@@ -410,6 +668,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     print_script.add_argument("--env-file", required=True)
     print_script.set_defaults(func=_run_print_check_script)
+
+    watchdog = subparsers.add_parser(
+        "watchdog",
+        help=(
+            "Probe worker-facing tunnel URLs and restart stale systemd "
+            "tunnel units after repeated failures."
+        ),
+    )
+    watchdog.add_argument("--env-file", required=True)
+    watchdog.add_argument(
+        "--state-file",
+        default="~/.local/state/loom/remote-worker-tunnel-watchdog.json",
+    )
+    watchdog.add_argument("--timeout-sec", type=float, default=5)
+    watchdog.add_argument("--failure-threshold", type=int, default=3)
+    watchdog.set_defaults(func=_run_watchdog)
 
     return parser
 

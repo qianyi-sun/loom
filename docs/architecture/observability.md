@@ -30,8 +30,10 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Control Plane | `loom_slurm_worker_desired_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_active_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_pending_slots` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_stale_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_running_jobs` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_pending_jobs` | Gauge | `environment`, `pool_name` |
+| Control Plane | `loom_slurm_worker_stale_jobs` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_failed_submissions` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_cancelled_pending_jobs` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_idle_exits` | Gauge | `environment`, `pool_name` |
@@ -163,7 +165,8 @@ at least one panel in the dashboards above.
    `loom admin slurm-workers status --cp-url <private-cp-url>`. Pending slots
    with pending reasons point to Slurm scheduling pressure; failed submissions
    point to controller/config errors; stale records mean Loom expected capacity
-   that Slurm no longer reports. Check Control Plane logs for
+   that Slurm no longer reports or a running Slurm job whose Loom worker
+   heartbeat is stale. Check Control Plane logs for
    `elastic_slurm_worker_decision`, `elastic_slurm_worker_submit_failed`, and
    `elastic_slurm_worker_cancel_failed` to distinguish capacity math,
    submission failures, and cancellation failures.

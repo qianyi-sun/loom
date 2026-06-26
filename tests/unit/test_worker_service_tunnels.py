@@ -196,6 +196,134 @@ def test_install_systemd_restarts_existing_units_after_enable(tmp_path: Path, mo
     ]
 
 
+def test_watchdog_restarts_only_tunnel_after_repeated_probe_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    state_file = tmp_path / "watchdog.json"
+    calls: list[list[str]] = []
+    results = [
+        module.ProbeResult(
+            name="control-plane",
+            url="http://control-node:18081/healthz",
+            ok=False,
+            detail="ConnectionResetError",
+        ),
+        module.ProbeResult(
+            name="gateway",
+            url="http://control-node:19100/healthz",
+            ok=True,
+            detail="http_status=200",
+        ),
+        module.ProbeResult(
+            name="minio",
+            url="http://control-node:19000/minio/health/live",
+            ok=True,
+            detail="http_status=200",
+        ),
+    ]
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        calls.append(command)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    for _ in range(2):
+        restarted = module.apply_watchdog_results(
+            results,
+            state_file=state_file,
+            failure_threshold=3,
+        )
+        assert restarted == []
+        assert calls == []
+
+    restarted = module.apply_watchdog_results(
+        results,
+        state_file=state_file,
+        failure_threshold=3,
+    )
+
+    assert restarted == ["loom-remote-worker-tunnel-control-plane.service"]
+    assert calls == [
+        [
+            "systemctl",
+            "--user",
+            "restart",
+            "loom-remote-worker-tunnel-control-plane.service",
+        ],
+    ]
+    assert '"control-plane": 0' in state_file.read_text(encoding="utf-8")
+
+
+def test_watchdog_command_records_failures_without_failing_oneshot(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = _load_module()
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "\n".join([
+            "LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:18081",
+            "LOOM_WORKER_GATEWAY_URL=http://control-node:19100",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control-node:19000",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    def fake_probe(urls, *, timeout_sec):  # type: ignore[no-untyped-def]
+        assert timeout_sec == 5
+        assert urls[0] == ("control-plane", "http://control-node:18081/healthz")
+        return [
+            module.ProbeResult(
+                name="control-plane",
+                url="http://control-node:18081/healthz",
+                ok=False,
+                detail="ConnectionResetError",
+            ),
+        ]
+
+    monkeypatch.setattr(module, "probe_health_urls", fake_probe)
+    rc = module._run_watchdog(Namespace(
+        env_file=str(env_file),
+        state_file=str(tmp_path / "watchdog.json"),
+        timeout_sec=5,
+        failure_threshold=3,
+    ))
+
+    assert rc == 0
+    assert "control-plane=failed" in capsys.readouterr().out
+
+
+def test_watchdog_systemd_timer_runs_healthcheck_periodically() -> None:
+    module = _load_module()
+
+    service = module.render_watchdog_systemd_service(
+        script_path="/opt/loom/scripts/ops/worker_service_tunnels.py",
+        env_file="/secure/.env.remote-worker",
+        state_file="/var/lib/loom/tunnel-watchdog.json",
+        timeout_sec=5,
+        failure_threshold=3,
+    )
+    timer = module.render_watchdog_systemd_timer(interval_sec=30)
+
+    assert "Description=Loom remote-worker tunnel watchdog" in service
+    assert "Type=oneshot" in service
+    assert (
+        "ExecStart=/opt/loom/scripts/ops/worker_service_tunnels.py watchdog "
+        "--env-file /secure/.env.remote-worker "
+        "--state-file /var/lib/loom/tunnel-watchdog.json "
+        "--timeout-sec 5 --failure-threshold 3"
+    ) in service
+    assert "OnBootSec=30" in timer
+    assert "OnUnitActiveSec=30" in timer
+    assert "Unit=loom-remote-worker-tunnel-watchdog.service" in timer
+    assert "WantedBy=timers.target" in timer
+
+
 def test_tunnel_script_has_no_environment_specific_hosts() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
     forbidden = (

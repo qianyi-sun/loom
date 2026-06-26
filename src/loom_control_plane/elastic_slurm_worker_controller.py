@@ -14,7 +14,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from sqlalchemy import func, or_, select
@@ -456,10 +456,11 @@ async def load_capacity_snapshot(
         select(SlurmWorkerJob).where(
             SlurmWorkerJob.environment == config.environment,
             SlurmWorkerJob.pool_name == config.pool_name,
-            SlurmWorkerJob.state.in_(ACTIVE_STATES),
+            SlurmWorkerJob.state.in_((*ACTIVE_STATES, "stale")),
         ),
     )).scalars().all()
 
+    stale_cutoff = datetime.now(UTC) - timedelta(seconds=config.stale_after_seconds)
     pending_jobs = 0
     running_jobs = 0
     pending_slots = 0
@@ -468,6 +469,10 @@ async def load_capacity_snapshot(
     active_job_ids: list[str] = []
     cancellable_pending_job_ids: list[str] = []
     for job in jobs:
+        if job.state == "stale":
+            if job.stale_at is not None and job.stale_at >= stale_cutoff:
+                active_nodes.add(job.nodelist)
+            continue
         active_nodes.add(job.nodelist)
         if job.job_id:
             active_job_ids.append(job.job_id)

@@ -1295,7 +1295,7 @@ the `groups` block into your `prometheus.yml`.
 | `LoomWorkerReclaimsSpiking` | warning | `rate(loom_worker_reclaim_total[5m]) > 0.5` for 10m | Crash detector is reclaiming > 30 trials/min. Workers are dying mid-trial. | `kubectl describe pod -n loom -l app=loom-worker \| grep -A2 "Last State\|OOMKilled\|Reason"`. |
 | `LoomStatePatchTimeouts` | warning | `rate(loom_state_patch_total{result="timeout"}[5m]) > 0` for 5m | Fenced state-PATCH is timing out; workers retry, eventually the crash detector reclaims. | `kubectl exec deploy/loom-control-plane -- pg_isready -h loom-postgres`; check Postgres connections + active queries; consider rolling back recent CP image. |
 | `LoomClaimLatencyP95High` | warning | `histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m]))) > 1.0` for 15m | DRF claim scan p95 > 1 second. Workers spinning instead of running. | Verify `trials(state, submitted_at)` index is hot; check `pg_stat_statements` for the claim query. |
-| Slurm worker capacity low | warning | No default alert; inspect `loom_slurm_worker_desired_slots`, `loom_slurm_worker_active_slots`, and `loom_slurm_worker_pending_slots` by environment/pool. | Elastic Slurm jobs were requested but are pending, stale, failed, cancelled, or exited idle. | `loom admin slurm-workers status --cp-url <private-cp-url>`; inspect pending reasons, stale records, failed submissions, and `squeue`/`sacct` for the recorded job ids. |
+| Slurm worker capacity low | warning | No default alert; inspect `loom_slurm_worker_desired_slots`, `loom_slurm_worker_active_slots`, `loom_slurm_worker_pending_slots`, and `loom_slurm_worker_stale_slots` by environment/pool. | Elastic Slurm jobs were requested but are pending, stale, failed, cancelled, or exited idle. | `loom admin slurm-workers status --cp-url <private-cp-url>`; inspect pending reasons, stale records, failed submissions, and `squeue`/`sacct` for the recorded job ids. |
 | `LoomLLMGatewayDown` | **critical** | `up{job=~".*loom-llm-gateway.*"} == 0` for 5m | Prometheus cannot scrape Gateway, so provider-call metrics are blind. | `kubectl get pods -n loom -l app=loom-llm-gateway`; `kubectl logs -n loom -l app=loom-llm-gateway --tail=200`. |
 | `LoomGatewayProviderErrorRate` | warning | provider-level `loom_gateway_llm_calls_total{result!="ok"}` ratio > 5% for 10m | A provider is failing calls; common causes are expired keys, provider outage, SSRF/egress policy, or dialect drift. | `kubectl logs -n loom -l app=loom-llm-gateway --since=15m`; run `loom providers test <connection-name>`; check provider status. |
 | `LoomGatewayCostSpike` | warning | `increase(loom_gateway_cost_usd_total[30m]) > 10` per team for 10m | A team accumulated more than $10 provider-attributed Gateway cost in 30 minutes. This is an alert only, not quota enforcement. | Inspect Gateway cost dashboard by `team_id`; check recent batches and provider configuration; disable the team or rotate provider secrets if spend is unintended. |
@@ -1570,9 +1570,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    workers, worker-token admin routes, and batch-runner bootstrap routes stay
    internal-only.
 4. **Remote-worker private tunnels hold.** If remote workers are attached,
-   verify the exact worker-facing URLs from the control node and at least one
-   worker host:
+   verify the tunnel watchdog timer is active, then verify the exact
+   worker-facing URLs from the control node and at least one worker host:
    ```bash
+   systemctl --user is-active loom-remote-worker-tunnel-watchdog.timer
+
    scripts/ops/worker_service_tunnels.py check \
      --env-file .env.remote-worker
 
@@ -1754,8 +1756,9 @@ checklist:
   and response leak scanning.
 - **`scripts/ops/worker_service_tunnels.py`** — covers the private
   remote-worker tunnel gate when out-of-cluster workers are attached. It renders
-  durable systemd user units, checks the exact worker-facing URLs locally, and
-  verifies those URLs from SSH worker hosts.
+  durable systemd user units, installs the watchdog timer that restarts stale
+  active-looking tunnel units after repeated failed probes, checks the exact
+  worker-facing URLs locally, and verifies those URLs from SSH worker hosts.
 
 Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a
@@ -1852,8 +1855,9 @@ mock provider and browser automation job.
   local ext4 disk; do not put those hot paths on `/shared_work`. Current
   public-beta validation uses `trt-gb10-1..15` at
   `LOOM_WORKER_MAX_CONCURRENT=2`, for 30 configured ARM64 slots. After every
-  rollout, restart/check the OLDLAB-1 `loom-remote-worker-tunnel-*` user units
-  and run the GB10 `check-remote` gate before treating the pool as healthy.
+  rollout, confirm the OLDLAB-1 `loom-remote-worker-tunnel-watchdog.timer` is
+  active and run the local plus GB10 `check-remote` tunnel gates before
+  treating the pool as healthy.
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
 
@@ -1865,10 +1869,14 @@ mock provider and browser automation job.
 
   Use this before submitting more capacity. A pending or running job with the
   same environment, pool, nodelist, CPU, memory, and concurrency is an active
-  capacity request and should not be duplicated. Use `--format json` for
-  release evidence or automation. If Loom backlog has drained but Slurm still
-  has pending elastic jobs, cancel those Slurm job ids with `scancel`; the
-  controller will record cancellation on its next reconcile.
+  capacity request and should not be duplicated. Stale worker-heartbeat or
+  missing-Slurm records are exposed as `stale=<slots>` and
+  `stale_jobs=<count>` in the CLI plus
+  `loom_slurm_worker_stale_slots` / `loom_slurm_worker_stale_jobs` metrics.
+  Use `--format json` for release evidence or automation. If Loom backlog has
+  drained but Slurm still has pending elastic jobs, cancel those Slurm job ids
+  with `scancel`; the controller will record cancellation on its next
+  reconcile.
 - When OLDLAB elastic workers are enabled for a staging or production release
   candidate, the release gate `worker_capacity_smoke` evidence must include the
   smoke batch id, runtime, failure count, and one record per OLDLAB worker with

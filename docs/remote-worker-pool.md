@@ -92,6 +92,18 @@ scripts/ops/worker_service_tunnels.py install-systemd \
   --kubeconfig /secure/path/public-beta.kubeconfig
 ```
 
+Install the watchdog timer on the same host after the tunnels are installed.
+The watchdog probes the worker-facing health URLs every 30 seconds, keeps a
+small consecutive-failure counter under `~/.local/state/loom/`, and restarts
+only the failed tunnel unit after three failed probes. This catches
+active-looking but stale `kubectl port-forward` processes after host restarts,
+pod recreation, or Kubernetes rollouts.
+
+```bash
+scripts/ops/worker_service_tunnels.py install-watchdog-systemd \
+  --env-file /secure/path/.env.remote-worker
+```
+
 Use durable paths for `--kubectl` and `--kubeconfig`. `install-systemd`
 rejects `/tmp`-style paths by default because those units must survive host
 reboot. For a disposable test only, pass `--allow-volatile-paths`.
@@ -109,7 +121,8 @@ Check the units after every cluster rollout:
 systemctl --user status \
   loom-remote-worker-tunnel-control-plane.service \
   loom-remote-worker-tunnel-gateway.service \
-  loom-remote-worker-tunnel-minio.service
+  loom-remote-worker-tunnel-minio.service \
+  loom-remote-worker-tunnel-watchdog.timer
 ```
 
 The remote-worker env file should point at the private control-node address and
@@ -125,6 +138,13 @@ The same script provides the rollout gate for those exact URLs:
 
 ```bash
 scripts/ops/worker_service_tunnels.py check \
+  --env-file .env.remote-worker
+```
+
+For immediate local self-heal testing without waiting for the timer, run:
+
+```bash
+scripts/ops/worker_service_tunnels.py watchdog \
   --env-file .env.remote-worker
 ```
 
@@ -370,12 +390,19 @@ The registry's normalized states are:
 | `completed` | Slurm completed the worker job. With idle-exit this is expected after queue drain. |
 | `failed` | Slurm reported failed, timed out, node failure, OOM, preempted, or submission failed before a job id existed. |
 | `cancelled` | Slurm reported cancellation. Use pending reason/logs to distinguish operator cancellation from policy preemption. |
-| `stale` | Loom had an active record, but the Slurm reconcile pass no longer saw the job after the stale window. |
+| `stale` | Loom had an active record, but the Slurm reconcile pass no longer saw the job after the stale window, or the Slurm job still reported running while the associated Loom worker heartbeat was missing or stale. |
 
 The elastic controller reconciles the table from `squeue` and `sacct`,
 including pending reasons where Slurm reports them. It must not submit another
 job for the same environment, pool, nodelist, CPU, memory, and concurrency
 while an active `pending` or `running` record already exists.
+
+Stale records are visible in `loom admin slurm-workers status` as
+`stale=<slots>` and `stale_jobs=<count>`, and in Prometheus as
+`loom_slurm_worker_stale_slots` and `loom_slurm_worker_stale_jobs`. A recent
+stale record temporarily blocks replacement on the same nodelist so the
+controller does not double-submit during a noisy Slurm or heartbeat transition;
+the next reconcile can replace missing capacity on another allowed node.
 
 ## Start A Remote Worker
 

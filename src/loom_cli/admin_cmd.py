@@ -227,8 +227,10 @@ def _slurm_workers_status(args: argparse.Namespace) -> int:
             f"desired={row['desired_slots']} "
             f"active={row['active_slots']} "
             f"pending={row['pending_slots']} "
+            f"stale={row.get('stale_slots', 0)} "
             f"jobs running={row['running_jobs']} "
             f"pending={row['pending_jobs']} "
+            f"stale_jobs={row.get('stale_jobs', 0)} "
             f"failed_submissions={row['failed_submissions']} "
             f"cancelled_pending={row['cancelled_pending_jobs']} "
             f"idle_exits={row['idle_exits']}\n",

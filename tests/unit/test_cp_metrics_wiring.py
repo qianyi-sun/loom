@@ -61,8 +61,10 @@ def test_metrics_objects_exposed_to_registry() -> None:
         "loom_slurm_worker_desired_slots",
         "loom_slurm_worker_active_slots",
         "loom_slurm_worker_pending_slots",
+        "loom_slurm_worker_stale_slots",
         "loom_slurm_worker_running_jobs",
         "loom_slurm_worker_pending_jobs",
+        "loom_slurm_worker_stale_jobs",
         "loom_slurm_worker_failed_submissions",
         "loom_slurm_worker_cancelled_pending_jobs",
         "loom_slurm_worker_idle_exits",
@@ -102,6 +104,8 @@ def test_metrics_refresher_imports_slurm_worker_metrics() -> None:
     assert hasattr(refresher_module, "SLURM_WORKER_DESIRED_SLOTS")
     assert hasattr(refresher_module, "SLURM_WORKER_ACTIVE_SLOTS")
     assert hasattr(refresher_module, "SLURM_WORKER_PENDING_SLOTS")
+    assert hasattr(refresher_module, "SLURM_WORKER_STALE_SLOTS")
+    assert hasattr(refresher_module, "SLURM_WORKER_STALE_JOBS")
 
 
 def test_control_plane_app_imports_elastic_slurm_controller_loop() -> None:

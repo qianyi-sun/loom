@@ -57,27 +57,30 @@ done
 
 On OLDLAB-1, install the durable private service tunnels with the shared
 remote-worker tunnel helper. Use durable paths for `kubectl` and `kubeconfig`;
-do not install units that depend on files under `/tmp`.
+do not install units that depend on files under `/tmp`. Install the watchdog
+timer after the tunnel units so stale active-looking port-forwards are restarted
+automatically after host restarts, pod recreation, or public-beta rollouts.
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
   --namespace loom-public-beta \
   --kubectl /usr/local/bin/kubectl \
   --kubeconfig /secure/path/public-beta.kubeconfig
+
+scripts/ops/worker_service_tunnels.py install-watchdog-systemd \
+  --env-file /secure/path/.env.remote-worker
 ```
 
-After every public-beta rollout, restart and check the OLDLAB-1 tunnel units:
+After every public-beta rollout, check the OLDLAB-1 tunnel units, watchdog
+timer, and worker-facing health URLs. Manual restart is a fallback when the
+watchdog reports repeated failures instead of a normal first step.
 
 ```bash
-systemctl --user restart \
-  loom-remote-worker-tunnel-control-plane.service \
-  loom-remote-worker-tunnel-gateway.service \
-  loom-remote-worker-tunnel-minio.service
-
 systemctl --user is-active \
   loom-remote-worker-tunnel-control-plane.service \
   loom-remote-worker-tunnel-gateway.service \
-  loom-remote-worker-tunnel-minio.service
+  loom-remote-worker-tunnel-minio.service \
+  loom-remote-worker-tunnel-watchdog.timer
 
 scripts/ops/worker_service_tunnels.py check \
   --env-file /secure/path/.env.remote-worker
@@ -216,6 +219,37 @@ done
 wait
 ```
 
+Install the worker-side user service so each GB10 host re-runs the same Compose
+startup after host reboot. This service does not store secrets; it reads the
+existing `/home/trt/loom-remote-worker/.env.remote-worker` file.
+
+```bash
+for i in $(seq 1 15); do
+  h=trt-gb10-$i
+  ssh "$h" "
+    set -euo pipefail
+    mkdir -p ~/.config/systemd/user
+    cp ~/loom-remote-worker/loom/deploy/worker-pools/gb10/loom-gb10-worker.service \
+      ~/.config/systemd/user/loom-gb10-worker.service
+    systemctl --user daemon-reload
+    systemctl --user enable --now loom-gb10-worker.service
+  " &
+done
+wait
+```
+
+Enable lingering for the `trt` user on every GB10 host through the site's
+privileged admin path so the user service starts after reboot even before an
+operator logs in:
+
+```bash
+for i in $(seq 1 15); do
+  h=trt-gb10-$i
+  ssh "$h" 'sudo loginctl enable-linger trt' &
+done
+wait
+```
+
 Stop without deleting cached Docker volumes:
 
 ```bash
@@ -242,6 +276,7 @@ curl -fsS http://127.0.0.1:18081/healthz
 curl -fsS http://127.0.0.1:19100/healthz
 curl -fsS http://127.0.0.1:19000/minio/health/live
 docker version --format '{{.Server.Version}}'
+systemctl --user is-active loom-gb10-worker.service
 ```
 
 Check running worker containers:

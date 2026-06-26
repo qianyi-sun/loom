@@ -1,0 +1,15 @@
+[Unit]
+Description=Loom GB10 remote worker compose service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/trt/loom-remote-worker/loom
+ExecStart=/usr/bin/env docker compose --env-file /home/trt/loom-remote-worker/.env.remote-worker -f deploy/docker-compose.remote-worker.yml -f /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml up -d --build
+ExecStop=/usr/bin/env docker compose --env-file /home/trt/loom-remote-worker/.env.remote-worker -f deploy/docker-compose.remote-worker.yml -f /home/trt/loom-remote-worker/docker-compose.gb10-hostnet.yml down
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=default.target

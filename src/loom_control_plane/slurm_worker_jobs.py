@@ -44,8 +44,10 @@ class SlurmWorkerPoolCapacity:
     desired_slots: int = 0
     active_slots: int = 0
     pending_slots: int = 0
+    stale_slots: int = 0
     running_jobs: int = 0
     pending_jobs: int = 0
+    stale_jobs: int = 0
     failed_submissions: int = 0
     cancelled_pending_jobs: int = 0
     idle_exits: int = 0
@@ -57,8 +59,10 @@ class SlurmWorkerPoolCapacity:
             "desired_slots": self.desired_slots,
             "active_slots": self.active_slots,
             "pending_slots": self.pending_slots,
+            "stale_slots": self.stale_slots,
             "running_jobs": self.running_jobs,
             "pending_jobs": self.pending_jobs,
+            "stale_jobs": self.stale_jobs,
             "failed_submissions": self.failed_submissions,
             "cancelled_pending_jobs": self.cancelled_pending_jobs,
             "idle_exits": self.idle_exits,
@@ -152,6 +156,9 @@ def summarize_jobs(rows: list[dict[str, Any]]) -> SlurmWorkerCapacitySummary:
         elif state == "running":
             capacity.active_slots += requested_concurrency
             capacity.running_jobs += 1
+        elif state == "stale":
+            capacity.stale_slots += requested_concurrency
+            capacity.stale_jobs += 1
         elif state == "failed" and (
             row.get("job_id") is None or row.get("submission_error") is not None
         ):
@@ -288,8 +295,10 @@ async def reconcile_slurm_worker_jobs(
     now: datetime | None = None,
 ) -> SlurmWorkerJobReconcileResult:
     now = now or datetime.now(UTC)
+    cutoff = now - timedelta(seconds=stale_after_seconds)
     observed_job_ids = {obs.job_id for obs in observations}
     updated = 0
+    stale = 0
     missing = 0
     for obs in observations:
         job = (await session.execute(
@@ -317,6 +326,31 @@ async def reconcile_slurm_worker_jobs(
         job.last_reconciled_at = obs.observed_at or now
         job.updated_at = now
         updated += 1
+        if state == "running" and job.worker_id is not None:
+            worker = (await session.execute(
+                select(Worker).where(Worker.id == job.worker_id),
+            )).scalar_one_or_none()
+            if (
+                worker is None
+                or worker.status != "active"
+                or worker.last_seen_at <= cutoff
+            ):
+                job.state = "stale"
+                job.pending_reason = "worker heartbeat stale"
+                job.stale_at = now
+                job.finished_at = now
+                job.updated_at = now
+                stale += 1
+                logger.info(
+                    "slurm_worker_job_marked_stale_worker_heartbeat",
+                    extra={
+                        "job_id": job.job_id,
+                        "environment": job.environment,
+                        "pool_name": job.pool_name,
+                        "nodelist": job.nodelist,
+                        "worker_id": str(job.worker_id),
+                    },
+                )
         if obs.pending_reason:
             logger.info(
                 "slurm_worker_pending_reason",
@@ -335,7 +369,6 @@ async def reconcile_slurm_worker_jobs(
                 },
             )
 
-    cutoff = now - timedelta(seconds=stale_after_seconds)
     active_stmt = select(SlurmWorkerJob).where(SlurmWorkerJob.state.in_(ACTIVE_STATES))
     if observed_job_ids:
         active_stmt = active_stmt.where(or_(
@@ -343,7 +376,6 @@ async def reconcile_slurm_worker_jobs(
             SlurmWorkerJob.job_id.not_in(observed_job_ids),
         ))
     stale_candidates = (await session.execute(active_stmt)).scalars().all()
-    stale = 0
     for job in stale_candidates:
         last_seen = job.last_reconciled_at or job.submitted_at or job.created_at
         if last_seen is not None and last_seen > cutoff:

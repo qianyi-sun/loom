@@ -77,6 +77,14 @@ def test_summarize_jobs_counts_capacity_without_secrets() -> None:
             "worker_status": "idle-exit",
         },
         {
+            "environment": "production",
+            "pool_name": "oldlab",
+            "state": "stale",
+            "requested_concurrency": 6,
+            "job_id": "6",
+            "worker_status": None,
+        },
+        {
             "environment": "staging",
             "pool_name": "lux",
             "state": "failed",
@@ -115,6 +123,10 @@ def test_summarize_jobs_counts_capacity_without_secrets() -> None:
     assert oldlab.running_jobs == 1
     assert oldlab.failed_submissions == 0
     assert oldlab.idle_exits == 1
+    assert oldlab.stale_slots == 6
+    assert oldlab.stale_jobs == 1
+    assert oldlab.as_dict()["stale_slots"] == 6
+    assert oldlab.as_dict()["stale_jobs"] == 1
 
     lux = summary.by_pool[("staging", "lux")]
     assert lux.failed_submissions == 1

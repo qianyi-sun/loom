@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -272,6 +272,78 @@ async def test_controller_reconciles_existing_jobs_before_deciding_capacity(
         assert [(row.job_id, row.state, row.worker_id) for row in rows] == [
             ("601", "running", worker_id),
             ("602", "pending", None),
+        ]
+    finally:
+        await engine.dispose()
+
+
+async def test_controller_replaces_running_job_with_stale_worker_heartbeat(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    worker_id = uuid4()
+    now = datetime.now(UTC)
+    try:
+        await _seed_team_task_trials(session_factory, queued=1)
+        async with session_factory() as s:
+            await s.execute(insert(Worker).values(
+                id=worker_id,
+                hostname="oldlab-1",
+                version="0.1",
+                capabilities=[],
+                registered_at=now - timedelta(minutes=20),
+                last_seen_at=now - timedelta(minutes=20),
+                status="active",
+            ))
+            await s.execute(insert(SlurmWorkerJob).values(
+                environment="production",
+                pool_name="oldlab",
+                nodelist="oldlab-1",
+                requested_cpus=12,
+                requested_memory_mib=58000,
+                requested_concurrency=6,
+                job_id="611",
+                slurm_state="RUNNING",
+                state="running",
+                worker_id=worker_id,
+                redacted_env={},
+                submitted_at=now - timedelta(minutes=20),
+                started_at=now - timedelta(minutes=19),
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner(
+            submit_results={"oldlab-2": "612"},
+            observations=[
+                SlurmWorkerJobObservation(
+                    job_id="611",
+                    slurm_state="RUNNING",
+                    nodelist="oldlab-1",
+                    worker_id=worker_id,
+                ),
+            ],
+        )
+
+        async with session_factory() as s:
+            result = await run_elastic_slurm_worker_controller_once(
+                s,
+                config=_config(stale_after_seconds=300),
+                runner=runner,
+            )
+            await s.commit()
+
+        assert runner.submitted_nodes == ["oldlab-2"]
+        assert result.submitted_job_ids == ("612",)
+
+        async with session_factory() as s:
+            rows = (await s.execute(
+                select(SlurmWorkerJob).order_by(SlurmWorkerJob.job_id),
+            )).scalars().all()
+
+        assert [(row.job_id, row.state) for row in rows] == [
+            ("611", "stale"),
+            ("612", "pending"),
         ]
     finally:
         await engine.dispose()

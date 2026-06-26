@@ -82,7 +82,8 @@ Attach these to the release issue or release PR:
 - If a remote-worker pool is attached, private tunnel evidence from
   `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
   Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the
-  control node and from at least one worker-host context.
+  control node and from at least one worker-host context, plus evidence that
+  `loom-remote-worker-tunnel-watchdog.timer` is active on the control node.
 - If OLDLAB elastic workers are enabled, `worker_capacity_smoke` release-gate
   evidence must include the smoke batch id, runtime, failure count, and one
   `oldlab_worker_records` entry per OLDLAB worker with node name, Slurm job id,
@@ -197,6 +198,8 @@ If the public beta uses extra remote workers outside the Kubernetes cluster,
 run this private gate after every rollout and before load testing:
 
 ```bash
+systemctl --user is-active loom-remote-worker-tunnel-watchdog.timer
+
 scripts/ops/worker_service_tunnels.py check \
   --env-file .env.remote-worker
 
