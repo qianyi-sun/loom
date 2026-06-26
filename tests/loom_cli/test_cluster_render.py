@@ -408,6 +408,42 @@ def _ipblock_ports(policy: dict) -> set[tuple[str, int]]:
     return out
 
 
+def _public_ipblock_ports(policy: dict) -> set[int]:
+    """Return TCP ports allowed to public internet egress."""
+    out: set[int] = set()
+    for rule in policy["spec"].get("egress", []):
+        for target in rule.get("to", []):
+            ip_block = target.get("ipBlock")
+            if ip_block is None or ip_block.get("cidr") != "0.0.0.0/0":
+                continue
+            if set(ip_block.get("except", [])) != {
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "169.254.0.0/16",
+            }:
+                continue
+            for port in rule.get("ports", []):
+                if port.get("protocol", "TCP") == "TCP":
+                    out.add(int(port["port"]))
+    return out
+
+
+def test_render_allows_service_public_https_for_provider_discovery() -> None:
+    """Provider validation and model discovery run in loom-service, so
+    the service pod needs the same public HTTPS/HTTP egress baseline as
+    the gateway for ordinary hosted OpenAI-compatible `/models` APIs.
+    """
+    docs = _load_docs(render_manifests(ClusterConfig()))
+
+    assert {443, 80} <= _public_ipblock_ports(
+        _network_policy_named(docs, "loom-service"),
+    )
+    assert {443, 80} <= _public_ipblock_ports(
+        _network_policy_named(docs, "loom-llm-gateway"),
+    )
+
+
 def test_render_provider_egress_allowlist_adds_service_and_gateway_rules() -> None:
     """Operators can approve a non-standard BYO provider endpoint once
     in cluster-config.toml; render must preserve that policy for both

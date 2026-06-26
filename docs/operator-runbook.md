@@ -1191,8 +1191,10 @@ automation is launching or restarting the inference service.
 
 Cluster NetworkPolicies keep `loom-service`, `loom-llm-gateway`, and the
 optional `loom-egress-proxy` on a default-deny boundary. Hosted providers on
-public `443` or `80` work with the default gateway policy, but GPU-cluster
-bastion forwards often use ports such as `18001`. Approve those endpoints in
+public `443` or `80` work with the default service and gateway policies: the
+service policy covers provider validation, model discovery, and preflight, and
+the gateway policy covers runtime model calls. GPU-cluster bastion forwards
+often use ports such as `18001`. Approve those endpoints in
 `cluster-config.toml`; do not patch live NetworkPolicies by hand.
 
 Use IP/CIDR entries, not DNS names. Kubernetes NetworkPolicy enforces CIDRs,

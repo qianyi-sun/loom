@@ -253,6 +253,20 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+    # Provider validation, model discovery, and model preflight run in
+    # loom-service. They need the same public provider baseline as
+    # loom-llm-gateway for hosted OpenAI-compatible `/models` APIs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - { port: 443, protocol: TCP }
+        - { port: 80, protocol: TCP }
 {% for target in provider_egress_rules %}
     # Operator-approved BYO provider endpoint from
     # render_config.provider_egress_allowlist.

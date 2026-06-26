@@ -101,7 +101,7 @@ component, restricting ingress/egress to only what each component needs:
 | `loom-control-plane` | `loom-worker`, `loom-service` | `loom-postgres`, kube-dns |
 | `loom-llm-gateway` | `loom-worker`, `loom-service` | `loom-postgres`, `loom-minio`, kube-dns, public 80/443, plus explicit `provider_egress_allowlist` IP/CIDR:port entries |
 | `loom-worker` | (none — workers only initiate) | `loom-control-plane`, `loom-llm-gateway`, `loom-minio`, kube-dns |
-| `loom-service` | any (public REST surface) | `loom-control-plane`, `loom-llm-gateway`, `loom-postgres`, `loom-minio`, kube-dns, plus explicit `provider_egress_allowlist` IP/CIDR:port entries for provider validation |
+| `loom-service` | any (public REST surface) | `loom-control-plane`, `loom-llm-gateway`, `loom-postgres`, `loom-minio`, kube-dns, public 80/443 for provider validation/model discovery/preflight, plus explicit `provider_egress_allowlist` IP/CIDR:port entries |
 | `loom-web` | any (public SPA) | kube-dns |
 | `loom-egress-xds` | `loom-egress-proxy` | `loom-postgres`, kube-dns |
 | `loom-egress-proxy` | `loom-llm-gateway` | `loom-egress-xds`, kube-dns, public 443, plus explicit `provider_egress_allowlist` IP/CIDR:port entries |
