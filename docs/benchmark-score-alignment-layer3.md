@@ -116,3 +116,66 @@ is the human-readable narrative; the machine-readable form lives in
 - **Aggregate vs. published leaderboard number.** Requires the
   model-agent path above to first work end-to-end; only then can we
   compare to a published cell on cxcscmu.github.io/SkillLearnBench.
+
+## gpqa-diamond — litellm × claude-haiku-4-5 (partial sweep)
+
+- **Upstream pin:** `idavidrein/gpqa@56686c06f5e19865c153de0fdb11be3890014df7`
+  (catalog `benchmarks.json`, `gpqa-diamond` sibling adapter added in #546).
+- **Imported task slate:** 198 tasks (full GPQA Diamond subset), registered via
+  `loom datasets import gpqa-diamond`. Same upstream zip, `gpqa_diamond.csv` member.
+- **Batch:** `stage-b-gpqa-diamond-smoke-5` (id `a86735f8-dccf-401d-9655-768b73da95a4`).
+  Submitted via `loom eval batch create --benchmark gpqa-diamond --agent litellm
+  --provider qa-relay-anthropic --model claude-haiku-4-5 --n-per-task 1 --backend docker`.
+  Provider connection: `qa-relay-anthropic` (yibuapi, anthropic dialect).
+- **Reference:** Harbor's published `parity_experiment.json` for `adapters/gpqa-diamond`
+  at `harbor-framework/harbor@2ead3f1f` records codex + gpt-5.2 → 87.21% ± 0.34 across
+  3 trials. **That config is NOT the matched config for this Loom run** — yibuapi
+  serves anthropic-dialect models, not codex/gpt-5.2 — so this Layer 3 entry is
+  workflow validation + Loom-side performance evidence on the substitute model, not
+  a strict Loom-vs-Harbor parity proof. A true paired comparison would require the
+  same model+agent on both sides.
+- **Result:** **156 / 198 trials succeeded (s=156, f=0, x=42); 87 / 156 scored
+  reward=1.0; 69 / 156 scored reward=0.0; aggregate over completed trials = 0.5577.**
+  The 42 unrun trials were cancelled because the `deploy-worker-1` container hard-failed
+  partway through with `httpx.ReadError` on the worker→CP `/workers/register` POST and
+  could not self-recover across multiple restart attempts. The CP remained healthy
+  throughout (`GET /healthz → 200`). Filed as a follow-up worker resilience issue.
+  Per-trial breakdown in `docs/evidence/2026-06-26-gpqa-diamond-haiku-partial.json`.
+- **Verdict:** the Loom side validated end-to-end on 156 distinct GPQA Diamond
+  tasks. The 0.5577 aggregate is consistent with claude-haiku-4-5's expected weak-model
+  performance on a domain-PhD-level multiple-choice benchmark; the gap vs. Harbor's
+  87.21% (gpt-5.2) is a model+agent gap, not a verifier-semantics gap. The Loom adapter
+  (#546 sibling slug), import pipeline, batch scheduling, LiteLLMAgent → qa-relay →
+  yibuapi → Anthropic round-trip, and the script verifier extracting the letter answer
+  from `final_answer.txt` all work correctly.
+- **Layer 2 manifest status:** the `gpqa` entry's `layer2_evidence.status` remains
+  `pending_paired_run` — this Layer 3 evidence is workflow validation, not a matched-
+  config paired comparison against Harbor's published baseline. A future entry with a
+  shared model+agent on both sides (or rerunning Harbor with claude-haiku via yibuapi)
+  would justify flipping `paired_validated` / `paired_delta_flagged`.
+
+### What this Layer 3 entry validates
+
+1. **`gpqa-diamond` sibling adapter (#546) is end-to-end.** Loom's worker selects the
+   198 Diamond tasks (not the 546 Extended superset), `convert_instance` materializes
+   the bundled `verifier/check.py` reading `final_answer.txt`, and the verifier scores
+   per-task at the expected 1.0/0.0 boundary.
+2. **The qa-relay-anthropic provider connection works for batches.** 158 LLM calls
+   succeeded through `https://yibuapi.com` with anthropic dialect; 98K prompt tokens
+   + 134K completion tokens recorded by the gateway.
+3. **No platform failures during the run** — the 42 unrun trials were cancelled by us
+   after the worker crashed, not failed by the verifier or sandbox layer. Every trial
+   that started reached a terminal state with a parseable reward.
+
+### Open follow-ups (not in this Layer 3 entry)
+
+- **Worker container resilience.** `deploy-worker-1` hit `httpx.ReadError` on its
+  startup `/workers/register` POST after running ~3 trials per slot for ~15 minutes,
+  could not self-recover across compose restart cycles. CP healthz remained 200
+  throughout. Filed as a separate worker-resilience follow-up.
+- **True matched-config paired comparison vs Harbor.** Requires either (a) Harbor
+  rerun with claude-haiku-4-5 via yibuapi against the same 198 Diamond tasks, or
+  (b) yibuapi adding gpt-5.2 / codex compatibility so Loom can replay Harbor's
+  published config end-to-end. Tracked in #541.
+- **Re-run the 42 unfinished trials** once the worker container is recovered, to
+  produce full 198-task aggregate evidence.

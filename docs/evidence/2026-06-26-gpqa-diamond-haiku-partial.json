@@ -1,0 +1,785 @@
+{
+  "batch_id": "a86735f8-dccf-401d-9655-768b73da95a4",
+  "trials": [
+    {
+      "task_id": "gpqa-diamond/recuYEkVjdVUwA3c0",
+      "trial_id": "d6f0a0ad-7e3a-4783-b393-709bf7f002a8",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recUOePh79cp4T2Bg",
+      "trial_id": "20cacddd-439e-4207-9ec6-f75789eccce7",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recUBgVlkKzcRPDdK",
+      "trial_id": "a3a426ba-61e8-4690-ba08-a70f18c2f403",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rectXfsCM1dj4Kv2c",
+      "trial_id": "2e8e496b-b9ca-4b5d-bd9c-e1a779f29c7b",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recTs7qzfJs6kfLUK",
+      "trial_id": "2c853d88-8bcd-4f30-a9b1-cd40b727f1e2",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rectlyG9pCAAuWhoB",
+      "trial_id": "4fb8e74e-7919-4867-aa3c-ece9c99c79cd",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rect4iLrSfUwkNTno",
+      "trial_id": "d2bffdeb-07c4-4cd2-a67a-633204dd6481",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recSBcGLPatKb3Ygu",
+      "trial_id": "ec2ea226-f50a-48fa-8d70-e5fdc94b6858",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recS48OsU6kVadBPW",
+      "trial_id": "eb0a68ba-0293-41af-a55c-a729a07b1fc4",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recs3PLPUEMiqg4P8",
+      "trial_id": "e3ee7e13-393c-4a57-90b8-a4f797b018c7",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recRZjaElf8ft7xTq",
+      "trial_id": "cef09757-0895-48ab-bde8-0be36d754995",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recRTiyaRymerDJ4y",
+      "trial_id": "849f8be8-fdf2-42c4-93e3-64a8ad425fa0",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recrs0kUo7Ua1xhKO",
+      "trial_id": "c63d7cd5-9ccd-4b6f-81f1-24cb96b2d744",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recrNbtgTNoabJJi6",
+      "trial_id": "588e4a0a-c694-4441-ac08-a5b452c78ac6",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recRhwQwHijW0gCLo",
+      "trial_id": "0f38f0d6-cf2a-4b49-8646-1e41c5be0269",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recrHBEJJoDTV05JR",
+      "trial_id": "798642c9-d2fc-4b35-b471-301634694304",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recRgabRzMaEoBRcM",
+      "trial_id": "0c8d9a72-3246-4afe-ad73-b9426d175c5f",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recReg13iV2HwJTaA",
+      "trial_id": "fbff9b46-1911-4157-b858-578bca9c3a25",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recr3VHM4zYf6dMFY",
+      "trial_id": "0e0a3239-2b71-4dea-9b81-253816a7479a",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recqLRu4BcJvlSANc",
+      "trial_id": "a1dd7163-2ac2-480b-8e1a-26446c4fae84",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recQiWOxhkXRz9NVE",
+      "trial_id": "fab19dbc-e90b-4839-910e-31f156d65079",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recqGD3fxPCI59vPQ",
+      "trial_id": "fb4db3bb-db14-41c0-9a02-29b9d867daca",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recqFDvYKKRmbnoUb",
+      "trial_id": "09ccc926-aedb-47fa-91f6-e267ce8654c4",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recQ8oxSY2aCwFRS8",
+      "trial_id": "a130ffc5-97b1-40f5-a4d5-ea83daf4d2fe",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recPzW1WqRnPs57D6",
+      "trial_id": "025ae059-cd2a-4965-be0a-510ac9c34b41",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recPSTGXK3P39yNYT",
+      "trial_id": "b90020c4-68e6-4cbe-853a-fb6ff5e8f384",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recPL4ZPpVYxgMu57",
+      "trial_id": "e34a4595-e2e8-4af8-8169-28ba3c58d3bd",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recpki12iG9RUGrz9",
+      "trial_id": "40a529f3-4575-4088-862d-170111749910",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recpJmTOXx6T48nDJ",
+      "trial_id": "a34fba29-10b1-48d0-b9bc-7d3e96ba662b",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recPIzpnuYpB4yvmp",
+      "trial_id": "0793b1aa-37a8-40a6-b5b6-be16cb6b1d40",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recOYsaYs6RmtlTDy",
+      "trial_id": "d2785d14-dde5-4bea-bcd1-240072b02e0d",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recoy9ZLBsc7HIRBy",
+      "trial_id": "7f4a68b5-c5a5-4581-8433-a71f4d41c739",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recOvqPKUtyy9ISA1",
+      "trial_id": "e03c9588-6939-44a5-b4df-0b1b4d60aeee",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recooG6bivTUJpDBz",
+      "trial_id": "0489809c-2793-4607-a15e-a58769b6538b",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recOkA2zsy4GSMD9R",
+      "trial_id": "50b20bd3-224b-417a-8b88-8212500ca550",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recoiTJPGUmzAkief",
+      "trial_id": "bc23cb45-451b-4632-a688-c3576c0b0ecb",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/reco8WSc71p8zAv4q",
+      "trial_id": "2aa1629d-4491-4661-b004-0ba993b8edaa",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recO3hvCWRGiG0odN",
+      "trial_id": "a6bb6ea2-321e-48c5-b0ef-454b27452ffe",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recNuT2oSnO86bxOx",
+      "trial_id": "bffeb8e0-fe48-45dd-b926-edc434a62dab",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recNu3MXkvWUzHZr9",
+      "trial_id": "e5f0149c-2326-4cf0-9bae-b716ce646d7b",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recnTTKdBzfuoZ7w7",
+      "trial_id": "11f85ccc-4f8a-4e06-93cf-fbb491fd0669",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recnjViFrqlZNL3fY",
+      "trial_id": "ea86d664-ff96-4c30-9301-83edd2cb0571",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recnGEpF1srQpaqWq",
+      "trial_id": "708b9ab5-8594-417b-b80e-23ede75f3c8b",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recNFJjE5PPTqVJGv",
+      "trial_id": "01ffaa40-fbee-417f-82eb-70ca592729f0",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recnawZPumSCLMVgp",
+      "trial_id": "ff79968a-65b9-488d-bf03-fe38d759449b",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recNAiPUKOulQbKVP",
+      "trial_id": "0d45b0ac-deb7-40c0-ab7d-4c61383a8559",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recN4DY9Q5V03glmQ",
+      "trial_id": "b73d04aa-beb3-4728-9d6b-c1ae1925e14c",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recn3NhOhqAPLda16",
+      "trial_id": "4606cbce-6b6d-4c3b-b069-2bc259f656fe",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recmwwQJnx7ll7bqL",
+      "trial_id": "272f1d89-cb0d-4418-9e62-66da6036e40e",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recmkvk6EFAmqyMxR",
+      "trial_id": "54ffcbfb-489e-49aa-a6ad-4dfe44b92a8f",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recMicVBcqy1xM1jq",
+      "trial_id": "a16f88a0-34cb-4522-b449-accef909038d",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recmI7EiLv72PxmYK",
+      "trial_id": "87fef060-ce33-4be7-bd64-64901b862e34",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recLSzwBUS3olCjhl",
+      "trial_id": "789bada0-9ded-4313-8a17-d8559a42271f",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recLrRirj7iXoB0rU",
+      "trial_id": "d26f49aa-7764-4b44-85be-e87751182089",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recLB0EkQ54bYVhnd",
+      "trial_id": "e184d937-678f-4bc3-ad2e-4cdbf025a06f",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recLAgwx9vbgB5EHk",
+      "trial_id": "fd800add-b8f3-420b-8ff5-bada48f9b48d",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recL9MFV5zmdlle5T",
+      "trial_id": "dc73d5e0-cc5f-4986-9186-f93747e485e3",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recl1UtgTVKishAq4",
+      "trial_id": "1303057f-87d1-49d3-9e23-15b2fe2564fe",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reckYqR92oJkqJXkE",
+      "trial_id": "a31d012f-216e-4e43-92b4-bd670e16662f",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recKv4hFyNpViUXnL",
+      "trial_id": "11cc0e43-2a25-4c25-a1e1-488f396423a1",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recKm6LNWykGapmCr",
+      "trial_id": "9b7b40f7-e144-45ef-837e-56591db58a80",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reckl6PkaEMWM50yZ",
+      "trial_id": "17cee1e8-12c4-4767-822a-7575cf33904a",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reckEnrOPFT9Ru7tW",
+      "trial_id": "301446ae-d6c3-464e-a1fa-480aac31cf95",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recKcjTwONILZqHAX",
+      "trial_id": "8c0900c2-226c-48c8-9f3b-75ec4ec48ea4",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recK9F5aqdaybl8bb",
+      "trial_id": "8b540fa0-e371-4fae-bf60-b0db18ec4e33",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reck4G4xxv3YnpbtQ",
+      "trial_id": "4959d3f9-e53a-463c-832e-995a7bcfe11c",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reck1zKeCssmN82Ga",
+      "trial_id": "cd180803-a1e3-43f5-af87-aae3d11a76aa",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recJZ3QEfRKjYw9a7",
+      "trial_id": "12b137d8-2c70-4691-915c-339b481140b5",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recJpyGtGIsxulevT",
+      "trial_id": "3afe2d7b-9bfd-4e32-81ed-5a4b72e22ba0",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recJJcOHhFeSaRpl4",
+      "trial_id": "988c2fa0-2e87-4ce8-8dde-2f33c2155df6",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recjJ54TXc04enRkZ",
+      "trial_id": "215b3f44-6396-452d-bd61-20bcade368bf",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recjgMJaMxz4ESDF2",
+      "trial_id": "0aecc0ae-6d4d-4926-bd9f-d3222c785900",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recixxJmdux0d8LZQ",
+      "trial_id": "5a8f4972-785a-4da5-9ab0-bcf8dffaa947",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/reciuppdQde4FGX1z",
+      "trial_id": "499f970f-486f-41cd-ad77-019fc7252bdf",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recIOlKBsOeEcgkA1",
+      "trial_id": "15bdc2d1-5e1c-40b3-93cb-0ed5327e7bc9",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recINSFEYLCyyd08m",
+      "trial_id": "320b455c-93a1-43c7-9cad-2698559336de",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recINGR1z01Fh1Z3A",
+      "trial_id": "1e758f89-261e-4016-bc86-5fb55ab51cdf",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recIMcQfaQNa6vzsT",
+      "trial_id": "254ed04d-2c82-4e03-a349-6c90fb0b8638",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recIlghoOw5VbY4Zh",
+      "trial_id": "f4a46e0c-2e4d-4d67-bd79-28a8ba29cdea",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recIj8lR4tuDgrHou",
+      "trial_id": "67936b6e-3255-4de9-bb53-6cf19df36133",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recIIUynGGpsGEYuo",
+      "trial_id": "37288280-560d-437d-996e-3b5d4b687ae7",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recihePFulRgNKsIn",
+      "trial_id": "1dba9d8b-dbe2-46b5-821b-74ff2b2da399",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recIDiDKKrN61Auyr",
+      "trial_id": "0c83b363-6f60-46c1-a6da-e1c0e35271ed",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recI1ls9OXdxatHQn",
+      "trial_id": "b67d4ffd-8aea-4bea-8bc0-243f14c90656",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recHVUd2DkoKfedJZ",
+      "trial_id": "b13d5967-b9c6-42b4-bd51-e1519c24b3a0",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rechtUKxC6G67H7Pr",
+      "trial_id": "836c6246-f873-47a4-991d-716b0d61c889",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rechKl68Uc6H7vU0N",
+      "trial_id": "f4bb324b-4739-48f5-904c-42c812a88a98",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rechgQucGlrnt8KRV",
+      "trial_id": "5e6e4938-9293-4c5c-9d1f-43973b88abcb",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recgXxEgllSGEpELP",
+      "trial_id": "a10e8cf5-c324-4bda-ba87-5727f375dcb8",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recgM7o1tcc7tP778",
+      "trial_id": "74947b4d-72fd-43f3-88dc-2269ae18494d",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recgI6tUQ7RLJRWGx",
+      "trial_id": "b18a6282-586b-4e50-a91b-882e7962f6c3",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recGFNRVl1qBZGwyU",
+      "trial_id": "38cc7e37-0bfa-4f47-b9be-e8ebf169328e",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recGFKDUd8qgz81Zl",
+      "trial_id": "c61e8e0d-a4e6-4417-a519-f71d115eb038",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recGee5m84dg5FZkc",
+      "trial_id": "c2dcd228-f75e-45ac-a206-803d84d8b2a8",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recgC4GJ8wUemlUQD",
+      "trial_id": "a9839e22-1d6a-4d6c-898c-2cdd5da7e229",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recG1ljJQcVy6CbSl",
+      "trial_id": "f8b5c704-96c0-4acd-82da-5a83836494fb",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recfTlTMjZBuOducT",
+      "trial_id": "548a2ad0-4ca2-4bdd-b699-fd43af9062fa",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recFaL6j8UMhutXrc",
+      "trial_id": "0e8bf106-da1d-454e-b47c-50d58dbca9a1",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recf6ayQmL1SxKbvW",
+      "trial_id": "d28ca664-304f-4eb3-95e7-b15b4e165d19",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/receYQxnUBvxPcvbQ",
+      "trial_id": "e77983c6-4ffb-499e-9401-bc350d08c955",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/receo3UUzRvWCqyfA",
+      "trial_id": "52769653-8853-414c-837a-b69c7163944b",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recEmTBhx2hgw6tPQ",
+      "trial_id": "76ac8f72-a63d-4009-8808-ceb224b6bc56",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recE2ihVfqEK4R9d0",
+      "trial_id": "428570f3-f747-40e2-b03c-683a610598c9",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recDytVnNYZe2HuUU",
+      "trial_id": "b1d4c6fd-1080-4915-9e52-43661ee8572e",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recdya6FuYraBU5Rh",
+      "trial_id": "6eae1caf-e23a-41ba-ac08-73d857614801",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recDj2Y2BbtV02Wv5",
+      "trial_id": "d41c25a6-7167-4bd8-836e-de8d3b6f06ab",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recDDxpS9s8cwkqfq",
+      "trial_id": "65fbd1dd-f9c3-481f-9661-67f4daa9dc18",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recD8oX1KevFbl7bL",
+      "trial_id": "5abb4286-ca19-40e0-85b4-595a65132183",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/reccVFW11Elovnf8T",
+      "trial_id": "333fad73-920f-4152-9449-104c69a68a7a",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/reccVBrYdwsB84fGy",
+      "trial_id": "c21b2a69-2a24-46f7-82aa-b09de2928ac8",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reccOKzFNmyqeJ6ry",
+      "trial_id": "b5674518-9cf0-4cd4-8b7d-b5b42c8ba20e",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recclFbsjbaiVVnnV",
+      "trial_id": "aa013ca0-fe4c-4d28-9935-00340f2cdf63",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recCJJOeBGERaHYax",
+      "trial_id": "9f6a8cc6-c5c3-4ffe-8c0a-836bd613fc4f",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recBXlqrZUCR897It",
+      "trial_id": "3dd055b3-b2a1-4b6e-a169-ecd2eca2336e",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recBtVK8rBVtIlXDq",
+      "trial_id": "7b97e869-ef21-4f9a-bcce-cb9b42ab99e0",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recBhnXrUyTJ6WHIR",
+      "trial_id": "a9189d30-a6e5-4510-85aa-3ee009d55888",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recBGxVySx1pkrO1i",
+      "trial_id": "4b7ad68c-21c4-45fd-b901-40204ab2abc0",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recb80OwMgNnceA9t",
+      "trial_id": "ff1bbb5b-0ac0-4c06-9497-0545b384a7ff",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recb4cGsC6BJUCU3V",
+      "trial_id": "b7631373-295f-40d0-a556-f2f34c709924",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recb2M22zaD3tL6Qc",
+      "trial_id": "01895c7e-415f-4503-abde-2d333db3ab06",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/recAYkd96NNuNl1Ei",
+      "trial_id": "071cf7a0-7a3c-436e-b69e-de364a86ab83",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recaXdGn3FAIkxLGM",
+      "trial_id": "eaa8ba61-9c54-465b-9827-57741bd7cb5a",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recatj4YXzbOaq3Ar",
+      "trial_id": "2268c2e8-e3cd-4c6a-98fe-a7944274b683",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recakFKZioXUuldcd",
+      "trial_id": "8d3b9199-be75-47d2-8171-9334baec9af7",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recafnH3RRnMBXEb1",
+      "trial_id": "c5d3bc35-d5d9-4e09-b189-03d20d27ac7e",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recAAJoHMW45Lv5je",
+      "trial_id": "a95e33a3-0b63-4d84-96b2-ce96aff0de2e",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/reca44yABeO2fx7UB",
+      "trial_id": "07a46c49-8d3a-4740-81da-c87dbc56d8e8",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/recA1i5ZAh0Uzclxp",
+      "trial_id": "9de34570-c6c8-45a2-876f-baf0f77687d0",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec9W28HgpEUeUN8k",
+      "trial_id": "d68750a9-d945-42b7-adfe-06c71b1f0d77",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec9ubQihAh6g9bft",
+      "trial_id": "0794ed69-8f97-4749-914e-0889971b004f",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec9GugrngvsQR99A",
+      "trial_id": "24ab5adb-4734-41db-a385-f2832dbba7f8",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec8y3ZrBOcLgNEkE",
+      "trial_id": "abfeb9bc-4a5c-4ce6-b93c-c253e6192a11",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec8nshandHARTkrg",
+      "trial_id": "049fc95e-225a-472f-9482-2b4d923c7e81",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec7qmSnbud4FHSqL",
+      "trial_id": "015057ba-0e14-483d-b0b9-8a279d36c338",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec7C06XOB2h298ue",
+      "trial_id": "29780419-49c9-4a6f-9432-b6fa55f981ca",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec6sE2CRtD4drtHg",
+      "trial_id": "9e36e92e-99f0-460f-8320-6fc4864c5dfd",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec5rjeLsEq5Fg7Oj",
+      "trial_id": "db2ae816-e144-49c1-acf0-c753cb0b24ae",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec5eA17Qr1ucNLUf",
+      "trial_id": "ca78d378-b1fa-40b6-a4b5-59e1819b8ba7",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec527dNeEtWJrYNl",
+      "trial_id": "6735dd18-9324-4793-a020-a32ba08f1735",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec4UqStf9WUVif1f",
+      "trial_id": "715e3016-0bd0-4117-91c5-07d7679dce65",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec4r4KWNLrT7g2kR",
+      "trial_id": "aa88e993-e877-49f1-99c9-5aac40b60125",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec4L69T0Y1AS4AFS",
+      "trial_id": "dfb2aea3-b469-45c7-b291-a0f5955e3028",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec4JrWy7Il8ho5vk",
+      "trial_id": "19378f89-8428-4ae4-b32b-2607a82bd9e3",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec47oNPXudlTIk4y",
+      "trial_id": "10c2c543-e32f-4582-bfcd-ebca5d9ad0f2",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec32C1ZEapBnCC0E",
+      "trial_id": "334db0ec-43b7-4595-ba8d-55524eb34d4f",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec2ZTsqazBZ3LTWZ",
+      "trial_id": "f0a8eb88-f072-4fbd-8397-a30f3c1568b0",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec2UlKqC6RFHdcro",
+      "trial_id": "86191fb8-5de2-4f8c-81a4-ea0f43923ed7",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec2fsnzUuvNtUYK8",
+      "trial_id": "95a4fd02-0117-4c9a-8d8c-e833390b7815",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec260hNUCEj109Dj",
+      "trial_id": "b4dd81f3-3863-4932-82ce-6ca59d05500a",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec1zl5LvaatzGhFt",
+      "trial_id": "1c1e4a47-26da-4e1b-ac1f-c3561660ad12",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec1oj2DveQWl9Rpw",
+      "trial_id": "508b681b-2b30-48da-9eb3-413189944898",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec0yTRmO1o1xCA6H",
+      "trial_id": "f9e189ae-a86a-4950-afbf-97fd1de12e2e",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec0wZvZgiz320KRs",
+      "trial_id": "c4ba9e24-1897-4c5d-8da0-f3cd612210fd",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec0VuKUjt1SZ7NYv",
+      "trial_id": "771de787-2fa7-49bd-9b4b-ed01dc589bdd",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec0Arme2jcXQZnAW",
+      "trial_id": "5232c723-bc5a-4de2-87c5-4ff4f615ccf0",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "gpqa-diamond/rec06pnAkLOr2t2mp",
+      "trial_id": "e59677f7-1478-4483-bff4-fc057a1c96ba",
+      "aggregate_reward": 1.0
+    }
+  ]
+}
