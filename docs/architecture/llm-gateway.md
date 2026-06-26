@@ -37,7 +37,7 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
 |--------------------------|---------------------|------------------------------------|
 | `POST /v1/messages`      | Anthropic native    | `anthropic.AsyncAnthropic.messages.create` |
 | `POST /v1/chat/completions` | OpenAI Chat / BYO OpenAI-compatible chat | Native OpenAI path or direct httpx through `EgressClientPool` when `loom.provider_connection_id` resolves to `openai-compatible` / `custom` |
-| `POST /v1/responses`     | OpenAI Responses / BYO OpenAI-compatible Responses | Native OpenAI path or direct httpx through `EgressClientPool` when the step JWT or `x-loom-provider-connection-id` resolves to `openai-compatible` / `custom` |
+| `POST /v1/responses`     | OpenAI Responses / BYO OpenAI-compatible Responses | Native OpenAI path or direct httpx through `EgressClientPool` when the step JWT or `x-loom-provider-connection-id` resolves to `openai-compatible` / `custom`; if a BYO endpoint exposes only Chat Completions and returns the chat-style "messages required" 400 from `/responses`, the provider facade retries once through `/chat/completions` and synthesizes a Responses body/SSE for Codex |
 | `POST /v1/models/{model}:generateContent` | Gemini  | `google.generativeai.GenerativeModel.generate_content_async` |
 | `POST /v1/chat/completions` *(via litellm)* | Tail-provider shim | non-BYO and non-OpenAI-compatible fallback providers |
 | `POST /openai/v1/chat/completions`, `/openai/v1/responses`, `/anthropic/v1/messages`, `/google/v1beta/...` | Sandbox provider facade | Direct httpx through `EgressClientPool` |
@@ -55,6 +55,17 @@ on `/v1/responses`, `/openai/v1/responses`, and
 `/anthropic/v1/messages`, forwards the native SSE stream to the
 selected provider, and records usage from the terminal usage-bearing
 SSE event when present.
+
+For provider connections that are OpenAI-chat-compatible but not
+Responses-compatible, the Responses facade has a narrow compatibility
+fallback. It triggers only after an upstream `/responses` call returns
+the chat-only missing-`messages` signature. The fallback converts the
+Responses `instructions`/`input`/function-tool shape to a
+non-streaming `/chat/completions` request, then converts the chat
+message or tool calls back into Responses JSON or SSE. Unsupported
+Responses-only item types are not treated as first-class ground truth;
+operators should prefer a native `/responses` provider for production
+score evidence when one is available.
 
 ## Dispatch contract
 
@@ -139,6 +150,7 @@ or BYO OpenAI-compatible dispatch because:
 | Upstream timeout (>120s)               | 504, `llm_calls` row inserted with `error_kind` |
 | Upstream non-2xx                       | Forwarded or surfaced with a redacted excerpt; `llm_calls` row with `error_kind` where the dialect path records failed calls |
 | LiteLLM adapter exception or malformed upstream response | 502 with sanitized diagnostic text; provider API keys and `Authorization: Bearer` values are redacted before logs or responses |
+| BYO `/responses` endpoint is actually chat-only | One fallback POST to `/chat/completions`; success returns synthetic Responses JSON/SSE and records normal `openai_responses` usage from chat `usage` tokens |
 | Rate-card missing                      | 422 `RateCardNotFoundError`; no row inserted |
 | Bearer invalid / over RPM              | 401 / 429; no upstream call          |
 | `stream=true`                          | Allowed for OpenAI Responses and Anthropic provider-facade calls; other v1 dialect paths reject it where final usage cannot be attributed |

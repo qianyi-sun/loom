@@ -391,6 +391,179 @@ async def test_responses_provider_connection_stream_passthrough(
     assert row["team_id"] == team_id
 
 
+async def test_responses_facade_falls_back_to_chat_completions_for_chat_only_provider(
+    gateway_with_provider_connection, postgres_url: str,
+) -> None:
+    app, step_jwt, team_id, trial_id, _conn_id, captures = (
+        gateway_with_provider_connection
+    )
+
+    def _chat_only_handler(request: httpx.Request) -> httpx.Response:
+        captures["requests"].append(request)
+        assert request.url.host == "provider.example"
+        assert request.headers["authorization"] == "Bearer sk-provider-XYZ"
+        if request.url.path == "/v1/responses":
+            return httpx.Response(400, json={
+                "error": {
+                    "message": "you must provide a messages parameter",
+                    "type": "invalid_request_error",
+                    "param": "messages",
+                    "code": "missing_required_parameter",
+                },
+            })
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content)
+        assert body["model"] == "qwen3.6-35b-a3b"
+        assert body["stream"] is False
+        assert body["tool_choice"] == "auto"
+        assert body["parallel_tool_calls"] is False
+        assert body["messages"] == [
+            {"role": "system", "content": "You are Codex."},
+            {"role": "user", "content": "run echo"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_old",
+                    "type": "function",
+                    "function": {
+                        "name": "exec_command",
+                        "arguments": "{\"cmd\":\"pwd\"}",
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_old",
+                "content": "ok",
+            },
+        ]
+        assert body["tools"] == [{
+            "type": "function",
+            "function": {
+                "name": "exec_command",
+                "description": "run commands",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"],
+                },
+            },
+        }]
+        return httpx.Response(200, json={
+            "id": "chatcmpl_compat",
+            "model": body["model"],
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_new",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": "{\"cmd\":\"echo hi\"}",
+                        },
+                    }],
+                },
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+            },
+        })
+
+    app.state.upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_chat_only_handler),
+        timeout=app.state.settings.upstream_timeout_sec,
+    )
+    app.state.egress_client_pool = EgressClientPool(
+        upstream_client=app.state.upstream_client,
+        proxy_url=app.state.settings.egress_proxy_url,
+        upstream_timeout_sec=app.state.settings.upstream_timeout_sec,
+    )
+
+    payload = {
+        "model": "qwen3.6-35b-a3b",
+        "instructions": "You are Codex.",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "run echo"}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_old",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_old",
+                "output": "ok",
+            },
+        ],
+        "stream": True,
+        "store": False,
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
+        "tools": [
+            {
+                "type": "function",
+                "name": "exec_command",
+                "description": "run commands",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"],
+                },
+            },
+            {"type": "namespace", "name": "multi_agent_v1"},
+        ],
+    }
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/openai/v1/responses",
+            headers={
+                "Authorization": f"Bearer {step_jwt}",
+                "Accept": "text/event-stream",
+            },
+            json=payload,
+        )
+
+    assert r.status_code == 200, r.text
+    assert "text/event-stream" in r.headers["content-type"]
+    assert "response.function_call_arguments.done" in r.text
+    assert "call_new" in r.text
+    assert "response.completed" in r.text
+
+    requests = captures["requests"]
+    assert [request.url.path for request in requests] == [
+        "/v1/responses",
+        "/v1/chat/completions",
+    ]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["dialect"] == "openai_responses"
+    assert row["model"] == "qwen3.6-35b-a3b"
+    assert row["input_tokens"] == 11
+    assert row["output_tokens"] == 7
+    assert row["provider_extras"] == {}
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+
+
 async def test_gemini_native_passthrough(gateway, postgres_url):  # type: ignore[no-untyped-def]
     app, step_jwt, team_id, trial_id = gateway
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]

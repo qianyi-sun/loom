@@ -380,8 +380,8 @@ hit them through a sandbox-facing Gateway URL):
 | POST | `/v1/messages` | Anthropic dialect |
 | POST | `/v1/chat/completions` | OpenAI dialect |
 | POST | `/openai/v1/chat/completions` | OpenAI-compatible provider facade for stock SDKs |
-| POST | `/v1/responses` | OpenAI Responses dialect; also routes provider-connection calls when the step JWT carries `provider_connection_id` |
-| POST | `/openai/v1/responses` | OpenAI-compatible Responses provider facade for stock SDKs and Codex CLI |
+| POST | `/v1/responses` | OpenAI Responses dialect; also routes provider-connection calls when the step JWT carries `provider_connection_id`; OpenAI-compatible provider connections with chat-only upstreams can fall back to `/chat/completions` after the upstream missing-`messages` `/responses` error |
+| POST | `/openai/v1/responses` | OpenAI-compatible Responses provider facade for stock SDKs and Codex CLI, including the same chat-only upstream compatibility fallback |
 | POST | `/v1beta/models/{model_path}` | Gemini dialect (Google's `v1beta` namespace) |
 | POST | `/admin/rate-cards` | Upsert rate card (gated on `admin:rate_cards` scope) |
 | GET | `/healthz` | Liveness |
