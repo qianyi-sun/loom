@@ -3,7 +3,7 @@
 **Repo:** https://github.com/harbor-framework/harbor
 **Commit:** `2ead3f1f2462f6f7260aca5ef2377cd7e309ff06`
 **Pulled:** 2026-06-25
-**Purpose:** Pinned reference for #419 Layer 2 evidence correction. The original Layer 2 batches (#499/#513/#514/#517) mistakenly identified `coder-harbor-cloud` (Huawei platform) as "Harbor". The actual reference target is the harbor-framework/harbor agent-evaluation framework. This snapshot fixes the adapter inventory at a single commit so later manifest entries point at a stable target.
+**Purpose:** Pinned reference for canonical #32 Layer 2 evidence correction. The original Layer 2 batches (#499/#513/#514/#517) mistakenly identified `coder-harbor-cloud` (Huawei platform) as "Harbor"; historical archive issue carinrc/loom#538 preserves that correction context. The actual reference target is the harbor-framework/harbor agent-evaluation framework. This snapshot fixes the adapter inventory at a single commit so later manifest entries point at a stable target.
 
 ## v1.0 benchmark → Harbor adapter mapping
 

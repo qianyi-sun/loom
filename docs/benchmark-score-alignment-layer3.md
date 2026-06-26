@@ -119,7 +119,8 @@ is the human-readable narrative; the machine-readable form lives in
 
 ## gpqa-diamond — paired Loom vs Harbor on claude-haiku-4-5
 
-Closes #541. This is the matched-config paired evidence under #419: both Loom and
+Historical archive issue carinrc/loom#541 closed with this evidence. This is
+the matched-config paired evidence under canonical #32: both Loom and
 Harbor ran the same 198-task GPQA Diamond subset with the same model (claude-haiku-4-5
 via yibuapi, anthropic dialect) through the same upstream verifier semantics (exact
 letter match on the canonical Diamond answer). The agent runtime differs on each side:
@@ -219,11 +220,13 @@ codex / gpt-5.2.
 
 ## aime — paired Loom (aime-24 + aime-25) vs Harbor (aime) on claude-haiku-4-5
 
-Closes #540. Matched-config paired evidence on AIME 2024 + 2025 (60 tasks total, 30
+Historical archive issue carinrc/loom#540 closed with this evidence. Matched-config
+paired evidence on AIME 2024 + 2025 (60 tasks total, 30
 per year). Same model, same provider, same verifier semantics (exact integer match
 on the canonical answer). Loom uses two separate dataset slugs (`aime-24`, `aime-25`)
 sharing the `_AIMEYearBase` adapter; Harbor's `adapters/aime` covers both years in a
-single 60-task slate. The agent runtime differs as in the #541 GPQA run: Loom's
+single 60-task slate. The agent runtime differs as in the GPQA paired run above:
+Loom's
 `litellm` is single-shot, Harbor's `terminus-2` is a tool-use loop. AIME's
 math-reasoning surface amplifies the agent-runtime effect compared to GPQA Diamond's
 multiple-choice surface.
