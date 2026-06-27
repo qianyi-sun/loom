@@ -941,10 +941,12 @@ async def test_apply_gb10_host_intent_creates_desired_state_and_updates_nodes() 
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
     node = SimpleNamespace(
         hostname="trt-gb10-1",
+        worker_id=None,
         desired_intent="active",
         updated_at=None,
     )
     session = _FakeSession([
+        _FakeResult(rows=[("worker-1", "trt-gb10-1")]),
         _FakeResult(scalar=None),
         _FakeResult(scalars=[node]),
     ])

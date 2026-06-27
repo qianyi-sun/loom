@@ -648,6 +648,94 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
         await engine.dispose()
 
 
+async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missing(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Worker).values(
+                id=worker_id,
+                hostname="trt-gb10-1",
+                version="test",
+                capabilities=[{
+                    "backend": "docker",
+                    "os": "linux",
+                    "cpu_arch": "arm64",
+                    "gpu_vendor": "none",
+                    "network_policies": ["none"],
+                }],
+                max_concurrent=2,
+                pool_name="gb10-arm64",
+                drain_state="active",
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            ))
+            await s.execute(insert(GB10WorkerPoolDesiredState).values(
+                environment="production",
+                pool_name="gb10-arm64",
+                image_tag="gb10-image",
+                max_concurrent=2,
+                env_config_version="gb10-env",
+                target_slots=2,
+                host_intents={"trt-gb10-1": "active"},
+                rollout_policy={},
+                env={},
+            ))
+            await s.execute(insert(GB10WorkerNodeStatus).values(
+                environment="production",
+                pool_name="gb10-arm64",
+                hostname="trt-gb10-1",
+                worker_id=None,
+                current_image_tag="gb10-image",
+                current_max_concurrent=2,
+                current_env_config_version="gb10-env",
+                current_intent="active",
+                desired_image_tag="gb10-image",
+                desired_max_concurrent=2,
+                desired_env_config_version="gb10-env",
+                desired_intent="active",
+                apply_state="applied",
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="gb10-arm64",
+                actuator="gb10",
+                enabled=True,
+                min_slots=0,
+                max_slots=2,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={"backend": "docker", "cpu_arch": "arm64"},
+                idle_since_at=now - timedelta(seconds=601),
+            ))
+            await s.commit()
+
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(s, now=now)
+            await s.commit()
+
+        assert results[0].action == "request_drain"
+
+        async with session_factory() as s:
+            desired = (await s.execute(select(GB10WorkerPoolDesiredState))).scalar_one()
+            worker = await s.get(Worker, worker_id)
+
+        assert desired.target_slots == 0
+        assert desired.host_intents == {"trt-gb10-1": "draining"}
+        assert worker is not None
+        assert worker.drain_state == "draining"
+    finally:
+        await engine.dispose()
+
+
 async def test_reconcile_sets_gb10_stopped_hosts_active_for_scale_up(
     postgres_url: str,
 ) -> None:
