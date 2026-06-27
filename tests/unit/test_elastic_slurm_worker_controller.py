@@ -136,9 +136,13 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
 def test_build_sbatch_request_cleans_up_compose_on_exit() -> None:
     request = build_sbatch_request(_config(), node="oldlab-4")
 
-    assert "trap cleanup EXIT INT TERM" in request.stdin
+    assert "trap cleanup EXIT" in request.stdin
+    assert "trap 'cleanup 130' INT" in request.stdin
+    assert "trap 'cleanup 143' TERM" in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --build &' in request.stdin
+    assert "compose_pid=$!" in request.stdin
+    assert 'wait "$compose_pid"' in request.stdin
     assert "docker compose \"${compose_args[@]}\" down --remove-orphans" in request.stdin
-    assert "docker compose \"${compose_args[@]}\" up --build" in request.stdin
 
 
 def test_build_controller_config_rejects_enabled_missing_required_settings() -> None:
