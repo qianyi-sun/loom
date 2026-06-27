@@ -87,6 +87,30 @@ quote() {
   printf '%q' "$1"
 }
 
+emit_slurm_script() {
+  local repo_q=$1
+  local env_q=$2
+  local concurrency=$3
+
+  cat <<SLURM
+#!/usr/bin/env bash
+set -euo pipefail
+cd ${repo_q}
+export LOOM_WORKER_MAX_CONCURRENT=${concurrency}
+compose_args=(--env-file ${env_q} -f deploy/docker-compose.remote-worker.yml)
+
+cleanup() {
+  status=\$?
+  trap - EXIT INT TERM
+  docker compose "\${compose_args[@]}" down --remove-orphans || true
+  exit "\$status"
+}
+
+trap cleanup EXIT INT TERM
+docker compose "\${compose_args[@]}" up --build
+SLURM
+}
+
 submit_row() {
   local host=$1
   local cpus=$2
@@ -114,25 +138,13 @@ submit_row() {
   if [[ "$submit" -eq 0 ]]; then
     printf 'sbatch'
     printf ' %q' "${sbatch_args[@]}"
-    cat <<DRYRUN
- <<'SLURM'
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${repo_q}
-export LOOM_WORKER_MAX_CONCURRENT=${concurrency}
-docker compose --env-file ${env_q} -f deploy/docker-compose.remote-worker.yml up --build
-SLURM
-DRYRUN
+    printf " <<'SLURM'\n"
+    emit_slurm_script "$repo_q" "$env_q" "$concurrency"
+    printf "SLURM\n"
     return
   fi
 
-  sbatch "${sbatch_args[@]}" <<SLURM
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${repo_q}
-export LOOM_WORKER_MAX_CONCURRENT=${concurrency}
-docker compose --env-file ${env_q} -f deploy/docker-compose.remote-worker.yml up --build
-SLURM
+  emit_slurm_script "$repo_q" "$env_q" "$concurrency" | sbatch "${sbatch_args[@]}"
 }
 
 tail -n +2 "$plan_csv" | while IFS=, read -r host status cpus mem_total_mib _docker_cpus recommended_concurrency _reason; do

@@ -135,3 +135,37 @@ def test_worker_pool_slurm_submit_dry_run_uses_plan_rows(tmp_path: Path) -> None
     assert "LOOM_WORKER_MAX_CONCURRENT=32" in result.stdout
     assert "worker-b" not in result.stdout
     assert "sbatch" in result.stdout
+
+
+def test_worker_pool_slurm_submit_dry_run_cleans_up_compose_on_exit(
+    tmp_path: Path,
+) -> None:
+    plan = tmp_path / "plan.csv"
+    plan.write_text(
+        "\n".join([
+            "host,status,cpus,mem_total_mib,docker_cpus,recommended_concurrency,reason",
+            "worker-a,include,64,262144,64,32,",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(_SLURM_SCRIPT),
+            str(plan),
+            "--env-file",
+            "/secure/.env.remote-worker",
+            "--repo-dir",
+            "/opt/loom",
+            "--dry-run",
+        ],
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+
+    assert "trap cleanup EXIT INT TERM" in result.stdout
+    assert "docker compose \"${compose_args[@]}\" down --remove-orphans" in result.stdout
+    assert "docker compose \"${compose_args[@]}\" up --build" in result.stdout

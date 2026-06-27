@@ -802,6 +802,9 @@ the underlying Slurm job or changes the GB10 host intent to `stopped`.
 For Slurm jobs, release prefers the registry `worker_id`; if Slurm observations
 never linked the job to a worker, it falls back to the drained worker hostname
 matching the Slurm job `nodelist`.
+The Slurm submission script wraps Docker Compose in an `EXIT`/`INT`/`TERM` trap
+and runs `docker compose down --remove-orphans`, so autoscaler cancellation and
+worker idle exit remove the compose worker container as well as the Slurm job.
 Forced termination is a break-glass operator action, not the default path.
 
 For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,

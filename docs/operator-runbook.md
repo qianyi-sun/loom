@@ -1870,6 +1870,10 @@ mock provider and browser automation job.
   policy `actuator_config.exclusive=false` only with a reduced, tested CPU,
   memory, and worker-concurrency slice; leave exclusive allocation enabled for
   full-node production capacity.
+  Slurm worker jobs install an `EXIT`/`INT`/`TERM` trap around Docker Compose;
+  normal exits, idle exits, and `scancel` release the compose worker container
+  with `docker compose down --remove-orphans` instead of leaving an orphaned
+  worker outside Slurm accounting.
   Temporarily exclude a node by removing it from `ALLOWED_NODES`; lower
   footprint with `MAX_JOBS`; lower per-node pressure with
   `REQUESTED_CONCURRENCY`; disable the pool with

@@ -303,7 +303,17 @@ def build_sbatch_request(
 set -euo pipefail
 
 cd "$LOOM_REMOTE_WORKER_REPO_DIR"
-docker compose --env-file "$LOOM_REMOTE_WORKER_ENV_FILE" -f deploy/docker-compose.remote-worker.yml up --build
+compose_args=(--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" -f deploy/docker-compose.remote-worker.yml)
+
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  docker compose "${compose_args[@]}" down --remove-orphans || true
+  exit "$status"
+}
+
+trap cleanup EXIT INT TERM
+docker compose "${compose_args[@]}" up --build
 """
     return SbatchRequest(args=tuple(args), stdin=stdin)
 
