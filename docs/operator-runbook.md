@@ -428,13 +428,13 @@ knob you need.
    links, and redacted next actions without bearer tokens, provider keys,
    internal service URLs, or signed object-store URLs.
 
-9. **Approve access requests into fixed teams.** Public registration is
-   default-closed. A researcher can submit an access request without a bearer
-   token; `name` is a requester/display label, not a new team name:
+9. **Approve account requests into fixed teams.** Public registration is
+   default-closed. A researcher can submit an account request without a bearer
+   token; the team must already exist:
    ```bash
-   curl -X POST https://loom.example.com/api/v1/teams/register \
+   curl -X POST https://loom.example.com/api/v1/auth/registration-requests \
      -H "Content-Type: application/json" \
-     -d '{"name":"Mark Li", "contact_email":"owner@example.com"}'
+     -d '{"username":"Mark", "team_id":"00000000-0000-0000-0000-000000000000"}'
    ```
    Internal teams are admin-managed ahead of time. List or create them before
    approving a request:
@@ -1430,12 +1430,13 @@ following bounds:
 
 ## Staging smoke gate
 
-Before promoting a release from `dev` to `main`, exercise the invite-only
-public beta on a staging cluster and attach the evidence to the release issue or
+Before promoting a release from `dev` to `main`, exercise the public beta
+account flow on a staging cluster and attach the evidence to the release issue or
 PR. The gate has two parts:
 
-- **Operator/browser evidence** for DNS/TLS, invite acceptance, SPA submission,
-  and visual checks that require a real browser session.
+- **Operator/browser evidence** for DNS/TLS, account request approval, password
+  setup/reset, SPA submission, and visual checks that require a real browser
+  session.
 - **Repeatable API evidence** from `scripts/public_beta_smoke_gate.py`, which
   verifies public API auth, provider discovery, service-proxied downloads, Run
   Library sharing, cross-team denials, provenance, and leak scanning.
@@ -1597,21 +1598,20 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    This check is required after every rollout because a public ingress health
    check can pass while private worker tunnels are down.
 5. **Invite-only onboarding.** From the operator/admin browser session, confirm
-   fixed teams such as Team A and Team B exist, then create an invite for the
-   desired role in each team. Open the invite link in a fresh browser profile,
-   accept it, and confirm the user lands in the selected team without seeing a
-   raw team token. Capture the invite id/prefix only; do not capture raw invite
-   codes.
-6. **Scoped CLI tokens.** In Team Settings -> Team access, each team owner
-   creates a named API token with `read:own` and `submit`; Team A also needs
-   `providers:manage` for provider setup. In a fresh shell:
+   fixed teams such as Team A and Team B exist, then submit username requests
+   for each team. Approve each request in Admin access -> Accounts, open the
+   setup link in a fresh browser profile, set a password, and confirm the user
+   lands in the selected team without seeing a raw team token. Capture only
+   safe prefixes and redacted links in shared evidence.
+6. **CLI login.** In a fresh shell, sign in with the approved account:
    ```bash
-   export LOOM_API_TOKEN=$TEAM_A_TOKEN
-   loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN
+   export LOOM_PASSWORD=...
+   loom auth login --server https://loom.example.com --username TeamAUser --password env:LOOM_PASSWORD
    loom auth whoami
    ```
-   Repeat with Team B's token. Evidence should show token names/scopes/prefixes,
-   never raw token values.
+   Repeat with Team B's user. Evidence should show usernames, teams, roles, and
+   scopes, never raw passwords. Team-owner API token creation remains a separate
+   automation smoke if the release touches token lifecycle.
 7. **Provider connection create + test.** As Team A, create a connection through
    the CLI (or `POST /api/v1/provider-connections`), then probe:
    ```bash

@@ -11,6 +11,7 @@ import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { modelLabel } from "../lib/modelLabel";
+import { ownershipLabel } from "../lib/ownership";
 import { batchStateVariant } from "../lib/statusVariant";
 
 const TERMINAL_STATES = new Set(["finished", "cancelled"]);
@@ -239,13 +240,13 @@ export default function RunLibrary(): JSX.Element {
                   <tr className="bg-slate-50/50">
                     {[
                       "Run",
-                      "Owner team",
+                      "Owner",
                       "Benchmark / task subset",
                       "Agent / model",
                       "Status",
                       "Score",
                       "Trials",
-                      "Creator",
+                      "Token",
                       "Created",
                       "Artifacts",
                       "Visibility",
@@ -276,7 +277,7 @@ export default function RunLibrary(): JSX.Element {
                           </Link>
                         </td>
                         <td className="px-4 py-3 text-slate-700">
-                          {batch.owner_team.name}
+                          {ownershipLabel(batch)}
                         </td>
                         <td className="px-4 py-3 text-slate-700">
                           {task.primary}

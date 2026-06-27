@@ -29,9 +29,11 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    User,
     Worker,
 )
 from loom_llm_gateway.rate_card import RateCardTable, hash_table
+from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -117,17 +119,29 @@ async def camp_setup(
     app.state.http_client = httpx.AsyncClient(base_url="http://cp")
 
     team_id = uuid4()
+    username = f"BatchOwner-{team_id.hex[:8]}"
+    user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(
+            insert(User).values(
+                id=user_id,
+                username=username,
+                username_normalized=username.casefold(),
+                status="active",
+                is_platform_admin=False,
+            )
+        )
+        s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
                 type="team",
                 scopes=["submit", "read:own"],
                 team_id=team_id,
+                created_by_user_id=user_id,
                 issued_at=datetime.now(UTC),
             )
         )
@@ -190,6 +204,7 @@ async def camp_setup(
             s.execute(delete(Benchmark))
             s.execute(delete(Worker))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.username_normalized == username.casefold()))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -430,9 +445,11 @@ async def test_post_batch_rejects_agent_name_without_agent_model(
 
 async def test_post_batch_rejects_agent_without_service_runtime(
     camp_setup: tuple[FastAPI, str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#289/#288: unsupported displayed adapters must fail before
     fan-out, not after every child trial hits `command not found`."""
+    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "opencode", False)
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -936,6 +953,11 @@ async def test_list_batches(
         "id": str(team_id),
         "name": f"t-{team_id}",
     }
+    submitted = items[0]["submitted_by_user"]
+    UUID(submitted["id"])
+    assert submitted["username"] == f"BatchOwner-{team_id.hex[:8]}"
+    assert submitted["team_id"] == str(team_id)
+    assert submitted["team_name"] == f"t-{team_id}"
     assert "total_cost_usd" not in items[0]
     assert items[0]["total_prompt_tokens"] == 4
     assert items[0]["total_completion_tokens"] == 2
@@ -1169,6 +1191,11 @@ async def test_get_batch_detail_with_rollup(
     body = r.json()
     assert body["trial_summary"]["succeeded"] == 2
     assert body["trial_summary"]["running"] == 1
+    submitted = body["submitted_by_user"]
+    UUID(submitted["id"])
+    assert submitted["username"] == f"BatchOwner-{team_id.hex[:8]}"
+    assert submitted["team_id"] == str(team_id)
+    assert submitted["team_name"] == f"t-{team_id}"
     # avg of 1.0 + 0.5 = 0.75
     assert body["aggregate_reward"] == pytest.approx(0.75)
     assert "total_cost_usd" not in body

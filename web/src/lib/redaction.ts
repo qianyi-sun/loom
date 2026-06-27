@@ -1,7 +1,7 @@
 const REDACTED = "[REDACTED]";
 
 const SECRET_TOKEN_RE =
-  /\b(?:loom_(?:admin|api|invite|team|w|session|csrf|login)_[A-Za-z0-9._-]{12,}|sk-(?:proj-)?[A-Za-z0-9][A-Za-z0-9_-]{20,})\b/g;
+  /\b(?:loom_(?:admin|api|invite|team|w|session|csrf|login|setup|reset)_[A-Za-z0-9._-]{12,}|sk-(?:proj-)?[A-Za-z0-9][A-Za-z0-9_-]{20,})\b/g;
 const BEARER_RE = /\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+/=-]{12,}/gi;
 const SECRET_REF_RE = /\b(?:loom|k8s-secret):\/\/[^\s"']+/gi;
 const SIGNED_URL_PARAM_RE =

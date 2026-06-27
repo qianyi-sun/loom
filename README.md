@@ -193,7 +193,7 @@ pages when you need to reproduce or debug from a terminal.
 Use this path from any machine that can reach the Loom public API.
 The CLI machine does not need GPUs, model weights, or direct access to the
 benchmark workers; it only needs network access to the Loom service and a team
-API token.
+account.
 
 Install the CLI from a source checkout:
 
@@ -204,11 +204,11 @@ source .venv/bin/activate
 loom --help
 ```
 
-Create a team API token from **Team access**, then authenticate:
+Authenticate with your approved username/password account:
 
 ```bash
-export LOOM_API_TOKEN=loom_api_...
-loom auth login --server https://yylx.world --token env:LOOM_API_TOKEN
+export LOOM_PASSWORD=...
+loom auth login --server https://yylx.world --username USER --password env:LOOM_PASSWORD
 loom auth whoami
 ```
 
@@ -352,7 +352,7 @@ models, lives in [`docs/user-guide.md#local-llms`](docs/user-guide.md#local-llms
 
 | Concept | Meaning |
 |---|---|
-| Team | Owns provider credentials, API tokens, submitted runs, cost attribution, and members. |
+| Team | Owns provider credentials, user-owned API tokens, submitted runs, cost attribution, and members. |
 | Provider connection | Team-scoped inference API configuration. It can point to a hosted provider or a user-hosted endpoint. |
 | Model | Concrete model id selected from a provider connection. Refresh discovers models; preflight proves one model can generate. |
 | Agent | Harness that drives a model through a task, such as `litellm`, coding-agent CLIs, or `oracle`. |

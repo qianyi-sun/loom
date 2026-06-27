@@ -34,9 +34,12 @@ from loom_cli.secret_source import (
     secret_source_argparse_type,
 )
 from loom_cli.server_client import (
+    CSRF_HEADER_NAME,
+    SESSION_COOKIE_NAME,
     HttpStatusError,
     NotLoggedInError,
     assert_2xx,
+    assert_2xx_response,
     authed_client,
     require_logged_in,
 )
@@ -51,29 +54,259 @@ def _redact(token: str) -> str:
     return f"{token[:6]}***{token[-4:]}"
 
 
-def _login(args: argparse.Namespace) -> int:
-    try:
-        token = resolve_secret_source(args.token, flag_name="--token")
-    except SecretSourceError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 2
-
-    server_url: str = args.server.rstrip("/")
+def _normalize_server_url(raw_server: str) -> str:
+    server_url = raw_server.rstrip("/")
     if not (server_url.startswith("http://") or
             server_url.startswith("https://")):
-        sys.stderr.write(
-            f"error: --server must start with http:// or https://; "
-            f"got {server_url!r}\n",
+        raise ValueError(
+            f"--server must start with http:// or https://; got {server_url!r}",
         )
-        return 2
+    return server_url
 
+
+def _plain_client(server_url: str, *, timeout: float = 30.0) -> httpx.Client:
+    return httpx.Client(base_url=server_url, timeout=timeout)
+
+
+def _resolve_secret(value: str, *, flag_name: str) -> str | None:
+    try:
+        return resolve_secret_source(value, flag_name=flag_name)
+    except SecretSourceError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return None
+
+
+def _save_bearer_login(*, server_url: str, token: str) -> None:
     cfg = load_config()
     cfg.server_url = server_url
     cfg.auth_token = token
+    cfg.auth_session_cookie = None
+    cfg.auth_csrf_token = None
     save_config(cfg)
+
+
+def _save_session_login(
+    *,
+    server_url: str,
+    session_cookie: str,
+    csrf_token: str,
+) -> None:
+    cfg = load_config()
+    cfg.server_url = server_url
+    cfg.auth_token = None
+    cfg.auth_session_cookie = session_cookie
+    cfg.auth_csrf_token = csrf_token
+    save_config(cfg)
+
+
+def _login_with_token(args: argparse.Namespace, *, server_url: str) -> int:
+    token = _resolve_secret(args.token, flag_name="--token")
+    if token is None:
+        return 2
+    _save_bearer_login(server_url=server_url, token=token)
     print(f"Logged in to {server_url}")
     print(f"Token stored in {config_path()} as {_redact(token)}")
     return 0
+
+
+def _login_with_password(args: argparse.Namespace, *, server_url: str) -> int:
+    password = _resolve_secret(args.password, flag_name="--password")
+    if password is None:
+        return 2
+    try:
+        with _plain_client(server_url) as c:
+            response = c.post(
+                "/api/v1/auth/login",
+                json={"username": args.username, "password": password},
+            )
+            assert_2xx_response(response, action="log in with username/password")
+            data = response.json()
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach {server_url}: {e}\n")
+        return 2
+
+    session_cookie = response.cookies.get(SESSION_COOKIE_NAME)
+    csrf_token = data.get("csrf_token") if isinstance(data, dict) else None
+    if not session_cookie or not isinstance(csrf_token, str) or not csrf_token:
+        sys.stderr.write("error: login response did not include session credentials\n")
+        return 1
+    _save_session_login(
+        server_url=server_url,
+        session_cookie=session_cookie,
+        csrf_token=csrf_token,
+    )
+    user = data.get("user") if isinstance(data, dict) else None
+    username = user.get("username") if isinstance(user, dict) else args.username
+    print(f"Logged in to {server_url} as {username}")
+    print(f"Session stored in {config_path()} ({SESSION_COOKIE_NAME} + {CSRF_HEADER_NAME})")
+    return 0
+
+
+def _login(args: argparse.Namespace) -> int:
+    try:
+        server_url = _normalize_server_url(args.server)
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    if args.token is not None:
+        if args.username is not None or args.password is not None:
+            sys.stderr.write("error: use either --token or --username/--password, not both\n")
+            return 2
+        return _login_with_token(args, server_url=server_url)
+    if args.username is not None and args.password is not None:
+        return _login_with_password(args, server_url=server_url)
+
+    sys.stderr.write("error: provide --token or both --username and --password\n")
+    return 2
+
+
+def _register(args: argparse.Namespace) -> int:
+    try:
+        server_url = _normalize_server_url(args.server)
+        with _plain_client(server_url) as c:
+            data = assert_2xx(
+                c.post(
+                    "/api/v1/auth/registration-requests",
+                    json={
+                        "username": args.username,
+                        "team_id": args.team_id,
+                        "metadata": {},
+                    },
+                ),
+                action="submit registration request",
+            )
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach {args.server}: {e}\n")
+        return 2
+
+    print("Registration request submitted")
+    print(f"Username: {data.get('username') or args.username}")
+    print(f"Status:   {data.get('status') or 'pending'}")
+    return 0
+
+
+def _teams(args: argparse.Namespace) -> int:
+    try:
+        server_url = _normalize_server_url(args.server)
+        with _plain_client(server_url) as c:
+            data = assert_2xx(
+                c.get("/api/v1/auth/public-teams"),
+                action="list registration teams",
+            )
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach {args.server}: {e}\n")
+        return 2
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list) or not items:
+        print("No public registration teams available.")
+        return 0
+    print("ID                                    Name")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        print(f"{item.get('id')!s:36}  {item.get('name') or '(unnamed)'}")
+    return 0
+
+
+def _complete_password_action(
+    args: argparse.Namespace,
+    *,
+    path: str,
+    action: str,
+    success_verb: str,
+) -> int:
+    token = _resolve_secret(args.token, flag_name="--token")
+    password = _resolve_secret(args.password, flag_name="--password")
+    confirm_password = _resolve_secret(
+        args.confirm_password, flag_name="--confirm-password",
+    )
+    if token is None or password is None or confirm_password is None:
+        return 2
+    try:
+        server_url = _normalize_server_url(args.server)
+        with _plain_client(server_url) as c:
+            data = assert_2xx(
+                c.post(
+                    path,
+                    json={
+                        "token": token,
+                        "password": password,
+                        "confirm_password": confirm_password,
+                    },
+                ),
+                action=action,
+            )
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach {args.server}: {e}\n")
+        return 2
+    user = data.get("user") if isinstance(data, dict) else None
+    username = user.get("username") if isinstance(user, dict) else "(unknown user)"
+    print(f"Password {success_verb} {username}")
+    return 0
+
+
+def _setup_password(args: argparse.Namespace) -> int:
+    return _complete_password_action(
+        args,
+        path="/api/v1/auth/setup/complete",
+        action="set password",
+        success_verb="set for",
+    )
+
+
+def _forgot_password(args: argparse.Namespace) -> int:
+    try:
+        server_url = _normalize_server_url(args.server)
+        with _plain_client(server_url) as c:
+            assert_2xx(
+                c.post(
+                    "/api/v1/auth/password-reset-requests",
+                    json={"username": args.username},
+                ),
+                action="submit password reset request",
+            )
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach {args.server}: {e}\n")
+        return 2
+    print("Password reset request submitted")
+    return 0
+
+
+def _reset_password(args: argparse.Namespace) -> int:
+    return _complete_password_action(
+        args,
+        path="/api/v1/auth/reset/complete",
+        action="reset password",
+        success_verb="reset for",
+    )
 
 
 def _status(args: argparse.Namespace) -> int:
@@ -81,14 +314,21 @@ def _status(args: argparse.Namespace) -> int:
     server = cfg.server_url or "(none)"
     if cfg.auth_token:
         token_display = f"set ({_redact(cfg.auth_token)})"
-        logged_in = cfg.server_url is not None
     else:
         token_display = "(none)"
-        logged_in = False
+    if cfg.auth_session_cookie:
+        session_display = "set"
+    else:
+        session_display = "(none)"
+    logged_in = (
+        cfg.server_url is not None
+        and (cfg.auth_token is not None or cfg.auth_session_cookie is not None)
+    )
 
     # Stable two-column output for human + CI parsing.
     print(f"Server:  {server}")
     print(f"Token:   {token_display}")
+    print(f"Session: {session_display}")
     print(f"Config:  {config_path()}")
 
     return 0 if logged_in else 1
@@ -154,12 +394,14 @@ def _whoami(args: argparse.Namespace) -> int:
 
 def _logout(args: argparse.Namespace) -> int:
     cfg = load_config()
-    if not cfg.auth_token:
-        print("Already logged out — no token in config.")
+    if not cfg.auth_token and not cfg.auth_session_cookie:
+        print("Already logged out — no credentials in config.")
         return 0
     cfg.auth_token = None
+    cfg.auth_session_cookie = None
+    cfg.auth_csrf_token = None
     save_config(cfg)
-    print(f"Cleared token in {config_path()} (server URL preserved).")
+    print(f"Cleared credentials in {config_path()} (server URL preserved).")
     return 0
 
 
@@ -179,7 +421,7 @@ def dispatch(argv: list[str]) -> int:
 
     p_login = sub.add_parser(
         "login",
-        help="Save server URL + bearer token to ~/.config/loom/config.toml",
+        help="Log in with username/password or save a bearer token.",
     )
     p_login.add_argument(
         "--server",
@@ -188,7 +430,6 @@ def dispatch(argv: list[str]) -> int:
     )
     p_login.add_argument(
         "--token",
-        required=True,
         type=secret_source_argparse_type("--token"),
         help=(
             "Token source. ONE of: 'env:VAR' (read os.environ[VAR]), "
@@ -197,7 +438,87 @@ def dispatch(argv: list[str]) -> int:
             "history and `ps -ef`."
         ),
     )
+    p_login.add_argument("--username", help="Username for account login.")
+    p_login.add_argument(
+        "--password",
+        type=secret_source_argparse_type("--password"),
+        help="Password source for account login: env:VAR, file:PATH, or -.",
+    )
     p_login.set_defaults(handler=_login)
+
+    p_register = sub.add_parser(
+        "register",
+        help="Submit a username/team registration request for admin approval.",
+    )
+    p_register.add_argument("--server", required=True, help="Server URL.")
+    p_register.add_argument("--username", required=True, help="Requested username.")
+    p_register.add_argument("--team-id", required=True, help="Existing team UUID.")
+    p_register.set_defaults(handler=_register)
+
+    p_teams = sub.add_parser(
+        "teams",
+        help="List teams available for registration requests.",
+    )
+    p_teams.add_argument("--server", required=True, help="Server URL.")
+    p_teams.set_defaults(handler=_teams)
+
+    p_setup = sub.add_parser(
+        "setup-password",
+        help="Complete an admin-approved setup link by setting a password.",
+    )
+    p_setup.add_argument("--server", required=True, help="Server URL.")
+    p_setup.add_argument(
+        "--token",
+        required=True,
+        type=secret_source_argparse_type("--token"),
+        help="Setup token source: env:VAR, file:PATH, or -.",
+    )
+    p_setup.add_argument(
+        "--password",
+        required=True,
+        type=secret_source_argparse_type("--password"),
+        help="Password source: env:VAR, file:PATH, or -.",
+    )
+    p_setup.add_argument(
+        "--confirm-password",
+        required=True,
+        type=secret_source_argparse_type("--confirm-password"),
+        help="Confirmation password source: env:VAR, file:PATH, or -.",
+    )
+    p_setup.set_defaults(handler=_setup_password)
+
+    p_forgot = sub.add_parser(
+        "forgot-password",
+        help="Submit a password reset request for admin approval.",
+    )
+    p_forgot.add_argument("--server", required=True, help="Server URL.")
+    p_forgot.add_argument("--username", required=True, help="Username to reset.")
+    p_forgot.set_defaults(handler=_forgot_password)
+
+    p_reset = sub.add_parser(
+        "reset-password",
+        help="Complete an admin-approved password reset link.",
+    )
+    p_reset.add_argument("--server", required=True, help="Server URL.")
+    p_reset.add_argument(
+        "--token",
+        required=True,
+        type=secret_source_argparse_type("--token"),
+        help="Reset token source: env:VAR, file:PATH, or -.",
+    )
+    p_reset.add_argument(
+        "--password",
+        required=True,
+        type=secret_source_argparse_type("--password"),
+        help="Password source: env:VAR, file:PATH, or -.",
+    )
+    p_reset.add_argument(
+        "--confirm-password",
+        required=True,
+        type=secret_source_argparse_type("--confirm-password"),
+        help="Confirmation password source: env:VAR, file:PATH, or -.",
+    )
+    p_reset.set_defaults(handler=_reset_password)
 
     p_status = sub.add_parser(
         "status",

@@ -215,6 +215,7 @@ async def verify_bearer_token(
     token_type = row.type
     scopes = list(row.scopes)
     team_id = row.team_id
+    user_id = row.created_by_user_id
     expires_at = row.expires_at
     now = datetime.now(UTC)
     touch_cutoff = now - _TOKEN_TOUCH_DEBOUNCE
@@ -235,5 +236,6 @@ async def verify_bearer_token(
         type=token_type,
         scopes=scopes,
         team_id=team_id,
+        user_id=user_id,
         expires_at=expires_at,
     )

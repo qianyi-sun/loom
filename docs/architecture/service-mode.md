@@ -388,15 +388,16 @@ hit them through a sandbox-facing Gateway URL):
 
 ## Auth tokens
 
-Team and worker credentials remain database-backed. Admin authority comes from a
-file-backed singleton secret loaded by `loom_service`, the Control Plane, and
-the LLM Gateway; DB-backed admin rows are ignored and revoked by migration.
+Team, worker, and user-owned API credentials remain database-backed. Browser
+users sign in with username/password sessions. Admin authority comes from a
+file-backed singleton secret or a platform-admin browser user; DB-backed admin
+rows are ignored and revoked by migration.
 
 Four token kinds, all bearer-format:
 
 | Prefix | Issued by | Scope |
 |---|---|---|
-| `loom_api_...` | Team owner or operator (`POST /api/v1/tokens`) | Named, scoped team API token; submit trials, view results, optionally manage providers/tokens |
+| `loom_api_...` | Team owner or platform user (`POST /api/v1/tokens`) | Named, scoped API token carrying team and creating-user identity; submit trials, view results, optionally manage providers/tokens |
 | `worker:*` | Auto-issued at worker `POST /workers/register` | Long-lived; claim trials, PATCH state |
 | `step:*` | Worker mints per-step JWT (`mint_step_token`) | Short-lived (per-step); CLI agent calls Gateway with bounded scope |
 | `admin:*` | Operator secret file (`loom service init-admin`) | Manage tokens, rate-cards, teams |
@@ -484,25 +485,25 @@ Core pages include:
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — signed-out invite/request-access/manual-code/CLI onboarding;
-  signed-in current team, role, team switcher, joined browser members,
-  role-aware setup links, and API-token summaries
-- **Admin access** — owner/team-admin invite create/list/revoke/resend and
-  one-time API-token reveal with CLI setup commands; platform-admin users also
-  manage fixed internal teams, approve pending access requests into a selected
-  team/role, and review admin audit events. The page is split into role-aware
+- **Settings** — signed-out username/password login, account request,
+  password-reset request, and CLI onboarding; signed-in current team, role,
+  team switcher, joined browser members, role-aware setup links, and API-token
+  summaries
+- **Admin access** — account setup/reset approvals, fixed-team maintenance,
+  owner/team-admin legacy invite create/list/revoke/resend, and one-time
+  API-token reveal with CLI setup commands. The page is split into role-aware
   sections, and platform-admin invite creation uses a team selector rather than
   requiring raw team ids.
 - **NotFound**
 
-Auth model: browser users sign in through `/api/v1/auth/*`. The service sets an
-HttpOnly session cookie; auth responses return a CSRF token that the API client
-keeps in memory, sends with `credentials: "include"`, and attaches to unsafe
-methods through the configured CSRF header. A 401 from `/auth/me` means signed
-out, and later 401s clear session state/query cache before returning the user
-to Settings. Legacy bearer tokens remain supported for CLI/backward
-compatibility, but the production SPA no longer stores normal bearer-token
-login state in `localStorage`.
+Auth model: browser users sign in through `/api/v1/auth/login` with username
+and password. The service sets an HttpOnly session cookie; auth responses return
+a CSRF token that the API client keeps in memory, sends with
+`credentials: "include"`, and attaches to unsafe methods through the configured
+CSRF header. A 401 from `/auth/me` means signed out, and later 401s clear
+session state/query cache before returning the user to Settings. User-owned
+bearer tokens remain supported for CLI/API automation, but the production SPA
+no longer stores normal bearer-token login state in `localStorage`.
 
 **Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
 node-slim builds the Vite bundle, nginx-alpine serves it.

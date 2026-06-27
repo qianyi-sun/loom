@@ -28,6 +28,7 @@ from loom.db.schema import (
     Trial,
     Worker,
 )
+from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -428,7 +429,9 @@ async def test_combinations_reject_unknown_agent(
 
 async def test_combinations_reject_agent_without_service_runtime(
     setup: tuple[FastAPI, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "opencode", False)
     app, raw = setup
     r = await _post(
         app,

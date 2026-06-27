@@ -239,18 +239,18 @@ async def create_session_for_user(
     now = datetime.now(UTC)
     role = "platform_admin" if user.is_platform_admin else None
     team_id: UUID | None = None
+    if current_team_id is not None:
+        membership_row = await _membership_for_team(
+            session, user_id=user.id, team_id=current_team_id,
+        )
+    else:
+        membership_row = await _first_membership(session, user.id)
+    if membership_row is None:
+        raise HTTPException(status_code=403, detail="user has no teams")
+    membership, _team = membership_row
+    team_id = membership.team_id
     if role is None:
-        if current_team_id is not None:
-            membership_row = await _membership_for_team(
-                session, user_id=user.id, team_id=current_team_id,
-            )
-        else:
-            membership_row = await _first_membership(session, user.id)
-        if membership_row is None:
-            raise HTTPException(status_code=403, detail="user has no teams")
-        membership, _team = membership_row
         role = membership.role
-        team_id = membership.team_id
 
     raw_session = _raw_secret("loom_session")
     raw_csrf = _raw_secret("loom_csrf")
@@ -293,25 +293,26 @@ async def verify_session_cookie(
 
     role = "platform_admin" if user.is_platform_admin else None
     team_id = user_session.current_team_id
-    if role is None:
-        if team_id is None:
-            first = await _first_membership(session, user.id)
-            if first is None:
-                return None
-            membership, _team = first
-            team_id = membership.team_id
+    if team_id is None:
+        first = await _first_membership(session, user.id)
+        if first is None:
+            return None
+        membership, _team = first
+        team_id = membership.team_id
+        if role is None:
             role = membership.role
-            await session.execute(
-                update(UserSession)
-                .where(UserSession.session_hash == user_session.session_hash)
-                .values(current_team_id=team_id),
-            )
-        else:
-            membership_row = await _membership_for_team(
-                session, user_id=user.id, team_id=team_id,
-            )
-            if membership_row is None:
-                return None
+        await session.execute(
+            update(UserSession)
+            .where(UserSession.session_hash == user_session.session_hash)
+            .values(current_team_id=team_id),
+        )
+    else:
+        membership_row = await _membership_for_team(
+            session, user_id=user.id, team_id=team_id,
+        )
+        if membership_row is None:
+            return None
+        if role is None:
             role = membership_row[0].role
     await session.execute(
         update(UserSession)

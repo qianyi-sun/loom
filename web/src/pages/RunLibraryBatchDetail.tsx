@@ -21,6 +21,7 @@ import { StatusPill } from "../components/StatusPill";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
+import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant } from "../lib/statusVariant";
@@ -218,7 +219,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           </div>
 
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-            <StatCard label="Owner team" value={batch.owner_team.name} />
+            <StatCard label="Owner" value={ownershipLabel(batch)} />
             <StatCard
               label="Visibility"
               value={`${batch.visibility} / ${batch.share_status}`}

@@ -290,7 +290,8 @@ export interface AuthTeam {
 export interface AuthMe {
   user: {
     id: string;
-    email: string;
+    username: string;
+    email?: string | null;
     display_name: string | null;
     is_platform_admin: boolean;
   };
@@ -300,6 +301,47 @@ export interface AuthMe {
   scopes: string[];
   is_platform_admin: boolean;
   csrf_token?: string;
+}
+
+export interface PublicTeam {
+  id: string;
+  name: string;
+}
+
+export interface UserRegistrationEntry {
+  id: string;
+  username: string;
+  username_normalized: string;
+  team_id: string;
+  team_name?: string | null;
+  role: InviteRole;
+  status: "pending" | "approved" | "rejected";
+  requested_at: string;
+  reviewed_at: string | null;
+  reviewed_by_actor: string | null;
+  setup_token_prefix?: string | null;
+}
+
+export interface AccountActionApproval {
+  setup_link?: string;
+  reset_link?: string;
+  setup_token_prefix?: string;
+  reset_token_prefix?: string;
+  registration?: UserRegistrationEntry;
+  request?: PasswordResetRequestEntry;
+  user: { id: string; username: string };
+  team?: { id: string; name: string };
+}
+
+export interface PasswordResetRequestEntry {
+  id: string;
+  username: string;
+  username_normalized: string;
+  status: "pending" | "approved" | "rejected";
+  requested_at: string;
+  reviewed_at: string | null;
+  reviewed_by_actor: string | null;
+  reset_token_prefix?: string | null;
 }
 
 export interface TeamRegistrationEntry {
@@ -444,6 +486,12 @@ export interface RunLibraryBatch {
   id: string;
   team_id: string;
   owner_team: RunLibraryOwnerTeam;
+  submitted_by_user?: {
+    id: string;
+    username: string;
+    team_id?: string | null;
+    team_name?: string | null;
+  } | null;
   name: string;
   description: string | null;
   task_filter: Record<string, unknown>;
@@ -591,6 +639,40 @@ export const api = {
     q: Record<string, string | undefined> = {},
   ) => apiFetch<MonitorSummary>(`/api/v1/monitor/summary${qs(q)}`),
   authMe: () => apiFetch<AuthMe>("/api/v1/auth/me"),
+  publicTeams: () => apiFetch<{ items: PublicTeam[] }>("/api/v1/auth/public-teams"),
+  loginPassword: (username: string, password: string) =>
+    apiFetch<AuthMe>("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  requestRegistration: (body: { username: string; team_id: string }) =>
+    apiFetch<UserRegistrationEntry>("/api/v1/auth/registration-requests", {
+      method: "POST",
+      body: JSON.stringify({ ...body, metadata: {} }),
+    }),
+  setupLookup: (token: string) =>
+    apiFetch<{ username: string; team: PublicTeam | null; expires_at: string }>(
+      `/api/v1/auth/setup/lookup${qs({ token })}`,
+    ),
+  setupComplete: (body: { token: string; password: string; confirm_password: string }) =>
+    apiFetch<{ status: string; user: { id: string; username: string } }>(
+      "/api/v1/auth/setup/complete",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  requestPasswordReset: (username: string) =>
+    apiFetch<{ status: "pending" }>("/api/v1/auth/password-reset-requests", {
+      method: "POST",
+      body: JSON.stringify({ username }),
+    }),
+  resetLookup: (token: string) =>
+    apiFetch<{ username: string; expires_at: string }>(
+      `/api/v1/auth/reset/lookup${qs({ token })}`,
+    ),
+  resetComplete: (body: { token: string; password: string; confirm_password: string }) =>
+    apiFetch<{ status: string; user: { id: string; username: string } }>(
+      "/api/v1/auth/reset/complete",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   loginStart: (email: string) =>
     apiFetch<{ status: "sent"; login_token?: string }>(
       "/api/v1/auth/login/start",
@@ -798,6 +880,34 @@ export const api = {
   ) =>
     apiFetch<{ items: TeamRegistrationEntry[] }>(
       `/api/v1/admin/team-registrations${qs({ status })}`,
+    ),
+  listUserRegistrationRequests: (status = "pending") =>
+    apiFetch<{ items: UserRegistrationEntry[] }>(
+      `/api/v1/admin/registration-requests${qs({ status })}`,
+    ),
+  approveUserRegistrationRequest: (id: string, role: InviteRole = "member") =>
+    apiFetch<AccountActionApproval>(
+      `/api/v1/admin/registration-requests/${encodeURIComponent(id)}/approve`,
+      { method: "POST", body: JSON.stringify({ role }) },
+    ),
+  rejectUserRegistrationRequest: (id: string, reason?: string) =>
+    apiFetch<UserRegistrationEntry>(
+      `/api/v1/admin/registration-requests/${encodeURIComponent(id)}/reject`,
+      { method: "POST", body: JSON.stringify({ reason: reason ?? null }) },
+    ),
+  listPasswordResetRequests: (status = "pending") =>
+    apiFetch<{ items: PasswordResetRequestEntry[] }>(
+      `/api/v1/admin/password-reset-requests${qs({ status })}`,
+    ),
+  approvePasswordResetRequest: (id: string) =>
+    apiFetch<AccountActionApproval>(
+      `/api/v1/admin/password-reset-requests/${encodeURIComponent(id)}/approve`,
+      { method: "POST" },
+    ),
+  rejectPasswordResetRequest: (id: string, reason?: string) =>
+    apiFetch<PasswordResetRequestEntry>(
+      `/api/v1/admin/password-reset-requests/${encodeURIComponent(id)}/reject`,
+      { method: "POST", body: JSON.stringify({ reason: reason ?? null }) },
     ),
   listAdminTeams: () =>
     apiFetch<{ items: AdminTeam[] }>("/api/v1/admin/teams"),

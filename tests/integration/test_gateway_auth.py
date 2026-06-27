@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import Team, Token
+from loom.db.schema import Team, Token, User
 from loom_llm_gateway.auth import verify_bearer_token
 
 
@@ -24,11 +24,13 @@ async def _insert_token(
     raw: str,
     type_: str = "team",
     team_id: UUID | None = None,
+    created_by_user_id: UUID | None = None,
     expires_in_sec: int = 3600,
 ) -> None:
     h = hashlib.sha256(raw.encode()).digest()
     await session.execute(insert(Token).values(
         token_hash=h, type=type_, scopes=["submit"], team_id=team_id,
+        created_by_user_id=created_by_user_id,
         issued_at=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_sec),
     ))
@@ -45,7 +47,10 @@ async def db_session(postgres_url: str) -> AsyncGenerator[AsyncSession, None]:
         finally:
             # Per-test cleanup so tests don't see each other's tokens.
             await session.execute(delete(Token))
-            await session.execute(delete(Team))
+            await session.execute(
+                delete(User).where(User.username_normalized.like("gateway-auth-%")),
+            )
+            await session.execute(delete(Team).where(Team.name.like("t-%")))
             await session.commit()
     await engine.dispose()
 
@@ -59,6 +64,33 @@ async def test_verify_valid_token(db_session: AsyncSession):
     assert ctx is not None
     assert ctx.team_id == team_id
     assert "submit" in ctx.scopes
+
+
+async def test_verify_token_restores_created_by_user_id(db_session: AsyncSession):
+    team_id = uuid4()
+    user_id = uuid4()
+    await db_session.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+    await db_session.execute(insert(User).values(
+        id=user_id,
+        username="GatewayAuthUser",
+        username_normalized="gateway-auth-user",
+        status="active",
+        is_platform_admin=False,
+    ))
+    raw = "loom_team_user_owned"
+    await _insert_token(
+        db_session,
+        raw=raw,
+        type_="team",
+        team_id=team_id,
+        created_by_user_id=user_id,
+    )
+
+    ctx = await verify_bearer_token(db_session, f"Bearer {raw}")
+
+    assert ctx is not None
+    assert ctx.team_id == team_id
+    assert ctx.user_id == user_id
 
 
 async def test_verify_token_debounces_last_seen_update(

@@ -19,6 +19,7 @@ from loom_service.admin_audit import require_admin_actor, write_admin_audit_even
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.metrics import INVITES_TOTAL
+from loom_service.password_auth import normalize_username
 from loom_service.routes.auth import _serialize_me, _set_auth_cookies
 from loom_service.session_auth import (
     create_session_for_user,
@@ -197,6 +198,32 @@ async def _find_user_by_email(session: AsyncSession, email: str) -> User | None:
     )).scalar_one_or_none()
 
 
+def _legacy_username_candidate(email: str) -> str:
+    local = email.split("@", 1)[0]
+    candidate = "".join(
+        ch if ch.isalnum() or ch in "_.-" else "."
+        for ch in local
+    ).strip("._-")
+    if not candidate:
+        candidate = "user"
+    if len(candidate) == 1:
+        candidate = f"{candidate}1"
+    return candidate[:64]
+
+
+async def _unique_legacy_username(session: AsyncSession, email: str) -> str:
+    base = _legacy_username_candidate(email)
+    for idx in range(1000):
+        candidate = base if idx == 0 else f"{base[: max(1, 64 - len(str(idx)) - 1)]}-{idx}"
+        normalized = normalize_username(candidate)
+        exists = (await session.execute(
+            select(User.id).where(User.username_normalized == normalized),
+        )).scalar_one_or_none()
+        if exists is None:
+            return candidate
+    raise HTTPException(status_code=409, detail="could not allocate username")
+
+
 def _email_matches_invite(invite: TeamInvite, email: str) -> bool:
     normalized = normalize_email(email)
     if normalized == invite.email:
@@ -373,15 +400,16 @@ async def accept_invite(
             await session.commit()
             raise HTTPException(status_code=410, detail="invite expired")
 
-        accepted_email = (
+        session_email = (
             normalize_email(session_user.email)
-            if session_user is not None
-            else payload.email
+            if session_user is not None and session_user.email is not None
+            else None
         )
+        accepted_email = session_email if session_user is not None else payload.email
         if accepted_email is None:
             raise HTTPException(status_code=400, detail="email required")
         if session_user is not None and payload.email is not None:
-            if normalize_email(payload.email) != normalize_email(session_user.email):
+            if session_email is None or normalize_email(payload.email) != session_email:
                 raise HTTPException(
                     status_code=403,
                     detail="invite is not valid for this user",
@@ -394,10 +422,14 @@ async def accept_invite(
 
         user = session_user or await _find_user_by_email(session, accepted_email)
         if user is None:
+            username = await _unique_legacy_username(session, accepted_email)
             user = User(
                 id=uuid4(),
                 email=accepted_email,
+                username=username,
+                username_normalized=normalize_username(username),
                 display_name=None,
+                status="active",
                 is_platform_admin=False,
                 created_at=now,
             )

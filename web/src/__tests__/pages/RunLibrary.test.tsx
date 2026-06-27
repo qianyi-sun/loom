@@ -11,6 +11,12 @@ const sharedBatch = {
   id: "batch-alpha",
   team_id: "team-alpha",
   owner_team: { id: "team-alpha", name: "Alpha Research" },
+  submitted_by_user: {
+    id: "user-ada",
+    username: "Ada",
+    team_id: "team-dev",
+    team_name: "Dev",
+  },
   name: "shared alpha run",
   description: null,
   task_filter: { subset_kind: "explicit", task_ids: ["humaneval/0"] },
@@ -151,6 +157,7 @@ function mockRunLibrary({
           jsonResponse({
             user: {
               id: "user-beta",
+              username: platformAdmin ? "Qianyi" : "Beta",
               email: "beta@example.com",
               display_name: platformAdmin ? "Platform Admin" : "Beta User",
               is_platform_admin: platformAdmin,
@@ -295,14 +302,14 @@ describe("RunLibrary", () => {
     vi.restoreAllMocks();
   });
 
-  it("lists all-team shared runs with owner team and artifact status", async () => {
+  it("lists all-team shared runs with submitting user owner and artifact status", async () => {
     mockRunLibrary();
     renderWithProviders(<RunLibrary />, { route: "/library?scope=all" });
 
     expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
     expect(screen.getByText("Reuse guide")).toBeInTheDocument();
     expect(screen.getByText(/Provider credentials are not copied/i)).toBeInTheDocument();
-    expect(screen.getByText("Alpha Research")).toBeInTheDocument();
+    expect(screen.getAllByText("Ada / Dev").length).toBeGreaterThan(0);
     expect(screen.getAllByText("org / shared").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Reports 1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Raw/internal 1").length).toBeGreaterThan(0);
@@ -379,8 +386,8 @@ describe("RunLibraryBatchDetail", () => {
         "loom eval trial download trial-alpha --kind artifact --artifact-key team-alpha/trial-alpha/main/report.json --output artifact.bin",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText("Owner team")).toBeInTheDocument();
-    expect(screen.getByText("Alpha Research")).toBeInTheDocument();
+    expect(screen.getByText("Owner")).toBeInTheDocument();
+    expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("org / shared")).toBeInTheDocument();
     expect(screen.getByText("Diagnosis")).toBeInTheDocument();

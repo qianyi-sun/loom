@@ -87,8 +87,23 @@ class TeamQuota(Base):
 class User(Base):
     __tablename__ = "users"
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    email: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    username_normalized: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_set_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending_setup'"),
+        default="pending_setup",
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
     is_platform_admin: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"), default=False,
     )
@@ -231,6 +246,139 @@ class PendingTeamRegistration(Base):
         server_default=text("'{}'::jsonb"),
         default=dict,
     )
+
+
+class UserRegistrationRequest(Base):
+    __tablename__ = "user_registration_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('owner', 'member', 'viewer')",
+            name="user_registration_requests_role_check",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'expired')",
+            name="user_registration_requests_status_check",
+        ),
+        Index(
+            "user_registration_requests_active_username_uidx",
+            "username_normalized",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'approved')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    username_normalized: Mapped[str] = mapped_column(Text, nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False,
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="member")
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    reviewed_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    setup_token_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_ip_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+
+
+class AccountActionToken(Base):
+    __tablename__ = "account_action_tokens"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('setup_password', 'reset_password')",
+            name="account_action_tokens_purpose_check",
+        ),
+        Index("account_action_tokens_user_purpose_idx", "user_id", "purpose"),
+        Index("account_action_tokens_prefix_idx", "token_prefix"),
+    )
+
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    registration_request_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("user_registration_requests.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    password_reset_request_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("password_reset_requests.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class PasswordResetRequest(Base):
+    __tablename__ = "password_reset_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'expired')",
+            name="password_reset_requests_status_check",
+        ),
+        Index(
+            "password_reset_requests_active_username_uidx",
+            "username_normalized",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'approved')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    username_normalized: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    reviewed_by_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reset_token_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_ip_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_agent_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AdminAuditEvent(Base):
@@ -737,6 +885,9 @@ class Batch(Base):
         TIMESTAMP(timezone=True), nullable=True,
     )
     created_by_token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    submitted_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
     expected_trial_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0,
     )
@@ -912,6 +1063,9 @@ class Trial(Base):
     )
     provider_model_id: Mapped[str | None] = mapped_column(
         Text, nullable=True,
+    )
+    submitted_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
     visibility: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'org'"), default="org",

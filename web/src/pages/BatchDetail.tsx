@@ -21,6 +21,7 @@ import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
+import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
@@ -218,8 +219,8 @@ export default function BatchDetail(): JSX.Element {
 
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
             <StatCard
-              label="Owner team"
-              value={c.owner_team?.name ?? c.team_id}
+              label="Owner"
+              value={ownershipLabel(c)}
             />
             <StatCard
               label="Visibility"

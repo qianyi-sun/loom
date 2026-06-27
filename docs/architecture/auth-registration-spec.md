@@ -6,7 +6,9 @@ secret verification, default-closed team registration, admin review, audit
 events, operator secret commands, and DB-admin removal. Issue #326 extends that
 baseline with browser users, team memberships, role-derived permissions,
 current-team context, HttpOnly session cookies, and CSRF protection for the
-invite-only public platform track.
+public platform track. Issue #58 changes the normal public onboarding path from
+email/invite-code sign-in to no-email username/password accounts with
+admin-approved setup and reset links.
 
 ## Goals
 
@@ -16,6 +18,13 @@ invite-only public platform track.
   creating admin credentials or escaping their team scope.
 - Add a default-closed access-request path with admin approval into a fixed
   internal team.
+- Do not collect email during registration, login, or password reset.
+- Use globally unique, case-insensitive usernames as the user-facing account
+  identifier.
+- Seed `admin` as a real team and keep platform admins such as `Qianyi` and
+  `Hongjian` as real users in that team.
+- Attribute batches, direct trials, API-token submissions, and batch fan-out to
+  the submitting user plus that user's team.
 - Add persisted browser users, team memberships, session rows, and current-team
   context for the SPA.
 - Enforce viewer/member/owner/platform-admin semantics server-side while
@@ -29,12 +38,14 @@ invite-only public platform track.
 
 ## Non-Goals
 
-- SSO, SAML, OIDC, and automated email delivery. Invite links are revealed once
-  to an admin/team owner on create or resend; a later mailer can deliver the
-  same link without changing the database contract.
-- Scoped public CLI/API tokens and org-wide completed-result sharing are
-  documented in their own API/UX specs. This document keeps the auth,
-  membership, invite, and CSRF contract focused.
+- SSO, SAML, OIDC, and automated email delivery. The platform intentionally has
+  no official mailbox requirement. Admins copy setup/reset links manually after
+  approving requests.
+- Removing legacy invite routes in the same release. They remain compatibility
+  routes, but the SPA and CLI no longer depend on them for normal onboarding.
+- Org-wide completed-result sharing is documented in its own API/UX specs.
+  This document keeps the auth, membership, password, and CSRF contract
+  focused.
 - Run Library sharing and artifact reuse must use explicit visibility/
   share-state checks instead of weakening existing team-scoped execution/
   control routes.
@@ -47,17 +58,23 @@ flowchart TD
   AdminCLI["Operator CLI"] --> SecretFile["Admin secret file"]
   SecretFile --> ServiceStartup["loom_service startup"]
   ServiceStartup --> AdminAuth["In-memory admin hash"]
-  Researcher["Researcher"] --> Register["POST /api/v1/teams/register"]
-  Register --> Pending["pending_team_registrations row"]
   AdminSPA["Admin SPA"] --> Teams["Create/update fixed internal teams"]
-  AdminSPA --> Approve["Approve or reject request"]
+  Researcher["Researcher"] --> PublicTeams["GET /auth/public-teams"]
+  PublicTeams --> Register["POST /auth/registration-requests"]
+  Register --> Pending["user_registration_requests row"]
+  AdminSPA --> Approve["Approve or reject account request"]
   Teams --> Approve
   Approve --> Audit["admin_audit_events row"]
-  Approve --> Team["existing teams row"]
-  Approve --> Invite["team_invites hash row"]
-  Invite --> Reveal["One-time invite link reveal"]
-  Reveal --> Accept["Invite acceptance"]
-  Accept --> Membership["users + team_memberships + session"]
+  Approve --> User["users + team_memberships"]
+  Approve --> SetupToken["account_action_tokens row"]
+  SetupToken --> Reveal["One-time setup link reveal"]
+  Reveal --> Setup["/auth/setup password form"]
+  Setup --> Session["active user + HttpOnly session"]
+  Researcher --> Forgot["POST /auth/password-reset-requests"]
+  Forgot --> ResetPending["password_reset_requests row"]
+  AdminSPA --> ResetApprove["Approve reset request"]
+  ResetApprove --> ResetToken["account_action_tokens row"]
+  ResetToken --> ResetLink["One-time reset link reveal"]
 ```
 
 ## Principal Model
@@ -65,8 +82,9 @@ flowchart TD
 | Principal | Auth source | Scope | Notes |
 | --- | --- | --- | --- |
 | Admin | File-backed singleton secret | Global administration | Compared in memory with `hmac.compare_digest`; not stored in `tokens`. |
-| Browser user | `user_sessions` row plus `loom_session` cookie | Current team role | Normal SPA identity. The raw session secret is HttpOnly; unsafe requests must send the CSRF header. |
-| Team | `tokens` row with `type='team'` | One team | Can submit and read own resources according to scopes. |
+| Browser user | Username/password plus `user_sessions` row and `loom_session` cookie | Current team role | Normal SPA identity. The raw session secret is HttpOnly; unsafe requests must send the CSRF header. |
+| User-owned API token | `tokens` row with `type='team'` and `created_by_user_id` | One team plus submitting user | CLI/API identity for service workflows. Submissions made with the token carry both `team_id` and `user_id`. |
+| Legacy team token | `tokens` row with `type='team'` and no user owner | One team | Compatibility path for old automation; it cannot create admin credentials or cross team scope. |
 | Worker | `tokens` row with `type='worker'` | Internal worker APIs | Not accepted by `loom_service` user/admin routes. |
 | Step session | `loom_step_<jwt>` | One trial step | Gateway-only runtime token, out of scope for #10. |
 
@@ -188,10 +206,20 @@ Issue #326 adds the browser identity tables:
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | UUID primary key | Stable user id. |
-| `email` | text | Unique case-insensitive identity key. |
+| `username` | text | Display-preserving account name. |
+| `username_normalized` | text | Unique case-insensitive login key. |
+| `email` | text nullable | Legacy compatibility only; new registration does not collect it. |
+| `password_hash` | text nullable | Argon2id encoded password hash. Null means pending setup or legacy account without password. |
+| `password_set_at` | timestamptz nullable | Last successful setup/reset timestamp. |
+| `status` | text | `pending_setup`, `active`, or `disabled`. |
+| `disabled_at` | timestamptz nullable | Set when the account is disabled. |
 | `display_name` | text nullable | UI label when available. |
 | `is_platform_admin` | bool | Grants platform-admin session semantics. |
 | `created_at`, `updated_at` | timestamptz | Server timestamps. |
+
+The migration creates an `admin` team and ensures `Qianyi` and `Hongjian` are
+platform-admin users in that team. Usernames are immutable for the public API;
+operators should create a new user if an account needs a different public name.
 
 ### `team_memberships`
 
@@ -243,7 +271,53 @@ returned only as an HttpOnly cookie; the raw CSRF secret is returned in auth
 JSON responses and kept in SPA memory so same-site JavaScript can prove
 mutation intent without storing that secret in a browser-readable cookie.
 
-### `login_challenges`
+### `user_registration_requests`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Generated by service. |
+| `username`, `username_normalized` | text | Requested account name. |
+| `team_id` | UUID | Existing team selected by the requester. |
+| `role` | text | Role approved by admin, default `member`. |
+| `status` | text | `pending`, `approved`, or `rejected`. |
+| `requested_at`, `reviewed_at` | timestamptz | Lifecycle timestamps. |
+| `reviewed_by_actor` | text nullable | Authenticated admin actor when reviewed. |
+| `metadata` | JSONB | Future-safe request context. |
+
+Pending requests are unique on `username_normalized`. Public registration does
+not accept email. If a requested team does not exist, the user must ask an
+admin to create it first.
+
+### `account_action_tokens`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Token row id. |
+| `user_id` | UUID | User that can use the token. |
+| `kind` | text | `setup_password` or `reset_password`. |
+| `token_hash` | bytea | SHA-256 of raw `loom_setup_...` or `loom_reset_...`. |
+| `token_prefix` | text | Safe display prefix. |
+| `expires_at`, `consumed_at`, `revoked_at` | timestamptz | Lifecycle state. |
+| `created_by_user_id` | UUID nullable | Admin user that approved the action. |
+
+The raw setup/reset link is returned only from the approve response. Database,
+list, audit, and diagnostics expose only safe prefixes.
+
+### `password_reset_requests`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID primary key | Generated by service. |
+| `username`, `username_normalized` | text | Requested account. |
+| `status` | text | `pending`, `approved`, or `rejected`. |
+| `requested_at`, `reviewed_at` | timestamptz | Lifecycle timestamps. |
+| `reviewed_by_actor` | text nullable | Authenticated admin actor when reviewed. |
+| `reset_token_prefix` | text nullable | Safe prefix after approval. |
+
+Unknown public reset requests return the same response as known usernames.
+Admins can only approve requests that resolve to a real user.
+
+### `login_challenges` (legacy)
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -253,13 +327,80 @@ mutation intent without storing that secret in a browser-readable cookie.
 | `expires_at`, `consumed_at` | timestamptz | Challenge validity. |
 | `created_at` | timestamptz | Server timestamp. |
 
-Unknown-email login starts return the same public response as known-email starts
-and do not reveal whether a user exists. Until email delivery lands, development
-and tests may enable a setting that returns the raw login token in the response.
+This table remains only for legacy email-code development flows. Normal public
+login uses username/password and does not create login challenges.
 
 ## API Contract
 
-### Public Registration
+### Public Account Registration
+
+`GET /api/v1/auth/public-teams`
+
+Returns fixed teams that users may request to join. Registration cannot create a
+new team. If a team is missing, the user contacts an admin and retries after the
+admin creates it.
+
+`POST /api/v1/auth/registration-requests`
+
+Request:
+
+```json
+{
+  "username": "Ada",
+  "team_id": "00000000-0000-0000-0000-000000000000",
+  "metadata": {}
+}
+```
+
+Creates a pending account request. The username is normalized for uniqueness but
+the original spelling is preserved for display. The request body intentionally
+has no email field.
+
+`GET /api/v1/auth/setup/lookup?token=loom_setup_...`
+
+Returns safe setup context such as username, team name, and expiry for a valid
+unconsumed setup token.
+
+`POST /api/v1/auth/setup/complete`
+
+Request:
+
+```json
+{
+  "token": "loom_setup_...",
+  "password": "long-passphrase-1",
+  "confirm_password": "long-passphrase-1"
+}
+```
+
+Consumes the setup token, stores an Argon2id password hash, activates the user,
+sets the HttpOnly browser session cookie, and returns the same shape as
+`/auth/me` plus `csrf_token`.
+
+### Password Login And Reset
+
+`POST /api/v1/auth/login`
+
+Accepts `{ "username": "ada", "password": "..." }`. Username lookup is
+case-insensitive. Success sets the HttpOnly `loom_session` cookie and returns
+the same shape as `/auth/me` plus `csrf_token`.
+
+`POST /api/v1/auth/password-reset-requests`
+
+Accepts `{ "username": "Ada" }` and always returns a generic pending response.
+Unknown usernames are not disclosed to the caller.
+
+`GET /api/v1/auth/reset/lookup?token=loom_reset_...`
+
+Returns safe reset context for a valid unconsumed reset token.
+
+`POST /api/v1/auth/reset/complete`
+
+Consumes the reset token, stores the new Argon2id password hash, revokes
+existing browser sessions and user-owned API tokens for that user, sets a new
+browser session, and returns `/auth/me` plus `csrf_token`.
+
+### Legacy Public Registration
 
 `POST /api/v1/teams/register`
 
@@ -272,12 +413,8 @@ Request:
 }
 ```
 
-Closed mode is the default: create a pending row and return `202 Accepted` with
-the registration id and status. Open mode is explicitly enabled by
-`LOOM_SVC_TEAM_REGISTRATION_OPEN=true`; open mode still requires rate limiting
-and a challenge hook before it can auto-approve access. Until that challenge
-hook ships, the backend accepts the setting but returns an explicit
-`501` for open-registration attempts instead of silently issuing credentials.
+This is a compatibility endpoint for old team-registration and invite-based
+onboarding. New UI and CLI flows use `/api/v1/auth/registration-requests`.
 
 ### Admin Review
 
@@ -328,6 +465,43 @@ Requires admin auth plus `X-Loom-Admin-Actor`. Marks the request rejected and
 records review metadata on the registration row. It does not delete the request
 row.
 
+`GET /api/v1/admin/registration-requests?status=pending`
+
+Returns pending username account requests. Requires platform-admin session or
+singleton admin auth.
+
+`POST /api/v1/admin/registration-requests/{id}/approve`
+
+Requires platform-admin authority. The body selects the role:
+
+```json
+{
+  "role": "member"
+}
+```
+
+Approval creates or activates the user record in `pending_setup` state, creates
+the team membership, writes an account-action setup token, records audit
+metadata using the authenticated admin actor where available, and returns
+`setup_link` exactly once.
+
+`POST /api/v1/admin/registration-requests/{id}/reject`
+
+Marks the request rejected and records review metadata.
+
+`GET /api/v1/admin/password-reset-requests?status=pending`
+
+Returns pending password reset requests. Requires platform-admin authority.
+
+`POST /api/v1/admin/password-reset-requests/{id}/approve`
+
+Creates an account-action reset token for the target user and returns
+`reset_link` exactly once. The admin copies the link and shares it manually.
+
+`POST /api/v1/admin/password-reset-requests/{id}/reject`
+
+Marks the reset request rejected and records review metadata.
+
 ### Invites
 
 `POST /api/v1/invites`
@@ -374,7 +548,7 @@ the last event id as the next cursor. Team users never see this endpoint. Raw
 tokens, provider secrets, request bodies, and artifact paths must not appear in
 audit metadata.
 
-### Browser Session Auth
+### Legacy Email-Code Browser Auth
 
 `POST /api/v1/auth/login/start`
 
@@ -386,7 +560,8 @@ response also includes `login_token` for local development and automated tests.
 
 Accepts `{ "token": "loom_login_..." }`, consumes the one-time challenge, sets
 the HttpOnly `loom_session` cookie, and returns the same shape as `/auth/me`
-plus `csrf_token`.
+plus `csrf_token`. This path is retained for compatibility only; username/
+password login is the normal browser and CLI path.
 
 `GET /api/v1/auth/me`
 
@@ -421,6 +596,8 @@ Team API-token behavior stays database-backed:
 
 - tokens are named and reveal a raw `loom_api_...` value only at creation or
   rotation time;
+- tokens created by browser users store `created_by_user_id`; bearer-token auth
+  restores both `AuthContext.team_id` and `AuthContext.user_id`;
 - team callers can mint only same-team tokens and cannot grant scopes they do
   not hold;
 - supported public team scopes include `read:own`, `submit`,
@@ -432,6 +609,12 @@ Team API-token behavior stays database-backed:
   the action can be written to `admin_audit_events`;
 - token list/detail responses reveal only names, scopes, metadata, last-used
   timestamps, and hash prefixes.
+
+Batch and direct-trial creation stores `submitted_by_user_id` from the browser
+session or user-owned API token. Batch fan-out copies the parent batch
+submitter onto child trials. List/detail APIs expose both `submitted_by_user`
+and `owner_team`; frontends render the stable ownership label as
+`username / team`.
 
 Provider connection creation, key rotation, provider tests, model refresh,
 manual model insertion, hide/unhide, and delete are similarly owner-gated for
@@ -470,11 +653,10 @@ auth responses into the configured header for unsafe methods.
 
 Settings is the session and team-settings surface:
 
-- signed-out users open an invite link, submit an access request, or paste a
-  one-time login code already issued by an operator or local development
-  environment;
-- signed-out users also see CLI setup guidance that points them to scoped team
-  API tokens after they have joined a team;
+- signed-out users sign in with username and password, submit a username
+  request for an existing team, or submit a password reset request;
+- signed-out users see CLI setup guidance for the same username/password
+  account flow;
 - signed-in users see their user, current team, role, platform-admin flag, team
   list, joined browser users, and role-derived capabilities;
 - the authenticated app shell shows the current team name and role in the
@@ -486,23 +668,27 @@ Settings is the session and team-settings surface:
   next actions;
 - team switching clears cached queries because the current-team context changes
   authorization and result scope;
-- owner users can navigate to Team access for invites and scoped CLI/API token
-  lifecycle, plus provider setup; platform admins also manage fixed internal
-  teams and approve pending access requests into a selected team/role;
+- owner users can navigate to Team access for scoped CLI/API token lifecycle,
+  legacy invites, and provider setup; platform admins also manage fixed
+  internal teams, approve username account requests, and approve password reset
+  requests;
   member/viewer users do not get owner-only UI affordances and still receive
   server-side 403s for forbidden mutations.
 
-Team access is organized into role-aware sections. Platform admins see Requests,
-Teams, Invites, API tokens, and Audit sections; team owners see Invites and API
-tokens only. Manual invite creation selects from visible team names for platform
-admins instead of requiring a pasted raw team id; team-owner invite creation uses
-the current team from the session context.
+Team access is organized into role-aware sections. Platform admins see legacy
+Requests, Accounts, Teams, Invites, API tokens, and Audit sections; team owners
+see Invites and API tokens only. The Accounts section lists pending username
+registration requests and password reset requests. Approvals reveal setup/reset
+links exactly once for manual sharing. Manual invite creation remains available
+as a compatibility path and selects from visible team names for platform admins
+instead of requiring a pasted raw team id; team-owner invite creation uses the
+current team from the session context.
 
-The invite acceptance page at `/invites/accept?code=...` performs a safe lookup
-that displays team name, role, invite status, and code prefix. Pending invites
-show an email field and accept action; expired, revoked, and already-used
-invites show human-readable terminal states without exposing raw membership
-data.
+The setup page at `/auth/setup?token=...` and reset page at
+`/auth/reset?token=...` perform safe lookups, then accept password and
+confirmation fields. The legacy invite acceptance page at
+`/invites/accept?code=...` remains available for old links and compatibility
+tests.
 
 The legacy Admin Access page and singleton admin secret remain operator tools.
 They are not normal browser identity for public users.
@@ -536,12 +722,15 @@ They are not normal browser identity for public users.
   is missing, malformed, or permission-unsafe.
 - Auth tests proving singleton admin succeeds, wrong admin token fails, team
   tokens still work, and DB admin rows are rejected.
-- User-session tests for login start/complete, `/auth/me`, logout, refresh,
-  team switch, unknown-email non-disclosure, CSRF denial, role-derived scopes,
-  and cross-team denial.
-- API tests for closed-mode registration, duplicate pending contact emails,
-  approval into an existing team/role, reject, one-time invite reveal, invite
-  acceptance, and membership after approval.
+- User-session tests for username/password login, `/auth/me`, logout, refresh,
+  team switch, CSRF denial, role-derived scopes, and cross-team denial.
+- API tests for no-email username registration, duplicate pending usernames,
+  approval into an existing team/role, setup-link completion, password reset
+  approval, reset completion, session/token revocation after reset, and
+  membership after approval.
+- Attribution tests proving browser sessions and user-owned API tokens persist
+  `submitted_by_user_id` on batches, direct trials, batch fan-out trials, and
+  Run Library clone/reuse submissions.
 - Invite API tests for create/list/revoke/resend/accept, expired and duplicate
   acceptance, explicit domain policy, and raw-code redaction from list/audit.
 - Audit tests proving admin mutations fail if audit insertion fails, team users
