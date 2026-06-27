@@ -806,6 +806,35 @@ remote worker env file, remote checkout path, requested CPU/memory, requested
 worker concurrency, max jobs, pending-job cap, and Slurm command paths if
 they differ from `sbatch`, `squeue`, `sacct`, and `scancel`.
 
+If the Control Plane runs inside Kubernetes and the Slurm CLI/munge socket are
+available only on the OLDLAB submit host, mark the policy as externally run:
+
+```json
+{
+  "actuator": "slurm",
+  "enabled": true,
+  "actuator_config": {
+    "external_runner": true,
+    "allowed_nodes": ["trt-eai-oldlab-5"],
+    "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env",
+    "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+    "requested_cpus": 12,
+    "requested_memory_mib": 58000,
+    "requested_concurrency": 6,
+    "max_jobs": 1,
+    "pending_job_cap": 1
+  }
+}
+```
+
+The in-pod Control Plane autoscaler loop skips `external_runner` policies, so
+it does not repeatedly fail on missing `sbatch`. Run the reconciler on the
+Slurm submit host with the same deployed code and `LOOM_CP_DB_URL`, passing
+`include_external_policies=True` and `external_only=True` to
+`reconcile_worker_pool_autoscaler_once` or `run_worker_pool_autoscaler_loop`.
+This keeps policy, status, and API visibility in the Control Plane while
+executing Slurm commands only where the cluster credentials exist.
+
 For GB10, autoscaler policy updates the GB10 desired state only. The
 Control Plane does not SSH into hosts. Each `loom worker gb10-agent apply`
 pulls desired state and applies its host intent:

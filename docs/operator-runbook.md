@@ -1932,6 +1932,12 @@ mock provider and browser automation job.
   to `active` or wait for OLDLAB Slurm jobs to converge. Manual `scancel` and
   Docker Compose stop remain break-glass actions and must not target workers
   that still own claimed or running trials.
+- If a Slurm pool's submit commands work only on the OLDLAB submit host, set
+  `actuator_config.external_runner=true`. The Kubernetes Control Plane loop
+  intentionally skips those policies; run the autoscaler reconciler on the
+  submit host with `include_external_policies=True` and `external_only=True`
+  so `sbatch`, `squeue`, `sacct`, `scancel`, and munge stay on the machine
+  that owns those credentials.
 - Until Docker sandbox CPU/RAM limits are enforced per trial, treat
   higher worker concurrency as an operator decision backed by load-test
   evidence, not just a CPU-count formula.
