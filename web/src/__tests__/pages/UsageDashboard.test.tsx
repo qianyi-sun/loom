@@ -19,7 +19,28 @@ describe("UsageDashboard", () => {
 
   function mockUsageDashboard({
     platformAdmin = false,
-  }: { platformAdmin?: boolean } = {}): ReturnType<typeof vi.spyOn> {
+    usageBody = {
+      degraded: false,
+      buckets: [
+        {
+          start_at: "2026-06-01T00:00:00Z",
+          trial_count: 2,
+          total_cost_usd: 0.25,
+          estimated_cost_usd: 0.25,
+          cost_status: "estimated",
+          cost_currency: "USD",
+          pricing_modes: ["priced"],
+          llm_input_tokens: 1000,
+          llm_output_tokens: 500,
+          trials_currently_succeeded: 1,
+          trials_currently_failed: 1,
+        },
+      ],
+    },
+  }: {
+    platformAdmin?: boolean;
+    usageBody?: Record<string, unknown>;
+  } = {}): ReturnType<typeof vi.spyOn> {
     return vi.spyOn(global, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -52,20 +73,7 @@ describe("UsageDashboard", () => {
           });
         }
         if (url.includes("/api/v1/usage")) {
-          return jsonResponse({
-            degraded: false,
-            buckets: [
-              {
-                start_at: "2026-06-01T00:00:00Z",
-                trial_count: 2,
-                total_cost_usd: 0.25,
-                llm_input_tokens: 1000,
-                llm_output_tokens: 500,
-                trials_currently_succeeded: 1,
-                trials_currently_failed: 1,
-              },
-            ],
-          });
+          return jsonResponse(usageBody);
         }
         return jsonResponse({ detail: `unhandled ${url}` }, 404);
       },
@@ -117,5 +125,62 @@ describe("UsageDashboard", () => {
     expect(screen.getByText(/loom eval usage --start/)).toHaveTextContent(
       "--team-id team-b",
     );
+  });
+
+  it("shows token-only cost as not applicable and includes admin batch drilldown", async () => {
+    const fetchMock = mockUsageDashboard({
+      platformAdmin: true,
+      usageBody: {
+        degraded: false,
+        buckets: [
+          {
+            start_at: "2026-06-02T00:00:00Z",
+            trial_count: 1,
+            total_cost_usd: 0,
+            estimated_cost_usd: null,
+            cost_status: "not_applicable",
+            cost_currency: null,
+            pricing_modes: ["tokens-only"],
+            llm_input_tokens: 77,
+            llm_output_tokens: 11,
+            trials_currently_succeeded: 0,
+            trials_currently_failed: 1,
+            batches: [
+              {
+                batch_id: "batch-token-only",
+                batch_name: "self-deployed token-only batch",
+                team_id: "team-1",
+                team_name: "Team One",
+                trial_count: 1,
+                estimated_cost_usd: null,
+                cost_status: "not_applicable",
+                cost_currency: null,
+                pricing_modes: ["tokens-only"],
+                llm_input_tokens: 77,
+                llm_output_tokens: 11,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(<UsageDashboard />, { route: "/usage" });
+
+    expect(await screen.findByText("self-deployed token-only batch"))
+      .toBeInTheDocument();
+    expect(screen.getAllByText("n/a").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("not_applicable").length).toBeGreaterThan(0);
+
+    await waitFor(() => {
+      const usageRequests = fetchMock.mock.calls.filter(([input]) =>
+        String(input).includes("/api/v1/usage"),
+      );
+      const latestUrl = new URL(
+        String(usageRequests.at(-1)![0]),
+        "http://localhost",
+      );
+      expect(latestUrl.searchParams.get("include_batches")).toBe("true");
+    });
   });
 });

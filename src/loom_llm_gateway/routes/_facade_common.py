@@ -42,6 +42,10 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.yibuapi_pricing import (
+    YIBUAPI_RATE_CARD_PROVIDER,
+    normalize_yibuapi_model_name,
+)
 
 _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER = {
     "anthropic": "anthropic",
@@ -55,7 +59,9 @@ _BEARER_VALUE_RE = re.compile(
 
 
 async def verify_facade_auth(
-    session: Any, authorization: str | None, signing_key: str,
+    session: Any,
+    authorization: str | None,
+    signing_key: str,
 ) -> AuthContext:
     """Step-scoped JWT auth path shared by all facade routes.
 
@@ -63,7 +69,9 @@ async def verify_facade_auth(
     and team_id. Raises 401 / 403 directly on auth failure.
     """
     ctx = await verify_bearer_token(
-        session, authorization, signing_key=signing_key,
+        session,
+        authorization,
+        signing_key=signing_key,
     )
     if ctx is None or "llm:call" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
@@ -93,15 +101,13 @@ def parse_connection_id_header(raw: str | None) -> UUID:
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "x-loom-provider-connection-id is not a valid UUID: "
-                f"{exc}"
-            ),
+            detail=(f"x-loom-provider-connection-id is not a valid UUID: {exc}"),
         ) from exc
 
 
 def resolve_provider_connection_id(
-    ctx: AuthContext, header_value: str | None,
+    ctx: AuthContext,
+    header_value: str | None,
 ) -> UUID:
     """Resolve the connection_id from EITHER the step-JWT scope
     (``ctx.provider_connection_id``) OR the
@@ -130,10 +136,7 @@ def resolve_provider_connection_id(
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "x-loom-provider-connection-id is not a valid "
-                    f"UUID: {exc}"
-                ),
+                detail=(f"x-loom-provider-connection-id is not a valid UUID: {exc}"),
             ) from exc
 
     jwt_uuid = ctx.provider_connection_id
@@ -180,15 +183,18 @@ async def resolve_facade_connection(
     Cross-team 404 fires BEFORE the dialect check so cross-team
     callers can't probe which provider_type a connection has.
     """
-    row: ProviderConnection | None = (await session.execute(
-        select(ProviderConnection).where(
-            ProviderConnection.id == connection_id,
-            ProviderConnection.deleted_at.is_(None),
-        ),
-    )).scalar_one_or_none()
+    row: ProviderConnection | None = (
+        await session.execute(
+            select(ProviderConnection).where(
+                ProviderConnection.id == connection_id,
+                ProviderConnection.deleted_at.is_(None),
+            ),
+        )
+    ).scalar_one_or_none()
     if row is None or row.team_id != team_id:
         raise HTTPException(
-            status_code=404, detail="provider_connection not found",
+            status_code=404,
+            detail="provider_connection not found",
         )
     if row.provider_type not in supported_types:
         raise HTTPException(
@@ -231,17 +237,22 @@ async def compute_facade_cost_usd(
     if row.pricing_source != "rate-card":
         return 0.0, f"facade:{row.pricing_source}"
 
-    lookup_provider = (
-        row.rate_card_provider
-        or _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER.get(row.provider_type)
+    lookup_provider = row.rate_card_provider or _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER.get(
+        row.provider_type
     )
     if lookup_provider is None or rate_card_cache is None:
         return 0.0, "facade:rate-card:missing"
 
     try:
         table = await rate_card_cache.get()
+        lookup_model = (
+            normalize_yibuapi_model_name(model_name)
+            if lookup_provider == YIBUAPI_RATE_CARD_PROVIDER
+            else model_name
+        )
         entry = lookup_entry(
-            table, ModelSpec(provider=lookup_provider, name=model_name),
+            table,
+            ModelSpec(provider=lookup_provider, name=lookup_model),
         )
     except RateCardNotFoundError:
         return 0.0, "facade:rate-card:missing"
@@ -257,7 +268,8 @@ async def compute_facade_cost_usd(
 
 
 async def decrypt_facade_api_key(
-    session: Any, row: ProviderConnection,
+    session: Any,
+    row: ProviderConnection,
 ) -> str:
     """Decrypt the provider api_key, translating SecretStore failures
     into controlled 502 responses so the facade never bubbles an

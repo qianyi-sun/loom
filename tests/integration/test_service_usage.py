@@ -18,15 +18,16 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import LlmCall, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, LlmCall, Task, Team, TeamQuota, Token, Trial
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
 
 @pytest.fixture
 async def usage_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
-) -> AsyncIterator[tuple[FastAPI, str, str]]:
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+) -> AsyncIterator[tuple[FastAPI, str, str, str]]:
     for k, v in {
         "LOOM_SVC_DB_URL": postgres_url,
         "LOOM_SVC_MINIO_ENDPOINT": "http://minio:9000",
@@ -41,7 +42,8 @@ async def usage_setup(
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        engine, expire_on_commit=False,
+        engine,
+        expire_on_commit=False,
     )
     app.state.minio_client = boto3.client(
         "s3",
@@ -56,19 +58,41 @@ async def usage_setup(
 
     team_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
-    task_id = "local/usage-task"
+    task_id = f"local/usage-task-{uuid4().hex[:8]}"
+    batch_id = uuid4()
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw.encode()).digest(),
-            type="team", scopes=["read:own"], team_id=team_id,
-            issued_at=datetime.now(UTC),
-        ))
-        s.execute(insert(Task).values(
-            id=task_id, checksum="x" * 64, config={}, source="local",
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw.encode()).digest(),
+                type="team",
+                scopes=["read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="x" * 64,
+                config={},
+                source="local",
+            )
+        )
+        s.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="priced usage batch",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="usage123",
+                expected_trial_count=3,
+            )
+        )
         # Seed three trials across two days: day-1 succeeded + failed,
         # day-2 succeeded. Each has one LLM call.
         base = datetime(2026, 6, 1, 12, tzinfo=UTC)
@@ -79,28 +103,39 @@ async def usage_setup(
         ]
         for tid, day_off, state in trials:
             ts = base + timedelta(days=day_off)
-            s.execute(insert(Trial).values(
-                id=tid, task_id=task_id, team_id=team_id, state=state,
-                config={}, requires_caps={}, submitted_at=ts,
-                finished_at=ts,
-            ))
-            s.execute(insert(LlmCall).values(
-                id=uuid4(),
-                team_id=team_id,
-                trial_id=tid,
-                step_id="main",
-                model="gpt-4",
-                dialect="openai_chat",
-                input_tokens=100,
-                output_tokens=50,
-                provider_extras={},
-                cost_usd=Decimal("0.01"),
-                rate_card_hash="h",
-                captured_at=ts,
-            ))
+            s.execute(
+                insert(Trial).values(
+                    id=tid,
+                    task_id=task_id,
+                    team_id=team_id,
+                    state=state,
+                    config={},
+                    requires_caps={},
+                    submitted_at=ts,
+                    finished_at=ts,
+                    batch_id=batch_id,
+                    result=({"aggregate_reward": 1.0} if state == "succeeded" else None),
+                )
+            )
+            s.execute(
+                insert(LlmCall).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    trial_id=tid,
+                    step_id="main",
+                    model="gpt-4",
+                    dialect="openai_chat",
+                    input_tokens=100,
+                    output_tokens=50,
+                    provider_extras={},
+                    cost_usd=Decimal("0.01"),
+                    rate_card_hash="h",
+                    captured_at=ts,
+                )
+            )
         s.commit()
     try:
-        yield app, raw, str(team_id)
+        yield app, raw, str(team_id), task_id
     finally:
         await app.state.gateway_client.aclose()
         await app.state.http_client.aclose()
@@ -108,6 +143,7 @@ async def usage_setup(
         with sl() as s:
             s.execute(delete(LlmCall))
             s.execute(delete(Trial))
+            s.execute(delete(Batch))
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(TeamQuota))
@@ -117,16 +153,16 @@ async def usage_setup(
 
 
 async def test_usage_groups_by_day(
-    usage_setup: tuple[FastAPI, str, str],
+    usage_setup: tuple[FastAPI, str, str, str],
 ) -> None:
-    app, raw, team_str = usage_setup
+    app, raw, team_str, _task_id = usage_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            f"/api/v1/usage?team_id={team_str}"
-            f"&start=2026-06-01&end=2026-06-03&group_by=day",
+            f"/api/v1/usage?team_id={team_str}&start=2026-06-01&end=2026-06-03&group_by=day",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200, r.text
@@ -153,17 +189,99 @@ async def test_usage_groups_by_day(
     assert day2["trials_currently_failed"] == 0
 
 
-async def test_usage_groups_by_week(
-    usage_setup: tuple[FastAPI, str, str],
+async def test_usage_include_batches_distinguishes_token_only_cost(
+    usage_setup: tuple[FastAPI, str, str, str],
+    postgres_url: str,
 ) -> None:
-    app, raw, team_str = usage_setup
+    app, raw, team_str, task_id = usage_setup
+    team_id = UUID(team_str)
+    batch_id = uuid4()
+    trial_id = uuid4()
+    ts = datetime(2026, 6, 2, 13, tzinfo=UTC)
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="self-deployed token-only batch",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="selfhost",
+                expected_trial_count=1,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_id,
+                team_id=team_id,
+                state="failed",
+                config={},
+                requires_caps={},
+                submitted_at=ts,
+                finished_at=ts,
+                batch_id=batch_id,
+            )
+        )
+        conn.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="qwen3.6-35b-a3b",
+                dialect="openai_responses",
+                input_tokens=77,
+                output_tokens=11,
+                provider_extras={},
+                cost_usd=Decimal("0"),
+                rate_card_hash="facade:tokens-only",
+                captured_at=ts,
+            )
+        )
+    sync_engine.dispose()
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             f"/api/v1/usage?team_id={team_str}"
-            f"&start=2026-06-01&end=2026-06-30&group_by=week",
+            f"&start=2026-06-02&end=2026-06-02"
+            f"&group_by=day&include_batches=true",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 200, r.text
+    bucket = r.json()["buckets"][0]
+    assert bucket["cost_status"] == "mixed"
+    assert bucket["pricing_modes"] == ["priced", "tokens-only"]
+    by_name = {item["batch_name"]: item for item in bucket["batches"]}
+    token_only = by_name["self-deployed token-only batch"]
+    assert token_only["llm_input_tokens"] == 77
+    assert token_only["llm_output_tokens"] == 11
+    assert token_only["estimated_cost_usd"] is None
+    assert token_only["cost_currency"] is None
+    assert token_only["cost_status"] == "not_applicable"
+    assert token_only["pricing_modes"] == ["tokens-only"]
+    priced = by_name["priced usage batch"]
+    assert priced["estimated_cost_usd"] == pytest.approx(0.01)
+    assert priced["cost_status"] == "estimated"
+
+
+async def test_usage_groups_by_week(
+    usage_setup: tuple[FastAPI, str, str, str],
+) -> None:
+    app, raw, team_str, _task_id = usage_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/usage?team_id={team_str}&start=2026-06-01&end=2026-06-30&group_by=week",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200
@@ -175,13 +293,14 @@ async def test_usage_groups_by_week(
 
 
 async def test_usage_default_team_for_team_caller(
-    usage_setup: tuple[FastAPI, str, str],
+    usage_setup: tuple[FastAPI, str, str, str],
 ) -> None:
     """No team_id query param → scoped to caller's team_id."""
-    app, raw, _team_str = usage_setup
+    app, raw, _team_str, _task_id = usage_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/usage?start=2026-06-01&end=2026-06-03",
@@ -192,28 +311,29 @@ async def test_usage_default_team_for_team_caller(
 
 
 async def test_cross_team_forbidden(
-    usage_setup: tuple[FastAPI, str, str],
+    usage_setup: tuple[FastAPI, str, str, str],
 ) -> None:
-    app, raw, _team_str = usage_setup
+    app, raw, _team_str, _task_id = usage_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            f"/api/v1/usage?team_id={uuid4()}"
-            f"&start=2026-06-01&end=2026-06-03",
+            f"/api/v1/usage?team_id={uuid4()}&start=2026-06-01&end=2026-06-03",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 403
 
 
 async def test_invalid_group_by_400(
-    usage_setup: tuple[FastAPI, str, str],
+    usage_setup: tuple[FastAPI, str, str, str],
 ) -> None:
-    app, raw, _team_str = usage_setup
+    app, raw, _team_str, _task_id = usage_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/usage?start=2026-06-01&end=2026-06-03&group_by=hour",
@@ -223,12 +343,13 @@ async def test_invalid_group_by_400(
 
 
 async def test_end_before_start_400(
-    usage_setup: tuple[FastAPI, str, str],
+    usage_setup: tuple[FastAPI, str, str, str],
 ) -> None:
-    app, raw, _team_str = usage_setup
+    app, raw, _team_str, _task_id = usage_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
             "/api/v1/usage?start=2026-06-10&end=2026-06-01",
@@ -238,7 +359,7 @@ async def test_end_before_start_400(
 
 
 async def test_degraded_when_llm_calls_missing(
-    usage_setup: tuple[FastAPI, str, str],
+    usage_setup: tuple[FastAPI, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If the llm_calls table somehow doesn't exist (operator drop,
@@ -249,22 +370,23 @@ async def test_degraded_when_llm_calls_missing(
     the table — restoring the schema mid-session is brittle and
     Plan 9's table is canonical so we shouldn't actually remove it.
     """
-    app, raw, team_str = usage_setup
+    app, raw, team_str, _task_id = usage_setup
 
     async def _absent(_session: object) -> bool:
         return False
 
     monkeypatch.setattr(
-        "loom_service.routes.usage._llm_calls_exists", _absent,
+        "loom_service.routes.usage._llm_calls_exists",
+        _absent,
     )
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://svc",
+        transport=transport,
+        base_url="http://svc",
     ) as ac:
         r = await ac.get(
-            f"/api/v1/usage?team_id={team_str}"
-            f"&start=2026-06-01&end=2026-06-03",
+            f"/api/v1/usage?team_id={team_str}&start=2026-06-01&end=2026-06-03",
             headers={"Authorization": f"Bearer {raw}"},
         )
     assert r.status_code == 200

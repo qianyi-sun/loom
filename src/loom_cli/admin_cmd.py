@@ -6,6 +6,8 @@ Subcommands:
   rotation via the Control Plane's admin surface.
 - ``loom admin tokens team {mint,revoke,rotate}`` — team-token
   rotation via loom_service's /api/v1/tokens route.
+- ``loom admin rate-cards sync-yibuapi`` — sync the official YibuAPI
+  pricing catalog into the service rate-card store.
 - ``loom admin secret-store rewrap`` — master-key rotation walker;
   re-encrypts all SecretStore rows with the primary key configured
   in ``LOOM_SECRET_STORE_MASTER_KEYS``.
@@ -53,7 +55,7 @@ def _resolve_admin_token(source: str) -> str:
     if source == "-":
         return sys.stdin.read().strip()
     if source.startswith("env:"):
-        var = source[len("env:"):]
+        var = source[len("env:") :]
         if not var:
             raise ValueError("--admin-token env:VAR — VAR cannot be empty")
         try:
@@ -63,7 +65,7 @@ def _resolve_admin_token(source: str) -> str:
                 f"--admin-token env:{var} — environment variable not set",
             ) from None
     if source.startswith("file:"):
-        path = source[len("file:"):]
+        path = source[len("file:") :]
         if not path:
             raise ValueError("--admin-token file:PATH — PATH cannot be empty")
         try:
@@ -72,8 +74,7 @@ def _resolve_admin_token(source: str) -> str:
         except OSError as e:
             raise ValueError(f"--admin-token file:{path} — {e}") from None
     raise ValueError(
-        f"--admin-token must be one of: env:VAR, file:PATH, '-' "
-        f"(stdin). Got {source!r}",
+        f"--admin-token must be one of: env:VAR, file:PATH, '-' (stdin). Got {source!r}",
     )
 
 
@@ -91,7 +92,8 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
 
     try:
         resp = httpx.post(
-            url, json=body,
+            url,
+            json=body,
             headers={"Authorization": f"Bearer {admin_token}"},
             timeout=10.0,
         )
@@ -127,8 +129,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
 def _revoke_worker_token(args: argparse.Namespace) -> int:
     if not _HEX_PREFIX_RE.fullmatch(args.prefix):
         sys.stderr.write(
-            f"error: prefix must be 4-64 hex characters; got "
-            f"{args.prefix!r}\n",
+            f"error: prefix must be 4-64 hex characters; got {args.prefix!r}\n",
         )
         return 2
 
@@ -141,7 +142,8 @@ def _revoke_worker_token(args: argparse.Namespace) -> int:
     url = f"{args.cp_url.rstrip('/')}/admin/worker-tokens/{args.prefix}"
     try:
         resp = httpx.delete(
-            url, headers={"Authorization": f"Bearer {admin_token}"},
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
             timeout=10.0,
         )
     except httpx.RequestError as e:
@@ -176,7 +178,7 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
             "\nRotation checklist:\n"
             "  1. Update `worker-token` key in `loom-secrets`:\n"
             "       kubectl patch secret loom-secrets \\\n"
-            "         -p '{\"stringData\":{\"worker-token\":\"<NEW>\"}}'\n"
+            '         -p \'{"stringData":{"worker-token":"<NEW>"}}\'\n'
             "  2. Restart workers:\n"
             "       kubectl rollout restart deploy/loom-worker\n"
             "  3. Verify workers re-register (no 401s in worker logs).\n"
@@ -239,8 +241,7 @@ def _slurm_workers_status(args: argparse.Namespace) -> int:
         sys.stdout.write("\nJobs:\n")
     for job in jobs:
         env_items = " ".join(
-            f"{key}={value}"
-            for key, value in sorted(job.get("redacted_env", {}).items())
+            f"{key}={value}" for key, value in sorted(job.get("redacted_env", {}).items())
         )
         sys.stdout.write(
             f"  {job.get('job_id') or '-'} "
@@ -371,7 +372,9 @@ def _mint_team_token(args: argparse.Namespace) -> int:
     try:
         with authed_client(cfg) as c:
             resp = c.post(
-                "/api/v1/tokens", json=body, headers=headers or None,
+                "/api/v1/tokens",
+                json=body,
+                headers=headers or None,
             )
             data = assert_2xx(resp, action="mint team token")
     except HttpStatusError as e:
@@ -400,8 +403,7 @@ def _mint_team_token(args: argparse.Namespace) -> int:
 def _revoke_team_token(args: argparse.Namespace) -> int:
     if not _HEX_8_PREFIX_RE.fullmatch(args.prefix):
         sys.stderr.write(
-            f"error: prefix must be exactly 8 lowercase hex chars; "
-            f"got {args.prefix!r}\n",
+            f"error: prefix must be exactly 8 lowercase hex chars; got {args.prefix!r}\n",
         )
         return 2
 
@@ -458,6 +460,48 @@ def _rotate_team_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sync_yibuapi_rate_cards(args: argparse.Namespace) -> int:
+    try:
+        cfg = require_logged_in()
+    except NotLoggedInError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    body: dict[str, object] = {}
+    if args.source_url is not None:
+        body["source_url"] = args.source_url
+    if args.group != "default":
+        body["group"] = args.group
+
+    try:
+        with authed_client(cfg) as c:
+            resp = c.post("/api/v1/rate-cards/sync/yibuapi", json=body)
+            data = assert_2xx(resp, action="sync YibuAPI rate card")
+    except HttpStatusError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+    except httpx.RequestError as e:
+        sys.stderr.write(
+            f"error: could not reach {cfg.server_url}: {e}\n",
+        )
+        return 2
+
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    sys.stdout.write(
+        "Synced YibuAPI rate card.\n"
+        f"  id:              {data.get('id', '-')}\n"
+        f"  source_url:      {data.get('source_url', '-')}\n"
+        f"  pricing_version: {data.get('pricing_version', '-')}\n"
+        f"  entries:         {data.get('entry_count', 0)}\n"
+        f"  skipped:         {data.get('skipped_model_count', 0)}\n",
+    )
+    return 0
+
+
 def _scopes_argparse_type(value: str) -> list[str]:
     """Accept a comma-separated list of scopes. Rejects unknown
     scopes client-side to surface typos before the round-trip."""
@@ -467,19 +511,21 @@ def _scopes_argparse_type(value: str) -> list[str]:
     unknown = [s for s in items if s not in _KNOWN_TEAM_SCOPES]
     if unknown:
         raise argparse.ArgumentTypeError(
-            f"unknown scope(s) {unknown}; known: "
-            f"{list(_KNOWN_TEAM_SCOPES)}",
+            f"unknown scope(s) {unknown}; known: {list(_KNOWN_TEAM_SCOPES)}",
         )
     return items
 
 
 def _add_team_mint_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
-        "--name", required=True,
+        "--name",
+        required=True,
         help="Human-readable token name shown in token lists and audit logs.",
     )
     p.add_argument(
-        "--type", choices=_KNOWN_TOKEN_TYPES, default="team",
+        "--type",
+        choices=_KNOWN_TOKEN_TYPES,
+        default="team",
         help=(
             "Token type. Admin credentials are file-backed singleton secrets; "
             "use `loom service init-admin` or `loom service rotate-admin` "
@@ -487,7 +533,8 @@ def _add_team_mint_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--team-id", default=None,
+        "--team-id",
+        default=None,
         help=(
             "UUID of the team this token grants access to. Required "
             "for --type team when called as an admin; defaults to "
@@ -495,7 +542,8 @@ def _add_team_mint_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--scopes", type=_scopes_argparse_type,
+        "--scopes",
+        type=_scopes_argparse_type,
         default=list(_DEFAULT_TEAM_SCOPES),
         help=(
             "Comma-separated scope list. Known: "
@@ -504,25 +552,31 @@ def _add_team_mint_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--expires-in-days", type=int, default=90,
+        "--expires-in-days",
+        type=int,
+        default=90,
         help="Token lifetime in days (default: 90).",
     )
     p.add_argument(
-        "--admin-actor", default=None,
+        "--admin-actor",
+        default=None,
         help=(
             "Sets `X-Loom-Admin-Actor`. Required when the logged-in "
             "bearer is an admin token (audit trail)."
         ),
     )
     p.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
 
 
 def _add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
-        "--cp-url", default=_DEFAULT_CP_URL,
+        "--cp-url",
+        default=_DEFAULT_CP_URL,
         help=(
             f"Control Plane base URL (default: {_DEFAULT_CP_URL}). The "
             f"CP admin surface is NOT public; port-forward in another "
@@ -531,7 +585,8 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--admin-token", default=_DEFAULT_ADMIN_TOKEN_SOURCE,
+        "--admin-token",
+        default=_DEFAULT_ADMIN_TOKEN_SOURCE,
         help=(
             f"Admin token source. ONE of: env:VAR (read os.environ[VAR]), "
             f"file:PATH (read file content), or '-' (read stdin). "
@@ -543,6 +598,7 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
 def _generate_new_key() -> str:
     """Return a fresh base64-encoded 32-byte key."""
     import base64
+
     return base64.b64encode(os.urandom(32)).decode()
 
 
@@ -571,16 +627,16 @@ def _rewrap_secret_store(args: argparse.Namespace) -> int:
             f"       OLD_KEY=$(kubectl get secret loom-secrets "
             f"-o jsonpath='{{.data.secret-store-master-key}}' | base64 -d)\n"
             f"       kubectl patch secret loom-secrets \\\n"
-            f"         -p '{{\"stringData\":{{\"secret-store-master-keys\":"
-            f"\"{new_key},${{OLD_KEY}}\"}},\"data\":{{\"secret-store-master-key\":null}}}}'\n"
+            f'         -p \'{{"stringData":{{"secret-store-master-keys":'
+            f'"{new_key},${{OLD_KEY}}"}},"data":{{"secret-store-master-key":null}}}}\'\n'
             f"       kubectl rollout restart deploy/loom-service\n\n"
             f"  2. Run the rewrap walk:\n"
             f"       loom admin secret-store rewrap --new-key {new_key!r} "
             f"--admin-actor <your-name>\n\n"
             f"  3. Drop the old key (new key only):\n"
             f"       kubectl patch secret loom-secrets \\\n"
-            f"         -p '{{\"stringData\":{{\"secret-store-master-keys\":null,"
-            f"\"secret-store-master-key\":\"{new_key}\"}}}}\n"
+            f'         -p \'{{"stringData":{{"secret-store-master-keys":null,'
+            f'"secret-store-master-key":"{new_key}"}}}}\n'
             f"       kubectl rollout restart deploy/loom-service\n",
         )
         return 0
@@ -644,8 +700,7 @@ def _rewrap_secret_store(args: argparse.Namespace) -> int:
             for ref, err in failed:
                 sys.stdout.write(f"  {ref}: {err}\n")
             sys.stdout.write(
-                "\nReview failures above. Refs that failed are still "
-                "encrypted with the OLD key.\n",
+                "\nReview failures above. Refs that failed are still encrypted with the OLD key.\n",
             )
         else:
             sys.stdout.write(
@@ -653,8 +708,8 @@ def _rewrap_secret_store(args: argparse.Namespace) -> int:
                 "Next step: drop the fallback key from loom-secrets "
                 "and restart loom-service:\n"
                 "  kubectl patch secret loom-secrets \\\n"
-                "    -p '{\"stringData\":{\"secret-store-master-keys\":null,"
-                "\"secret-store-master-key\":\"<NEW_KEY>\"}}\n"
+                '    -p \'{"stringData":{"secret-store-master-keys":null,'
+                '"secret-store-master-key":"<NEW_KEY>"}}\n'
                 "  kubectl rollout restart deploy/loom-service\n",
             )
 
@@ -668,7 +723,8 @@ def dispatch(argv: list[str]) -> int:
         prog="loom admin",
         description=(
             "Operator-only admin operations. Subcommands: "
-            "`tokens` (worker/team token rotation) and "
+            "`tokens` (worker/team token rotation), "
+            "`rate-cards` (pricing catalog sync), and "
             "`secret-store` (master-key rotation walker)."
         ),
     )
@@ -685,7 +741,8 @@ def dispatch(argv: list[str]) -> int:
         help="Worker-token operations (Control Plane admin surface).",
     )
     worker_sub = p_worker.add_subparsers(
-        dest="worker_op", required=True,
+        dest="worker_op",
+        required=True,
     )
 
     p_mint = worker_sub.add_parser(
@@ -694,7 +751,9 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_common_args(p_mint)
     p_mint.add_argument(
-        "--expires-in-days", type=int, default=_DEFAULT_EXPIRES_DAYS,
+        "--expires-in-days",
+        type=int,
+        default=_DEFAULT_EXPIRES_DAYS,
         help=(
             f"Token lifetime in days "
             f"(default: {_DEFAULT_EXPIRES_DAYS}). Pass 0 to omit the "
@@ -702,7 +761,9 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_mint.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format. JSON for scripting.",
     )
     p_mint.set_defaults(handler=_mint_worker_token)
@@ -728,11 +789,15 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_common_args(p_rotate)
     p_rotate.add_argument(
-        "--expires-in-days", type=int, default=_DEFAULT_EXPIRES_DAYS,
+        "--expires-in-days",
+        type=int,
+        default=_DEFAULT_EXPIRES_DAYS,
         help=f"Token lifetime in days (default: {_DEFAULT_EXPIRES_DAYS}).",
     )
     p_rotate.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
     p_rotate.set_defaults(handler=_rotate_worker_token)
@@ -748,7 +813,9 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_common_args(p_slurm_status)
     p_slurm_status.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
     p_slurm_status.set_defaults(handler=_slurm_workers_status)
@@ -766,7 +833,9 @@ def dispatch(argv: list[str]) -> int:
     p_gb10_status.add_argument("--environment", default=None)
     p_gb10_status.add_argument("--pool-name", default=None)
     p_gb10_status.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
     p_gb10_status.set_defaults(handler=_gb10_workers_status)
@@ -797,7 +866,8 @@ def dispatch(argv: list[str]) -> int:
         help="Exactly 8 lowercase hex chars from token_hash_prefix.",
     )
     p_team_revoke.add_argument(
-        "--admin-actor", default=None,
+        "--admin-actor",
+        default=None,
         help=(
             "Sets `X-Loom-Admin-Actor`. Required when the logged-in "
             "bearer is an admin token (audit trail). Ignored when "
@@ -816,13 +886,44 @@ def dispatch(argv: list[str]) -> int:
     _add_team_mint_args(p_team_rotate)
     p_team_rotate.set_defaults(handler=_rotate_team_token)
 
+    # ── rate-cards subgroup ───────────────────────────────────────────
+    p_rate_cards = sub.add_parser(
+        "rate-cards",
+        help="Rate-card catalog operations via the public service API.",
+    )
+    rate_cards_sub = p_rate_cards.add_subparsers(
+        dest="rate_cards_op",
+        required=True,
+    )
+    p_rc_sync_yibuapi = rate_cards_sub.add_parser(
+        "sync-yibuapi",
+        help="Sync YibuAPI official pricing into the service rate-card store.",
+    )
+    p_rc_sync_yibuapi.add_argument(
+        "--source-url",
+        default=None,
+        help=(
+            "Override the YibuAPI pricing endpoint. Defaults to the "
+            "server's configured official pricing URL."
+        ),
+    )
+    p_rc_sync_yibuapi.add_argument(
+        "--group",
+        default="default",
+        help="YibuAPI group ratio to use when converting prices.",
+    )
+    p_rc_sync_yibuapi.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_rc_sync_yibuapi.set_defaults(handler=_sync_yibuapi_rate_cards)
+
     # ── secret-store subgroup ──────────────────────────────────────────
     p_ss = sub.add_parser(
         "secret-store",
-        help=(
-            "SecretStore master-key rotation operations. "
-            "See `loom admin secret-store --help`."
-        ),
+        help=("SecretStore master-key rotation operations. See `loom admin secret-store --help`."),
     )
     ss_sub = p_ss.add_subparsers(dest="ss_op", required=True)
 
@@ -836,7 +937,9 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_ss_rewrap.add_argument(
-        "--new-key", dest="new_key", default=None,
+        "--new-key",
+        dest="new_key",
+        default=None,
         help=(
             "Base64-encoded 32-byte key to rewrap to. Overrides the "
             "PRIMARY key in LOOM_SECRET_STORE_MASTER_KEYS. Normally "
@@ -844,8 +947,10 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_ss_rewrap.add_argument(
-        "--generate-new-key", dest="generate_new_key",
-        action="store_true", default=False,
+        "--generate-new-key",
+        dest="generate_new_key",
+        action="store_true",
+        default=False,
         help=(
             "Mint a fresh key, print it, and output the kubectl patch "
             "commands. Does NOT call the rewrap endpoint. Use this to "
@@ -853,19 +958,24 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_ss_rewrap.add_argument(
-        "--dry-run", dest="dry_run",
-        action="store_true", default=False,
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=False,
         help="Print what would be done without calling the endpoint.",
     )
     p_ss_rewrap.add_argument(
-        "--admin-actor", default=None,
+        "--admin-actor",
+        default=None,
         help=(
             "Sets `X-Loom-Admin-Actor`. Required when the logged-in "
             "bearer is an admin token (audit trail)."
         ),
     )
     p_ss_rewrap.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
     p_ss_rewrap.set_defaults(handler=_rewrap_secret_store)

@@ -936,6 +936,10 @@ async def test_list_batches(
     assert "total_cost_usd" not in items[0]
     assert items[0]["total_prompt_tokens"] == 4
     assert items[0]["total_completion_tokens"] == 2
+    assert items[0]["estimated_cost_usd"] == pytest.approx(99.0)
+    assert items[0]["cost_currency"] == "USD"
+    assert items[0]["cost_status"] == "estimated"
+    assert items[0]["pricing_modes"] == ["priced"]
     assert items[0]["llm_calls_count"] == 1
     assert items[1]["total_prompt_tokens"] == 0
     assert items[1]["total_completion_tokens"] == 0
@@ -1093,7 +1097,7 @@ async def test_get_batch_detail_with_rollup(
                     "output_tokens": 3,
                     "provider_extras": {},
                     "cost_usd": Decimal("0.000000"),
-                    "rate_card_hash": "missing-rate-card",
+                    "rate_card_hash": "facade:rate-card:missing",
                 },
                 {
                     "id": uuid4(),
@@ -1130,6 +1134,10 @@ async def test_get_batch_detail_with_rollup(
     assert "total_cost_usd" not in body
     assert body["total_prompt_tokens"] == 18
     assert body["total_completion_tokens"] == 9
+    assert body["estimated_cost_usd"] == pytest.approx(9.990001)
+    assert body["cost_currency"] == "USD"
+    assert body["cost_status"] == "mixed"
+    assert body["pricing_modes"] == ["priced", "price-unknown"]
     assert body["llm_calls_count"] == 3
 
 
@@ -1755,9 +1763,13 @@ async def test_get_batch_detail_effective_rollup_uses_successful_rerun(
     assert "effective_total_cost_usd" not in body
     assert body["total_prompt_tokens"] == 5
     assert body["total_completion_tokens"] == 2
+    assert body["estimated_cost_usd"] == pytest.approx(0.01)
+    assert body["cost_status"] == "estimated"
     assert body["llm_calls_count"] == 1
     assert body["effective_total_prompt_tokens"] == 16
     assert body["effective_total_completion_tokens"] == 6
+    assert body["effective_estimated_cost_usd"] == pytest.approx(0.03)
+    assert body["effective_cost_status"] == "estimated"
     assert body["effective_llm_calls_count"] == 2
     assert body["rerunnable_failed_count"] == 1
     assert body["rerun_batches"][0]["id"] == str(rerun_batch_id)

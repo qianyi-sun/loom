@@ -574,7 +574,9 @@ export interface ReuseRunLibraryArtifactResult {
   created_at: string;
 }
 
-function qs(params: Record<string, string | number | undefined>): string {
+function qs(
+  params: Record<string, string | number | boolean | undefined>,
+): string {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") out[k] = String(v);
@@ -942,6 +944,7 @@ export const api = {
     start: string;
     end: string;
     group_by?: string;
+    include_batches?: boolean;
   }) => apiFetch<Usage>(`/api/v1/usage${qs(q)}`),
   getTeam: (teamId: string) =>
     apiFetch<Team>(`/api/v1/teams/${teamId}`),

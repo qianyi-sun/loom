@@ -50,6 +50,10 @@ from loom_service.monitor_filters import (
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.usage_accounting import (
+    empty_usage_projection,
+    summarize_usage_counts,
+)
 
 router = APIRouter()
 
@@ -75,40 +79,69 @@ def _extract_reward(result: dict[str, Any] | None) -> float | None:
         return None
 
 
-def _empty_usage_projection() -> dict[str, int]:
-    return {
-        "total_prompt_tokens": 0,
-        "total_completion_tokens": 0,
-        "llm_calls_count": 0,
-    }
+def _empty_usage_projection() -> dict[str, Any]:
+    return empty_usage_projection()
+
+
+def _priced_call_filter() -> Any:
+    return ~LlmCall.rate_card_hash.like("facade:tokens-only%") & ~LlmCall.rate_card_hash.like(
+        "facade:rate-card:missing%"
+    )
 
 
 async def _usage_by_trial_ids(
     session: Any,
     trial_ids: Sequence[UUID],
-) -> dict[UUID, dict[str, int]]:
+) -> dict[UUID, dict[str, Any]]:
     if not trial_ids:
         return {}
-    rows = (await session.execute(
-        select(
-            LlmCall.trial_id.label("trial_id"),
-            func.coalesce(
-                func.sum(LlmCall.input_tokens), 0,
-            ).label("total_prompt_tokens"),
-            func.coalesce(
-                func.sum(LlmCall.output_tokens), 0,
-            ).label("total_completion_tokens"),
-            func.count(LlmCall.id).label("llm_calls_count"),
+    rows = (
+        await session.execute(
+            select(
+                LlmCall.trial_id.label("trial_id"),
+                func.coalesce(
+                    func.sum(LlmCall.input_tokens),
+                    0,
+                ).label("total_prompt_tokens"),
+                func.coalesce(
+                    func.sum(LlmCall.output_tokens),
+                    0,
+                ).label("total_completion_tokens"),
+                func.count(LlmCall.id).label("llm_calls_count"),
+                func.coalesce(
+                    func.sum(LlmCall.cost_usd),
+                    0,
+                ).label("total_cost_usd"),
+                func.count(LlmCall.id)
+                .filter(_priced_call_filter())
+                .label("priced_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
+                .label("token_only_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
+                )
+                .label("price_unknown_llm_calls_count"),
+            )
+            .where(LlmCall.trial_id.in_(trial_ids))
+            .group_by(LlmCall.trial_id),
         )
-        .where(LlmCall.trial_id.in_(trial_ids))
-        .group_by(LlmCall.trial_id),
-    )).all()
+    ).all()
     return {
-        row.trial_id: {
-            "total_prompt_tokens": int(row.total_prompt_tokens or 0),
-            "total_completion_tokens": int(row.total_completion_tokens or 0),
-            "llm_calls_count": int(row.llm_calls_count or 0),
-        }
+        row.trial_id: summarize_usage_counts(
+            llm_calls_count=int(row.llm_calls_count or 0),
+            total_prompt_tokens=int(row.total_prompt_tokens or 0),
+            total_completion_tokens=int(row.total_completion_tokens or 0),
+            total_cost_usd=row.total_cost_usd,
+            priced_llm_calls_count=int(row.priced_llm_calls_count or 0),
+            token_only_llm_calls_count=int(
+                row.token_only_llm_calls_count or 0,
+            ),
+            price_unknown_llm_calls_count=int(
+                row.price_unknown_llm_calls_count or 0,
+            ),
+        )
         for row in rows
     }
 
@@ -141,7 +174,7 @@ def _extract_agent_projection(
 def _trial_row(
     t: Trial,
     *,
-    usage: dict[str, int] | None = None,
+    usage: dict[str, Any] | None = None,
     owner_team: Team | None = None,
 ) -> dict[str, Any]:
     agent_name, model = _extract_agent_projection(t.config)
@@ -159,10 +192,16 @@ def _trial_row(
         "attempt_count": t.attempt_count,
         "aggregate_reward": _extract_reward(t.result),
         "total_prompt_tokens": usage_projection["total_prompt_tokens"],
-        "total_completion_tokens": usage_projection[
-            "total_completion_tokens"
-        ],
+        "total_completion_tokens": usage_projection["total_completion_tokens"],
+        "total_tokens": usage_projection["total_tokens"],
         "llm_calls_count": usage_projection["llm_calls_count"],
+        "estimated_cost_usd": usage_projection["estimated_cost_usd"],
+        "cost_currency": usage_projection["cost_currency"],
+        "cost_status": usage_projection["cost_status"],
+        "pricing_modes": usage_projection["pricing_modes"],
+        "priced_llm_calls_count": usage_projection["priced_llm_calls_count"],
+        "token_only_llm_calls_count": usage_projection["token_only_llm_calls_count"],
+        "price_unknown_llm_calls_count": usage_projection["price_unknown_llm_calls_count"],
         "agent_name": agent_name,
         "model": model,
         "visibility": t.visibility,
@@ -247,9 +286,15 @@ async def list_trials(
     usage_by_trial = await _usage_by_trial_ids(s, [r.id for r in rows])
     teams_by_id: dict[UUID, Team] = {}
     if rows:
-        team_rows = (await s.execute(
-            select(Team).where(Team.id.in_({r.team_id for r in rows})),
-        )).scalars().all()
+        team_rows = (
+            (
+                await s.execute(
+                    select(Team).where(Team.id.in_({r.team_id for r in rows})),
+                )
+            )
+            .scalars()
+            .all()
+        )
         teams_by_id = {team.id: team for team in team_rows}
     return {
         "items": [
@@ -367,17 +412,27 @@ async def get_trial(
     require_team_or_admin(ctx, trial.team_id)
 
     usage_by_trial = await _usage_by_trial_ids(s, [trial.id])
-    owner_team = (await s.execute(
-        select(Team).where(Team.id == trial.team_id),
-    )).scalar_one_or_none()
-    task = (await s.execute(
-        select(Task).where(Task.id == trial.task_id),
-    )).scalar_one_or_none()
-    llm_calls = list((await s.execute(
-        select(LlmCall)
-        .where(LlmCall.trial_id == trial.id)
-        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
-    )).scalars().all())
+    owner_team = (
+        await s.execute(
+            select(Team).where(Team.id == trial.team_id),
+        )
+    ).scalar_one_or_none()
+    task = (
+        await s.execute(
+            select(Task).where(Task.id == trial.task_id),
+        )
+    ).scalar_one_or_none()
+    llm_calls = list(
+        (
+            await s.execute(
+                select(LlmCall)
+                .where(LlmCall.trial_id == trial.id)
+                .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
     base = _trial_row(
         trial,
         usage=usage_by_trial.get(trial.id),
@@ -437,14 +492,22 @@ async def get_trial_debug(
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
-    task = (await s.execute(
-        select(Task).where(Task.id == trial.task_id),
-    )).scalar_one_or_none()
-    llm_calls = list((await s.execute(
-        select(LlmCall)
-        .where(LlmCall.trial_id == trial.id)
-        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
-    )).scalars().all())
+    task = (
+        await s.execute(
+            select(Task).where(Task.id == trial.task_id),
+        )
+    ).scalar_one_or_none()
+    llm_calls = list(
+        (
+            await s.execute(
+                select(LlmCall)
+                .where(LlmCall.trial_id == trial.id)
+                .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
     return build_trial_debug_evidence(
         request,
         trial,
@@ -469,14 +532,22 @@ async def get_trial_diagnosis(
     if trial is None:
         raise HTTPException(status_code=404, detail="trial not found")
     require_team_or_admin(ctx, trial.team_id)
-    task = (await s.execute(
-        select(Task).where(Task.id == trial.task_id),
-    )).scalar_one_or_none()
-    llm_calls = list((await s.execute(
-        select(LlmCall)
-        .where(LlmCall.trial_id == trial.id)
-        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
-    )).scalars().all())
+    task = (
+        await s.execute(
+            select(Task).where(Task.id == trial.task_id),
+        )
+    ).scalar_one_or_none()
+    llm_calls = list(
+        (
+            await s.execute(
+                select(LlmCall)
+                .where(LlmCall.trial_id == trial.id)
+                .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
     debug_evidence = build_trial_debug_evidence(
         request,
         trial,

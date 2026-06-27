@@ -8,10 +8,11 @@ each mode.
 
 Every LLM call freezes its raw token counts (input, output, cache
 reads, cache writes, plus any dialect-specific extras) verbatim into
-storage at the moment the response lands. Trial and batch read APIs
-return token totals plus `llm_calls_count`; they do not expose a
-top-level dollar cost. Cost views derive spend from a versioned rate
-card over the recorded call rows.
+storage at the moment the response lands. Priced calls also freeze the
+per-call `cost_usd` snapshot and `rate_card_hash` used at emit time.
+Trial, batch, and usage read APIs project these rows into token totals,
+estimated spend, and cost diagnostics; they do not hide token-only or
+missing-rate-card calls behind a zero-dollar total.
 
 ```
 provider response
@@ -26,8 +27,10 @@ TokenUsage ──► llm_calls row
         ▼                         ▼
  trial/batch usage projection     usage/rate-card cost view
  { total_prompt_tokens,           { derived spend totals,
-   total_completion_tokens,         rate-card diagnostics }
-   llm_calls_count }
+   total_completion_tokens,         rate-card diagnostics,
+   llm_calls_count,                 optional batch drilldown }
+   estimated_cost_usd,
+   cost_status }
 ```
 
 Why this shape:
@@ -40,12 +43,14 @@ Why this shape:
   `thoughtsTokenCount`). The `provider_extras` JSONB column
   absorbs them without a schema change.
 - **Trial/batch responses stay stable** — dashboards can distinguish
-  "no calls were made" from "rate-card lookup missed" using
-  `llm_calls_count`, prompt tokens, and completion tokens.
+  "no calls were made", "self-deployed token-only model", and
+  "rate-card lookup missed" using `llm_calls_count`, token totals,
+  `cost_status`, and `pricing_modes`.
 - **Cost attribution stays auditable** — the Gateway records a
   per-call `cost_usd` snapshot and `rate_card_hash` for metrics and
-  diagnostics, while consumers that need spend totals should query the
-  usage/rate-card surface rather than reading trial or batch rows.
+  diagnostics. Consumers that need fleet-wide totals should query
+  `/api/v1/usage`; trial and batch detail responses expose the same
+  projection fields for local debugging.
 
 (Harbor froze `cost_usd` at emit time. RFC0001 acknowledges this
 goes wrong when prices move.)
@@ -62,6 +67,11 @@ class RateCardEntry:
     output_per_mtok: float
     cache_read_per_mtok: float
     cache_write_per_mtok: float
+    currency: str          # optional metadata, defaults to "USD"
+    source_url: str | None
+    pricing_version: str | None
+    source_model: str | None
+    pricing_unit: str | None
 ```
 
 Cost formula (per call):
@@ -101,6 +111,21 @@ gateway records tokens with `cost_usd=0` and
 the gap without losing call attribution. Trial and batch responses still
 show the non-zero call count and token totals in this case.
 
+For hosted YibuAPI usage, sync the official pricing catalog into the
+service rate-card table:
+
+```bash
+loom admin rate-cards sync-yibuapi
+```
+
+The service fetches `https://yibuapi.com/api/pricing`, converts token
+quota models into USD-per-1M-token entries using YibuAPI's group ratio,
+and stores the catalog with `source_url`, `pricing_version`,
+`last_checked_at`, `currency`, `group`, `group_ratio`, entry count, and
+skipped model count. Model lookup normalizes common prefixes such as
+`yibuapi/<model>` and `models/<model>`. The synced card is auditable by
+its stored JSON payload and `rate_card_hash`.
+
 ## Local / self-hosted rates
 
 Provider key uses a `local:<server>` prefix to match the model spec
@@ -135,7 +160,10 @@ loom providers create \
 
 The connection still defaults to `pricing_source='tokens-only'` for
 OpenAI-compatible endpoints; switch it to `rate-card` only when the
-service rate-card table has rows for that provider/model pair.
+service rate-card table has rows for that provider/model pair. For
+user-managed or self-deployed APIs, keep `tokens-only`: Loom records
+token totals and returns `estimated_cost_usd=null` with
+`cost_status='not_applicable'` rather than inventing a dollar amount.
 Rate-card metadata is optional for launch selection: BYO provider model
 discovery and manual model ids are exposed through `/api/v1/models`
 even when no matching rate-card entry exists. Missing facade pricing is

@@ -363,6 +363,7 @@ export interface paths {
           start: string;
           end: string;
           group_by?: string;
+          include_batches?: string;
         };
       };
       responses: {
@@ -447,6 +448,18 @@ export interface components {
       starting_tasks: number;
       queued_tasks: number;
     };
+    UsageCostStatus:
+      | "no_usage"
+      | "estimated"
+      | "not_applicable"
+      | "price_unknown"
+      | "mixed"
+      | string;
+    UsagePricingMode:
+      | "priced"
+      | "tokens-only"
+      | "price-unknown"
+      | string;
     Trial: {
       id: string;
       task_id: string;
@@ -460,7 +473,15 @@ export interface components {
       aggregate_reward: number | null;
       total_prompt_tokens: number;
       total_completion_tokens: number;
+      total_tokens?: number;
       llm_calls_count: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+      pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
       agent_name: string | null;
       model: components["schemas"]["ModelSpec"] | null;
     };
@@ -667,7 +688,15 @@ export interface components {
       expected_trial_count: number;
       total_prompt_tokens: number;
       total_completion_tokens: number;
+      total_tokens?: number;
       llm_calls_count: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+      pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
       visibility?: "team" | "org" | "private";
       share_status?: "pending_scan" | "shared" | "blocked";
       source_provenance?: Record<string, unknown>[];
@@ -712,8 +741,32 @@ export interface components {
       effective_total_prompt_tokens: number;
       effective_total_completion_tokens: number;
       effective_llm_calls_count: number;
+      effective_total_tokens?: number;
+      effective_estimated_cost_usd?: number | null;
+      effective_cost_currency?: string | null;
+      effective_cost_status?: components["schemas"]["UsageCostStatus"];
+      effective_pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      effective_priced_llm_calls_count?: number;
+      effective_token_only_llm_calls_count?: number;
+      effective_price_unknown_llm_calls_count?: number;
       debug_evidence?: components["schemas"]["DebugEvidence"];
       diagnosis?: components["schemas"]["DiagnosisReport"];
+    };
+    UsageBatch: {
+      batch_id: string;
+      batch_name: string;
+      team_id: string;
+      team_name?: string | null;
+      trial_count: number;
+      llm_input_tokens: number;
+      llm_output_tokens: number;
+      estimated_cost_usd: number | null;
+      cost_currency: string | null;
+      cost_status: components["schemas"]["UsageCostStatus"];
+      pricing_modes: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
     };
     UsageBucket: {
       start_at: string;
@@ -724,8 +777,16 @@ export interface components {
       succeeded_count: number;
       failed_count: number;
       total_cost_usd: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+      pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
       llm_input_tokens: number;
       llm_output_tokens: number;
+      batches?: components["schemas"]["UsageBatch"][];
     };
     Usage: {
       buckets: components["schemas"]["UsageBucket"][];

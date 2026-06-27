@@ -55,8 +55,10 @@ _TYPE_TO_AGENT_PROVIDER: dict[str, str] = {
 
 
 def _build_agent_model(
-    connection_type: str, model_name: str,
-    *, agent_provider_override: str | None = None,
+    connection_type: str,
+    model_name: str,
+    *,
+    agent_provider_override: str | None = None,
 ) -> dict[str, Any]:
     """Construct the `agent_model` dict the worker hands to the agent.
 
@@ -236,8 +238,7 @@ def _print_diagnosis_report(report: dict[str, Any]) -> None:
         affected = primary.get("affected_trials")
         if affected is not None:
             print(
-                "  affected:        "
-                f"{affected} ({_format_ratio(primary.get('affected_ratio'))})",
+                f"  affected:        {affected} ({_format_ratio(primary.get('affected_ratio'))})",
             )
     impact = report.get("impact")
     if isinstance(impact, str) and impact:
@@ -290,7 +291,8 @@ def _run(args: argparse.Namespace) -> int:
             trial_config: dict[str, Any] = {
                 "agent_name": args.agent,
                 "agent_model": _build_agent_model(
-                    conn["type"], args.model,
+                    conn["type"],
+                    args.model,
                     agent_provider_override=args.agent_provider,
                 ),
             }
@@ -303,8 +305,7 @@ def _run(args: argparse.Namespace) -> int:
             resp = c.post("/api/v1/trials", json=payload)
         body = assert_2xx(resp, action=f"submit trial for task {args.task!r}")
         print(
-            f"Submitted trial for task {args.task!r} via provider "
-            f"{args.provider!r}:",
+            f"Submitted trial for task {args.task!r} via provider {args.provider!r}:",
         )
         body.setdefault("task_id", args.task)
         _print_trial_summary(body)
@@ -372,17 +373,17 @@ def _batch_create(args: argparse.Namespace) -> int:
 
         if needs_model:
             missing = [
-                flag for flag, value in (
+                flag
+                for flag, value in (
                     ("--provider", args.provider),
                     ("--model", args.model),
-                ) if not value
+                )
+                if not value
             ]
             if missing:
                 message = (
                     f"error: agent {args.agent!r} requires --provider and "
-                    "--model for batch creation; missing "
-                    + ", ".join(missing)
-                    + ".\n"
+                    "--model for batch creation; missing " + ", ".join(missing) + ".\n"
                 )
                 sys.stderr.write(message)
                 return 2
@@ -403,7 +404,8 @@ def _batch_create(args: argparse.Namespace) -> int:
             if needs_model:
                 conn = _resolve_by_name(c, args.provider)
                 trial_config["agent_model"] = _build_agent_model(
-                    conn["type"], args.model,
+                    conn["type"],
+                    args.model,
                     agent_provider_override=args.agent_provider,
                 )
             # --benchmark is a SHORTCUT for the most common task_filter:
@@ -415,7 +417,7 @@ def _batch_create(args: argparse.Namespace) -> int:
                 sys.stderr.write(
                     "error: --benchmark and --task-filter are mutually "
                     "exclusive (--benchmark B is sugar for "
-                    "--task-filter '{\"benchmark_id\":\"B\"}').\n",
+                    '--task-filter \'{"benchmark_id":"B"}\').\n',
                 )
                 return 2
             if args.task_filter is not None:
@@ -482,8 +484,7 @@ def _batch_list(args: argparse.Namespace) -> int:
         # warning interactive users.
         if body.get("next_cursor"):
             sys.stderr.write(
-                f"(more — {len(items)} shown; pass --limit N for more "
-                "or filter with --state)\n",
+                f"(more — {len(items)} shown; pass --limit N for more or filter with --state)\n",
             )
         return 0
 
@@ -556,6 +557,27 @@ def _batch_cancel(args: argparse.Namespace) -> int:
     return _run_with_error_handling(_body)
 
 
+def _usage_cost_status(item: dict[str, Any]) -> str:
+    status = item.get("cost_status")
+    if isinstance(status, str) and status:
+        return status
+    if "estimated_cost_usd" in item or "total_cost_usd" in item:
+        return "estimated"
+    return "unknown"
+
+
+def _format_usage_cost(item: dict[str, Any]) -> str:
+    if "estimated_cost_usd" in item:
+        value = item.get("estimated_cost_usd")
+    else:
+        value = item.get("total_cost_usd")
+    if value is None:
+        return "n/a"
+    if isinstance(value, int | float):
+        return f"{value:.6g}"
+    return str(value)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # eval trial list / show
 # ──────────────────────────────────────────────────────────────────────
@@ -585,8 +607,7 @@ def _trial_list(args: argparse.Namespace) -> int:
             reward = it.get("aggregate_reward")
             reward_s = f"{reward:.3f}" if isinstance(reward, (int, float)) else "-"
             print(
-                f"{it['id']:<38}  {it['state']:<10}  "
-                f"reward={reward_s:<6}  {it.get('task_id', '')}",
+                f"{it['id']:<38}  {it['state']:<10}  reward={reward_s:<6}  {it.get('task_id', '')}",
             )
         # Issue #67: same truncation hint as batch list. Stderr keeps
         # stdout pipeable; interactive users still see the warning.
@@ -653,21 +674,24 @@ def _diagnose_trial(args: argparse.Namespace) -> int:
 
 
 def _print_trial_download_commands(
-    body: dict[str, Any], trial_id: str,
+    body: dict[str, Any],
+    trial_id: str,
 ) -> None:
     commands: list[tuple[str, str]] = []
     if body.get("atif_ready"):
-        commands.append((
-            "atif",
-            f"loom eval trial download {shlex.quote(trial_id)} "
-            "--kind atif",
-        ))
+        commands.append(
+            (
+                "atif",
+                f"loom eval trial download {shlex.quote(trial_id)} --kind atif",
+            )
+        )
     if body.get("trajectory_ready"):
-        commands.append((
-            "trajectory",
-            f"loom eval trial download {shlex.quote(trial_id)} "
-            "--kind trajectory",
-        ))
+        commands.append(
+            (
+                "trajectory",
+                f"loom eval trial download {shlex.quote(trial_id)} --kind trajectory",
+            )
+        )
     artifacts = body.get("artifacts")
     if isinstance(artifacts, list):
         for artifact in artifacts:
@@ -677,11 +701,13 @@ def _print_trial_download_commands(
             if not isinstance(key, str) or not key:
                 continue
             label = str(artifact.get("path") or key)
-            commands.append((
-                f"artifact {label}",
-                f"loom eval trial download {shlex.quote(trial_id)} "
-                f"--kind artifact --artifact-key {shlex.quote(key)}",
-            ))
+            commands.append(
+                (
+                    f"artifact {label}",
+                    f"loom eval trial download {shlex.quote(trial_id)} "
+                    f"--kind artifact --artifact-key {shlex.quote(key)}",
+                )
+            )
     if not commands:
         return
     print("downloads:")
@@ -713,15 +739,14 @@ def _trial_download(args: argparse.Namespace) -> int:
         else:
             path = f"/api/v1/trials/{args.trial_id}/artifacts/download"
             params = {"key": args.artifact_key}
-            default_name = Path(args.artifact_key).name or (
-                f"{args.trial_id}-artifact"
-            )
+            default_name = Path(args.artifact_key).name or (f"{args.trial_id}-artifact")
 
         output = Path(args.output) if args.output else Path(default_name)
         with authed_client(cfg) as c:
             resp = c.get(path, params=params)
         assert_2xx_response(
-            resp, action=f"download {args.kind} for trial {args.trial_id!r}",
+            resp,
+            action=f"download {args.kind} for trial {args.trial_id!r}",
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(resp.content)
@@ -741,6 +766,8 @@ def _usage(args: argparse.Namespace) -> int:
         }
         if args.team_id is not None:
             params["team_id"] = args.team_id
+        if args.include_batches:
+            params["include_batches"] = "true"
         with authed_client(cfg) as c:
             resp = c.get("/api/v1/usage", params=params)
         body = assert_2xx(resp, action="fetch usage")
@@ -754,17 +781,39 @@ def _usage(args: argparse.Namespace) -> int:
         if not buckets:
             print("(no usage in range)")
             return 0
-        print("start_at                      trials  success  failed  cost_usd  in_tok  out_tok")
+        print(
+            "start_at                      trials  success  failed  "
+            "cost_status      cost_usd  in_tok  out_tok",
+        )
         for bucket in buckets:
             print(
                 f"{bucket.get('start_at', '')!s:<29} "
                 f"{bucket.get('trial_count', 0):>6} "
                 f"{bucket.get('succeeded_count', 0):>8} "
                 f"{bucket.get('failed_count', 0):>7} "
-                f"{bucket.get('total_cost_usd', 0):>8} "
+                f"{_usage_cost_status(bucket):<15} "
+                f"{_format_usage_cost(bucket):>8} "
                 f"{bucket.get('llm_input_tokens', 0):>7} "
                 f"{bucket.get('llm_output_tokens', 0):>8}",
             )
+            batches = bucket.get("batches")
+            if args.include_batches and isinstance(batches, list) and batches:
+                print(
+                    "  batch_id                              trials  "
+                    "cost_status      cost_usd  in_tok  out_tok  name",
+                )
+                for batch in batches:
+                    if not isinstance(batch, dict):
+                        continue
+                    print(
+                        f"  {batch.get('batch_id', '')!s:<36} "
+                        f"{batch.get('trial_count', 0):>6} "
+                        f"{_usage_cost_status(batch):<15} "
+                        f"{_format_usage_cost(batch):>8} "
+                        f"{batch.get('llm_input_tokens', 0):>7} "
+                        f"{batch.get('llm_output_tokens', 0):>8} "
+                        f"{batch.get('batch_name', '')}",
+                    )
         return 0
 
     return _run_with_error_handling(_body)
@@ -792,23 +841,29 @@ def dispatch(argv: list[str]) -> int:
         help="Submit a single trial against a task on the deployed Loom.",
     )
     p_run.add_argument(
-        "--provider", required=True,
+        "--provider",
+        required=True,
         help="Provider connection name (`loom providers list`).",
     )
     p_run.add_argument(
-        "--model", required=True,
+        "--model",
+        required=True,
         help="Upstream model id the gateway forwards to.",
     )
     p_run.add_argument(
-        "--agent", required=True,
+        "--agent",
+        required=True,
         help="Agent name from the catalog (`GET /api/v1/agents`).",
     )
     p_run.add_argument(
-        "--task", required=True,
+        "--task",
+        required=True,
         help="Task id (e.g. `humaneval/HumanEval/0`).",
     )
     p_run.add_argument(
-        "--agent-provider", dest="agent_provider", default=None,
+        "--agent-provider",
+        dest="agent_provider",
+        default=None,
         help=(
             "Override the agent_model.provider derived from the "
             "connection type. Use this for openai-compatible "
@@ -823,12 +878,14 @@ def dispatch(argv: list[str]) -> int:
 
     # --- batch ---
     p_batch = sub.add_parser(
-        "batch", help="Manage batches (create/list/show/cancel).",
+        "batch",
+        help="Manage batches (create/list/show/cancel).",
     )
     batch_sub = p_batch.add_subparsers(dest="batch_cmd", required=True)
 
     p_bc = batch_sub.add_parser(
-        "create", help="Create a batch + materialize trials.",
+        "create",
+        help="Create a batch + materialize trials.",
     )
     p_bc.add_argument(
         "--provider",
@@ -848,15 +905,15 @@ def dispatch(argv: list[str]) -> int:
     )
     p_bc.add_argument("--agent", required=True)
     p_bc.add_argument(
-        "--benchmark", default=None,
-        help=(
-            "Benchmark slug — shortcut for "
-            "--task-filter '{\"benchmark_id\":\"...\"}'."
-        ),
+        "--benchmark",
+        default=None,
+        help=('Benchmark slug — shortcut for --task-filter \'{"benchmark_id":"..."}\'.'),
     )
     p_bc.add_argument(
-        "--task-filter", dest="task_filter",
-        type=_load_task_filter_json, default=None,
+        "--task-filter",
+        dest="task_filter",
+        type=_load_task_filter_json,
+        default=None,
         help=(
             "Task filter as JSON (object). Pass a literal JSON string "
             "or `@path/to/file.json` to read from disk."
@@ -865,20 +922,25 @@ def dispatch(argv: list[str]) -> int:
     p_bc.add_argument("--name", required=True, help="Batch display name.")
     p_bc.add_argument("--description", default=None)
     p_bc.add_argument(
-        "--n-per-task", dest="n_per_task", type=int, default=None,
+        "--n-per-task",
+        dest="n_per_task",
+        type=int,
+        default=None,
         help="Number of trials per task (1–100).",
     )
-    p_bc.add_argument("--backend", default=None,
-                      help="Worker backend (default: server default).")
+    p_bc.add_argument("--backend", default=None, help="Worker backend (default: server default).")
     p_bc.add_argument(
-        "--agent-provider", dest="agent_provider", default=None,
+        "--agent-provider",
+        dest="agent_provider",
+        default=None,
         help="See `loom eval run --agent-provider`.",
     )
     p_bc.set_defaults(handler=_batch_create)
 
     p_bl = batch_sub.add_parser("list", help="List batches.")
     p_bl.add_argument(
-        "--state", default=None,
+        "--state",
+        default=None,
         help="Comma-separated state filter (e.g. submitted,running).",
     )
     p_bl.add_argument("--limit", type=int, default=None)
@@ -907,17 +969,21 @@ def dispatch(argv: list[str]) -> int:
 
     # --- trial ---
     p_trial = sub.add_parser(
-        "trial", help="Inspect trials (list/show).",
+        "trial",
+        help="Inspect trials (list/show).",
     )
     trial_sub = p_trial.add_subparsers(dest="trial_cmd", required=True)
 
     p_tl = trial_sub.add_parser("list", help="List trials.")
     p_tl.add_argument(
-        "--task-id", dest="task_id", default=None,
+        "--task-id",
+        dest="task_id",
+        default=None,
         help="Filter to a specific task id.",
     )
     p_tl.add_argument(
-        "--state", default=None,
+        "--state",
+        default=None,
         help="Comma-separated state filter.",
     )
     p_tl.add_argument("--limit", type=int, default=None)
@@ -925,7 +991,8 @@ def dispatch(argv: list[str]) -> int:
     p_tl.set_defaults(handler=_trial_list)
 
     p_ts = trial_sub.add_parser(
-        "show", help="Show trial details + copyable download commands.",
+        "show",
+        help="Show trial details + copyable download commands.",
     )
     p_ts.add_argument("trial_id", help="Trial UUID.")
     p_ts.add_argument("--format", choices=["text", "json"], default="text")
@@ -1005,6 +1072,11 @@ def dispatch(argv: list[str]) -> int:
         default="day",
     )
     p_usage.add_argument("--team-id", default=None)
+    p_usage.add_argument(
+        "--include-batches",
+        action="store_true",
+        help="Include per-batch usage/cost rows when the API permits it.",
+    )
     p_usage.add_argument("--format", choices=["table", "json"], default="table")
     p_usage.set_defaults(handler=_usage)
 

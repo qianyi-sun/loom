@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
+import type { components } from "../api/schema";
 import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -15,6 +16,12 @@ import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { usageCommand } from "../lib/quickstartSnippets";
+import {
+  formatUsageCost,
+  summarizeUsageCost,
+  usageCostAmount,
+  usageCostStatus,
+} from "../lib/usageCost";
 
 const SELECT_CLASSES =
   "rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700";
@@ -48,13 +55,14 @@ export default function UsageDashboard(): JSX.Element {
   const currentTeamName = currentTeam?.name ?? "Current team";
 
   const query = useQuery({
-    queryKey: ["usage", start, end, groupBy, teamId],
+    queryKey: ["usage", start, end, groupBy, teamId, auth.isAdmin],
     queryFn: () =>
       api.getUsage({
         start,
         end,
         group_by: groupBy,
         team_id: teamId || undefined,
+        include_batches: auth.isAdmin ? true : undefined,
       }),
   });
 
@@ -143,7 +151,7 @@ export default function UsageDashboard(): JSX.Element {
 
       <CommandSnippet
         label="Usage CLI"
-        command={usageCommand(start, end, teamId)}
+        command={usageCommand(start, end, teamId, auth.isAdmin)}
         helperText={
           auth.isAdmin
             ? teamId
@@ -168,35 +176,30 @@ export default function UsageDashboard(): JSX.Element {
   );
 }
 
-type Bucket = {
-  start_at: string;
-  trial_count: number;
-  total_cost_usd: number;
-  llm_input_tokens: number;
-  llm_output_tokens: number;
-  trials_currently_succeeded: number;
-  trials_currently_failed: number;
-};
+type Bucket = components["schemas"]["UsageBucket"];
+type BatchUsage = components["schemas"]["UsageBatch"];
 
 function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
   const totals = useMemo(
-    () =>
-      buckets.reduce(
+    () => {
+      const usageCost = summarizeUsageCost(buckets);
+      const counters = buckets.reduce(
         (acc, b) => ({
           trial_count: acc.trial_count + b.trial_count,
-          total_cost_usd: acc.total_cost_usd + b.total_cost_usd,
           llm_input_tokens: acc.llm_input_tokens + b.llm_input_tokens,
           llm_output_tokens: acc.llm_output_tokens + b.llm_output_tokens,
         }),
         {
           trial_count: 0,
-          total_cost_usd: 0,
           llm_input_tokens: 0,
           llm_output_tokens: 0,
         },
-      ),
+      );
+      return { ...counters, usageCost };
+    },
     [buckets],
   );
+  const hasBatchBreakdown = buckets.some((b) => (b.batches ?? []).length > 0);
 
   return (
     <div className="space-y-6">
@@ -204,7 +207,8 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
         <StatCard label="Trials" value={totals.trial_count.toLocaleString()} />
         <StatCard
           label="Estimated LLM cost"
-          value={`$${totals.total_cost_usd.toFixed(4)}`}
+          value={formatUsageCost(totals.usageCost)}
+          note={usageCostStatus(totals.usageCost)}
         />
         <StatCard
           label="Input tokens"
@@ -228,8 +232,8 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
         <Card.Body>
           <Chart
             buckets={buckets}
-            getValue={(b) => b.total_cost_usd}
-            formatValue={(v) => `$${v.toFixed(4)}`}
+            getValue={(b) => usageCostAmount(b) ?? 0}
+            formatValue={(_v, b) => formatUsageCost(b)}
           />
         </Card.Body>
       </Card>
@@ -248,6 +252,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
                     "Failed",
                     "Input tokens",
                     "Output tokens",
+                    "Cost status",
                     "LLM cost",
                   ].map((h) => (
                     <th
@@ -261,27 +266,11 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {buckets.map((b) => (
-                  <tr key={b.start_at} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                      {b.start_at.slice(0, 10)}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">{b.trial_count}</td>
-                    <td className="px-4 py-3 text-emerald-700">
-                      {b.trials_currently_succeeded}
-                    </td>
-                    <td className="px-4 py-3 text-red-700">
-                      {b.trials_currently_failed}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">
-                      {b.llm_input_tokens.toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">
-                      {b.llm_output_tokens.toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">
-                      ${b.total_cost_usd.toFixed(4)}
-                    </td>
-                  </tr>
+                  <UsageBucketRows
+                    key={b.start_at}
+                    bucket={b}
+                    showBatchBreakdown={hasBatchBreakdown}
+                  />
                 ))}
               </tbody>
             </table>
@@ -292,6 +281,107 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
   );
 }
 
+function UsageBucketRows({
+  bucket,
+  showBatchBreakdown,
+}: {
+  bucket: Bucket;
+  showBatchBreakdown: boolean;
+}): JSX.Element {
+  return (
+    <>
+      <tr className="hover:bg-slate-50">
+        <td className="px-4 py-3 font-mono text-xs text-slate-700">
+          {bucket.start_at.slice(0, 10)}
+        </td>
+        <td className="px-4 py-3 text-slate-700">{bucket.trial_count}</td>
+        <td className="px-4 py-3 text-emerald-700">
+          {bucket.trials_currently_succeeded}
+        </td>
+        <td className="px-4 py-3 text-red-700">
+          {bucket.trials_currently_failed}
+        </td>
+        <td className="px-4 py-3 text-slate-700">
+          {bucket.llm_input_tokens.toLocaleString()}
+        </td>
+        <td className="px-4 py-3 text-slate-700">
+          {bucket.llm_output_tokens.toLocaleString()}
+        </td>
+        <td className="px-4 py-3 text-slate-700">
+          {usageCostStatus(bucket)}
+        </td>
+        <td className="px-4 py-3 text-slate-700">
+          {formatUsageCost(bucket)}
+        </td>
+      </tr>
+      {showBatchBreakdown && (bucket.batches ?? []).length > 0 ? (
+        <tr>
+          <td colSpan={8} className="bg-slate-50/70 px-4 py-3">
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-xs">
+                <thead>
+                  <tr>
+                    {[
+                      "Batch",
+                      "Team",
+                      "Trials",
+                      "Input tokens",
+                      "Output tokens",
+                      "Cost status",
+                      "LLM cost",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-3 py-2 text-left font-medium uppercase tracking-wider text-slate-500"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(bucket.batches ?? []).map((batch) => (
+                    <UsageBatchRow key={batch.batch_id} batch={batch} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+function UsageBatchRow({ batch }: { batch: BatchUsage }): JSX.Element {
+  return (
+    <tr className="border-t border-slate-200">
+      <td className="px-3 py-2 text-slate-800">
+        <div className="font-medium">{batch.batch_name}</div>
+        <div className="font-mono text-[11px] text-slate-500">
+          {batch.batch_id}
+        </div>
+      </td>
+      <td className="px-3 py-2 text-slate-600">
+        {batch.team_name ?? batch.team_id}
+      </td>
+      <td className="px-3 py-2 text-slate-700">{batch.trial_count}</td>
+      <td className="px-3 py-2 text-slate-700">
+        {batch.llm_input_tokens.toLocaleString()}
+      </td>
+      <td className="px-3 py-2 text-slate-700">
+        {batch.llm_output_tokens.toLocaleString()}
+      </td>
+      <td className="px-3 py-2 text-slate-700">
+        {usageCostStatus(batch)}
+      </td>
+      <td className="px-3 py-2 text-slate-700">
+        {formatUsageCost(batch)}
+      </td>
+    </tr>
+  );
+}
+
 function Chart({
   buckets,
   getValue,
@@ -299,7 +389,7 @@ function Chart({
 }: {
   buckets: Bucket[];
   getValue: (b: Bucket) => number;
-  formatValue: (v: number) => string;
+  formatValue: (v: number, b: Bucket) => string;
 }): JSX.Element {
   const values = buckets.map(getValue);
   const max = Math.max(1e-9, ...values);
@@ -332,7 +422,7 @@ function Chart({
               fill="#6366f1"
               opacity={0.85}
             >
-              <title>{`${b.start_at.slice(0, 10)} — ${formatValue(v)}`}</title>
+              <title>{`${b.start_at.slice(0, 10)} — ${formatValue(v, b)}`}</title>
             </rect>
             <text
               x={x + barWidth / 2}

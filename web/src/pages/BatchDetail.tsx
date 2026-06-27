@@ -24,6 +24,7 @@ import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { formatUsageCost, usageCostStatus } from "../lib/usageCost";
 
 function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
   switch (s) {
@@ -125,6 +126,12 @@ export default function BatchDetail(): JSX.Element {
       ? [{ title: "fanout_errors", data: c.fanout_errors }]
       : []),
   ];
+  const hasCostProjection =
+    "estimated_cost_usd" in c || "cost_status" in c || "cost_currency" in c;
+  const hasEffectiveCostProjection =
+    "effective_estimated_cost_usd" in c ||
+    "effective_cost_status" in c ||
+    "effective_cost_currency" in c;
 
   return (
     <div className="space-y-6">
@@ -231,6 +238,18 @@ export default function BatchDetail(): JSX.Element {
               label="Tokens"
               value={`P ${c.total_prompt_tokens} / C ${c.total_completion_tokens}`}
             />
+            {hasCostProjection ? (
+              <>
+                <StatCard
+                  label="Estimated LLM cost"
+                  value={formatUsageCost(c)}
+                />
+                <StatCard
+                  label="Cost status"
+                  value={usageCostStatus(c)}
+                />
+              </>
+            ) : null}
             <StatCard
               label="Created"
               value={c.created_at.slice(0, 16).replace("T", " ")}
@@ -329,6 +348,19 @@ export default function BatchDetail(): JSX.Element {
                   : "—"} · {c.effective_llm_calls_count} LLM calls · tokens P{" "}
                 {c.effective_total_prompt_tokens} / C{" "}
                 {c.effective_total_completion_tokens}
+                {hasEffectiveCostProjection
+                  ? ` · cost ${formatUsageCost({
+                      estimated_cost_usd: c.effective_estimated_cost_usd,
+                      cost_currency: c.effective_cost_currency,
+                      cost_status: c.effective_cost_status,
+                      pricing_modes: c.effective_pricing_modes,
+                    })} (${usageCostStatus({
+                      estimated_cost_usd: c.effective_estimated_cost_usd,
+                      cost_currency: c.effective_cost_currency,
+                      cost_status: c.effective_cost_status,
+                      pricing_modes: c.effective_pricing_modes,
+                    })})`
+                  : ""}
               </div>
             </div>
           ) : null}

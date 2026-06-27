@@ -61,15 +61,21 @@ from loom_service.task_config_validation import (
     split_valid_task_configs,
 )
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.usage_accounting import (
+    empty_usage_projection,
+    summarize_usage_counts,
+)
 from loom_service.worker_backends import get_active_backends
 
 router = APIRouter()
 
-_RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset({
-    "gateway_error",
-    "retry_exhausted",
-    "exhausted_retries",
-})
+_RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
+    {
+        "gateway_error",
+        "retry_exhausted",
+        "exhausted_retries",
+    }
+)
 
 
 class _CreateBatch(BaseModel):
@@ -109,9 +115,11 @@ def _reject_submission(
 
 
 async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
-    paused_at = (await session.execute(
-        select(Team.submissions_paused_at).where(Team.id == team_id),
-    )).scalar_one_or_none()
+    paused_at = (
+        await session.execute(
+            select(Team.submissions_paused_at).where(Team.id == team_id),
+        )
+    ).scalar_one_or_none()
     if paused_at is not None:
         _reject_submission(
             reason="team_paused",
@@ -128,23 +136,22 @@ async def _reject_if_known_failed_provider_model(
 ) -> None:
     if provider_connection_id is None or not provider_model_id:
         return
-    row = (await session.execute(
-        select(ProviderModelCache).where(
-            ProviderModelCache.provider_connection_id == provider_connection_id,
-            ProviderModelCache.model_id == provider_model_id,
-        ),
-    )).scalar_one_or_none()
+    row = (
+        await session.execute(
+            select(ProviderModelCache).where(
+                ProviderModelCache.provider_connection_id == provider_connection_id,
+                ProviderModelCache.model_id == provider_model_id,
+            ),
+        )
+    ).scalar_one_or_none()
     if row is None or row.last_preflight_status != "failed":
         return
     detail = (
-        f"provider model {provider_model_id!r} last preflight failed "
-        f"for this provider connection"
+        f"provider model {provider_model_id!r} last preflight failed for this provider connection"
     )
     if row.last_preflight_error_code:
         detail += f" ({row.last_preflight_error_code})"
-    detail += (
-        "; run provider model preflight again or choose another model"
-    )
+    detail += "; run provider model preflight again or choose another model"
     _reject_submission(
         reason="provider_model_preflight",
         status_code=400,
@@ -200,14 +207,13 @@ async def _reject_agent_task_incompat(
         )
     ).all()
     configs: dict[str, Any] = {str(tid): cfg for tid, cfg, _ in rows}
-    tags_by_id: dict[str, dict[str, str]] = {
-        str(tid): dict(tags or {}) for tid, _, tags in rows
-    }
+    tags_by_id: dict[str, dict[str, str]] = {str(tid): dict(tags or {}) for tid, _, tags in rows}
 
     offenders: dict[str, list[str]] = {}
     for agent_name, required in requirements.items():
         bad = [
-            tid for tid in valid_task_ids
+            tid
+            for tid in valid_task_ids
             if not task_supports_agent(
                 configs.get(tid) or {},
                 required,
@@ -257,18 +263,12 @@ def _serialize(
         "state": b.state,
         "result_status": b.result_status,
         "failure_reason": b.failure_reason,
-        "failure_message": (
-            redact_text(b.failure_message) if b.failure_message else None
-        ),
+        "failure_message": (redact_text(b.failure_message) if b.failure_message else None),
         "fanout_errors": redact_mapping(b.fanout_errors),
-        "rerun_of_batch_id": (
-            str(b.rerun_of_batch_id) if b.rerun_of_batch_id else None
-        ),
+        "rerun_of_batch_id": (str(b.rerun_of_batch_id) if b.rerun_of_batch_id else None),
         "rerun_targets": b.rerun_targets,
         "created_at": b.created_at.isoformat(),
-        "finished_at": (
-            b.finished_at.isoformat() if b.finished_at else None
-        ),
+        "finished_at": (b.finished_at.isoformat() if b.finished_at else None),
         "created_by_token_prefix": b.created_by_token_prefix,
         "expected_trial_count": b.expected_trial_count,
         "n_per_task": b.n_per_task,
@@ -284,7 +284,9 @@ def _serialize(
             "id": str(owner_team.id),
             "name": owner_team.name,
         }
-    out.update(usage or _empty_usage_projection())
+    usage_projection = dict(usage or _empty_usage_projection())
+    usage_projection.pop("total_cost_usd", None)
+    out.update(usage_projection)
     if summary is not None:
         out["trial_summary"] = summary
         out["aggregate_reward"] = aggregate_reward
@@ -310,7 +312,7 @@ async def create_batch(
             reason="invalid_input",
             status_code=400,
             detail="admin tokens must scope batches to a team — "
-                   "use the service's per-team admin token",
+            "use the service's per-team admin token",
         )
     await _reject_if_team_paused(s, ctx.team_id)
 
@@ -345,7 +347,8 @@ async def create_batch(
                     ),
                 )
             err = validate_agent_model_compat(
-                combo.agent_name, combo.agent_model,
+                combo.agent_name,
+                combo.agent_model,
             )
             if err is not None:
                 _reject_submission(
@@ -362,10 +365,7 @@ async def create_batch(
                 _reject_submission(
                     reason="invalid_input",
                     status_code=400,
-                    detail=(
-                        f"combinations[{i}] label {label!r} is "
-                        "duplicated within the batch"
-                    ),
+                    detail=(f"combinations[{i}] label {label!r} is duplicated within the batch"),
                 )
             seen_labels.add(label)
     else:
@@ -378,8 +378,7 @@ async def create_batch(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
-                        f"unknown agent_name {agent_name!r} in "
-                        "trial_config. GET /api/v1/agents."
+                        f"unknown agent_name {agent_name!r} in trial_config. GET /api/v1/agents."
                     ),
                 )
             if "agent_model" not in payload.trial_config:
@@ -403,10 +402,7 @@ async def create_batch(
                     _reject_submission(
                         reason="invalid_input",
                         status_code=400,
-                        detail=(
-                            "trial_config.agent_model failed to "
-                            f"validate: {exc}"
-                        ),
+                        detail=(f"trial_config.agent_model failed to validate: {exc}"),
                     )
             err = validate_agent_model_compat(agent_name, model)
             if err is not None:
@@ -425,8 +421,7 @@ async def create_batch(
     active_backends = await get_active_backends(s)
     if payload.backend not in active_backends:
         available_str = (
-            ", ".join(sorted(active_backends)) if active_backends
-            else "(none — no active workers)"
+            ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
         )
         _reject_submission(
             reason="no_workers",
@@ -443,7 +438,9 @@ async def create_batch(
     if payload.provider_connection_id is not None and ctx.team_id is not None:
         try:
             await validate_provider_connection(
-                s, payload.provider_connection_id, team_id=ctx.team_id,
+                s,
+                payload.provider_connection_id,
+                team_id=ctx.team_id,
             )
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(
@@ -474,7 +471,8 @@ async def create_batch(
         )
 
     valid_task_ids, invalid_tasks = await split_valid_task_configs(
-        s, task_ids,
+        s,
+        task_ids,
     )
     if invalid_tasks:
         _reject_submission(
@@ -496,15 +494,11 @@ async def create_batch(
         single_agent_name=payload.trial_config.get("agent_name"),
     )
 
-    token_prefix = (
-        ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
-    )
+    token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
 
     # expected_trial_count = sum over combinations × tasks.
     if payload.combinations:
-        combinations_jsonb = [
-            c.model_dump(mode="json") for c in payload.combinations
-        ]
+        combinations_jsonb = [c.model_dump(mode="json") for c in payload.combinations]
         expected = expected_trial_count(
             task_count=len(valid_task_ids),
             n_per_task=payload.n_per_task,
@@ -552,10 +546,7 @@ def _derive_combination_label(combo: Combination) -> str:
     `"{agent_name}/{provider}/{name}"` when a model is set."""
     if combo.agent_model is None:
         return combo.agent_name
-    return (
-        f"{combo.agent_name}/{combo.agent_model.provider}/"
-        f"{combo.agent_model.name}"
-    )
+    return f"{combo.agent_name}/{combo.agent_model.provider}/{combo.agent_model.name}"
 
 
 @router.get("/batches")
@@ -579,7 +570,8 @@ async def list_batches(
     target_team = resolve_monitor_team_filter(ctx, team_id)
 
     stmt = select(Batch).order_by(
-        Batch.created_at.desc(), Batch.id.desc(),
+        Batch.created_at.desc(),
+        Batch.id.desc(),
     )
     stmt = apply_batch_monitor_filters(
         stmt,
@@ -594,7 +586,8 @@ async def list_batches(
             cur = decode_cursor(cursor)
         except ValueError as exc:
             raise HTTPException(
-                status_code=400, detail=str(exc),
+                status_code=400,
+                detail=str(exc),
             ) from exc
         stmt = stmt.where(
             or_(
@@ -606,9 +599,7 @@ async def list_batches(
             ),
         )
     stmt = stmt.limit(limit + 1)
-    rows: Sequence[Batch] = (
-        await s.execute(stmt)
-    ).scalars().all()
+    rows: Sequence[Batch] = (await s.execute(stmt)).scalars().all()
 
     items = list(rows)
     if len(items) > limit:
@@ -622,9 +613,15 @@ async def list_batches(
     usage_by_batch = await _usage_by_batch_ids(s, [r.id for r in items])
     teams_by_id: dict[UUID, Team] = {}
     if items:
-        team_rows = (await s.execute(
-            select(Team).where(Team.id.in_({r.team_id for r in items})),
-        )).scalars().all()
+        team_rows = (
+            (
+                await s.execute(
+                    select(Team).where(Team.id.in_({r.team_id for r in items})),
+                )
+            )
+            .scalars()
+            .all()
+        )
         teams_by_id = {team.id: team for team in team_rows}
     return {
         "items": [
@@ -654,37 +651,64 @@ def _rollup_from_result(result: dict[str, Any] | None) -> float | None:
         return None
 
 
-def _empty_usage_projection() -> dict[str, int]:
-    return {
-        "total_prompt_tokens": 0,
-        "total_completion_tokens": 0,
-        "llm_calls_count": 0,
-    }
+def _empty_usage_projection() -> dict[str, Any]:
+    return empty_usage_projection()
+
+
+def _priced_call_filter() -> Any:
+    return ~LlmCall.rate_card_hash.like("facade:tokens-only%") & ~LlmCall.rate_card_hash.like(
+        "facade:rate-card:missing%"
+    )
 
 
 async def _usage_totals_for_trials(
     session: Any,
     trials: Sequence[Trial],
-) -> dict[str, int]:
+) -> dict[str, Any]:
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
         return _empty_usage_projection()
-    row = (await session.execute(
-        select(
-            func.coalesce(
-                func.sum(LlmCall.input_tokens), 0,
-            ).label("total_prompt_tokens"),
-            func.coalesce(
-                func.sum(LlmCall.output_tokens), 0,
-            ).label("total_completion_tokens"),
-            func.count(LlmCall.id).label("llm_calls_count"),
-        ).where(LlmCall.trial_id.in_(trial_ids)),
-    )).one()
-    return {
-        "total_prompt_tokens": int(row.total_prompt_tokens or 0),
-        "total_completion_tokens": int(row.total_completion_tokens or 0),
-        "llm_calls_count": int(row.llm_calls_count or 0),
-    }
+    row = (
+        await session.execute(
+            select(
+                func.coalesce(
+                    func.sum(LlmCall.input_tokens),
+                    0,
+                ).label("total_prompt_tokens"),
+                func.coalesce(
+                    func.sum(LlmCall.output_tokens),
+                    0,
+                ).label("total_completion_tokens"),
+                func.count(LlmCall.id).label("llm_calls_count"),
+                func.coalesce(
+                    func.sum(LlmCall.cost_usd),
+                    0,
+                ).label("total_cost_usd"),
+                func.count(LlmCall.id)
+                .filter(_priced_call_filter())
+                .label("priced_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
+                .label("token_only_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
+                )
+                .label("price_unknown_llm_calls_count"),
+            ).where(LlmCall.trial_id.in_(trial_ids)),
+        )
+    ).one()
+    return summarize_usage_counts(
+        llm_calls_count=int(row.llm_calls_count or 0),
+        total_prompt_tokens=int(row.total_prompt_tokens or 0),
+        total_completion_tokens=int(row.total_completion_tokens or 0),
+        total_cost_usd=row.total_cost_usd,
+        priced_llm_calls_count=int(row.priced_llm_calls_count or 0),
+        token_only_llm_calls_count=int(row.token_only_llm_calls_count or 0),
+        price_unknown_llm_calls_count=int(
+            row.price_unknown_llm_calls_count or 0,
+        ),
+    )
 
 
 async def _llm_calls_for_trials(
@@ -694,49 +718,87 @@ async def _llm_calls_for_trials(
     trial_ids = [trial.id for trial in trials]
     if not trial_ids:
         return []
-    return list((await session.execute(
-        select(LlmCall)
-        .where(LlmCall.trial_id.in_(trial_ids))
-        .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
-    )).scalars().all())
+    return list(
+        (
+            await session.execute(
+                select(LlmCall)
+                .where(LlmCall.trial_id.in_(trial_ids))
+                .order_by(LlmCall.captured_at.asc(), LlmCall.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def _usage_by_batch_ids(
     session: Any,
     batch_ids: Sequence[UUID],
-) -> dict[UUID, dict[str, int]]:
+) -> dict[UUID, dict[str, Any]]:
     if not batch_ids:
         return {}
-    rows = (await session.execute(
-        select(
-            Trial.batch_id.label("batch_id"),
-            func.coalesce(
-                func.sum(LlmCall.input_tokens), 0,
-            ).label("total_prompt_tokens"),
-            func.coalesce(
-                func.sum(LlmCall.output_tokens), 0,
-            ).label("total_completion_tokens"),
-            func.count(LlmCall.id).label("llm_calls_count"),
+    rows = (
+        await session.execute(
+            select(
+                Trial.batch_id.label("batch_id"),
+                func.coalesce(
+                    func.sum(LlmCall.input_tokens),
+                    0,
+                ).label("total_prompt_tokens"),
+                func.coalesce(
+                    func.sum(LlmCall.output_tokens),
+                    0,
+                ).label("total_completion_tokens"),
+                func.count(LlmCall.id).label("llm_calls_count"),
+                func.coalesce(
+                    func.sum(LlmCall.cost_usd),
+                    0,
+                ).label("total_cost_usd"),
+                func.count(LlmCall.id)
+                .filter(_priced_call_filter())
+                .label("priced_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(LlmCall.rate_card_hash.like("facade:tokens-only%"))
+                .label("token_only_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(
+                    LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
+                )
+                .label("price_unknown_llm_calls_count"),
+            )
+            .join(LlmCall, LlmCall.trial_id == Trial.id)
+            .where(Trial.batch_id.in_(batch_ids))
+            .group_by(Trial.batch_id),
         )
-        .join(LlmCall, LlmCall.trial_id == Trial.id)
-        .where(Trial.batch_id.in_(batch_ids))
-        .group_by(Trial.batch_id),
-    )).all()
+    ).all()
     return {
-        row.batch_id: {
-            "total_prompt_tokens": int(row.total_prompt_tokens or 0),
-            "total_completion_tokens": int(row.total_completion_tokens or 0),
-            "llm_calls_count": int(row.llm_calls_count or 0),
-        }
+        row.batch_id: summarize_usage_counts(
+            llm_calls_count=int(row.llm_calls_count or 0),
+            total_prompt_tokens=int(row.total_prompt_tokens or 0),
+            total_completion_tokens=int(row.total_completion_tokens or 0),
+            total_cost_usd=row.total_cost_usd,
+            priced_llm_calls_count=int(row.priced_llm_calls_count or 0),
+            token_only_llm_calls_count=int(
+                row.token_only_llm_calls_count or 0,
+            ),
+            price_unknown_llm_calls_count=int(
+                row.price_unknown_llm_calls_count or 0,
+            ),
+        )
         for row in rows
     }
 
 
 def _empty_trial_summary() -> dict[str, int]:
     return {
-        k: 0 for k in (
-            "queued", "claimed", "running",
-            "succeeded", "failed", "cancelled",
+        k: 0
+        for k in (
+            "queued",
+            "claimed",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
         )
     }
 
@@ -770,15 +832,17 @@ async def _benchmark_summary_from_trials(
     if not task_ids:
         return []
 
-    rows = (await session.execute(
-        select(
-            Task.id,
-            Task.benchmark_id,
-            Benchmark.display_name,
+    rows = (
+        await session.execute(
+            select(
+                Task.id,
+                Task.benchmark_id,
+                Benchmark.display_name,
+            )
+            .outerjoin(Benchmark, Benchmark.id == Task.benchmark_id)
+            .where(Task.id.in_(task_ids)),
         )
-        .outerjoin(Benchmark, Benchmark.id == Task.benchmark_id)
-        .where(Task.id.in_(task_ids)),
-    )).all()
+    ).all()
     task_lookup = {
         str(row.id): {
             "benchmark_id": row.benchmark_id,
@@ -808,19 +872,20 @@ async def _benchmark_summary_from_trials(
     for group_key, group_trials in grouped.items():
         summary = _summary_from_trials(group_trials)
         benchmark_id, display_name = labels[group_key]
-        summaries.append({
-            "benchmark_id": benchmark_id,
-            "display_name": display_name,
-            "metric_name": "score",
-            "expected_trial_count": len(group_trials),
-            "completed_trial_count": sum(
-                summary.get(state, 0)
-                for state in ("succeeded", "failed", "cancelled")
-            ),
-            "platform_failed_count": summary.get("failed", 0),
-            "trial_summary": summary,
-            "aggregate_reward": _rollup_from_trials(group_trials),
-        })
+        summaries.append(
+            {
+                "benchmark_id": benchmark_id,
+                "display_name": display_name,
+                "metric_name": "score",
+                "expected_trial_count": len(group_trials),
+                "completed_trial_count": sum(
+                    summary.get(state, 0) for state in ("succeeded", "failed", "cancelled")
+                ),
+                "platform_failed_count": summary.get("failed", 0),
+                "trial_summary": summary,
+                "aggregate_reward": _rollup_from_trials(group_trials),
+            }
+        )
 
     return sorted(
         summaries,
@@ -836,10 +901,7 @@ def _trial_key(trial: Trial) -> tuple[str, int, int]:
 
 
 def _is_rerunnable_failure(trial: Trial) -> bool:
-    return (
-        str(trial.state) == "failed"
-        and trial.failure_reason in _RERUNNABLE_FAILURE_REASONS
-    )
+    return str(trial.state) == "failed" and trial.failure_reason in _RERUNNABLE_FAILURE_REASONS
 
 
 def _effective_trials(
@@ -882,47 +944,69 @@ async def get_batch(
 ) -> dict[str, Any]:
     s, ctx = sc
     require_scope(ctx, "read:own")
-    b = (await s.execute(
-        select(Batch).where(Batch.id == batch_id),
-    )).scalar_one_or_none()
+    b = (
+        await s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        )
+    ).scalar_one_or_none()
     if b is None:
         raise HTTPException(
-            status_code=404, detail="batch not found",
+            status_code=404,
+            detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
-    owner_team = (await s.execute(
-        select(Team).where(Team.id == b.team_id),
-    )).scalar_one_or_none()
+    owner_team = (
+        await s.execute(
+            select(Team).where(Team.id == b.team_id),
+        )
+    ).scalar_one_or_none()
 
-    original_trials = (await s.execute(
-        select(Trial).where(Trial.batch_id == batch_id),
-    )).scalars().all()
+    original_trials = (
+        (
+            await s.execute(
+                select(Trial).where(Trial.batch_id == batch_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
     llm_calls = await _llm_calls_for_trials(s, original_trials)
     benchmark_summary = await _benchmark_summary_from_trials(
-        s, original_trials,
+        s,
+        original_trials,
     )
 
-    rerun_batches = (await s.execute(
-        select(Batch)
-        .where(Batch.rerun_of_batch_id == batch_id)
-        .order_by(Batch.created_at.asc(), Batch.id.asc()),
-    )).scalars().all()
+    rerun_batches = (
+        (
+            await s.execute(
+                select(Batch)
+                .where(Batch.rerun_of_batch_id == batch_id)
+                .order_by(Batch.created_at.asc(), Batch.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
     rerun_batch_ids = [child.id for child in rerun_batches]
     rerun_trials: list[Trial] = []
     if rerun_batch_ids:
-        rerun_trials = list((await s.execute(
-            select(Trial).where(Trial.batch_id.in_(rerun_batch_ids)),
-        )).scalars().all())
+        rerun_trials = list(
+            (
+                await s.execute(
+                    select(Trial).where(Trial.batch_id.in_(rerun_batch_ids)),
+                )
+            )
+            .scalars()
+            .all()
+        )
     effective_trials = _effective_trials(original_trials, rerun_trials)
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
     effective_usage = await _usage_totals_for_trials(s, effective_trials)
-    rerunnable_failed_count = sum(
-        1 for trial in original_trials if _is_rerunnable_failure(trial)
-    )
+    rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
     debug_evidence = build_batch_debug_evidence(
         b,
         trials=original_trials,
@@ -937,9 +1021,7 @@ async def get_batch(
                 "result_status": child.result_status,
                 "expected_trial_count": child.expected_trial_count,
                 "created_at": child.created_at.isoformat(),
-                "finished_at": (
-                    child.finished_at.isoformat() if child.finished_at else None
-                ),
+                "finished_at": (child.finished_at.isoformat() if child.finished_at else None),
             }
             for child in rerun_batches
         ],
@@ -947,13 +1029,17 @@ async def get_batch(
         "effective_trial_summary": effective_summary,
         "effective_result_status": _result_status_from_trials(effective_trials),
         "effective_aggregate_reward": effective_reward,
-        "effective_total_prompt_tokens": effective_usage[
-            "total_prompt_tokens"
-        ],
-        "effective_total_completion_tokens": effective_usage[
-            "total_completion_tokens"
-        ],
+        "effective_total_prompt_tokens": effective_usage["total_prompt_tokens"],
+        "effective_total_completion_tokens": effective_usage["total_completion_tokens"],
+        "effective_total_tokens": effective_usage["total_tokens"],
         "effective_llm_calls_count": effective_usage["llm_calls_count"],
+        "effective_estimated_cost_usd": effective_usage["estimated_cost_usd"],
+        "effective_cost_currency": effective_usage["cost_currency"],
+        "effective_cost_status": effective_usage["cost_status"],
+        "effective_pricing_modes": effective_usage["pricing_modes"],
+        "effective_priced_llm_calls_count": effective_usage["priced_llm_calls_count"],
+        "effective_token_only_llm_calls_count": effective_usage["token_only_llm_calls_count"],
+        "effective_price_unknown_llm_calls_count": effective_usage["price_unknown_llm_calls_count"],
         "benchmark_summary": benchmark_summary,
         "debug_evidence": debug_evidence,
         "diagnosis": build_batch_diagnosis(
@@ -979,17 +1065,26 @@ async def get_batch_debug(
 ) -> dict[str, Any]:
     s, ctx = sc
     require_scope(ctx, "read:own")
-    b = (await s.execute(
-        select(Batch).where(Batch.id == batch_id),
-    )).scalar_one_or_none()
+    b = (
+        await s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        )
+    ).scalar_one_or_none()
     if b is None:
         raise HTTPException(
-            status_code=404, detail="batch not found",
+            status_code=404,
+            detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
-    trials = list((await s.execute(
-        select(Trial).where(Trial.batch_id == batch_id),
-    )).scalars().all())
+    trials = list(
+        (
+            await s.execute(
+                select(Trial).where(Trial.batch_id == batch_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
     llm_calls = await _llm_calls_for_trials(s, trials)
     return build_batch_debug_evidence(
         b,
@@ -1005,17 +1100,26 @@ async def get_batch_diagnosis(
 ) -> dict[str, Any]:
     s, ctx = sc
     require_scope(ctx, "read:own")
-    b = (await s.execute(
-        select(Batch).where(Batch.id == batch_id),
-    )).scalar_one_or_none()
+    b = (
+        await s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        )
+    ).scalar_one_or_none()
     if b is None:
         raise HTTPException(
-            status_code=404, detail="batch not found",
+            status_code=404,
+            detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
-    trials = list((await s.execute(
-        select(Trial).where(Trial.batch_id == batch_id),
-    )).scalars().all())
+    trials = list(
+        (
+            await s.execute(
+                select(Trial).where(Trial.batch_id == batch_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
     llm_calls = await _llm_calls_for_trials(s, trials)
     debug_evidence = build_batch_debug_evidence(
         b,
@@ -1040,9 +1144,11 @@ async def rerun_failed_batch(
     except HTTPException:
         SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
         raise
-    b = (await s.execute(
-        select(Batch).where(Batch.id == batch_id),
-    )).scalar_one_or_none()
+    b = (
+        await s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        )
+    ).scalar_one_or_none()
     if b is None:
         _reject_submission(
             reason="invalid_input",
@@ -1055,8 +1161,7 @@ async def rerun_failed_batch(
     active_backends = await get_active_backends(s)
     if b.backend not in active_backends:
         available_str = (
-            ", ".join(sorted(active_backends)) if active_backends
-            else "(none -- no active workers)"
+            ", ".join(sorted(active_backends)) if active_backends else "(none -- no active workers)"
         )
         _reject_submission(
             reason="no_workers",
@@ -1067,36 +1172,51 @@ async def rerun_failed_batch(
             ),
         )
 
-    failed_trials = (await s.execute(
-        select(Trial)
-        .where(
-            and_(
-                Trial.batch_id == batch_id,
-                Trial.state == "failed",
-                Trial.failure_reason.in_(sorted(_RERUNNABLE_FAILURE_REASONS)),
-            ),
+    failed_trials = (
+        (
+            await s.execute(
+                select(Trial)
+                .where(
+                    and_(
+                        Trial.batch_id == batch_id,
+                        Trial.state == "failed",
+                        Trial.failure_reason.in_(sorted(_RERUNNABLE_FAILURE_REASONS)),
+                    ),
+                )
+                .order_by(Trial.task_id.asc(), Trial.combination_idx.asc(), Trial.sample_idx.asc()),
+            )
         )
-        .order_by(Trial.task_id.asc(), Trial.combination_idx.asc(), Trial.sample_idx.asc()),
-    )).scalars().all()
-    child_batch_ids = (await s.execute(
-        select(Batch.id).where(Batch.rerun_of_batch_id == batch_id),
-    )).scalars().all()
+        .scalars()
+        .all()
+    )
+    child_batch_ids = (
+        (
+            await s.execute(
+                select(Batch.id).where(Batch.rerun_of_batch_id == batch_id),
+            )
+        )
+        .scalars()
+        .all()
+    )
     successful_rerun_keys: set[tuple[str, int, int]] = set()
     if child_batch_ids:
         successful_rerun_keys = {
             _trial_key(trial)
-            for trial in (await s.execute(
-                select(Trial).where(
-                    and_(
-                        Trial.batch_id.in_(child_batch_ids),
-                        Trial.state == "succeeded",
+            for trial in (
+                await s.execute(
+                    select(Trial).where(
+                        and_(
+                            Trial.batch_id.in_(child_batch_ids),
+                            Trial.state == "succeeded",
+                        ),
                     ),
-                ),
-            )).scalars().all()
+                )
+            )
+            .scalars()
+            .all()
         }
         failed_trials = [
-            trial for trial in failed_trials
-            if _trial_key(trial) not in successful_rerun_keys
+            trial for trial in failed_trials if _trial_key(trial) not in successful_rerun_keys
         ]
     if not failed_trials:
         _reject_submission(
@@ -1120,9 +1240,7 @@ async def rerun_failed_batch(
     rerun = Batch(
         team_id=b.team_id,
         name=f"{b.name} failed-case rerun",
-        description=(
-            f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."
-        ),
+        description=(f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."),
         task_filter={"subset_kind": "explicit", "task_ids": task_ids},
         trial_config=dict(b.trial_config),
         state="submitted",
@@ -1157,19 +1275,20 @@ async def cancel_batch(
 ) -> dict[str, Any]:
     s, ctx = sc
     require_scope(ctx, "submit")
-    b = (await s.execute(
-        select(Batch).where(Batch.id == batch_id),
-    )).scalar_one_or_none()
+    b = (
+        await s.execute(
+            select(Batch).where(Batch.id == batch_id),
+        )
+    ).scalar_one_or_none()
     if b is None:
         raise HTTPException(
-            status_code=404, detail="batch not found",
+            status_code=404,
+            detail="batch not found",
         )
     require_team_or_admin(ctx, b.team_id)
     now = datetime.now(UTC)
     await s.execute(
-        update(Batch)
-        .where(Batch.id == batch_id)
-        .values(state="cancelled", finished_at=now),
+        update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
     )
     # Cascade-cancel still-active trials in this batch. We do
     # NOT cancel queued trials whose worker may already be partway

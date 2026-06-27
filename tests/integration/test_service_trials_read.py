@@ -144,7 +144,7 @@ async def trials_setup(
                     "output_tokens": 1,
                     "provider_extras": {},
                     "cost_usd": Decimal("0.000000"),
-                    "rate_card_hash": "missing-rate-card",
+                    "rate_card_hash": "facade:rate-card:missing",
                 },
             ],
         )
@@ -197,11 +197,17 @@ async def test_list_my_trials(
     assert "cost_usd" not in items[0]
     assert items[0]["total_prompt_tokens"] == 12
     assert items[0]["total_completion_tokens"] == 6
+    assert items[0]["estimated_cost_usd"] == pytest.approx(9.99)
+    assert items[0]["cost_currency"] == "USD"
+    assert items[0]["cost_status"] == "mixed"
+    assert items[0]["pricing_modes"] == ["priced", "price-unknown"]
     assert items[0]["llm_calls_count"] == 2
     # Running trial: no reward.
     assert items[1]["aggregate_reward"] is None
     assert items[1]["total_prompt_tokens"] == 0
     assert items[1]["total_completion_tokens"] == 0
+    assert items[1]["estimated_cost_usd"] is None
+    assert items[1]["cost_status"] == "no_usage"
     assert items[1]["llm_calls_count"] == 0
     # Agent name pulled from config.
     assert items[0]["agent_name"] == "oracle"
@@ -422,6 +428,10 @@ async def test_trial_detail_returns_service_download_urls(
     assert "cost_usd" not in body
     assert body["total_prompt_tokens"] == 12
     assert body["total_completion_tokens"] == 6
+    assert body["estimated_cost_usd"] == pytest.approx(9.99)
+    assert body["cost_currency"] == "USD"
+    assert body["cost_status"] == "mixed"
+    assert body["pricing_modes"] == ["priced", "price-unknown"]
     assert body["llm_calls_count"] == 2
     # failure_message field present in response (issue #164).
     assert "failure_message" in body
