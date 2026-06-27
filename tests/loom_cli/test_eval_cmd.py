@@ -559,6 +559,49 @@ def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
     assert "name:                  (unset)" not in out
 
 
+def test_batch_create_allows_omitted_name_and_prints_generated_name(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "name": "humaneval | litellm/gpt-4o x1",
+            "description": "Tasks: humaneval; subset: all tasks.",
+            "expected_trial_count": 5,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+        ]
+    )
+
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert "name" not in body
+    out = capsys.readouterr().out
+    assert "Created batch 'humaneval | litellm/gpt-4o x1'" in out
+    assert "name:                  humaneval | litellm/gpt-4o x1" in out
+
+
 def test_batch_create_task_filter_json(
     mock_server: MockServer,
 ) -> None:
@@ -824,6 +867,54 @@ def test_batch_list_table_and_state_filter_param(
     assert "b1" in out
     # Verify state param forwarded to server.
     assert mock_server[0].url.params.get("state") == "running,queued"
+
+
+def test_batch_list_forwards_structured_filter_params(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
+        200,
+        json={"items": [], "next_cursor": None},
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "list",
+            "--q",
+            "needle",
+            "--benchmark",
+            "skilllearnbench",
+            "--agent",
+            "codex",
+            "--model-provider",
+            "openai",
+            "--model",
+            "qwen3.6-35b-a3b",
+            "--provider-connection-id",
+            "provider-1",
+            "--provider-model-id",
+            "qwen3.6-35b-a3b",
+            "--state",
+            "finished",
+            "--limit",
+            "25",
+        ]
+    )
+
+    assert rc == 0
+    params = mock_server[0].url.params
+    assert params.get("q") == "needle"
+    assert params.get("benchmark_id") == "skilllearnbench"
+    assert params.get("agent_name") == "codex"
+    assert params.get("model_provider") == "openai"
+    assert params.get("model_name") == "qwen3.6-35b-a3b"
+    assert params.get("provider_connection_id") == "provider-1"
+    assert params.get("provider_model_id") == "qwen3.6-35b-a3b"
+    assert params.get("state") == "finished"
+    assert params.get("limit") == "25"
+    assert "no batches" in capsys.readouterr().out
 
 
 def test_batch_list_warns_on_truncation(

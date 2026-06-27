@@ -64,4 +64,5 @@ def test_cluster_deploy_eval_run_example_matches_supported_options() -> None:
         "    [--backend B] [--name N]"
     ) not in cluster_deploy
     assert "loom eval batch create" in cluster_deploy
-    assert "[--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]" in cluster_deploy
+    assert "[--name N | --name-suffix S] [--benchmark B | --task-filter JSON]" in cluster_deploy
+    assert "[--n-per-task N] [--backend B]" in cluster_deploy

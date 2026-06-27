@@ -237,6 +237,8 @@ function tasksResponse(
 
 const BATCH_RESPONSE = {
   batch_id: "00000000-0000-0000-0000-000000000001",
+  name: "humaneval | litellm/deepseek-chat",
+  description: "Tasks: humaneval. Combinations: litellm/openai/deepseek-chat x1.",
   expected_trial_count: 3,
   n_per_task: 1,
   state: "submitted",
@@ -437,6 +439,7 @@ describe("NewBatch", () => {
 
     expect(screen.getByText("Task selection")).toBeInTheDocument();
     expect(screen.getByText("Agent/model combinations")).toBeInTheDocument();
+    expect(screen.getByText("Generated identity")).toBeInTheDocument();
     expect(screen.getByText("Advanced trial settings")).toBeInTheDocument();
     expect(screen.getByText("CLI/API equivalent")).toBeInTheDocument();
     expect(screen.getByText(/loom eval batch create/)).toHaveTextContent(
@@ -514,7 +517,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "x");
     await pickBackend();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     expect(
@@ -624,7 +626,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "my-batch");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -632,7 +633,9 @@ describe("NewBatch", () => {
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     const call = batchCall(spy)!;
-    expect(call.body.name).toBe("my-batch");
+    expect(call.body.name).toBeUndefined();
+    expect(call.body.description).toBeUndefined();
+    expect(call.body.name_suffix).toBeUndefined();
     expect(call.body.backend).toBe("docker");
     expect(call.body.task_filter).toEqual({
       subset_kind: "all",
@@ -652,12 +655,32 @@ describe("NewBatch", () => {
     ]);
   });
 
+  it("submits an optional suffix for the generated batch name", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
+
+    await user.type(screen.getByLabelText(/Name suffix/i), "canary");
+    expect(
+      screen.getByText(/humaneval .* - canary/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body.name).toBeUndefined();
+    expect(batchCall(spy)!.body.name_suffix).toBe("canary");
+  });
+
   it("expands a specific agent selector and lets oracle submit without a model", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "oracle-batch");
     await pickBackend();
     await pickBenchmark();
     await pickOracleAgent(user);
@@ -703,7 +726,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "big-batch");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -741,7 +763,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "retry-batch");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -775,7 +796,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "env-batch");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -798,7 +818,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "prio-batch");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -817,7 +836,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "explicit-batch");
     await pickBackend();
     await pickDefaultModel(user);
     await user.click(screen.getByRole("radio", { name: /Explicit task ids/i }));
@@ -837,7 +855,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "noisy-batch");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -857,10 +874,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(
-      screen.getByPlaceholderText(/run 7/i),
-      "single-attempt",
-    );
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -880,7 +893,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "bad-backoff");
     await pickBackend();
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -909,7 +921,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "aime-batch");
     await pickBackend();
     await pickDefaultModel(user);
     await user.click(
@@ -935,7 +946,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "filtered");
     await pickBackend();
     await pickBenchmark("aime-22");
     await pickDefaultModel(user);
@@ -947,6 +957,7 @@ describe("NewBatch", () => {
     );
     // Real count from the mocked /tasks/count endpoint.
     await screen.findByText(/14 tasks match the current benchmark \+ tag filters/i);
+    expect(screen.getByText(/tags: exam=I, year=2024/i)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.task_filter).toEqual({
@@ -965,7 +976,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "narrowed-to-zero");
     await pickBackend();
     await pickBenchmark("aime-22");
     await user.click(
@@ -987,7 +997,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "swap-batch");
     await pickBackend();
     await pickBenchmark("aime-22");
     await pickDefaultModel(user);
@@ -1015,7 +1024,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "byo-batch");
     await pickBackend();
     await pickBenchmark();
     await user.selectOptions(
@@ -1055,7 +1063,6 @@ describe("NewBatch", () => {
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
-    await user.type(screen.getByPlaceholderText(/run 7/i), "manual-batch");
     await pickBackend();
     await pickBenchmark();
     await user.selectOptions(

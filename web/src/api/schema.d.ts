@@ -17,9 +17,15 @@ export interface paths {
         query?: {
           view?: "batches" | "trials";
           team_id?: string;
+          q?: string;
           benchmark_id?: string;
+          agent_name?: string;
           agent?: string;
+          model_provider?: string;
+          model_name?: string;
           model?: string;
+          provider_connection_id?: string;
+          provider_model_id?: string;
           batch_id?: string;
           state?: string;
         };
@@ -39,6 +45,15 @@ export interface paths {
         query?: {
           team_id?: string;
           task_id?: string;
+          batch_id?: string;
+          benchmark_id?: string;
+          agent_name?: string;
+          agent?: string;
+          model_provider?: string;
+          model_name?: string;
+          model?: string;
+          provider_connection_id?: string;
+          provider_model_id?: string;
           state?: string;
           cursor?: string;
           limit?: number;
@@ -199,6 +214,15 @@ export interface paths {
       parameters: {
         query?: {
           team_id?: string;
+          q?: string;
+          benchmark_id?: string;
+          agent_name?: string;
+          agent?: string;
+          model_provider?: string;
+          model_name?: string;
+          model?: string;
+          provider_connection_id?: string;
+          provider_model_id?: string;
           state?: string;
           cursor?: string;
           limit?: number;
@@ -216,13 +240,16 @@ export interface paths {
       requestBody: {
         content: {
           "application/json": {
-            name: string;
+            name?: string;
+            name_suffix?: string;
             description?: string;
             backend?: string;
             task_filter: Record<string, unknown>;
             trial_config: Record<string, unknown>;
             n_per_task?: number;
             combinations?: components["schemas"]["Combination"][];
+            provider_connection_id?: string | null;
+            provider_model_id?: string | null;
           };
         };
       };
@@ -389,9 +416,13 @@ export interface components {
       scope: {
         view: "batches" | "trials";
         team_id: string | null;
+        q: string | null;
         benchmark_id: string | null;
-        agent: string | null;
-        model: string | null;
+        agent_name: string | null;
+        model_provider: string | null;
+        model_name: string | null;
+        provider_connection_id: string | null;
+        provider_model_id: string | null;
         batch_id: string | null;
         state: string | null;
       };

@@ -31,6 +31,7 @@ from loom.db.schema import (
     Batch,
     Benchmark,
     LlmCall,
+    ProviderConnection,
     RateCard,
     Task,
     Team,
@@ -175,6 +176,7 @@ async def trials_setup(
             s.execute(delete(Trial))
             s.execute(delete(Batch))
             s.execute(delete(RateCard))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
@@ -1356,13 +1358,27 @@ async def test_filter_by_benchmark_agent_and_model(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
     postgres_url: str,
 ) -> None:
-    app, raw, _team_id, trial_ids = trials_setup
+    app, raw, team_id, trial_ids = trials_setup
+    provider_connection_id = uuid4()
     wanted_model = {"provider": "openai-compatible", "name": "qwen2.5-coder"}
     other_model = {"provider": "openai-compatible", "name": "gpt-4o-mini"}
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        s.execute(
+            insert(ProviderConnection).values(
+                id=provider_connection_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name="trial-filter-provider",
+                base_url="https://api.example.test/v1",
+                upstream_host="api.example.test",
+                encrypted_api_key_ref="env:TRIAL_FILTER_PROVIDER_KEY",
+                created_by="test",
+                status="valid",
+            )
+        )
         s.execute(
             insert(Benchmark),
             [
@@ -1414,6 +1430,8 @@ async def test_filter_by_benchmark_agent_and_model(
             .values(
                 task_id="mbpp/1",
                 config={"agent_name": "litellm", "agent_model": wanted_model},
+                provider_connection_id=provider_connection_id,
+                provider_model_id="qwen2.5-coder",
             )
         )
         s.execute(
@@ -1422,6 +1440,8 @@ async def test_filter_by_benchmark_agent_and_model(
             .values(
                 task_id="mbpp/1",
                 config={"agent_name": "swe-agent", "agent_model": wanted_model},
+                provider_connection_id=provider_connection_id,
+                provider_model_id="qwen2.5-coder",
             )
         )
         s.execute(
@@ -1442,6 +1462,24 @@ async def test_filter_by_benchmark_agent_and_model(
     ) as ac:
         r = await ac.get(
             "/api/v1/trials?benchmark_id=mbpp&agent=litellm&model=qwen2.5-coder",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [item["id"] for item in items] == [str(trial_ids[0])]
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            (
+                "/api/v1/trials?benchmark_id=mbpp&agent_name=litellm"
+                "&model_provider=openai-compatible&model_name=qwen2.5-coder"
+                f"&provider_connection_id={provider_connection_id}"
+                "&provider_model_id=qwen2.5-coder"
+            ),
             headers={"Authorization": f"Bearer {raw}"},
         )
 

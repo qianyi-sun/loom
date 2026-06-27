@@ -45,6 +45,7 @@ from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
 )
+from loom_service.batch_identity import build_batch_identity
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
@@ -84,7 +85,8 @@ _RERUNNABLE_FAILURE_REASONS: frozenset[str] = frozenset(
 
 
 class _CreateBatch(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: str | None = Field(default=None, max_length=200)
+    name_suffix: str | None = Field(default=None, max_length=80)
     description: str | None = None
     task_filter: dict[str, Any]
     trial_config: dict[str, Any]
@@ -527,10 +529,26 @@ async def create_batch(
         )
         combinations_jsonb = []
 
+    explicit_name = payload.name.strip() if payload.name else ""
+    explicit_description = (
+        payload.description.strip() if payload.description else ""
+    )
+    generated_identity = build_batch_identity(
+        task_filter=payload.task_filter,
+        trial_config=payload.trial_config,
+        combinations=combinations_jsonb or payload.combinations,
+        n_per_task=payload.n_per_task,
+        backend=payload.backend,
+        suffix=payload.name_suffix,
+        provider_model_id=payload.provider_model_id,
+    )
+    batch_name = explicit_name or generated_identity.name
+    batch_description = explicit_description or generated_identity.description
+
     b = Batch(
         team_id=ctx.team_id,
-        name=payload.name,
-        description=payload.description,
+        name=batch_name,
+        description=batch_description,
         task_filter=payload.task_filter,
         trial_config=payload.trial_config,
         state="submitted",
@@ -548,6 +566,8 @@ async def create_batch(
     await s.refresh(b)
     return {
         "batch_id": str(b.id),
+        "name": b.name,
+        "description": b.description,
         "expected_trial_count": expected,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
@@ -570,9 +590,15 @@ async def list_batches(
     request: Request,
     sc: SessionAndCtx,
     team_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
+    agent_name: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
+    model_provider: Annotated[str | None, Query()] = None,
+    model_name: Annotated[str | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
+    provider_connection_id: Annotated[UUID | None, Query()] = None,
+    provider_model_id: Annotated[str | None, Query()] = None,
     state: Annotated[
         str | None,
         Query(description="comma-separated state filter"),
@@ -592,9 +618,13 @@ async def list_batches(
     stmt = apply_batch_monitor_filters(
         stmt,
         target_team=target_team,
+        q=q,
         benchmark_id=benchmark_id,
-        agent=agent,
-        model=model,
+        agent_name=agent_name or agent,
+        model_provider=model_provider,
+        model_name=model_name or model,
+        provider_connection_id=provider_connection_id,
+        provider_model_id=provider_model_id,
         state=state,
     )
     if cursor:

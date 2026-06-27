@@ -187,7 +187,8 @@ export interface BenchmarkTagsResponse {
 }
 
 export interface CreateBatchBody {
-  name: string;
+  name?: string;
+  name_suffix?: string;
   description?: string;
   backend: string;
   task_filter: TaskFilter;

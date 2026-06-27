@@ -264,8 +264,13 @@ async def list_trials(
     task_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
+    agent_name: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
+    model_provider: Annotated[str | None, Query()] = None,
+    model_name: Annotated[str | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
+    provider_connection_id: Annotated[UUID | None, Query()] = None,
+    provider_model_id: Annotated[str | None, Query()] = None,
     state: Annotated[
         str | None,
         Query(description="comma-separated state filter"),
@@ -288,8 +293,13 @@ async def list_trials(
         task_id=task_id,
         batch_id=batch_id,
         benchmark_id=benchmark_id,
+        agent_name=agent_name,
         agent=agent,
+        model_provider=model_provider,
+        model_name=model_name,
         model=model,
+        provider_connection_id=provider_connection_id,
+        provider_model_id=provider_model_id,
         state=state,
     )
     if cursor:
