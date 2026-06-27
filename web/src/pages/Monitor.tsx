@@ -305,21 +305,30 @@ function ResourcePoolBreakdown({
 
 function MonitorHealthSummary({
   view,
+  search,
   stateFilter,
   teamFilter,
   benchmarkFilter,
   agentFilter,
-  modelFilter,
+  modelProviderFilter,
+  modelNameFilter,
+  providerConnectionFilter,
+  providerModelFilter,
   batchId,
 }: {
   view: View;
+  search: string;
   stateFilter: string;
   teamFilter: string;
   benchmarkFilter: string;
   agentFilter: string;
-  modelFilter: string;
+  modelProviderFilter: string;
+  modelNameFilter: string;
+  providerConnectionFilter: string;
+  providerModelFilter: string;
   batchId?: string;
 }): JSX.Element | null {
+  const debouncedSearch = useDebouncedValue(search, 300);
   const polling = useAdaptivePolling({
     baseIntervalMs: 4_000,
     minIntervalMs: 3_000,
@@ -331,21 +340,29 @@ function MonitorHealthSummary({
     queryKey: [
       "monitor-summary",
       view,
+      debouncedSearch,
       stateFilter,
       teamFilter,
       benchmarkFilter,
       agentFilter,
-      modelFilter,
+      modelProviderFilter,
+      modelNameFilter,
+      providerConnectionFilter,
+      providerModelFilter,
       batchId,
     ],
     queryFn: () =>
       api.getMonitorSummary({
         view,
+        q: view === "batches" ? debouncedSearch || undefined : undefined,
         state: stateFilter || undefined,
         team_id: teamFilter || undefined,
         benchmark_id: benchmarkFilter || undefined,
-        agent: agentFilter || undefined,
-        model: modelFilter || undefined,
+        agent_name: agentFilter || undefined,
+        model_provider: modelProviderFilter || undefined,
+        model_name: modelNameFilter || undefined,
+        provider_connection_id: providerConnectionFilter || undefined,
+        provider_model_id: providerModelFilter || undefined,
         batch_id: batchId || undefined,
       }),
     refetchInterval: polling.refetchInterval,
@@ -470,14 +487,20 @@ function BatchesView({
   teamFilter,
   benchmarkFilter,
   agentFilter,
-  modelFilter,
+  modelProviderFilter,
+  modelNameFilter,
+  providerConnectionFilter,
+  providerModelFilter,
 }: {
   search: string;
   stateFilter: string;
   teamFilter: string;
   benchmarkFilter: string;
   agentFilter: string;
-  modelFilter: string;
+  modelProviderFilter: string;
+  modelNameFilter: string;
+  providerConnectionFilter: string;
+  providerModelFilter: string;
 }): JSX.Element {
   const [page, setPage] = useState<PageState>(initialPage);
   const debouncedSearch = useDebouncedValue(search, 300);
@@ -491,15 +514,30 @@ function BatchesView({
   });
 
   const query = useQuery({
-    queryKey: ["batches", stateFilter, debouncedSearch, page.current],
+    queryKey: [
+      "batches",
+      stateFilter,
+      debouncedSearch,
+      teamFilter,
+      benchmarkFilter,
+      agentFilter,
+      modelProviderFilter,
+      modelNameFilter,
+      providerConnectionFilter,
+      providerModelFilter,
+      page.current,
+    ],
     queryFn: () =>
       api.listBatches({
         state: stateFilter || undefined,
         q: debouncedSearch || undefined,
         team_id: teamFilter || undefined,
         benchmark_id: benchmarkFilter || undefined,
-        agent: agentFilter || undefined,
-        model: modelFilter || undefined,
+        agent_name: agentFilter || undefined,
+        model_provider: modelProviderFilter || undefined,
+        model_name: modelNameFilter || undefined,
+        provider_connection_id: providerConnectionFilter || undefined,
+        provider_model_id: providerModelFilter || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
       }),
@@ -646,7 +684,10 @@ function TrialsView({
   teamFilter,
   benchmarkFilter,
   agentFilter,
-  modelFilter,
+  modelProviderFilter,
+  modelNameFilter,
+  providerConnectionFilter,
+  providerModelFilter,
 }: {
   search: string;
   stateFilter: string;
@@ -654,7 +695,10 @@ function TrialsView({
   teamFilter: string;
   benchmarkFilter: string;
   agentFilter: string;
-  modelFilter: string;
+  modelProviderFilter: string;
+  modelNameFilter: string;
+  providerConnectionFilter: string;
+  providerModelFilter: string;
 }): JSX.Element {
   const [page, setPage] = useState<PageState>(initialPage);
   const debouncedSearch = useDebouncedValue(search, 300);
@@ -676,7 +720,10 @@ function TrialsView({
       teamFilter,
       benchmarkFilter,
       agentFilter,
-      modelFilter,
+      modelProviderFilter,
+      modelNameFilter,
+      providerConnectionFilter,
+      providerModelFilter,
       page.current,
     ],
     queryFn: () =>
@@ -685,8 +732,11 @@ function TrialsView({
         batch_id: batchId,
         team_id: teamFilter || undefined,
         benchmark_id: benchmarkFilter || undefined,
-        agent: agentFilter || undefined,
-        model: modelFilter || undefined,
+        agent_name: agentFilter || undefined,
+        model_provider: modelProviderFilter || undefined,
+        model_name: modelNameFilter || undefined,
+        provider_connection_id: providerConnectionFilter || undefined,
+        provider_model_id: providerModelFilter || undefined,
         cursor: page.current ?? undefined,
         limit: "50",
       }),
@@ -924,8 +974,11 @@ export default function Monitor(): JSX.Element {
   const stateFilter = searchParams.get("state") ?? "";
   const teamFilter = searchParams.get("team_id") ?? "";
   const benchmarkFilter = searchParams.get("benchmark_id") ?? "";
-  const agentFilter = searchParams.get("agent") ?? "";
-  const modelFilter = searchParams.get("model") ?? "";
+  const agentFilter = searchParams.get("agent_name") ?? searchParams.get("agent") ?? "";
+  const modelProviderFilter = searchParams.get("model_provider") ?? "";
+  const modelNameFilter = searchParams.get("model_name") ?? searchParams.get("model") ?? "";
+  const providerConnectionFilter = searchParams.get("provider_connection_id") ?? "";
+  const providerModelFilter = searchParams.get("provider_model_id") ?? "";
 
   const teamsQuery = useQuery({
     queryKey: ["admin-teams", auth.isAdmin],
@@ -937,6 +990,17 @@ export default function Monitor(): JSX.Element {
 
   const updateParam = (key: string, value: string): void => {
     const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    setSearchParams(next);
+  };
+  const updateParamWithAliases = (
+    key: string,
+    value: string,
+    aliases: string[] = [],
+  ): void => {
+    const next = new URLSearchParams(searchParams);
+    for (const alias of aliases) next.delete(alias);
     if (value) next.set(key, value);
     else next.delete(key);
     setSearchParams(next);
@@ -1028,19 +1092,47 @@ export default function Monitor(): JSX.Element {
         />
         <Input
           value={agentFilter}
-          onChange={(e) => updateParam("agent", e.target.value)}
+          onChange={(e) =>
+            updateParamWithAliases("agent_name", e.target.value, ["agent"])
+          }
           placeholder="Agent"
           className="max-w-[10rem]"
-          aria-label="filter by agent"
+          aria-label="filter by agent name"
           title="Filter by agent adapter name."
         />
         <Input
-          value={modelFilter}
-          onChange={(e) => updateParam("model", e.target.value)}
-          placeholder="Model"
+          value={modelProviderFilter}
+          onChange={(e) => updateParam("model_provider", e.target.value)}
+          placeholder="Provider"
           className="max-w-[10rem]"
-          aria-label="filter by model"
+          aria-label="filter by model provider"
+          title="Filter by model provider namespace."
+        />
+        <Input
+          value={modelNameFilter}
+          onChange={(e) =>
+            updateParamWithAliases("model_name", e.target.value, ["model"])
+          }
+          placeholder="Model name"
+          className="max-w-[10rem]"
+          aria-label="filter by model name"
           title="Filter by model id or model name."
+        />
+        <Input
+          value={providerConnectionFilter}
+          onChange={(e) => updateParam("provider_connection_id", e.target.value)}
+          placeholder="Provider conn."
+          className="max-w-[12rem]"
+          aria-label="filter by provider connection"
+          title="Filter by provider connection ID."
+        />
+        <Input
+          value={providerModelFilter}
+          onChange={(e) => updateParam("provider_model_id", e.target.value)}
+          placeholder="Provider model"
+          className="max-w-[12rem]"
+          aria-label="filter by provider model"
+          title="Filter by provider model ID."
         />
         {view === "trials" && batchIdFilter ? (
           <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
@@ -1063,11 +1155,15 @@ export default function Monitor(): JSX.Element {
 
       <MonitorHealthSummary
         view={view}
+        search={search}
         stateFilter={stateFilter}
         teamFilter={teamFilter}
         benchmarkFilter={benchmarkFilter}
         agentFilter={agentFilter}
-        modelFilter={modelFilter}
+        modelProviderFilter={modelProviderFilter}
+        modelNameFilter={modelNameFilter}
+        providerConnectionFilter={providerConnectionFilter}
+        providerModelFilter={providerModelFilter}
         batchId={batchIdFilter}
       />
 
@@ -1078,7 +1174,10 @@ export default function Monitor(): JSX.Element {
           teamFilter={teamFilter}
           benchmarkFilter={benchmarkFilter}
           agentFilter={agentFilter}
-          modelFilter={modelFilter}
+          modelProviderFilter={modelProviderFilter}
+          modelNameFilter={modelNameFilter}
+          providerConnectionFilter={providerConnectionFilter}
+          providerModelFilter={providerModelFilter}
         />
       ) : (
         <TrialsView
@@ -1088,7 +1187,10 @@ export default function Monitor(): JSX.Element {
           teamFilter={teamFilter}
           benchmarkFilter={benchmarkFilter}
           agentFilter={agentFilter}
-          modelFilter={modelFilter}
+          modelProviderFilter={modelProviderFilter}
+          modelNameFilter={modelNameFilter}
+          providerConnectionFilter={providerConnectionFilter}
+          providerModelFilter={providerModelFilter}
         />
       )}
     </div>

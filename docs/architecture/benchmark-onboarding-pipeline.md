@@ -336,7 +336,7 @@ through the existing batch API/CLI with `task_filter.benchmark_id` set to
 
 ```bash
 loom eval batch create \
-  --name my-benchmark-oracle-smoke \
+  --name-suffix oracle-smoke \
   --agent oracle \
   --benchmark my-benchmark \
   --n-per-task 1
@@ -347,7 +347,7 @@ model id:
 
 ```bash
 loom eval batch create \
-  --name my-benchmark-litellm-smoke \
+  --name-suffix litellm-smoke \
   --agent litellm \
   --provider smoke-openai \
   --model gpt-4o-mini \

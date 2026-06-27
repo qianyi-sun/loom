@@ -1646,15 +1646,15 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    ```bash
    # No-model oracle canary; no provider/model flags are needed.
    loom eval batch create \
-     --name oracle-smoke-$(date +%s) \
-    --task-filter '{"task_ids":["hello-world"]}' \
+     --name-suffix oracle-smoke \
+     --task-filter '{"task_ids":["hello-world"]}' \
      --agent oracle \
      --n-per-task 1
 
    # Model-backed path through the provider gateway.
    loom eval batch create \
-     --name smoke-$(date +%s) \
-    --task-filter '{"task_ids":["hello-world"]}' \
+     --name-suffix provider-smoke \
+     --task-filter '{"task_ids":["hello-world"]}' \
      --provider smoke-openai --model gpt-4o-mini --agent litellm \
      --n-per-task 1
    # then tail it:

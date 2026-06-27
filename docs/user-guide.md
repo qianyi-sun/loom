@@ -168,7 +168,10 @@ current team's work; platform admins can use the team filter to inspect
 cross-team queues without losing context. The Monitor health card summarizes
 the current URL scope with batch/trial state counters, queued/claimed/running
 trial pressure, concurrent task slots, active worker count, worker backends, and
-per-resource-pool slot usage before the row table. For autoscaled worker pools,
+per-resource-pool slot usage before the row table. In the batch view, the `q`
+search filter scopes both the table and health card to matching batch identity
+text or batch ids, so shared Monitor links keep their counters aligned with the
+visible rows. For autoscaled worker pools,
 the resource summary also includes desired slots, pending slots, draining
 slots, idle-window age, and the last autoscaler decision. The same slot summary
 is available from the CLI with `loom resources status` and
@@ -190,7 +193,8 @@ timestamps. Token usage labels use `Input` and `Output` instead of abbreviated
 New Batch includes a Release review card before submit. Check that it shows the
 intended task scope, planned trial count, selected backend worker availability,
 provider connection status, and model preflight state before launching a
-release-blocking batch.
+release-blocking batch. When tag filters are selected, the generated description
+preview and stored batch description include the selected tag keys and values.
 
 Usage follows the same team-context model. Ordinary users see usage scoped to
 their current team and do not enter raw team ids. Platform admins can leave the
@@ -230,7 +234,7 @@ Submit, monitor, inspect usage, and download through public `/api/v1` routes:
 
 ```bash
 loom eval batch create \
-  --name public-cli-smoke \
+  --name-suffix public-cli-smoke \
   --agent litellm \
   --provider smoke-openai \
   --model gpt-4o-mini \
@@ -257,6 +261,11 @@ loom eval trial download <trial-id> --kind artifact \
   --artifact-key <artifact-key-from-trial-show> \
   --output artifact.bin
 ```
+
+`loom eval batch create` can omit `--name`; the service derives a concise
+name and description from the benchmark/subset, combinations, provider/model,
+and backend. Use `--name-suffix` only when you need an extra human label after
+the generated prefix.
 
 Auth and permission errors use the same remediation hint across CLI subcommands.
 Text and JSON output redact raw bearer tokens, provider keys, internal service
@@ -300,8 +309,9 @@ Use the SPA top-level **Run Library** page:
 - **All teams** shows your team plus completed org-shared rows from other
   teams.
 - Owner-team labels show who ran the original work.
-- State, team, and artifact-type filters narrow the table without showing raw
-  JSON payloads.
+- State, team, artifact-type, search, benchmark, agent, model provider/name,
+  provider connection, and provider model filters narrow the table without
+  parsing display names or showing raw JSON payloads.
 - Platform admins can use the team filter with internal team names across the
   whole platform; ordinary users see only their joined teams.
 
@@ -699,7 +709,7 @@ For a cheap oracle smoke that does not call a model, omit provider/model flags:
 
 ```bash
 loom eval batch create \
-  --name team-evals-oracle-smoke \
+  --name-suffix oracle-smoke \
   --agent oracle \
   --benchmark team-evals \
   --n-per-task 1
@@ -709,7 +719,7 @@ For model-backed agents, include a provider connection and model:
 
 ```bash
 loom eval batch create \
-  --name team-evals-litellm-smoke \
+  --name-suffix litellm-smoke \
   --agent litellm \
   --provider smoke-openai \
   --model gpt-4o-mini \

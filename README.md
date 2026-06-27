@@ -177,6 +177,8 @@ Use this path when presenting the public UI.
    - Choose the task subset: all, first N, last N, random N, or explicit task
      ids.
    - Pick agent/model combinations.
+   - Optionally add a short suffix; Loom generates the batch name and
+     description from the selected tasks and combinations.
    - Review the planned trial count and submit.
 5. Open **Monitor** to watch batch/trial progress.
 6. Open the batch or trial detail page for evaluator reward, platform outcome,
@@ -232,7 +234,7 @@ Submit a small model-backed batch:
 
 ```bash
 loom eval batch create \
-  --name cli-smoke-$(date +%s) \
+  --name-suffix cli-smoke \
   --task-filter '{"task_ids":["hello-world"]}' \
   --provider smoke-openai \
   --model gpt-4o-mini \

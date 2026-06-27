@@ -306,10 +306,12 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   next actions. User actions link to normal Loom pages; missing platform
   prerequisites are grouped as operator actions rather than rendered as
   commands for end users to run.
-- **New batch** — the submission form. Submit button text
-  reflects the resolved fan-out (`Submit 1 trial` if one task
-  × one sample × one combination; `Submit 984 trials` for 164
-  tasks × 2 combinations × 3 samples).
+- **New batch** — the submission form. Users choose task selection/settings
+  and agent/model combinations first. The service then generates a concise
+  batch name and description; the UI exposes only an optional suffix on the
+  default path. Submit button text reflects the resolved fan-out
+  (`Submit 1 trial` if one task × one sample × one combination;
+  `Submit 984 trials` for 164 tasks × 2 combinations × 3 samples).
 - **Monitor** — one route with a **Segmented toggle** between
   **Batches** (aggregated view: one row per Batch with
   per-state counters + lifecycle/outcome chips) and **Trials**
@@ -319,12 +321,18 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   `/monitor?view=batches|trials` and switching the toggle
   preserves filters. Monitor filter state is URL-backed for
   shareable support links: `state`, `q`, `batch_id`, `team_id`,
-  `benchmark_id`, `agent`, and `model` round-trip through the query
-  string. Batch and Trial rows render `username / team` from
+  `benchmark_id`, `agent_name`, `model_provider`, `model_name`,
+  `provider_connection_id`, and `provider_model_id` round-trip through the
+  query string. Legacy `agent`/`model` URLs remain accepted as aliases. Batch
+  and Trial rows render `username / team` from
   `submitted_by_user` with legacy team fallback; platform-admin sessions also
-  expose a team selector.
+  expose a team selector. In batch view, the same `q` value is sent to the row
+  list and Monitor health summary; the service scopes batch counters and
+  trial/slot pressure to batches whose generated identity or id matches that
+  search.
 - **Run Library** — org-wide completed-result browser with **My team** and
-  **All teams** scopes, `username / team` owner labels, task/config summaries, artifact
+  **All teams** scopes, `username / team` owner labels, structured filters for
+  benchmark/agent/model/provider fields, task/config summaries, artifact
   groups, safe shared artifact downloads, clone-config actions, reuse actions,
   and provenance.
 - **Usage** — cost/token/trial rollups scoped to the selected current team for
@@ -785,7 +793,7 @@ today's submit):
 
 ```json
 {
-  "name": "humaneval — claude-opus",
+  "name_suffix": "paper-table-1",
   "backend": "docker",
   "task_filter": {
     "benchmark_id": "humaneval",
@@ -798,12 +806,18 @@ today's submit):
 }
 ```
 
+`name` and `description` are still accepted for API/CLI compatibility, but the
+default SPA/CLI path omits them. When they are absent, the service stores a
+generated name/description derived from the task filter, including selected
+`tag_filters`, combinations, provider model, backend, and optional
+`name_suffix`.
+
 Multi-combination form (Harbor-style `组合` rows). The SPA always
 sends this shape when more than one combination is selected:
 
 ```json
 {
-  "name": "humaneval — claude vs gpt",
+  "name_suffix": "claude-vs-gpt",
   "backend": "docker",
   "task_filter": { "benchmark_id": "humaneval", "subset_kind": "all" },
   "trial_config": { /* shared knobs only — NO agent_name / agent_model / n_per_task */ },

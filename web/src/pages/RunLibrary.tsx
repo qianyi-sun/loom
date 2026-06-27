@@ -7,6 +7,7 @@ import { Card } from "../components/Card";
 import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
+import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { formatLocalDateTime } from "../lib/dateTime";
@@ -102,6 +103,13 @@ export default function RunLibrary(): JSX.Element {
   const teamId = searchParams.get("team_id") ?? "";
   const state = searchParams.get("state") ?? "";
   const artifactType = searchParams.get("artifact_type") ?? "";
+  const search = searchParams.get("q") ?? "";
+  const benchmarkId = searchParams.get("benchmark_id") ?? "";
+  const agentName = searchParams.get("agent_name") ?? searchParams.get("agent") ?? "";
+  const modelProvider = searchParams.get("model_provider") ?? "";
+  const modelName = searchParams.get("model_name") ?? searchParams.get("model") ?? "";
+  const providerConnectionId = searchParams.get("provider_connection_id") ?? "";
+  const providerModelId = searchParams.get("provider_model_id") ?? "";
 
   const teamsQuery = useQuery({
     queryKey: ["admin-teams", auth.isAdmin],
@@ -112,18 +120,50 @@ export default function RunLibrary(): JSX.Element {
   const selectedTeamKnown = teamOptions.some((team) => team.id === teamId);
 
   const query = useQuery({
-    queryKey: ["run-library", scope, teamId, state, artifactType],
+    queryKey: [
+      "run-library",
+      scope,
+      teamId,
+      state,
+      artifactType,
+      search,
+      benchmarkId,
+      agentName,
+      modelProvider,
+      modelName,
+      providerConnectionId,
+      providerModelId,
+    ],
     queryFn: () =>
       api.listRunLibraryBatches({
         scope: scope === "all" ? "all" : undefined,
         team_id: teamId || undefined,
         state: state || undefined,
         artifact_type: artifactType || undefined,
+        q: search || undefined,
+        benchmark_id: benchmarkId || undefined,
+        agent_name: agentName || undefined,
+        model_provider: modelProvider || undefined,
+        model_name: modelName || undefined,
+        provider_connection_id: providerConnectionId || undefined,
+        provider_model_id: providerModelId || undefined,
       }),
   });
 
   function updateParam(key: string, value: string): void {
     const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    setSearchParams(next);
+  }
+
+  function updateParamWithAliases(
+    key: string,
+    value: string,
+    aliases: string[] = [],
+  ): void {
+    const next = new URLSearchParams(searchParams);
+    for (const alias of aliases) next.delete(alias);
     if (value) next.set(key, value);
     else next.delete(key);
     setSearchParams(next);
@@ -166,7 +206,82 @@ export default function RunLibrary(): JSX.Element {
       </DocsCallout>
 
       <Card>
-        <Card.Body className="grid gap-3 md:grid-cols-3">
+        <Card.Body className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Search
+            <Input
+              value={search}
+              onChange={(event) => updateParam("q", event.target.value)}
+              placeholder="Name, description, or ID"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Benchmark
+            <Input
+              value={benchmarkId}
+              onChange={(event) =>
+                updateParam("benchmark_id", event.target.value)
+              }
+              placeholder="humaneval"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Agent
+            <Input
+              value={agentName}
+              onChange={(event) =>
+                updateParamWithAliases("agent_name", event.target.value, ["agent"])
+              }
+              placeholder="litellm"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Model provider
+            <Input
+              value={modelProvider}
+              onChange={(event) =>
+                updateParam("model_provider", event.target.value)
+              }
+              placeholder="openai"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Model name
+            <Input
+              value={modelName}
+              onChange={(event) =>
+                updateParamWithAliases("model_name", event.target.value, ["model"])
+              }
+              placeholder="gpt-4o-mini"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Provider connection
+            <Input
+              value={providerConnectionId}
+              onChange={(event) =>
+                updateParam("provider_connection_id", event.target.value)
+              }
+              placeholder="connection ID"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+            Provider model
+            <Input
+              value={providerModelId}
+              onChange={(event) =>
+                updateParam("provider_model_id", event.target.value)
+              }
+              placeholder="provider model ID"
+              className="mt-1 normal-case tracking-normal"
+            />
+          </label>
           <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
             Team
             <select

@@ -73,7 +73,10 @@ diagnostics.
 The top-level Run Library page provides:
 
 - My team / All teams scope toggle.
-- Team, state, and artifact-type filters.
+- URL-backed team, state, artifact-type, free-text search, benchmark, agent,
+  model provider/name, provider connection, and provider model filters. These
+  are server-side structured filters; the UI does not parse generated display
+  names to find reusable runs.
 - Owner-team labels.
 - Human-readable task, agent/model, status, score, cost, trial, artifact, and
   share-state columns.

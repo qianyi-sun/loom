@@ -21,6 +21,7 @@ from loom_service.auth_guards import (
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.monitor_filters import apply_batch_monitor_filters
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.routes.object_downloads import stream_object_response
@@ -439,6 +440,15 @@ async def list_run_library_batches(
     sc: SessionAndCtx,
     scope: Annotated[str, Query(pattern="^(my|all)$")] = "my",
     team_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+    benchmark_id: Annotated[str | None, Query()] = None,
+    agent_name: Annotated[str | None, Query()] = None,
+    agent: Annotated[str | None, Query()] = None,
+    model_provider: Annotated[str | None, Query()] = None,
+    model_name: Annotated[str | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
+    provider_connection_id: Annotated[UUID | None, Query()] = None,
+    provider_model_id: Annotated[str | None, Query()] = None,
     state: Annotated[str | None, Query()] = None,
     visibility: Annotated[str | None, Query(pattern="^(team|org|private)$")] = None,
     artifact_type: Annotated[str | None, Query()] = None,
@@ -454,10 +464,18 @@ async def list_run_library_batches(
         .order_by(Batch.created_at.desc(), Batch.id.desc())
     )
     stmt = _apply_read_filter(stmt, ctx=ctx, scope=scope, team_id=team_id)
-    if state:
-        wanted = [item.strip() for item in state.split(",") if item.strip()]
-        if wanted:
-            stmt = stmt.where(Batch.state.in_(wanted))
+    stmt = apply_batch_monitor_filters(
+        stmt,
+        target_team=None,
+        q=q,
+        benchmark_id=benchmark_id,
+        agent_name=agent_name or agent,
+        model_provider=model_provider,
+        model_name=model_name or model,
+        provider_connection_id=provider_connection_id,
+        provider_model_id=provider_model_id,
+        state=state,
+    )
     if visibility:
         stmt = stmt.where(Batch.visibility == visibility)
     if cursor:

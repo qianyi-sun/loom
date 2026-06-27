@@ -26,6 +26,7 @@ from loom.db.schema import (
     Task,
     Team,
     TeamMembership,
+    TeamQuota,
     Trial,
     User,
     UserSession,
@@ -93,8 +94,11 @@ async def overview_setup(
         s.execute(insert(Team).values(id=other_team_id, name="Other Team"))
         s.execute(insert(User).values(
             id=user_id,
+            username="Owner",
+            username_normalized="owner",
             email="owner@example.com",
             display_name="Owner Example",
+            status="active",
             is_platform_admin=False,
             created_at=now,
         ))
@@ -281,6 +285,7 @@ async def overview_setup(
             s.execute(delete(UserSession))
             s.execute(delete(LoginChallenge))
             s.execute(delete(TeamMembership))
+            s.execute(delete(TeamQuota))
             s.execute(delete(User))
             s.execute(delete(Team))
             s.commit()
@@ -410,9 +415,13 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     assert body["scope"] == {
         "view": "trials",
         "team_id": str(team_id),
+        "q": None,
         "benchmark_id": "humaneval",
-        "agent": "oracle",
-        "model": None,
+        "agent_name": "oracle",
+        "model_provider": None,
+        "model_name": None,
+        "provider_connection_id": None,
+        "provider_model_id": None,
         "batch_id": None,
         "state": "failed",
     }
@@ -505,6 +514,50 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "last_autoscaler_error": None,
         },
     ]
+
+
+async def test_monitor_summary_search_scopes_batch_identity_counts(
+    overview_setup: tuple[FastAPI, UUID, UUID],
+) -> None:
+    app, team_id, _latest_batch_id = overview_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        await _login(ac)
+        r = await ac.get(
+            "/api/v1/monitor/summary",
+            params={
+                "view": "batches",
+                "team_id": str(team_id),
+                "q": "latest",
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["scope"]["q"] == "latest"
+    assert body["state_counts"]["batches"] == {
+        "submitted": 0,
+        "running": 1,
+        "finished": 0,
+        "cancelled": 0,
+    }
+    assert body["state_counts"]["trials"] == {
+        "queued": 0,
+        "claimed": 1,
+        "running": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "cancelled": 0,
+    }
+    assert body["queue"] | {
+        "queued": 0,
+        "claimed": 1,
+        "running": 1,
+        "waiting": 1,
+    } == body["queue"]
 
 
 async def test_overview_marks_operator_prerequisites_separately(

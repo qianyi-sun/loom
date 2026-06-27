@@ -23,6 +23,7 @@ from loom.db.schema import (
     Batch,
     Benchmark,
     LlmCall,
+    ProviderConnection,
     RateCard,
     Task,
     Team,
@@ -200,6 +201,7 @@ async def camp_setup(
             s.execute(delete(RateCard))
             s.execute(delete(Token))
             s.execute(delete(Batch))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
             s.execute(delete(Worker))
@@ -234,6 +236,130 @@ async def test_post_batch_materializes_count(
     assert body["expected_trial_count"] == 3
     assert body["state"] == "submitted"
     UUID(body["batch_id"])  # parseable
+
+
+async def test_post_batch_generates_concise_identity_when_name_omitted(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Benchmark),
+            [
+                {
+                    "id": "humaneval",
+                    "display_name": "HumanEval",
+                    "upstream_kind": "fixture",
+                    "upstream_locator": "fixture://humaneval",
+                    "upstream_revision": "test",
+                    "license_spdx": "MIT",
+                    "license_url": "https://example.test/license",
+                    "splits": ["test"],
+                },
+                {
+                    "id": "mbpp",
+                    "display_name": "MBPP",
+                    "upstream_kind": "fixture",
+                    "upstream_locator": "fixture://mbpp",
+                    "upstream_revision": "test",
+                    "license_spdx": "MIT",
+                    "license_url": "https://example.test/license",
+                    "splits": ["test"],
+                },
+            ],
+        )
+        for benchmark_id in ("humaneval", "mbpp"):
+            for i in range(2):
+                tid = f"{benchmark_id}/task-{i}"
+                conn.execute(
+                    insert(Task).values(
+                        id=tid,
+                        checksum=f"{benchmark_id}-{i}".encode().hex().ljust(64, "0")[:64],
+                        config=_valid_task_config(tid),
+                        source="local",
+                        benchmark_id=benchmark_id,
+                    )
+                )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name_suffix": "canary",
+                "task_filter": {
+                    "benchmark_ids": ["humaneval", "mbpp"],
+                    "subset_kind": "random_n",
+                    "n": 5,
+                    "seed": 17,
+                },
+                "trial_config": {},
+                "combinations": [
+                    {
+                        "agent_name": "litellm",
+                        "agent_model": {
+                            "provider": "openai",
+                            "name": "gpt-4o-mini",
+                        },
+                        "n_per_task": 2,
+                    }
+                ],
+            },
+        )
+        assert r.status_code == 201, r.text
+        batch_id = UUID(r.json()["batch_id"])
+        detail = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["name"] == "humaneval+mbpp random5 | litellm/gpt-4o-mini x2 - canary"
+    assert len(body["name"]) <= 90
+    assert body["description"] == (
+        "Tasks: humaneval, mbpp; subset: random 5 seed 17. "
+        "Combinations: litellm/openai/gpt-4o-mini x2. Backend: docker."
+    )
+
+
+async def test_post_batch_keeps_explicit_identity_over_generated_values(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "Manual display name",
+                "name_suffix": "ignored",
+                "description": "Manual description",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+        assert r.status_code == 201, r.text
+        detail = await ac.get(
+            f"/api/v1/batches/{r.json()['batch_id']}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["name"] == "Manual display name"
+    assert body["description"] == "Manual description"
 
 
 async def test_post_batch_accepts_noncommercial_license_tasks(
@@ -449,7 +575,31 @@ async def test_post_batch_rejects_agent_without_service_runtime(
 ) -> None:
     """#289/#288: unsupported displayed adapters must fail before
     fan-out, not after every child trial hits `command not found`."""
-    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "opencode", False)
+    base_agents = agent_catalog.list_agents()
+    opencode = agent_catalog.AgentEntry(
+        name="opencode",
+        needs_model=True,
+        kind="adapter",
+        description="opencode test adapter",
+        supported_providers=("*",),
+        supported_model_sources=("api",),
+        runtime_contract=agent_catalog.RuntimeContract(
+            execution="subprocess-adapter",
+            capture="stdout_jsonl",
+            required_executables=("opencode",),
+            required_packages=("opencode-ai",),
+            endpoint_dialect="openai_chat",
+            sandbox_network="gateway",
+        ),
+        service_mode_ready=False,
+        readiness_status="unavailable",
+        readiness_message="agent opencode requires runtime dependency",
+    )
+    monkeypatch.setattr(
+        agent_catalog,
+        "list_agents",
+        lambda: [e for e in base_agents if e.name != "opencode"] + [opencode],
+    )
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -1035,6 +1185,140 @@ async def test_list_batches_filters_by_benchmark_agent_and_model(
     ) as ac:
         r = await ac.get(
             "/api/v1/batches?benchmark_id=mbpp&agent=litellm&model=qwen",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [item["id"] for item in items] == [str(wanted_id)]
+
+
+async def test_list_batches_filters_by_query_provider_and_model_fields(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    wanted_id = uuid4()
+    wrong_provider_id = uuid4()
+    wrong_text_id = uuid4()
+    provider_connection_id = uuid4()
+    other_provider_connection_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(ProviderConnection),
+            [
+                {
+                    "id": provider_connection_id,
+                    "team_id": team_id,
+                    "provider_type": "openai-compatible",
+                    "display_name": "qwen-provider",
+                    "base_url": "https://api.example.test/v1",
+                    "upstream_host": "api.example.test",
+                    "encrypted_api_key_ref": "env:QWEN_PROVIDER_KEY",
+                    "created_by": "test",
+                    "status": "valid",
+                },
+                {
+                    "id": other_provider_connection_id,
+                    "team_id": team_id,
+                    "provider_type": "anthropic",
+                    "display_name": "claude-provider",
+                    "base_url": "https://api.anthropic.test/v1",
+                    "upstream_host": "api.anthropic.test",
+                    "encrypted_api_key_ref": "env:CLAUDE_PROVIDER_KEY",
+                    "created_by": "test",
+                    "status": "valid",
+                },
+            ],
+        )
+        conn.execute(
+            insert(Batch),
+            [
+                {
+                    "id": wanted_id,
+                    "team_id": team_id,
+                    "name": "skilllearnbench codex qwen sweep",
+                    "description": "Needle text for generated identity search",
+                    "task_filter": {"benchmark_ids": ["skilllearnbench"]},
+                    "trial_config": {},
+                    "state": "submitted",
+                    "created_by_token_prefix": "abcdef12",
+                    "expected_trial_count": 1,
+                    "combinations": [
+                        {
+                            "agent_name": "codex",
+                            "agent_model": {
+                                "provider": "openai",
+                                "name": "qwen3.6-35b-a3b",
+                            },
+                            "n_per_task": 1,
+                        }
+                    ],
+                    "provider_connection_id": provider_connection_id,
+                    "provider_model_id": "qwen3.6-35b-a3b",
+                },
+                {
+                    "id": wrong_provider_id,
+                    "team_id": team_id,
+                    "name": "skilllearnbench codex qwen other provider",
+                    "description": "Needle text for generated identity search",
+                    "task_filter": {"benchmark_ids": ["skilllearnbench"]},
+                    "trial_config": {},
+                    "state": "submitted",
+                    "created_by_token_prefix": "abcdef12",
+                    "expected_trial_count": 1,
+                    "combinations": [
+                        {
+                            "agent_name": "codex",
+                            "agent_model": {
+                                "provider": "anthropic",
+                                "name": "claude-sonnet-4-6",
+                            },
+                            "n_per_task": 1,
+                        }
+                    ],
+                    "provider_connection_id": other_provider_connection_id,
+                    "provider_model_id": "claude-sonnet-4-6",
+                },
+                {
+                    "id": wrong_text_id,
+                    "team_id": team_id,
+                    "name": "unrelated batch",
+                    "description": "No matching terms here",
+                    "task_filter": {"benchmark_ids": ["skilllearnbench"]},
+                    "trial_config": {
+                        "agent_name": "codex",
+                        "agent_model": {
+                            "provider": "openai",
+                            "name": "qwen3.6-35b-a3b",
+                        },
+                    },
+                    "combinations": [],
+                    "state": "submitted",
+                    "created_by_token_prefix": "abcdef12",
+                    "expected_trial_count": 1,
+                    "provider_connection_id": provider_connection_id,
+                    "provider_model_id": "qwen3.6-35b-a3b",
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    params = (
+        "q=needle&benchmark_id=skilllearnbench&agent_name=codex"
+        "&model_provider=openai&model_name=qwen3.6-35b-a3b"
+        f"&provider_connection_id={provider_connection_id}"
+        "&provider_model_id=qwen3.6-35b-a3b"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/batches?{params}",
             headers={"Authorization": f"Bearer {raw}"},
         )
 

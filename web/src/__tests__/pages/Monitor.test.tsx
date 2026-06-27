@@ -353,8 +353,10 @@ describe("Monitor human-readable labels", () => {
   });
 
   it("explains batch filters and planned trial counts without raw API wording", async () => {
-    mockMonitorEndpoints();
-    renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
+    const fetchMock = mockMonitorEndpoints();
+    renderWithProviders(<Monitor />, {
+      route: "/monitor?view=batches&q=human-readable",
+    });
 
     expect(await screen.findByText("human-readable-batch")).toBeInTheDocument();
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
@@ -365,17 +367,28 @@ describe("Monitor human-readable labels", () => {
     expect(
       screen.getByPlaceholderText("Search batches by name or ID..."),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("search")).toHaveValue("human-readable");
     expect(screen.getByRole("option", { name: "All states" })).toBeInTheDocument();
     expect(
       screen.getByRole("option", { name: "Submitted - waiting for scheduling" }),
     ).toBeInTheDocument();
+
+    await waitFor(() => {
+      const summaryRequest = fetchMock.mock.calls.find(([input]) =>
+        String(input).includes("/api/v1/monitor/summary"),
+      );
+      expect(summaryRequest).toBeTruthy();
+      const url = new URL(String(summaryRequest![0]), "http://localhost");
+      expect(url.searchParams.get("view")).toBe("batches");
+      expect(url.searchParams.get("q")).toBe("human-readable");
+    });
   });
 
   it("hydrates trial filters from URL and sends shareable filter params", async () => {
     const fetchMock = mockFilteredMonitorEndpoints();
     renderWithProviders(<Monitor />, {
       route:
-        "/monitor?view=trials&state=failed&q=ada&team_id=team-a&benchmark_id=mbpp&agent=litellm&model=qwen",
+        "/monitor?view=trials&state=failed&q=ada&team_id=team-a&benchmark_id=mbpp&agent_name=litellm&model_provider=openai-compatible&model_name=qwen&provider_connection_id=11111111-1111-4111-8111-111111111111&provider_model_id=qwen",
     });
 
     expect(await screen.findByText("Ada / Dev")).toBeInTheDocument();
@@ -383,8 +396,13 @@ describe("Monitor human-readable labels", () => {
     expect(screen.getByLabelText("filter by state")).toHaveValue("failed");
     expect(screen.getByLabelText("filter by team")).toHaveValue("team-a");
     expect(screen.getByLabelText("filter by benchmark")).toHaveValue("mbpp");
-    expect(screen.getByLabelText("filter by agent")).toHaveValue("litellm");
-    expect(screen.getByLabelText("filter by model")).toHaveValue("qwen");
+    expect(screen.getByLabelText("filter by agent name")).toHaveValue("litellm");
+    expect(screen.getByLabelText("filter by model provider")).toHaveValue("openai-compatible");
+    expect(screen.getByLabelText("filter by model name")).toHaveValue("qwen");
+    expect(screen.getByLabelText("filter by provider connection")).toHaveValue(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    expect(screen.getByLabelText("filter by provider model")).toHaveValue("qwen");
 
     await waitFor(() => {
       const trialRequest = fetchMock.mock.calls.find(([input]) =>
@@ -395,8 +413,13 @@ describe("Monitor human-readable labels", () => {
       expect(url.searchParams.get("state")).toBe("failed");
       expect(url.searchParams.get("team_id")).toBe("team-a");
       expect(url.searchParams.get("benchmark_id")).toBe("mbpp");
-      expect(url.searchParams.get("agent")).toBe("litellm");
-      expect(url.searchParams.get("model")).toBe("qwen");
+      expect(url.searchParams.get("agent_name")).toBe("litellm");
+      expect(url.searchParams.get("model_provider")).toBe("openai-compatible");
+      expect(url.searchParams.get("model_name")).toBe("qwen");
+      expect(url.searchParams.get("provider_connection_id")).toBe(
+        "11111111-1111-4111-8111-111111111111",
+      );
+      expect(url.searchParams.get("provider_model_id")).toBe("qwen");
     });
   });
 
@@ -404,7 +427,7 @@ describe("Monitor human-readable labels", () => {
     const fetchMock = mockFilteredMonitorEndpoints();
     renderWithProviders(<Monitor />, {
       route:
-        "/monitor?view=trials&state=failed&q=mbpp&team_id=team-a&benchmark_id=mbpp&agent=litellm&model=qwen",
+        "/monitor?view=trials&state=failed&q=mbpp&team_id=team-a&benchmark_id=mbpp&agent_name=litellm&model_provider=openai-compatible&model_name=qwen&provider_connection_id=11111111-1111-4111-8111-111111111111&provider_model_id=qwen",
     });
 
     expect(await screen.findByText("Monitor health")).toBeInTheDocument();
@@ -436,8 +459,13 @@ describe("Monitor human-readable labels", () => {
       expect(url.searchParams.get("state")).toBe("failed");
       expect(url.searchParams.get("team_id")).toBe("team-a");
       expect(url.searchParams.get("benchmark_id")).toBe("mbpp");
-      expect(url.searchParams.get("agent")).toBe("litellm");
-      expect(url.searchParams.get("model")).toBe("qwen");
+      expect(url.searchParams.get("agent_name")).toBe("litellm");
+      expect(url.searchParams.get("model_provider")).toBe("openai-compatible");
+      expect(url.searchParams.get("model_name")).toBe("qwen");
+      expect(url.searchParams.get("provider_connection_id")).toBe(
+        "11111111-1111-4111-8111-111111111111",
+      );
+      expect(url.searchParams.get("provider_model_id")).toBe("qwen");
     });
   });
 

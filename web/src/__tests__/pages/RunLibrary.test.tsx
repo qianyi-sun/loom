@@ -183,6 +183,18 @@ function mockRunLibrary({
           }),
         );
       }
+      const parsed = new URL(url, "http://localhost");
+      if (
+        parsed.pathname === "/api/v1/run-library/batches" &&
+        parsed.searchParams.has("q")
+      ) {
+        return Promise.resolve(
+          jsonResponse({
+            items: [sharedBatch],
+            next_cursor: null,
+          }),
+        );
+      }
       if (
         url.endsWith(
           "/api/v1/run-library/batches?scope=all&team_id=team-alpha",
@@ -358,6 +370,39 @@ describe("RunLibrary", () => {
       const url = new URL(String(runLibraryRequest![0]), "http://localhost");
       expect(url.searchParams.get("scope")).toBe("all");
       expect(url.searchParams.get("team_id")).toBe("team-alpha");
+    });
+  });
+
+  it("hydrates structured library filters from the URL and sends them to the API", async () => {
+    const fetchMock = mockRunLibrary({ platformAdmin: true });
+    renderWithProviders(<RunLibrary />, {
+      route:
+        "/library?scope=all&q=alpha&benchmark_id=humaneval&agent_name=litellm&model_provider=openai&model_name=gpt-4o-mini&provider_connection_id=source-provider&provider_model_id=gpt-4o-mini",
+    });
+
+    expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search")).toHaveValue("alpha");
+    expect(screen.getByLabelText("Benchmark")).toHaveValue("humaneval");
+    expect(screen.getByLabelText("Agent")).toHaveValue("litellm");
+    expect(screen.getByLabelText("Model provider")).toHaveValue("openai");
+    expect(screen.getByLabelText("Model name")).toHaveValue("gpt-4o-mini");
+    expect(screen.getByLabelText("Provider connection")).toHaveValue("source-provider");
+    expect(screen.getByLabelText("Provider model")).toHaveValue("gpt-4o-mini");
+
+    await waitFor(() => {
+      const runLibraryRequest = fetchMock.mock.calls.find(([input]) =>
+        String(input).includes("/api/v1/run-library/batches"),
+      );
+      expect(runLibraryRequest).toBeTruthy();
+      const url = new URL(String(runLibraryRequest![0]), "http://localhost");
+      expect(url.searchParams.get("scope")).toBe("all");
+      expect(url.searchParams.get("q")).toBe("alpha");
+      expect(url.searchParams.get("benchmark_id")).toBe("humaneval");
+      expect(url.searchParams.get("agent_name")).toBe("litellm");
+      expect(url.searchParams.get("model_provider")).toBe("openai");
+      expect(url.searchParams.get("model_name")).toBe("gpt-4o-mini");
+      expect(url.searchParams.get("provider_connection_id")).toBe("source-provider");
+      expect(url.searchParams.get("provider_model_id")).toBe("gpt-4o-mini");
     });
   });
 });

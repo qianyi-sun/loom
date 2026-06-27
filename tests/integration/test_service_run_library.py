@@ -352,6 +352,111 @@ async def test_run_library_defaults_to_my_team_and_all_teams_shows_shared_owner(
     assert default_shared["share_status"] == "shared"
 
 
+async def test_run_library_filters_by_structured_batch_fields(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    team_a = run_library_setup["team_a"]
+    conn_a = run_library_setup["conn_a"]
+    postgres_url = run_library_setup["postgres_url"]
+    wanted_id = uuid4()
+    wrong_id = uuid4()
+    now = datetime.now(UTC)
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch),
+            [
+                {
+                    "id": wanted_id,
+                    "team_id": team_a,
+                    "name": "skilllearnbench codex qwen generated",
+                    "description": "structured library needle",
+                    "task_filter": {
+                        "subset_kind": "random_n",
+                        "benchmark_ids": ["skilllearnbench"],
+                        "n": 5,
+                    },
+                    "trial_config": {},
+                    "state": "finished",
+                    "result_status": "succeeded",
+                    "created_at": now,
+                    "finished_at": now,
+                    "created_by_token_prefix": "test:web",
+                    "expected_trial_count": 1,
+                    "backend": "docker",
+                    "combinations": [
+                        {
+                            "agent_name": "codex",
+                            "agent_model": {
+                                "provider": "openai",
+                                "name": "qwen3.6-35b-a3b",
+                            },
+                            "n_per_task": 1,
+                        }
+                    ],
+                    "provider_connection_id": conn_a,
+                    "provider_model_id": "qwen3.6-35b-a3b",
+                    "visibility": "org",
+                    "share_status": "shared",
+                },
+                {
+                    "id": wrong_id,
+                    "team_id": team_a,
+                    "name": "skilllearnbench codex claude generated",
+                    "description": "structured library needle",
+                    "task_filter": {
+                        "subset_kind": "random_n",
+                        "benchmark_ids": ["skilllearnbench"],
+                        "n": 5,
+                    },
+                    "trial_config": {},
+                    "state": "finished",
+                    "result_status": "succeeded",
+                    "created_at": now,
+                    "finished_at": now,
+                    "created_by_token_prefix": "test:web",
+                    "expected_trial_count": 1,
+                    "backend": "docker",
+                    "combinations": [
+                        {
+                            "agent_name": "codex",
+                            "agent_model": {
+                                "provider": "anthropic",
+                                "name": "claude-sonnet-4-6",
+                            },
+                            "n_per_task": 1,
+                        }
+                    ],
+                    "provider_connection_id": conn_a,
+                    "provider_model_id": "claude-sonnet-4-6",
+                    "visibility": "org",
+                    "share_status": "shared",
+                },
+            ],
+        )
+    sync_engine.dispose()
+
+    params = (
+        "scope=all&q=needle&benchmark_id=skilllearnbench&agent_name=codex"
+        "&model_provider=openai&model_name=qwen3.6-35b-a3b"
+        f"&provider_connection_id={conn_a}&provider_model_id=qwen3.6-35b-a3b"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/run-library/batches?{params}",
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert r.status_code == 200, r.text
+    assert [item["id"] for item in r.json()["items"]] == [str(wanted_id)]
+
+
 async def test_cross_team_shared_artifact_downloads_and_blocked_denials(
     run_library_setup: dict[str, object],
 ) -> None:

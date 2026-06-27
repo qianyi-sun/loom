@@ -79,9 +79,15 @@ async def get_monitor_summary(
     sc: SessionAndCtx,
     view: Annotated[View, Query()] = "batches",
     team_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
+    agent_name: Annotated[str | None, Query()] = None,
     agent: Annotated[str | None, Query()] = None,
+    model_provider: Annotated[str | None, Query()] = None,
+    model_name: Annotated[str | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
+    provider_connection_id: Annotated[UUID | None, Query()] = None,
+    provider_model_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
     state: Annotated[
         str | None,
@@ -91,24 +97,35 @@ async def get_monitor_summary(
     session, ctx = sc
     require_scope(ctx, "read:own")
     target_team = resolve_monitor_team_filter(ctx, team_id)
+    agent_value = agent_name or agent
+    model_value = model_name or model
+    q_value = q.strip() if isinstance(q, str) and q.strip() else None
 
     batch_counts_stmt = select(Batch.state, func.count()).select_from(Batch)
     batch_counts_stmt = apply_batch_monitor_filters(
         batch_counts_stmt,
         target_team=target_team,
+        q=q_value,
         benchmark_id=benchmark_id,
-        agent=agent,
-        model=model,
+        agent_name=agent_value,
+        model_provider=model_provider,
+        model_name=model_value,
+        provider_connection_id=provider_connection_id,
+        provider_model_id=provider_model_id,
         state=None,
     )
     trial_counts_stmt = select(Trial.state, func.count()).select_from(Trial)
     trial_counts_stmt = apply_trial_monitor_filters(
         trial_counts_stmt,
         target_team=target_team,
+        q=q_value,
         batch_id=batch_id,
         benchmark_id=benchmark_id,
-        agent=agent,
-        model=model,
+        agent_name=agent_value,
+        model_provider=model_provider,
+        model_name=model_value,
+        provider_connection_id=provider_connection_id,
+        provider_model_id=provider_model_id,
         state=None,
     )
     resource_trials_stmt = select(
@@ -119,10 +136,14 @@ async def get_monitor_summary(
     resource_trials_stmt = apply_trial_monitor_filters(
         resource_trials_stmt,
         target_team=target_team,
+        q=q_value,
         batch_id=batch_id,
         benchmark_id=benchmark_id,
-        agent=agent,
-        model=model,
+        agent_name=agent_value,
+        model_provider=model_provider,
+        model_name=model_value,
+        provider_connection_id=provider_connection_id,
+        provider_model_id=provider_model_id,
         state=None,
     )
     batch_counts = await _counts(
@@ -152,9 +173,16 @@ async def get_monitor_summary(
         "scope": {
             "view": view,
             "team_id": str(target_team) if target_team else None,
+            "q": q_value,
             "benchmark_id": benchmark_id,
-            "agent": agent,
-            "model": model,
+            "agent_name": agent_value,
+            "model_provider": model_provider,
+            "model_name": model_value,
+            "provider_connection_id": (
+                str(provider_connection_id)
+                if provider_connection_id else None
+            ),
+            "provider_model_id": provider_model_id,
             "batch_id": str(batch_id) if batch_id else None,
             "state": state,
         },

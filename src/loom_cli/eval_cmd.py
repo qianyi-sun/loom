@@ -447,10 +447,13 @@ def _batch_create(args: argparse.Namespace) -> int:
                 )
                 return 2
             payload: dict[str, Any] = {
-                "name": args.name,
                 "task_filter": task_filter,
                 "trial_config": trial_config,
             }
+            if args.name is not None:
+                payload["name"] = args.name
+            if args.name_suffix is not None:
+                payload["name_suffix"] = args.name_suffix
             if conn is not None:
                 payload["provider_connection_id"] = conn["id"]
                 payload["provider_model_id"] = args.model
@@ -461,10 +464,11 @@ def _batch_create(args: argparse.Namespace) -> int:
             if args.description is not None:
                 payload["description"] = args.description
             resp = c.post("/api/v1/batches", json=payload)
-        body = assert_2xx(resp, action=f"create batch {args.name!r}")
+        action_name = args.name if args.name is not None else "server-generated name"
+        body = assert_2xx(resp, action=f"create batch {action_name!r}")
         if body.get("name") is None:
-            body = {**body, "name": args.name}
-        print(f"Created batch {args.name!r}:")
+            body = {**body, "name": args.name or "(server-generated)"}
+        print(f"Created batch {body['name']!r}:")
         _print_batch_summary(body)
         return 0
 
@@ -479,6 +483,18 @@ def _batch_list(args: argparse.Namespace) -> int:
             params["state"] = args.state
         if args.limit is not None:
             params["limit"] = args.limit
+        for attr, param_name in (
+            ("q", "q"),
+            ("benchmark", "benchmark_id"),
+            ("agent", "agent_name"),
+            ("model_provider", "model_provider"),
+            ("model", "model_name"),
+            ("provider_connection_id", "provider_connection_id"),
+            ("provider_model_id", "provider_model_id"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                params[param_name] = value
         with authed_client(cfg) as c:
             resp = c.get("/api/v1/batches", params=params)
         body = assert_2xx(resp, action="list batches")
@@ -968,7 +984,16 @@ def dispatch(argv: list[str]) -> int:
             "or `@path/to/file.json` to read from disk."
         ),
     )
-    p_bc.add_argument("--name", required=True, help="Batch display name.")
+    p_bc.add_argument(
+        "--name",
+        default=None,
+        help="Optional batch display name. When omitted, the server generates one.",
+    )
+    p_bc.add_argument(
+        "--name-suffix",
+        default=None,
+        help="Optional suffix appended to the server-generated display name.",
+    )
     p_bc.add_argument("--description", default=None)
     p_bc.add_argument(
         "--n-per-task",
@@ -992,6 +1017,13 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help="Comma-separated state filter (e.g. submitted,running).",
     )
+    p_bl.add_argument("--q", default=None, help="Search batch name, description, or ID.")
+    p_bl.add_argument("--benchmark", default=None, help="Filter by benchmark id.")
+    p_bl.add_argument("--agent", default=None, help="Filter by agent name.")
+    p_bl.add_argument("--model-provider", dest="model_provider", default=None)
+    p_bl.add_argument("--model", default=None, help="Filter by model name.")
+    p_bl.add_argument("--provider-connection-id", default=None)
+    p_bl.add_argument("--provider-model-id", default=None)
     p_bl.add_argument("--limit", type=int, default=None)
     p_bl.add_argument("--format", choices=["table", "json"], default="table")
     p_bl.set_defaults(handler=_batch_list)
