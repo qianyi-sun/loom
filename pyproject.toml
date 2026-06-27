@@ -22,6 +22,7 @@ dependencies = [
   "dirhash>=0.5,<1.0",
   "docker>=7.0,<8.0",
   "fastapi>=0.110,<1.0",
+  "greenlet>=3.0,<4.0",
   "google-generativeai>=0.8,<1.0",
   "httpx>=0.27,<1.0",
   "huggingface-hub>=0.30,<1.0",
@@ -41,6 +42,7 @@ dependencies = [
   "tomli-w>=1.0,<2.0",
   "types-aiofiles>=23.2,<25.0",
   "uvicorn[standard]>=0.32,<1.0",
+  "argon2-cffi>=23.1,<26.0",
 ]
 
 [project.optional-dependencies]

@@ -6,8 +6,8 @@ function cleanOrigin(serverOrigin: string): string {
 export function cliLoginCommands(serverOrigin: string): string[] {
   const origin = cleanOrigin(serverOrigin);
   return [
-    "export LOOM_API_TOKEN=loom_api_...",
-    `loom auth login --server ${origin} --token env:LOOM_API_TOKEN`,
+    "export LOOM_PASSWORD=...",
+    `loom auth login --server ${origin} --username USER --password env:LOOM_PASSWORD`,
     "loom auth whoami",
   ];
 }

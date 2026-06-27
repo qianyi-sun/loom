@@ -8,9 +8,11 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import AdminAuditEvent
+from loom.auth import AuthContext
+from loom.db.schema import AdminAuditEvent, User
 from loom.security.redaction import redact_text
 
 
@@ -33,6 +35,25 @@ def require_admin_actor(actor: str | None) -> str:
             detail="X-Loom-Admin-Actor must be at most 128 characters",
         )
     return cleaned
+
+
+async def actor_from_context(
+    session: AsyncSession,
+    ctx: AuthContext,
+    fallback_actor: str | None = None,
+) -> str:
+    """Return audit actor from the authenticated admin user when possible.
+
+    Singleton admin-secret requests do not have a durable user id yet, so they
+    still need the legacy explicit header as a break-glass fallback.
+    """
+    if ctx.user_id is not None:
+        username = (await session.execute(
+            select(User.username).where(User.id == ctx.user_id),
+        )).scalar_one_or_none()
+        if username:
+            return f"user:{username}"
+    return require_admin_actor(fallback_actor)
 
 
 def _metadata_contains_secret(value: object) -> bool:

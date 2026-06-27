@@ -129,6 +129,15 @@ function mockMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   expected_trial_count: 164,
                   created_at: "2026-06-19T20:23:00Z",
                   created_by_token_prefix: "test:web",
+                  team_id: "team-a",
+                  team_name: "EAI",
+                  owner_team: { id: "team-a", name: "EAI" },
+                  submitted_by_user: {
+                    id: "user-ada",
+                    username: "Ada",
+                    team_id: "team-dev",
+                    team_name: "Dev",
+                  },
                 },
               ],
               next_cursor: null,
@@ -211,6 +220,12 @@ function mockFilteredMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   team_id: "team-a",
                   team_name: "EAI",
                   owner_team: { id: "team-a", name: "EAI" },
+                  submitted_by_user: {
+                    id: "user-ada",
+                    username: "Ada",
+                    team_id: "team-dev",
+                    team_name: "Dev",
+                  },
                   model: { provider: "openai-compatible", name: "qwen" },
                 },
               ],
@@ -286,6 +301,12 @@ function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   team_id: "team-a",
                   team_name: "EAI",
                   owner_team: { id: "team-a", name: "EAI" },
+                  submitted_by_user: {
+                    id: "user-ada",
+                    username: "Ada",
+                    team_id: "team-dev",
+                    team_name: "Dev",
+                  },
                   model: { provider: "openai-compatible", name: "qwen" },
                 },
                 {
@@ -303,6 +324,12 @@ function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   team_id: "team-a",
                   team_name: "EAI",
                   owner_team: { id: "team-a", name: "EAI" },
+                  submitted_by_user: {
+                    id: "user-ada",
+                    username: "Ada",
+                    team_id: "team-dev",
+                    team_name: "Dev",
+                  },
                   model: { provider: "openai-compatible", name: "qwen" },
                 },
               ],
@@ -328,6 +355,7 @@ describe("Monitor human-readable labels", () => {
     renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
 
     expect(await screen.findByText("human-readable-batch")).toBeInTheDocument();
+    expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Monitor quick actions")).toBeInTheDocument();
     expect(screen.getByText("loom eval batch show batch-1")).toBeInTheDocument();
     expect(screen.getByText("Planned trials")).toBeInTheDocument();
@@ -345,11 +373,11 @@ describe("Monitor human-readable labels", () => {
     const fetchMock = mockFilteredMonitorEndpoints();
     renderWithProviders(<Monitor />, {
       route:
-        "/monitor?view=trials&state=failed&q=mbpp&team_id=team-a&benchmark_id=mbpp&agent=litellm&model=qwen",
+        "/monitor?view=trials&state=failed&q=ada&team_id=team-a&benchmark_id=mbpp&agent=litellm&model=qwen",
     });
 
-    expect(await screen.findByText("EAI")).toBeInTheDocument();
-    expect(screen.getByLabelText("search")).toHaveValue("mbpp");
+    expect(await screen.findByText("Ada / Dev")).toBeInTheDocument();
+    expect(screen.getByLabelText("search")).toHaveValue("ada");
     expect(screen.getByLabelText("filter by state")).toHaveValue("failed");
     expect(screen.getByLabelText("filter by team")).toHaveValue("team-a");
     expect(screen.getByLabelText("filter by benchmark")).toHaveValue("mbpp");

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial
+from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -181,7 +182,9 @@ async def test_post_trial_no_scope_403(
 
 async def test_post_trial_rejects_agent_without_service_runtime(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "opencode", False)
     app, raw, _team_id, captured = fwd_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(

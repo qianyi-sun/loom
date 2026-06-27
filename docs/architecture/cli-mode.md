@@ -174,10 +174,12 @@ package logs a warning, doesn't crash.
 through the public API. They do not require direct access to Control Plane, LLM
 Gateway, Postgres, MinIO, or worker routes.
 
-- `loom auth login --server URL --token env:LOOM_API_TOKEN` stores the public
-  server URL and scoped team API token in
-  `$XDG_CONFIG_HOME/loom/config.toml`. The config directory is owner-only and
-  the config file is written with mode `0600` on POSIX systems.
+- `loom auth login --server URL --username USER --password env:LOOM_PASSWORD`
+  stores the public server URL and browser-session credentials for the approved
+  account in `$XDG_CONFIG_HOME/loom/config.toml`. `loom auth login --token ...`
+  remains available for user-owned API tokens used by automation. The config
+  directory is owner-only and the config file is written with mode `0600` on
+  POSIX systems.
 - `loom auth whoami` calls `GET /api/v1/auth/whoami` and prints server, team,
   role/scopes, and token prefix without printing raw token material.
 - `loom providers ...` manages team provider connections through

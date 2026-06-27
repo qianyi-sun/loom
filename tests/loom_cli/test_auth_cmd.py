@@ -6,12 +6,14 @@ from io import StringIO
 from pathlib import Path
 from stat import S_IMODE
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from loom_cli.__main__ import main
-from loom_cli.config import load_config
+from loom_cli.config import LoomConfig, load_config
+from loom_cli.server_client import authed_client
 
 
 @pytest.fixture(autouse=True)
@@ -270,6 +272,200 @@ def mock_auth_server(monkeypatch: pytest.MonkeyPatch) -> MockAuthServer:
     return server
 
 
+@pytest.fixture
+def mock_public_auth_server(monkeypatch: pytest.MonkeyPatch) -> MockAuthServer:
+    server = MockAuthServer()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        server.requests.append(request)
+        key = (request.method, request.url.path)
+        if key in server.canned:
+            return server.canned[key]
+        return httpx.Response(404, json={"detail": f"no mock for {key}"})
+
+    transport = httpx.MockTransport(_handler)
+
+    def _client(server_url: str, *, timeout: float = 30.0) -> httpx.Client:
+        return httpx.Client(
+            base_url=server_url,
+            transport=transport,
+            timeout=timeout,
+        )
+
+    monkeypatch.setattr("loom_cli.auth_cmd._plain_client", _client, raising=False)
+    return server
+
+
+def test_register_posts_username_and_team(
+    mock_public_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    team_id = str(uuid4())
+    mock_public_auth_server.canned[
+        ("POST", "/api/v1/auth/registration-requests")
+    ] = httpx.Response(
+        202,
+        json={
+            "id": str(uuid4()),
+            "username": "Ada",
+            "team_id": team_id,
+            "status": "pending",
+        },
+    )
+
+    rc = main([
+        "auth", "register",
+        "--server", "https://loom.test",
+        "--username", "Ada",
+        "--team-id", team_id,
+    ])
+
+    assert rc == 0
+    req = mock_public_auth_server.requests[0]
+    assert req.method == "POST"
+    assert req.url.path == "/api/v1/auth/registration-requests"
+    assert req.read() == (
+        b'{"username":"Ada","team_id":"' + team_id.encode() + b'","metadata":{}}'
+    )
+    assert "Registration request submitted" in capsys.readouterr().out
+
+
+def test_teams_lists_public_registration_teams(
+    mock_public_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    team_id = str(uuid4())
+    mock_public_auth_server.canned[
+        ("GET", "/api/v1/auth/public-teams")
+    ] = httpx.Response(
+        200,
+        json={"items": [{"id": team_id, "name": "Research"}]},
+    )
+
+    rc = main(["auth", "teams", "--server", "https://loom.test"])
+
+    assert rc == 0
+    assert mock_public_auth_server.requests[0].method == "GET"
+    out = capsys.readouterr().out
+    assert "Research" in out
+    assert team_id in out
+
+
+def test_login_with_username_password_persists_session(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_public_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("ADA_PASSWORD", "correct horse battery")
+    mock_public_auth_server.canned[("POST", "/api/v1/auth/login")] = httpx.Response(
+        200,
+        json={
+            "csrf_token": "loom_csrf_raw",
+            "user": {"id": str(uuid4()), "username": "Ada"},
+            "current_team": {"id": str(uuid4()), "name": "Research"},
+        },
+        headers={"set-cookie": "loom_session=loom_session_raw; Path=/; HttpOnly"},
+    )
+
+    rc = main([
+        "auth", "login",
+        "--server", "https://loom.test",
+        "--username", "Ada",
+        "--password", "env:ADA_PASSWORD",
+    ])
+
+    assert rc == 0
+    req = mock_public_auth_server.requests[0]
+    assert req.url.path == "/api/v1/auth/login"
+    assert req.read() == b'{"username":"Ada","password":"correct horse battery"}'
+    cfg = load_config()
+    assert cfg.server_url == "https://loom.test"
+    assert cfg.auth_token is None
+    assert cfg.auth_session_cookie == "loom_session_raw"
+    assert cfg.auth_csrf_token == "loom_csrf_raw"
+    out = capsys.readouterr().out
+    assert "Logged in to https://loom.test as Ada" in out
+    assert "correct horse battery" not in out
+
+
+def test_setup_password_uses_secret_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_public_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SETUP_TOKEN", "loom_setup_secret")
+    monkeypatch.setenv("SETUP_PASSWORD", "new-password-1234")
+    mock_public_auth_server.canned[
+        ("POST", "/api/v1/auth/setup/complete")
+    ] = httpx.Response(200, json={"status": "active", "user": {"username": "Ada"}})
+
+    rc = main([
+        "auth", "setup-password",
+        "--server", "https://loom.test",
+        "--token", "env:SETUP_TOKEN",
+        "--password", "env:SETUP_PASSWORD",
+        "--confirm-password", "env:SETUP_PASSWORD",
+    ])
+
+    assert rc == 0
+    assert mock_public_auth_server.requests[0].read() == (
+        b'{"token":"loom_setup_secret","password":"new-password-1234",'
+        b'"confirm_password":"new-password-1234"}'
+    )
+    assert "Password set for Ada" in capsys.readouterr().out
+
+
+def test_forgot_and_reset_password_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_public_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("RESET_TOKEN", "loom_reset_secret")
+    monkeypatch.setenv("RESET_PASSWORD", "new-password-5678")
+    mock_public_auth_server.canned[
+        ("POST", "/api/v1/auth/password-reset-requests")
+    ] = httpx.Response(202, json={"status": "pending"})
+    mock_public_auth_server.canned[
+        ("POST", "/api/v1/auth/reset/complete")
+    ] = httpx.Response(200, json={"status": "active", "user": {"username": "Ada"}})
+
+    forgot_rc = main([
+        "auth", "forgot-password",
+        "--server", "https://loom.test",
+        "--username", "Ada",
+    ])
+    reset_rc = main([
+        "auth", "reset-password",
+        "--server", "https://loom.test",
+        "--token", "env:RESET_TOKEN",
+        "--password", "env:RESET_PASSWORD",
+        "--confirm-password", "env:RESET_PASSWORD",
+    ])
+
+    assert forgot_rc == 0
+    assert reset_rc == 0
+    assert [request.url.path for request in mock_public_auth_server.requests] == [
+        "/api/v1/auth/password-reset-requests",
+        "/api/v1/auth/reset/complete",
+    ]
+    out = capsys.readouterr().out
+    assert "Password reset request submitted" in out
+    assert "Password reset for Ada" in out
+
+
+def test_authed_client_uses_session_cookie_and_csrf_without_bearer() -> None:
+    cfg = LoomConfig(
+        server_url="https://loom.test",
+        auth_session_cookie="loom_session_raw",
+        auth_csrf_token="loom_csrf_raw",
+    )
+
+    with authed_client(cfg) as client:
+        assert "authorization" not in client.headers
+        assert client.cookies.get("loom_session") == "loom_session_raw"
+        assert client.headers["X-Loom-CSRF"] == "loom_csrf_raw"
+
+
 def test_whoami_when_not_logged_in_returns_2(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -277,7 +473,7 @@ def test_whoami_when_not_logged_in_returns_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "not logged in" in err
-    assert "Create a team API token in the web UI" in err
+    assert "loom auth login --server URL --username USER --password env:PASS" in err
     assert "loom auth login --server URL --token env:LOOM_API_TOKEN" in err
 
 

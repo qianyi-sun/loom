@@ -20,10 +20,12 @@ from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.config import LoomConfig, load_config
 
 LOGIN_HINT = (
-    "Create a team API token in the web UI, then run "
-    "`export LOOM_API_TOKEN=loom_api_...` and "
+    "Run `loom auth login --server URL --username USER --password env:PASS`, "
+    "or use an API token with "
     "`loom auth login --server URL --token env:LOOM_API_TOKEN`."
 )
+SESSION_COOKIE_NAME = "loom_session"
+CSRF_HEADER_NAME = "X-Loom-CSRF"
 
 
 class NotLoggedInError(Exception):
@@ -37,7 +39,9 @@ def require_logged_in() -> LoomConfig:
     Used as the preamble for every server-talking command.
     """
     cfg = load_config()
-    if cfg.server_url is None or cfg.auth_token is None:
+    has_bearer = cfg.auth_token is not None
+    has_session = cfg.auth_session_cookie is not None
+    if cfg.server_url is None or not (has_bearer or has_session):
         raise NotLoggedInError(
             f"not logged in. {LOGIN_HINT}",
         )
@@ -53,10 +57,20 @@ def authed_client(cfg: LoomConfig, *, timeout: float = 30.0) -> httpx.Client:
     script — async ergonomics aren't worth the complexity here.
     """
     assert cfg.server_url is not None  # require_logged_in guarantees
-    assert cfg.auth_token is not None
+    if cfg.auth_token is not None:
+        return httpx.Client(
+            base_url=cfg.server_url,
+            headers={"Authorization": f"Bearer {cfg.auth_token}"},
+            timeout=timeout,
+        )
+    assert cfg.auth_session_cookie is not None
+    headers = {}
+    if cfg.auth_csrf_token is not None:
+        headers[CSRF_HEADER_NAME] = cfg.auth_csrf_token
     return httpx.Client(
         base_url=cfg.server_url,
-        headers={"Authorization": f"Bearer {cfg.auth_token}"},
+        cookies={SESSION_COOKIE_NAME: cfg.auth_session_cookie},
+        headers=headers,
         timeout=timeout,
     )
 

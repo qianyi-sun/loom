@@ -49,8 +49,8 @@ Google when those types are enabled.
 The CLI path uses secret indirection so keys do not land in shell history:
 
 ```bash
-export LOOM_API_TOKEN=loom_api_...
-loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN
+export LOOM_PASSWORD=...
+loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD
 
 export PROVIDER_API_KEY=...
 loom providers create \
@@ -193,8 +193,8 @@ Probe the service before registering:
 Then authenticate to Loom and register:
 
 ```bash
-export LOOM_API_TOKEN=loom_api_...
-loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN
+export LOOM_PASSWORD=...
+loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD
 ./register-provider.sh
 ```
 

@@ -43,18 +43,23 @@ async def submit_trial(
     # tenant from the parent batch row.
     batch_id = payload.get("batch_id")
     batch_team_id: UUID | None = None
+    batch_submitter_user_id: UUID | None = None
     if batch_id is not None:
         async with request.app.state.session_factory() as session:
-            batch_team_id = (
+            batch_row = (
                 await session.execute(
-                    select(Batch.team_id).where(Batch.id == batch_id),
+                    select(Batch.team_id, Batch.submitted_by_user_id).where(
+                        Batch.id == batch_id,
+                    ),
                 )
-            ).scalar_one_or_none()
-        if batch_team_id is None:
+            ).first()
+        if batch_row is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"unknown batch {batch_id}",
             )
+        batch_team_id = batch_row.team_id
+        batch_submitter_user_id = batch_row.submitted_by_user_id
 
     if ctx.team_id is not None:
         if "submit" not in ctx.scopes:
@@ -68,8 +73,10 @@ async def submit_trial(
                 detail="batch belongs to another team",
             )
         submit_team_id = ctx.team_id
+        submitter_user_id = ctx.user_id
     elif "submit:batch" in ctx.scopes and batch_team_id is not None:
         submit_team_id = batch_team_id
+        submitter_user_id = batch_submitter_user_id
     else:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
@@ -166,6 +173,7 @@ async def submit_trial(
             "state": "queued",
             "submit_priority": trial_config.submit_priority,
             "batch_id": batch_id,
+            "submitted_by_user_id": submitter_user_id,
             "idempotency_key": idempotency_key,
             "sample_idx": sample_idx,
             "combination_idx": combination_idx,

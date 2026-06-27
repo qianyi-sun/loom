@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import {
   api,
+  type AccountActionApproval,
   type AdminAuditEvent,
   type AdminTeam,
   type ApiTokenEntry,
@@ -11,7 +12,9 @@ import {
   type InviteReveal,
   type InviteRole,
   type InviteStatus,
+  type PasswordResetRequestEntry,
   type TeamRegistrationApproval,
+  type UserRegistrationEntry,
 } from "../api/client";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
@@ -167,10 +170,20 @@ function CliSetupCommands({ token }: { token: string }): JSX.Element {
 
 type RevealedInvite = TeamRegistrationApproval | InviteReveal;
 
-type AccessSection = "requests" | "teams" | "invites" | "tokens" | "audit";
+type RevealedAccountLink = {
+  id: string;
+  kind: "setup" | "reset";
+  username: string;
+  teamName?: string | null;
+  link: string;
+  tokenPrefix?: string | null;
+};
+
+type AccessSection = "requests" | "accounts" | "teams" | "invites" | "tokens" | "audit";
 
 const ADMIN_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
   { value: "requests", label: "Requests" },
+  { value: "accounts", label: "Accounts" },
   { value: "teams", label: "Teams" },
   { value: "invites", label: "Invites" },
   { value: "tokens", label: "API tokens" },
@@ -188,6 +201,7 @@ export default function AdminAccess(): JSX.Element {
   const [actor, setActor] = useState("");
   const [rejectedReason, setRejectedReason] = useState<Record<string, string>>({});
   const [revealedInvites, setRevealedInvites] = useState<RevealedInvite[]>([]);
+  const [revealedAccountLinks, setRevealedAccountLinks] = useState<RevealedAccountLink[]>([]);
   const [inviteStatus, setInviteStatus] = useState<InviteStatus>("pending");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteTeamId, setInviteTeamId] = useState("");
@@ -202,9 +216,14 @@ export default function AdminAccess(): JSX.Element {
   const [teamNameEdits, setTeamNameEdits] = useState<Record<string, string>>({});
   const [approvalTeamIds, setApprovalTeamIds] = useState<Record<string, string>>({});
   const [approvalRoles, setApprovalRoles] = useState<Record<string, InviteRole>>({});
+  const [accountApprovalRoles, setAccountApprovalRoles] = useState<Record<string, InviteRole>>({});
   const queryClient = useQueryClient();
   const currentRole = me?.current_team?.role ?? null;
   const canManageTeam = isAdmin || currentRole === "owner";
+  const visibleSections = isAdmin ? ADMIN_ACCESS_SECTIONS : TEAM_OWNER_ACCESS_SECTIONS;
+  const activeSection = visibleSections.some((item) => item.value === section)
+    ? section
+    : visibleSections[0].value;
 
   const registrations = useQuery({
     queryKey: ["admin", "team-registrations", "pending"],
@@ -221,6 +240,16 @@ export default function AdminAccess(): JSX.Element {
     queryFn: () => api.listAdminTeams(),
     enabled: isAdmin,
   });
+  const userRegistrationRequests = useQuery({
+    queryKey: ["admin", "user-registration-requests", "pending"],
+    queryFn: () => api.listUserRegistrationRequests("pending"),
+    enabled: isAdmin && activeSection === "accounts",
+  });
+  const passwordResetRequests = useQuery({
+    queryKey: ["admin", "password-reset-requests", "pending"],
+    queryFn: () => api.listPasswordResetRequests("pending"),
+    enabled: isAdmin && activeSection === "accounts",
+  });
   const invites = useQuery({
     queryKey: ["invites", inviteStatus],
     queryFn: () => api.listInvites({ status: inviteStatus }),
@@ -235,15 +264,32 @@ export default function AdminAccess(): JSX.Element {
   const selectedInviteTeamId = isAdmin
     ? inviteTeamId || adminTeamItems[0]?.id || ""
     : "";
-  const visibleSections = isAdmin ? ADMIN_ACCESS_SECTIONS : TEAM_OWNER_ACCESS_SECTIONS;
-  const activeSection = visibleSections.some((item) => item.value === section)
-    ? section
-    : visibleSections[0].value;
 
   function revealInvite(data: RevealedInvite): void {
     setRevealedInvites((current) => [
       data,
       ...current.filter((item) => item.invite.id !== data.invite.id),
+    ]);
+  }
+
+  function revealAccountLink(
+    data: AccountActionApproval,
+    kind: RevealedAccountLink["kind"],
+  ): void {
+    const link = kind === "setup" ? data.setup_link : data.reset_link;
+    if (!link) return;
+    const id = `${kind}:${data.user.id}:${link}`;
+    setRevealedAccountLinks((current) => [
+      {
+        id,
+        kind,
+        username: data.user.username,
+        teamName: data.team?.name ?? null,
+        link,
+        tokenPrefix:
+          kind === "setup" ? data.setup_token_prefix : data.reset_token_prefix,
+      },
+      ...current.filter((item) => item.id !== id),
     ]);
   }
 
@@ -362,6 +408,43 @@ export default function AdminAccess(): JSX.Element {
       queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
     },
   });
+  const approveUserRegistration = useMutation({
+    mutationFn: (request: UserRegistrationEntry) =>
+      api.approveUserRegistrationRequest(
+        request.id,
+        accountApprovalRoles[request.id] ?? request.role ?? "member",
+      ),
+    onSuccess: (data) => {
+      revealAccountLink(data, "setup");
+      queryClient.invalidateQueries({ queryKey: ["admin", "user-registration-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const rejectUserRegistration = useMutation({
+    mutationFn: (request: UserRegistrationEntry) =>
+      api.rejectUserRegistrationRequest(request.id, rejectedReason[request.id]),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "user-registration-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const approvePasswordReset = useMutation({
+    mutationFn: (request: PasswordResetRequestEntry) =>
+      api.approvePasswordResetRequest(request.id),
+    onSuccess: (data) => {
+      revealAccountLink(data, "reset");
+      queryClient.invalidateQueries({ queryKey: ["admin", "password-reset-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
+  const rejectPasswordReset = useMutation({
+    mutationFn: (request: PasswordResetRequestEntry) =>
+      api.rejectPasswordResetRequest(request.id, rejectedReason[request.id]),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "password-reset-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
+    },
+  });
 
   const actorMissing = isAdmin && actor.trim().length === 0;
   const tokenCreateDisabled =
@@ -475,6 +558,40 @@ export default function AdminAccess(): JSX.Element {
                     Download
                   </Button>
                 </div>
+              </div>
+            ))}
+          </Card.Body>
+        </Card>
+      ) : null}
+
+      {revealedAccountLinks.length > 0 ? (
+        <Card className="border-emerald-200">
+          <Card.Header
+            title="Account links"
+            description="Copy these one-time password links and share them manually. Loom does not send email."
+          />
+          <Card.Body className="space-y-3">
+            {revealedAccountLinks.map((revealed) => (
+              <div
+                key={revealed.id}
+                className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
+              >
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-emerald-900">
+                  <span className="font-medium">{revealed.username}</span>
+                  <span>{revealed.kind === "setup" ? "Password setup" : "Password reset"}</span>
+                  {revealed.teamName ? <span>{revealed.teamName}</span> : null}
+                  {revealed.tokenPrefix ? <span>Prefix: {revealed.tokenPrefix}</span> : null}
+                </div>
+                <div className="break-all rounded-lg border border-emerald-200 bg-white px-3 py-2 font-mono text-sm text-emerald-900">
+                  {revealed.link}
+                </div>
+                <Button
+                  size="sm"
+                  aria-label={`Copy ${revealed.kind} link for ${revealed.username}`}
+                  onClick={() => navigator.clipboard.writeText(revealed.link)}
+                >
+                  Copy
+                </Button>
               </div>
             ))}
           </Card.Body>
@@ -620,6 +737,178 @@ export default function AdminAccess(): JSX.Element {
             {updateTeam.isError ? <ErrorState error={updateTeam.error} /> : null}
           </Card.Body>
         </Card>
+      ) : null}
+
+      {isAdmin && activeSection === "accounts" ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Card>
+            <Card.Header
+              title="Account requests"
+              description="Approve a username into its requested team, then share the one-time password setup link manually."
+            />
+            <Card.Body className="space-y-3">
+              {userRegistrationRequests.isPending ? <LoadingState /> : null}
+              {userRegistrationRequests.isError ? (
+                <ErrorState error={userRegistrationRequests.error} />
+              ) : null}
+              {userRegistrationRequests.data ? (
+                userRegistrationRequests.data.items.length === 0 ? (
+                  <EmptyState label="No pending account requests." />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-slate-200 text-sm">
+                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2 font-semibold">Username</th>
+                          <th className="px-3 py-2 font-semibold">Team</th>
+                          <th className="px-3 py-2 font-semibold">Requested</th>
+                          <th className="px-3 py-2 font-semibold">Role</th>
+                          <th className="px-3 py-2 font-semibold">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {userRegistrationRequests.data.items.map((request) => {
+                          const role =
+                            accountApprovalRoles[request.id] ?? request.role ?? "member";
+                          return (
+                            <tr key={request.id}>
+                              <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
+                                {request.username}
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-2 text-slate-700">
+                                {request.team_name ?? request.team_id}
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                                {formatDate(request.requested_at)}
+                              </td>
+                              <td className="px-3 py-2">
+                                <select
+                                  aria-label={`Role for ${request.username}`}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm"
+                                  value={role}
+                                  onChange={(event) =>
+                                    setAccountApprovalRoles((current) => ({
+                                      ...current,
+                                      [request.id]: event.target.value as InviteRole,
+                                    }))
+                                  }
+                                >
+                                  {(["member", "owner", "viewer"] as InviteRole[]).map(
+                                    (option) => (
+                                      <option key={option} value={option}>
+                                        {option}
+                                      </option>
+                                    ),
+                                  )}
+                                </select>
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="flex flex-wrap gap-2">
+                                  <Button
+                                    size="sm"
+                                    aria-label={`Approve account ${request.username}`}
+                                    disabled={approveUserRegistration.isPending}
+                                    onClick={() => approveUserRegistration.mutate(request)}
+                                  >
+                                    Approve
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    aria-label={`Reject account ${request.username}`}
+                                    disabled={rejectUserRegistration.isPending}
+                                    onClick={() => rejectUserRegistration.mutate(request)}
+                                  >
+                                    Reject
+                                  </Button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              ) : null}
+              {approveUserRegistration.isError ? (
+                <ErrorState error={approveUserRegistration.error} />
+              ) : null}
+              {rejectUserRegistration.isError ? (
+                <ErrorState error={rejectUserRegistration.error} />
+              ) : null}
+            </Card.Body>
+          </Card>
+
+          <Card>
+            <Card.Header
+              title="Password resets"
+              description="Approve reset requests only after verifying the request out of band, then share the one-time reset link manually."
+            />
+            <Card.Body className="space-y-3">
+              {passwordResetRequests.isPending ? <LoadingState /> : null}
+              {passwordResetRequests.isError ? (
+                <ErrorState error={passwordResetRequests.error} />
+              ) : null}
+              {passwordResetRequests.data ? (
+                passwordResetRequests.data.items.length === 0 ? (
+                  <EmptyState label="No pending password resets." />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-slate-200 text-sm">
+                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2 font-semibold">Username</th>
+                          <th className="px-3 py-2 font-semibold">Requested</th>
+                          <th className="px-3 py-2 font-semibold">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {passwordResetRequests.data.items.map((request) => (
+                          <tr key={request.id}>
+                            <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
+                              {request.username}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                              {formatDate(request.requested_at)}
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  size="sm"
+                                  aria-label={`Approve reset ${request.username}`}
+                                  disabled={approvePasswordReset.isPending}
+                                  onClick={() => approvePasswordReset.mutate(request)}
+                                >
+                                  Approve
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  aria-label={`Reject reset ${request.username}`}
+                                  disabled={rejectPasswordReset.isPending}
+                                  onClick={() => rejectPasswordReset.mutate(request)}
+                                >
+                                  Reject
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              ) : null}
+              {approvePasswordReset.isError ? (
+                <ErrorState error={approvePasswordReset.error} />
+              ) : null}
+              {rejectPasswordReset.isError ? (
+                <ErrorState error={rejectPasswordReset.error} />
+              ) : null}
+            </Card.Body>
+          </Card>
+        </div>
       ) : null}
 
       {activeSection === "tokens" ? (

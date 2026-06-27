@@ -15,6 +15,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const ownerMe = {
   user: {
     id: "user-owner",
+    username: "Owner",
     email: "owner@example.com",
     display_name: "Owner Example",
     is_platform_admin: false,
@@ -76,20 +77,53 @@ describe("Settings", () => {
       if (url.includes("/api/v1/auth/me")) {
         return jsonResponse({ detail: "unauthorized" }, 401);
       }
-      if (url.endsWith("/api/v1/teams/register") && init?.method === "POST") {
+      if (url.endsWith("/api/v1/auth/public-teams")) {
+        return jsonResponse({
+          items: [{ id: "team-research", name: "Research" }],
+        });
+      }
+      if (url.endsWith("/api/v1/auth/login") && init?.method === "POST") {
         expect(JSON.parse(String(init.body))).toEqual({
-          name: "Mark Research",
-          contact_email: "mark@example.com",
+          username: "Mark",
+          password: "long-passphrase-1",
+        });
+        return jsonResponse({
+          ...ownerMe,
+          user: { ...ownerMe.user, username: "Mark" },
+          current_team: { id: "team-research", name: "Research", role: "member" },
+          csrf_token: "csrf-login",
+        });
+      }
+      if (
+        url.endsWith("/api/v1/auth/registration-requests") &&
+        init?.method === "POST"
+      ) {
+        expect(JSON.parse(String(init.body))).toEqual({
+          username: "Mark",
+          team_id: "team-research",
+          metadata: {},
         });
         return jsonResponse({
           id: "reg-1",
-          name: "Mark Research",
-          contact_email: "mark@example.com",
+          username: "Mark",
+          team: { id: "team-research", name: "Research" },
           status: "pending",
           requested_at: "2026-06-24T00:00:00Z",
           reviewed_at: null,
           reviewed_by_actor: null,
           approved_team_id: null,
+        }, 201);
+      }
+      if (
+        url.endsWith("/api/v1/auth/password-reset-requests") &&
+        init?.method === "POST"
+      ) {
+        expect(JSON.parse(String(init.body))).toEqual({ username: "Mark" });
+        return jsonResponse({
+          id: "reset-1",
+          username: "Mark",
+          status: "pending",
+          requested_at: "2026-06-24T00:00:00Z",
         }, 202);
       }
       return jsonResponse({ detail: `unhandled ${url}` }, 404);
@@ -100,28 +134,54 @@ describe("Settings", () => {
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.queryByText(/send a one-time sign-in link/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/Public beta access requests are reviewed by an admin/i)).toBeInTheDocument();
-    expect(screen.getByText("Have an invite")).toBeInTheDocument();
-    expect(screen.getAllByText("Request access").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/invite link/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/one-time login code/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Public beta account requests are reviewed by an admin/i)).toBeInTheDocument();
+    expect(screen.getAllByText("Request account").length).toBeGreaterThan(0);
+    expect(screen.getByText("Forgot password")).toBeInTheDocument();
     expect(screen.getByText("CLI setup")).toBeInTheDocument();
     expect(screen.getByText("First run checklist")).toBeInTheDocument();
-    expect(screen.getByText(/export LOOM_API_TOKEN=loom_api_\.\.\./)).toBeInTheDocument();
+    expect(screen.getByText(/export LOOM_PASSWORD=\.\.\./)).toBeInTheDocument();
     expect(screen.getByText(/loom auth whoami/)).toBeInTheDocument();
     const cliCommand = screen.getByText(/loom auth login --server/i);
     expect(cliCommand).toHaveTextContent(window.location.origin);
+    expect(cliCommand).toHaveTextContent("--username USER --password env:LOOM_PASSWORD");
     expect(cliCommand).not.toHaveTextContent("<server-url>");
+    expect(cliCommand).not.toHaveTextContent("LOOM_API_TOKEN");
     expect(cliCommand.closest("pre")).toHaveClass("whitespace-pre-wrap");
 
-    await userEvent.type(screen.getByLabelText("Requested team name"), "Mark Research");
-    await userEvent.type(screen.getByLabelText("Request contact email"), "mark@example.com");
-    await userEvent.click(screen.getByRole("button", { name: "Request access" }));
+    expect(await screen.findByRole("option", { name: "Research" })).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Requested username"), "Mark");
+    await userEvent.selectOptions(screen.getByLabelText("Registration team"), "team-research");
+    await userEvent.click(screen.getByRole("button", { name: "Request account" }));
 
     expect(await screen.findByText(
-      "Request submitted. An admin will review it and share an invite link manually if approved.",
+      "Request submitted. An admin will review it and share a password setup link manually if approved.",
     )).toBeInTheDocument();
     expect(fetchSpy.mock.calls.some(([input, init]) =>
-      String(input).endsWith("/api/v1/teams/register") && init?.method === "POST",
+      String(input).endsWith("/api/v1/auth/registration-requests") && init?.method === "POST",
     )).toBe(true);
+
+    await userEvent.type(screen.getByLabelText("Reset username"), "Mark");
+    await userEvent.click(screen.getByRole("button", { name: "Request reset" }));
+
+    expect(await screen.findByText(
+      "Reset request submitted. An admin will share a reset link if approved.",
+    )).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([input, init]) =>
+      String(input).endsWith("/api/v1/auth/password-reset-requests") &&
+        init?.method === "POST",
+    )).toBe(true);
+
+    await userEvent.type(screen.getByLabelText("Username"), "Mark");
+    await userEvent.type(screen.getByLabelText("Password"), "long-passphrase-1");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).endsWith("/api/v1/auth/login") && init?.method === "POST",
+      )).toBe(true);
+    });
   });
 
   it("summarizes the current team, members, and owner setup actions", async () => {
@@ -171,7 +231,8 @@ describe("Settings", () => {
 
     expect(await screen.findByRole("heading", { name: "Team Settings" })).toBeInTheDocument();
     expect(screen.getByLabelText("Current team")).toHaveValue("team-a");
-    expect(screen.getAllByText("owner@example.com").length).toBeGreaterThan(0);
+    expect(screen.getByText("Owner")).toBeInTheDocument();
+    expect((await screen.findAllByText("owner@example.com")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("member@example.com")).length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Provider connections" })).toHaveAttribute(
       "href",

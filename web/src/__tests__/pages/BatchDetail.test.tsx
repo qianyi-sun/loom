@@ -15,6 +15,12 @@ const BATCH_BODY: BatchBody = {
   id: BATCH_ID,
   team_id: "team-1",
   owner_team: { id: "team-1", name: "Alpha Research" },
+  submitted_by_user: {
+    id: "user-ada",
+    username: "Ada",
+    team_id: "team-dev",
+    team_name: "Dev",
+  },
   name: "qwen2.5-litellm",
   description: null,
   task_filter: { subset_kind: "all", benchmark_ids: ["humaneval"] },
@@ -181,12 +187,12 @@ describe("BatchDetail run plan", () => {
     expect(screen.queryByText("trial_config")).not.toBeInTheDocument();
   });
 
-  it("shows owner team, share status, and provenance on the detail header", async () => {
+  it("shows submitting user owner, share status, and provenance on the detail header", async () => {
     mockBatch();
     renderBatchDetail();
 
-    expect(await screen.findByText("Owner team")).toBeInTheDocument();
-    expect(screen.getByText("Alpha Research")).toBeInTheDocument();
+    expect(await screen.findByText("Owner")).toBeInTheDocument();
+    expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
