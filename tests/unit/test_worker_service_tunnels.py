@@ -84,6 +84,32 @@ def test_systemd_unit_rendering_can_override_gateway_local_port(tmp_path: Path) 
     assert "svc/loom-control-plane 18081:8080" in control_plane
 
 
+def test_systemd_unit_rendering_can_add_subprocess_gateway_tunnel(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+
+    module.write_systemd_units(
+        tmp_path,
+        namespace="loom-public-beta",
+        kubectl="/usr/local/bin/kubectl",
+        kubeconfig="/secure/public-beta.kubeconfig",
+        address="0.0.0.0",
+        subprocess_gateway_local_port=30444,
+    )
+
+    gateway = (
+        tmp_path / "loom-remote-worker-tunnel-gateway.service"
+    ).read_text(encoding="utf-8")
+    subprocess_gateway = (
+        tmp_path / "loom-remote-worker-tunnel-subprocess-gateway.service"
+    ).read_text(encoding="utf-8")
+
+    assert "svc/loom-llm-gateway 19100:9100" in gateway
+    assert "svc/loom-llm-gateway 30444:9100" in subprocess_gateway
+    assert "Description=Loom remote-worker tunnel: subprocess-gateway" in subprocess_gateway
+
+
 def test_worker_health_urls_are_derived_from_remote_worker_env_file(tmp_path: Path) -> None:
     module = _load_module()
     env_file = tmp_path / ".env.remote-worker"
@@ -345,6 +371,64 @@ def test_watchdog_restarts_gateway_tunnel_after_subprocess_facade_failure(
             "loom-remote-worker-tunnel-gateway.service",
         ],
     ]
+
+
+def test_watchdog_restarts_dedicated_subprocess_gateway_tunnel_when_ports_differ(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = _load_module()
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "\n".join([
+            "LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:18081",
+            "LOOM_WORKER_GATEWAY_URL=http://control-node:19100",
+            "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30444/openai/v1",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control-node:19000",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_probe(urls, *, timeout_sec):  # type: ignore[no-untyped-def]
+        assert ("subprocess-gateway", "http://127.0.0.1:30444/healthz") in urls
+        return [
+            module.ProbeResult(
+                name="subprocess-gateway",
+                url="http://127.0.0.1:30444/healthz",
+                ok=False,
+                detail="ConnectionResetError",
+            ),
+        ]
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        calls.append(command)
+
+    monkeypatch.setattr(module, "probe_health_urls", fake_probe)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    rc = module._run_watchdog(Namespace(
+        env_file=str(env_file),
+        state_file=str(tmp_path / "watchdog.json"),
+        timeout_sec=5,
+        failure_threshold=1,
+    ))
+
+    assert rc == 0
+    assert calls == [
+        [
+            "systemctl",
+            "--user",
+            "restart",
+            "loom-remote-worker-tunnel-subprocess-gateway.service",
+        ],
+    ]
+    assert "restarted=loom-remote-worker-tunnel-subprocess-gateway.service" in (
+        capsys.readouterr().out
+    )
 
 
 def test_watchdog_command_records_failures_without_failing_oneshot(

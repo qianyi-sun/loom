@@ -110,9 +110,10 @@ use `/google`. Kind-on-host deployments that launch sandboxes through
 the platform host Docker socket must review host port ownership; if
 another service owns `30443`, set
 `worker_subprocess_gateway_url` to a dedicated host bridge such as
-`http://host.docker.internal:30444/openai/v1` and keep a durable
-host-side port-forward to `svc/loom-llm-gateway:9100`. `DockerDriver`
-adds the Linux Docker host-gateway mapping when that hostname is used.
+`http://host.docker.internal:30444/openai/v1` and install the
+`worker_service_tunnels.py --subprocess-gateway-local-port 30444` managed
+tunnel to `svc/loom-llm-gateway:9100`. `DockerDriver` adds the Linux Docker
+host-gateway mapping when that hostname is used.
 
 ### Network isolation
 
