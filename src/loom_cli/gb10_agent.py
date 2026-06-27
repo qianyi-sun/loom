@@ -51,6 +51,8 @@ class DesiredState:
     env_config_version: str
     rollout_policy: dict[str, Any]
     env: dict[str, str]
+    target_slots: int | None = None
+    host_intents: dict[str, str] | None = None
     force: bool = False
     previous_image_tag: str | None = None
     previous_max_concurrent: int | None = None
@@ -67,6 +69,15 @@ class DesiredState:
             env_config_version=str(data["env_config_version"]),
             rollout_policy=dict(data.get("rollout_policy") or {}),
             env={str(k): str(v) for k, v in dict(data.get("env") or {}).items()},
+            target_slots=(
+                int(data["target_slots"])
+                if data.get("target_slots") is not None
+                else None
+            ),
+            host_intents={
+                str(k): str(v)
+                for k, v in dict(data.get("host_intents") or {}).items()
+            },
             force=bool(data.get("force", False)),
             previous_image_tag=data.get("previous_image_tag"),
             previous_max_concurrent=data.get("previous_max_concurrent"),
@@ -92,6 +103,8 @@ class DesiredState:
             env_config_version=self.previous_env_config_version,
             rollout_policy={"mode": "all"},
             env=dict(self.previous_env or {}),
+            target_slots=self.target_slots,
+            host_intents=dict(self.host_intents or {}),
             force=True,
         )
 
@@ -103,6 +116,7 @@ class LocalWorkerState:
     pool_name: str
     max_concurrent: int
     env_config_version: str
+    capacity_intent: str = "active"
 
 
 @dataclass(frozen=True)
@@ -129,12 +143,20 @@ def _env_int(values: dict[str, str | None], key: str, default: int) -> int:
 
 def load_local_state(env_file: Path, *, hostname: str | None = None) -> LocalWorkerState:
     values = dotenv_values(env_file)
+    raw_intent = str(values.get("LOOM_GB10_CAPACITY_INTENT") or "").strip()
+    if not raw_intent:
+        raw_intent = (
+            "draining"
+            if str(values.get("LOOM_WORKER_DRAIN") or "").strip() in {"1", "true", "yes"}
+            else "active"
+        )
     return LocalWorkerState(
         hostname=hostname or str(values.get("LOOM_WORKER_HOSTNAME") or socket.gethostname()),
         image_tag=str(values.get("LOOM_IMAGE_TAG") or "dev"),
         pool_name=str(values.get("LOOM_WORKER_POOL_NAME") or "remote-worker"),
         max_concurrent=_env_int(values, "LOOM_WORKER_MAX_CONCURRENT", 5),
         env_config_version=str(values.get("LOOM_WORKER_ENV_CONFIG_VERSION") or ""),
+        capacity_intent=raw_intent,
     )
 
 
@@ -162,6 +184,7 @@ def build_plan(
     force: bool = False,
 ) -> AgentPlan:
     changes: list[str] = []
+    desired_intent = (desired.host_intents or {}).get(local.hostname, "active")
     if local.image_tag != desired.image_tag:
         changes.append("image_tag")
     if local.pool_name != desired.pool_name:
@@ -170,6 +193,8 @@ def build_plan(
         changes.append("max_concurrent")
     if local.env_config_version != desired.env_config_version:
         changes.append("env_config_version")
+    if local.capacity_intent != desired_intent:
+        changes.append("capacity_intent")
     blocked_reason = None
     if changes:
         blocked_reason = _can_apply_to_host(desired, local, force=force)
@@ -185,12 +210,14 @@ def build_plan(
             "pool_name": desired.pool_name,
             "max_concurrent": desired.max_concurrent,
             "env_config_version": desired.env_config_version,
+            "capacity_intent": desired_intent,
         },
         current={
             "image_tag": local.image_tag,
             "pool_name": local.pool_name,
             "max_concurrent": local.max_concurrent,
             "env_config_version": local.env_config_version,
+            "capacity_intent": local.capacity_intent,
         },
     )
 
@@ -214,12 +241,15 @@ def render_env_updates(env_file: Path, updates: dict[str, str]) -> str:
     return "\n".join(rendered) + "\n"
 
 
-def _desired_env_updates(desired: DesiredState) -> dict[str, str]:
+def _desired_env_updates(desired: DesiredState, *, hostname: str | None = None) -> dict[str, str]:
+    desired_intent = (desired.host_intents or {}).get(hostname or "", "active")
     updates = {
         "LOOM_IMAGE_TAG": desired.image_tag,
         "LOOM_WORKER_POOL_NAME": desired.pool_name,
         "LOOM_WORKER_MAX_CONCURRENT": str(desired.max_concurrent),
         "LOOM_WORKER_ENV_CONFIG_VERSION": desired.env_config_version,
+        "LOOM_GB10_CAPACITY_INTENT": desired_intent,
+        "LOOM_WORKER_DRAIN": "1" if desired_intent == "draining" else "0",
     }
     updates.update(desired.env)
     return updates
@@ -314,6 +344,7 @@ def _report_node(
         "current_image_tag": local.image_tag,
         "current_max_concurrent": local.max_concurrent,
         "current_env_config_version": local.env_config_version,
+        "current_intent": local.capacity_intent,
         "apply_state": apply_state,
         "last_apply_result": last_apply_result,
         "error_message": error_message,
@@ -431,7 +462,7 @@ def _apply(args: argparse.Namespace) -> int:
 
     temp_env_file: Path | None = None
     try:
-        updates = _desired_env_updates(desired)
+        updates = _desired_env_updates(desired, hostname=local.hostname)
         rendered = render_env_updates(args.env_file, updates)
         compose_env_file = args.env_file
         if args.dry_run:
@@ -447,7 +478,9 @@ def _apply(args: argparse.Namespace) -> int:
         ]
         for compose_file in args.compose_file:
             compose_base.extend(["-f", str(compose_file)])
-        _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
+        desired_intent = str(plan.desired.get("capacity_intent") or "active")
+        if desired_intent not in {"draining", "stopped"}:
+            _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
         _run(
             [
                 *compose_base,
@@ -458,7 +491,8 @@ def _apply(args: argparse.Namespace) -> int:
             ],
             dry_run=args.dry_run,
         )
-        _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+        if desired_intent not in {"draining", "stopped"}:
+            _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
         if not args.dry_run:
             args.env_file.write_text(rendered, encoding="utf-8")
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -476,12 +510,18 @@ def _apply(args: argparse.Namespace) -> int:
             temp_env_file.unlink(missing_ok=True)
 
     refreshed = load_local_state(args.env_file, hostname=local.hostname)
+    final_intent = str(plan.desired.get("capacity_intent") or "active")
+    apply_state = "rolled_back" if args.rollback else "applied"
+    result = "docker compose worker restarted"
+    if final_intent in {"draining", "stopped"}:
+        apply_state = final_intent
+        result = "docker compose worker stopped after drain"
     _report_node(
         args,
         desired=desired,
         local=refreshed,
-        apply_state="rolled_back" if args.rollback else "applied",
-        last_apply_result="docker compose worker restarted",
+        apply_state=apply_state,
+        last_apply_result=result,
     )
     return _plan(args)
 

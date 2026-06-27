@@ -44,6 +44,7 @@ def test_all_tables_exist(postgres_url: str) -> None:
                 "benchmarks", "pending_team_registrations",
                 "slurm_worker_jobs", "gb10_worker_pool_desired_states",
                 "gb10_worker_node_statuses",
+                "worker_pool_autoscaler_policies",
                 "alembic_version"}
     assert expected.issubset(names)
 
@@ -98,8 +99,10 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
 
     # running → succeeded: -1
     with engine.begin() as conn:
-        conn.execute(text("UPDATE trials SET state='succeeded' WHERE id=:id"),
-                     {"id": trial_id})
+        conn.execute(
+            text("UPDATE trials SET state='succeeded', result='{}'::jsonb WHERE id=:id"),
+            {"id": trial_id},
+        )
     assert in_flight() == 0
 
     # Re-queue → +1 next time we go claimed

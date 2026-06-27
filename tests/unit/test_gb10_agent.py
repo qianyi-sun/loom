@@ -40,6 +40,36 @@ def test_build_plan_blocks_non_canary_host_until_policy_expands() -> None:
     assert "env_config_version" in plan.changes
 
 
+def test_build_plan_detects_capacity_intent_change() -> None:
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="gb10-env-v2",
+        target_slots=0,
+        host_intents={"trt-gb10-1": "draining"},
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+    local = LocalWorkerState(
+        hostname="trt-gb10-1",
+        image_tag="current-image",
+        pool_name="gb10-arm64",
+        max_concurrent=10,
+        env_config_version="gb10-env-v2",
+        capacity_intent="active",
+    )
+
+    plan = build_plan(desired, local)
+
+    assert plan.needs_apply is True
+    assert plan.blocked_reason is None
+    assert plan.changes == ["capacity_intent"]
+    assert plan.desired["capacity_intent"] == "draining"
+    assert plan.current["capacity_intent"] == "active"
+
+
 def test_build_plan_allows_canary_host_and_force_override() -> None:
     desired = DesiredState(
         environment="production",
@@ -161,6 +191,71 @@ def test_apply_dry_run_uses_every_compose_file(
     assert "LOOM_IMAGE_TAG=new-image" in out
     assert "loom_w_existing_secret" not in out
     assert "minio-secret" not in out
+
+
+def test_apply_stopped_intent_stops_without_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "LOOM_IMAGE_TAG=current-image\n"
+        "LOOM_WORKER_POOL_NAME=gb10-arm64\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_ENV_CONFIG_VERSION=current-env\n"
+        "LOOM_GB10_CAPACITY_INTENT=active\n",
+        encoding="utf-8",
+    )
+    compose_file = tmp_path / "docker-compose.remote-worker.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    desired = DesiredState(
+        environment="production",
+        pool_name="gb10-arm64",
+        image_tag="current-image",
+        max_concurrent=10,
+        env_config_version="current-env",
+        rollout_policy={"mode": "all"},
+        env={},
+        target_slots=0,
+        host_intents={"trt-gb10-1": "stopped"},
+    )
+    commands: list[list[str]] = []
+    reports: list[dict[str, object]] = []
+
+    monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_report_node",
+        lambda _args, **kwargs: reports.append(kwargs),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
+
+    rc = gb10_agent._apply(SimpleNamespace(
+        cp_url="http://cp:8080",
+        admin_token="env:LOOM_ADMIN_TOKEN",
+        environment="production",
+        pool_name="gb10-arm64",
+        hostname="trt-gb10-1",
+        env_file=env_file,
+        compose_file=[compose_file],
+        service="worker",
+        drain_timeout_sec=600,
+        dry_run=False,
+        rollback=False,
+        force=False,
+        format="text",
+    ))
+
+    assert rc == 0
+    assert [command[-2:] for command in commands] == [["600", "worker"]]
+    assert all("up" not in command for command in commands)
+    assert reports[-1]["apply_state"] == "stopped"
+    rendered = env_file.read_text(encoding="utf-8")
+    assert "LOOM_GB10_CAPACITY_INTENT=stopped" in rendered
 
 
 def test_apply_failure_leaves_env_file_retryable(

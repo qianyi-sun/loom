@@ -422,7 +422,9 @@ Desired state is stored per `(environment, pool_name)` and includes:
 - pool name (`LOOM_WORKER_POOL_NAME`);
 - per-worker trial concurrency (`LOOM_WORKER_MAX_CONCURRENT`);
 - env/config version (`LOOM_WORKER_ENV_CONFIG_VERSION`, node-agent local only);
-- rollout policy such as canary hosts.
+- rollout policy such as canary hosts;
+- optional autoscaler target slots and per-host intents:
+  `active`, `draining`, or `stopped`.
 
 Write desired state through the CP admin API:
 
@@ -776,6 +778,51 @@ Before treating a remote worker pool as usable:
 If any gate fails, keep the pool below the last stable concurrency and
 record the failure on the deployment issue before raising the limit.
 
+## Worker-Pool Autoscaler
+
+Shared OLDLAB and GB10 pools can be controlled by a Control Plane
+autoscaler policy. The policy is keyed by `environment` and `pool_name`
+and records desired, actual, pending, draining, queued, occupied,
+idle-window age, decision, blocked, and error state.
+
+Inspect policy state with:
+
+```bash
+loom admin worker-pools autoscaler status \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token file:/secure/path/admin-token
+loom resources status
+loom resources status --json
+```
+
+Normal scale-down first marks workers `draining`. Draining workers stop
+claiming new trials but keep heartbeating until in-flight trials finish.
+After a worker has no claimed or running trials, the autoscaler releases
+the underlying Slurm job or changes the GB10 host intent to `stopped`.
+Forced termination is a break-glass operator action, not the default path.
+
+For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,
+remote worker env file, remote checkout path, requested CPU/memory, requested
+worker concurrency, max jobs, pending-job cap, and Slurm command paths if
+they differ from `sbatch`, `squeue`, `sacct`, and `scancel`.
+
+For GB10, autoscaler policy updates the GB10 desired state only. The
+Control Plane does not SSH into hosts. Each `loom worker gb10-agent apply`
+pulls desired state and applies its host intent:
+
+- `active`: run the worker compose service.
+- `draining`: write drain intent, stop compose with the drain timeout, and
+  let the worker finish in-flight trials before exit.
+- `stopped`: keep compose stopped.
+
+Rollback or disable:
+
+- Set the policy `enabled=false` to stop new autoscaler actions.
+- Raise `min_slots` or set GB10 `host_intents` back to `active` to restore
+  warm capacity.
+- For OLDLAB, use `loom admin slurm-workers status` before manual `scancel`
+  so running jobs with active trials are not interrupted.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Check |
@@ -784,4 +831,6 @@ record the failure on the deployment issue before raising the limit.
 | Claims happen but trials fail immediately | Docker unavailable or sandbox image missing | `docker info`; worker logs around sandbox start. |
 | Trials upload no trajectory/artifacts | MinIO endpoint, credentials, or runtime bucket bootstrap failure | `curl $LOOM_WORKER_MINIO_ENDPOINT/minio/health/live`; worker logs for S3 errors; trial `failure_reason` should be `trajectory_flush_failed` or `artifact_upload_failed`. |
 | Queue grows while hosts look idle | Workers not matching task capabilities or provider limits throttling | Control Plane worker table, queue depth, gateway/provider errors. |
+| Autoscaler does not scale up | Policy disabled, cooldown active, max slots reached, pending cap reached, or no compatible queued trials | `loom admin worker-pools autoscaler status --format json`; check `last_blocked_reason`, `last_error`, queued caps, and Slurm/GB10 desired state. |
+| Worker remains draining | In-flight trial still assigned or node-agent has not applied desired state | `loom resources status --json`; inspect claimed/running trials by worker id and GB10 node report. |
 | Host becomes unstable | Concurrency too high or missing sandbox resource limits | Lower `LOOM_WORKER_MAX_CONCURRENT`; inspect memory, swap, and Docker container count. |

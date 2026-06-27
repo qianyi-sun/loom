@@ -178,6 +178,7 @@ async def verify_bearer_token(
                 "admin:rate_cards",
                 "admin:slurm_workers",
                 "admin:gb10_workers",
+                "admin:worker_pools",
             ],
             team_id=None,
             expires_at=None,

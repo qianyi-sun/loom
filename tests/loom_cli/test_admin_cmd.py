@@ -609,6 +609,82 @@ def test_gb10_workers_status_json_format_emits_raw_json(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# loom admin worker-pools autoscaler status
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_worker_pool_autoscaler_status_gets_cp_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = url
+        captured["headers"] = headers
+        return _StubResponse(
+            200,
+            json_data={
+                "policies": [
+                    {
+                        "environment": "production",
+                        "pool_name": "oldlab",
+                        "actuator": "slurm",
+                        "enabled": True,
+                        "min_slots": 6,
+                        "max_slots": 30,
+                        "last_desired_slots": 12,
+                        "last_actual_slots": 6,
+                        "last_pending_slots": 6,
+                        "last_draining_slots": 0,
+                        "last_occupied_slots": 6,
+                        "last_queued_slots": 7,
+                        "last_decision": "scale_up",
+                        "last_decision_reason": "queued_deficit",
+                        "last_blocked_reason": None,
+                        "last_error": None,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main([
+        "admin", "worker-pools", "autoscaler", "status",
+        "--cp-url", "http://cp:8080/",
+    ])
+
+    assert rc == 0
+    assert captured["url"] == "http://cp:8080/admin/worker-pool-autoscalers/status"
+    assert captured["headers"]["Authorization"] == "Bearer admin-secret"
+    out = capsys.readouterr().out
+    assert "production/oldlab" in out
+    assert "desired=12 actual=6 pending=6 draining=0" in out
+    assert "decision=scale_up" in out
+
+
+def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {"policies": []}
+
+    def _fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        return _StubResponse(200, json_data=payload)
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+
+    rc = main([
+        "admin", "worker-pools", "autoscaler", "status", "--format", "json",
+    ])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+# ──────────────────────────────────────────────────────────────────────
 # loom admin tokens team — uses loom_service /api/v1/tokens
 # ──────────────────────────────────────────────────────────────────────
 

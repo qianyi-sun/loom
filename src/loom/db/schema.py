@@ -314,12 +314,31 @@ class Agent(Base):
 
 class Worker(Base):
     __tablename__ = "workers"
+    __table_args__ = (
+        CheckConstraint(
+            "drain_state IN ('active', 'draining', 'drained')",
+            name="workers_drain_state_check",
+        ),
+        Index("idx_workers_drain_state", "drain_state"),
+    )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     hostname: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
     capabilities: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     pool_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'default'"))
+    drain_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'active'"),
+        default="active",
+    )
+    drain_requested_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    drain_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    drain_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
     registered_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
@@ -456,6 +475,13 @@ class GB10WorkerPoolDesiredState(Base):
         server_default=text("'{}'::jsonb"),
         default=dict,
     )
+    target_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    host_intents: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
     force: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     previous_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     previous_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -500,7 +526,7 @@ class GB10WorkerNodeStatus(Base):
             name="gb10_worker_node_statuses_desired_max_positive_check",
         ),
         CheckConstraint(
-            "apply_state IN ('unknown', 'idle', 'applying', 'draining', 'applied', 'blocked', 'failed', 'rolled_back')",
+            "apply_state IN ('unknown', 'idle', 'applying', 'draining', 'stopped', 'applied', 'blocked', 'failed', 'rolled_back')",
             name="gb10_worker_node_statuses_apply_state_check",
         ),
         UniqueConstraint(
@@ -524,6 +550,8 @@ class GB10WorkerNodeStatus(Base):
     desired_image_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     desired_max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     desired_env_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desired_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     apply_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -539,6 +567,132 @@ class GB10WorkerNodeStatus(Base):
     )
     last_apply_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class WorkerPoolAutoscalerPolicy(Base):
+    __tablename__ = "worker_pool_autoscaler_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(environment)) > 0",
+            name="worker_pool_autoscaler_policies_environment_nonempty_check",
+        ),
+        CheckConstraint(
+            "length(trim(pool_name)) > 0",
+            name="worker_pool_autoscaler_policies_pool_name_nonempty_check",
+        ),
+        CheckConstraint(
+            "actuator IN ('slurm', 'gb10')",
+            name="worker_pool_autoscaler_policies_actuator_check",
+        ),
+        CheckConstraint(
+            "min_slots >= 0",
+            name="worker_pool_autoscaler_policies_min_slots_nonnegative_check",
+        ),
+        CheckConstraint(
+            "max_slots >= min_slots",
+            name="worker_pool_autoscaler_policies_max_slots_check",
+        ),
+        CheckConstraint(
+            "scale_up_threshold_slots >= 0",
+            name="worker_pool_autoscaler_policies_scale_up_threshold_check",
+        ),
+        CheckConstraint(
+            "scale_down_idle_seconds >= 0",
+            name="worker_pool_autoscaler_policies_scale_down_idle_check",
+        ),
+        CheckConstraint(
+            "scale_up_cooldown_seconds >= 0",
+            name="worker_pool_autoscaler_policies_scale_up_cooldown_check",
+        ),
+        CheckConstraint(
+            "scale_down_cooldown_seconds >= 0",
+            name="worker_pool_autoscaler_policies_scale_down_cooldown_check",
+        ),
+        CheckConstraint(
+            "drain_timeout_seconds > 0",
+            name="worker_pool_autoscaler_policies_drain_timeout_positive_check",
+        ),
+        UniqueConstraint(
+            "environment",
+            "pool_name",
+            name="worker_pool_autoscaler_policies_environment_pool_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    actuator: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    min_slots: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_slots: Mapped[int] = mapped_column(Integer, nullable=False)
+    scale_up_threshold_slots: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+    )
+    scale_down_idle_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("600"),
+    )
+    scale_up_cooldown_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("60"),
+    )
+    scale_down_cooldown_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("300"),
+    )
+    drain_timeout_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("600"),
+    )
+    force: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actuator_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    idle_since_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    last_decision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_desired_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_actual_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_pending_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_draining_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_occupied_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_queued_slots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_scale_up_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    last_scale_down_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    last_decision_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,

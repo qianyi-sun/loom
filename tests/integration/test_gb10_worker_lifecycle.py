@@ -79,6 +79,8 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
                 "image_tag": "2026-06-26-gb10",
                 "max_concurrent": 10,
                 "env_config_version": "gb10-env-v2",
+                "target_slots": 10,
+                "host_intents": {"trt-gb10-1": "draining"},
                 "rollout_policy": {
                     "mode": "canary",
                     "canary_hosts": ["trt-gb10-1"],
@@ -93,6 +95,8 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert body["image_tag"] == "2026-06-26-gb10"
         assert body["max_concurrent"] == 10
         assert body["env_config_version"] == "gb10-env-v2"
+        assert body["target_slots"] == 10
+        assert body["host_intents"] == {"trt-gb10-1": "draining"}
         assert body["previous_image_tag"] is None
         assert body["rollout_policy"]["mode"] == "canary"
 
@@ -110,6 +114,7 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
                 "current_image_tag": "2026-06-26-gb10",
                 "current_max_concurrent": 10,
                 "current_env_config_version": "gb10-env-v2",
+                "current_intent": "draining",
                 "apply_state": "applied",
                 "last_apply_result": "compose restarted and worker heartbeat verified",
                 "agent_version": "test-agent",
@@ -122,6 +127,8 @@ def test_desired_state_node_report_and_status_round_trip(app) -> None:
         assert node["desired_image_tag"] == "2026-06-26-gb10"
         assert node["desired_max_concurrent"] == 10
         assert node["desired_env_config_version"] == "gb10-env-v2"
+        assert node["desired_intent"] == "draining"
+        assert node["current_intent"] == "draining"
         assert node["apply_state"] == "applied"
 
         status = client.get(

@@ -37,6 +37,7 @@ _SECRET_VALUE_PATTERNS = (
         r"(?i)\b(token|secret|password|credential|api[_-]?key)=\S+",
     ),
 )
+_CAPACITY_INTENTS = {"active", "draining", "stopped"}
 
 
 class UnsafeDesiredEnvError(ValueError):
@@ -48,6 +49,7 @@ class GB10NodeReport:
     current_image_tag: str | None = None
     current_max_concurrent: int | None = None
     current_env_config_version: str | None = None
+    current_intent: str | None = None
     apply_state: str = "unknown"
     last_apply_result: str | None = None
     error_message: str | None = None
@@ -87,6 +89,21 @@ def validate_safe_env(env: dict[str, str] | None) -> dict[str, str]:
     return out
 
 
+def validate_host_intents(host_intents: dict[str, str] | None) -> dict[str, str]:
+    if not host_intents:
+        return {}
+    out: dict[str, str] = {}
+    for raw_host, raw_intent in host_intents.items():
+        host = _clean_nonempty(str(raw_host), "host_intents hostname")
+        intent = str(raw_intent).strip()
+        if intent not in _CAPACITY_INTENTS:
+            raise ValueError(
+                "host_intents values must be one of: active, draining, stopped",
+            )
+        out[host] = intent
+    return out
+
+
 def _redact_status_match(match: re.Match[str]) -> str:
     if match.lastindex:
         return f"{match.group(1)}=<redacted>"
@@ -114,6 +131,8 @@ def desired_state_to_dict(row: GB10WorkerPoolDesiredState) -> dict[str, object]:
         "image_tag": row.image_tag,
         "max_concurrent": row.max_concurrent,
         "env_config_version": row.env_config_version,
+        "target_slots": row.target_slots,
+        "host_intents": row.host_intents,
         "rollout_policy": row.rollout_policy,
         "env": row.env,
         "force": row.force,
@@ -136,9 +155,11 @@ def node_status_to_dict(row: GB10WorkerNodeStatus) -> dict[str, object]:
         "current_image_tag": row.current_image_tag,
         "current_max_concurrent": row.current_max_concurrent,
         "current_env_config_version": row.current_env_config_version,
+        "current_intent": row.current_intent,
         "desired_image_tag": row.desired_image_tag,
         "desired_max_concurrent": row.desired_max_concurrent,
         "desired_env_config_version": row.desired_env_config_version,
+        "desired_intent": row.desired_intent,
         "apply_state": row.apply_state,
         "last_apply_result": row.last_apply_result,
         "error_message": row.error_message,
@@ -175,6 +196,8 @@ async def upsert_desired_state(
     image_tag: str,
     max_concurrent: int,
     env_config_version: str,
+    target_slots: int | None = None,
+    host_intents: dict[str, str] | None = None,
     rollout_policy: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
     force: bool = False,
@@ -186,7 +209,10 @@ async def upsert_desired_state(
     env_config_version = _clean_nonempty(env_config_version, "env_config_version")
     if max_concurrent <= 0:
         raise ValueError("max_concurrent must be positive")
+    if target_slots is not None and target_slots < 0:
+        raise ValueError("target_slots must be >= 0")
     safe_env = validate_safe_env(env)
+    safe_host_intents = validate_host_intents(host_intents)
     policy = dict(rollout_policy or {})
     now = now or datetime.now(UTC)
     row = await get_desired_state(
@@ -201,6 +227,8 @@ async def upsert_desired_state(
             image_tag=image_tag,
             max_concurrent=max_concurrent,
             env_config_version=env_config_version,
+            target_slots=target_slots,
+            host_intents=safe_host_intents,
             rollout_policy=policy,
             env=safe_env,
             force=bool(force),
@@ -212,6 +240,8 @@ async def upsert_desired_state(
             row.image_tag != image_tag
             or row.max_concurrent != max_concurrent
             or row.env_config_version != env_config_version
+            or row.target_slots != target_slots
+            or row.host_intents != safe_host_intents
             or row.env != safe_env
         )
         if changed:
@@ -222,6 +252,8 @@ async def upsert_desired_state(
         row.image_tag = image_tag
         row.max_concurrent = max_concurrent
         row.env_config_version = env_config_version
+        row.target_slots = target_slots
+        row.host_intents = safe_host_intents
         row.rollout_policy = policy
         row.env = safe_env
         row.force = bool(force)
@@ -267,10 +299,12 @@ async def record_node_report(
     row.current_image_tag = report.current_image_tag
     row.current_max_concurrent = report.current_max_concurrent
     row.current_env_config_version = report.current_env_config_version
+    row.current_intent = report.current_intent
     if desired is not None:
         row.desired_image_tag = desired.image_tag
         row.desired_max_concurrent = desired.max_concurrent
         row.desired_env_config_version = desired.env_config_version
+        row.desired_intent = (desired.host_intents or {}).get(hostname, "active")
     row.apply_state = report.apply_state
     row.last_apply_result = redact_status_text(report.last_apply_result)
     row.error_message = redact_status_text(report.error_message)

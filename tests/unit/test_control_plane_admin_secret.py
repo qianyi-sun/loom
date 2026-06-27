@@ -69,3 +69,4 @@ async def test_file_backed_admin_secret_grants_gb10_worker_scope() -> None:
 
     assert ctx is not None
     assert "admin:gb10_workers" in ctx.scopes
+    assert "admin:worker_pools" in ctx.scopes

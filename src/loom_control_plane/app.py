@@ -39,6 +39,9 @@ from loom_control_plane.routes import (
     workers,
 )
 from loom_control_plane.scheduler.crash_detector import run_crash_detector_loop
+from loom_control_plane.worker_pool_autoscaler import (
+    run_worker_pool_autoscaler_loop,
+)
 
 
 def _load_admin_secret_verifier(
@@ -141,6 +144,14 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             ),
             name="loom-cp-retry-exhausted-sweeper",
         )
+        worker_pool_autoscaler_task = asyncio.create_task(
+            run_worker_pool_autoscaler_loop(
+                session_factory=session_factory,
+                interval_sec=settings.worker_reclaim_sweep_interval_sec,
+                freshness_sec=settings.worker_heartbeat_expiry_sec,
+            ),
+            name="loom-cp-worker-pool-autoscaler",
+        )
         slurm_controller_task: asyncio.Task[None] | None = None
         if slurm_controller_config is not None:
             slurm_controller_task = asyncio.create_task(
@@ -160,6 +171,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             crash_detector_task.cancel()
             metrics_refresher_task.cancel()
             retry_exhausted_task.cancel()
+            worker_pool_autoscaler_task.cancel()
             if slurm_controller_task is not None:
                 slurm_controller_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
@@ -172,6 +184,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 crash_detector_task,
                 metrics_refresher_task,
                 retry_exhausted_task,
+                worker_pool_autoscaler_task,
                 slurm_controller_task,
             ):
                 if t is None:

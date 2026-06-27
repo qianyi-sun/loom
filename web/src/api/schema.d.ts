@@ -428,8 +428,12 @@ export interface components {
       pools: components["schemas"]["ResourcePool"][];
     };
     ResourceAggregate: {
+      desired_slots: number;
+      pending_slots: number;
       active_workers: number;
+      draining_workers: number;
       total_slots: number;
+      draining_slots: number;
       occupied_slots: number;
       free_slots: number;
       running_tasks: number;
@@ -440,13 +444,26 @@ export interface components {
       pool_name: string;
       backend: string;
       cpu_arch: string;
+      autoscaler_environment: string | null;
+      autoscaler_actuator: string | null;
+      autoscaler_enabled: boolean;
+      autoscaler_idle_since_at: string | null;
+      autoscaler_idle_seconds: number | null;
+      desired_slots: number;
+      pending_slots: number;
       active_workers: number;
+      draining_workers: number;
       total_slots: number;
+      draining_slots: number;
       occupied_slots: number;
       free_slots: number;
       running_tasks: number;
       starting_tasks: number;
       queued_tasks: number;
+      last_autoscaler_decision: string | null;
+      last_autoscaler_reason: string | null;
+      last_autoscaler_blocked_reason: string | null;
+      last_autoscaler_error: string | null;
     };
     UsageCostStatus:
       | "no_usage"

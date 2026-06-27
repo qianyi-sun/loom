@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Task, Team, TeamQuota, Token, Trial, Worker
@@ -120,6 +120,38 @@ def test_claim_no_match_returns_204(app, claim_seed):  # type: ignore[no-untyped
             json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
         )
         assert r.status_code == 204
+
+
+def test_draining_worker_cannot_claim_new_trial(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    assert hasattr(Worker, "drain_state")
+    worker_id, raw_worker, _ = claim_seed
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        session.execute(
+            update(Worker)
+            .where(Worker.id == worker_id)
+            .values(
+                drain_state="draining",
+                drain_reason="autoscaler scale-down",
+                drain_owner="worker-pool-autoscaler",
+            ),
+        )
+        session.commit()
+    engine.dispose()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials/claim",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
+        )
+
+    assert r.status_code == 204
 
 
 def test_claim_rejects_unauth(app, claim_seed):  # type: ignore[no-untyped-def]

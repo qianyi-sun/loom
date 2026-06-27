@@ -1912,6 +1912,26 @@ mock provider and browser automation job.
   use 300 seconds for dev/staging pools and 600-900 seconds for production
   OLDLAB capacity. Keep Slurm `--time` as the hard safety bound; idle-exit
   only releases allocations after queue drain.
+- For shared OLDLAB and GB10 pools, prefer the worker-pool autoscaler over
+  manual SSH, Docker Compose, or Slurm operations. Check current policy and
+  decisions with:
+
+  ```bash
+  loom admin worker-pools autoscaler status \
+    --cp-url http://control-node.lan:18081 \
+    --admin-token file:/secure/path/admin-token
+  loom resources status --json
+  ```
+
+  The policy records desired slots, actual claimable slots, pending slots,
+  draining slots, occupied slots, queued slots, idle-window age, last decision,
+  blocked reason, and actuator error. Normal scale-down marks workers
+  `draining` first; those workers stop claiming new work, finish assigned
+  trials, and are released only after in-flight count reaches zero. To roll
+  back, disable the policy or raise `min_slots`, then restore GB10 host intents
+  to `active` or wait for OLDLAB Slurm jobs to converge. Manual `scancel` and
+  Docker Compose stop remain break-glass actions and must not target workers
+  that still own claimed or running trials.
 - Until Docker sandbox CPU/RAM limits are enforced per trial, treat
   higher worker concurrency as an operator decision backed by load-test
   evidence, not just a CPU-count formula.

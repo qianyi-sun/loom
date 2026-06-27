@@ -13,7 +13,10 @@ production-like validation.
   smoke batch id, worker ids, Slurm job ids, runtime, trial counts, and failure
   count.
 - `controller.env.example` is the Control Plane override set for the native
-  elastic Slurm controller from #432.
+  elastic Slurm controller from #432. For #45 and later, use the worker-pool
+  autoscaler policy as the normal desired-capacity control surface; the same
+  Slurm node, checkout, env-file, CPU, memory, concurrency, max-job, and
+  pending-cap settings map into the policy `actuator_config`.
 
 The initial capacity slice is intentionally conservative: one Slurm job per
 node, `12 CPU`, `58000M`, and `LOOM_WORKER_MAX_CONCURRENT=6`. Raise concurrency
@@ -41,4 +44,6 @@ work. Full production capacity still uses the 12 CPU / 58000M plan above.
 To temporarily exclude a node, remove it from both `worker-plan.csv` and
 `LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES`, or lower
 `LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS` below the node count. To disable the
-elastic pool entirely, set `LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=false`.
+elastic pool entirely, disable the worker-pool autoscaler policy and set
+`LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=false` for older controller-only
+deployments.

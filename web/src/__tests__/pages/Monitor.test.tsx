@@ -37,8 +37,12 @@ const monitorSummaryPayload = {
   },
   resources: {
     aggregate: {
+      desired_slots: 18,
+      pending_slots: 6,
       active_workers: 2,
+      draining_workers: 1,
       total_slots: 12,
+      draining_slots: 2,
       occupied_slots: 3,
       free_slots: 9,
       running_tasks: 2,
@@ -50,25 +54,51 @@ const monitorSummaryPayload = {
         pool_name: "gb10-arm64",
         backend: "docker",
         cpu_arch: "arm64",
+        autoscaler_environment: "production",
+        autoscaler_actuator: "gb10",
+        autoscaler_enabled: true,
+        autoscaler_idle_since_at: "2026-06-27T12:00:00+00:00",
+        autoscaler_idle_seconds: 601,
+        desired_slots: 12,
+        pending_slots: 0,
         active_workers: 1,
+        draining_workers: 1,
         total_slots: 10,
+        draining_slots: 2,
         occupied_slots: 1,
         free_slots: 9,
         running_tasks: 1,
         starting_tasks: 0,
         queued_tasks: 1,
+        last_autoscaler_decision: "request_drain",
+        last_autoscaler_reason: "idle_excess_capacity",
+        last_autoscaler_blocked_reason: null,
+        last_autoscaler_error: null,
       },
       {
         pool_name: "public-beta-x86",
         backend: "docker",
         cpu_arch: "x86_64",
+        autoscaler_environment: "production",
+        autoscaler_actuator: "slurm",
+        autoscaler_enabled: true,
+        autoscaler_idle_since_at: null,
+        autoscaler_idle_seconds: null,
+        desired_slots: 6,
+        pending_slots: 6,
         active_workers: 1,
+        draining_workers: 0,
         total_slots: 2,
+        draining_slots: 0,
         occupied_slots: 2,
         free_slots: 0,
         running_tasks: 1,
         starting_tasks: 1,
         queued_tasks: 1,
+        last_autoscaler_decision: "scale_up",
+        last_autoscaler_reason: "queued_deficit",
+        last_autoscaler_blocked_reason: null,
+        last_autoscaler_error: null,
       },
     ],
   },
@@ -362,6 +392,9 @@ describe("Monitor human-readable labels", () => {
     expect(screen.getByText("public-beta-x86")).toBeInTheDocument();
     expect(screen.getByText("1/10")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
+    expect(screen.getByText("601s")).toBeInTheDocument();
+    expect(screen.getByText("request_drain")).toBeInTheDocument();
+    expect(screen.getByText("scale_up")).toBeInTheDocument();
 
     await waitFor(() => {
       const summaryRequest = fetchMock.mock.calls.find(([input]) =>
