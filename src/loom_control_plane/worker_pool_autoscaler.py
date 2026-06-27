@@ -26,7 +26,11 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     SubprocessSlurmCommandRunner,
     build_controller_config,
 )
-from loom_control_plane.slurm_worker_jobs import ACTIVE_STATES, record_slurm_worker_job
+from loom_control_plane.slurm_worker_jobs import (
+    ACTIVE_STATES,
+    reconcile_slurm_worker_jobs,
+    record_slurm_worker_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +615,52 @@ async def _load_observation(
     )
 
 
+async def _refresh_slurm_job_registry(
+    session: AsyncSession,
+    row: WorkerPoolAutoscalerPolicy,
+    *,
+    runner: SlurmWorkerCommandRunner | None,
+    now: datetime,
+) -> str | None:
+    if row.actuator != "slurm":
+        return None
+    job_ids = tuple(
+        str(job_id)
+        for (job_id,) in (await session.execute(
+            select(SlurmWorkerJob.job_id).where(
+                SlurmWorkerJob.environment == row.environment,
+                SlurmWorkerJob.pool_name == row.pool_name,
+                SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                SlurmWorkerJob.job_id.is_not(None),
+            ),
+        )).all()
+        if job_id is not None
+    )
+    if not job_ids:
+        return None
+    config = _slurm_config_from_policy(row)
+    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    try:
+        observations = await runner.query_jobs(job_ids)
+        await reconcile_slurm_worker_jobs(
+            session,
+            observations,
+            stale_after_seconds=config.stale_after_seconds,
+            now=now,
+        )
+    except Exception as exc:
+        logger.warning(
+            "worker_pool_autoscaler_slurm_query_failed",
+            extra={
+                "environment": row.environment,
+                "pool_name": row.pool_name,
+                "err": str(exc),
+            },
+        )
+        return str(exc)
+    return None
+
+
 async def _request_worker_drain(
     session: AsyncSession,
     *,
@@ -1048,6 +1098,13 @@ async def reconcile_worker_pool_autoscaler_once(
         if external_only and not uses_external_runner:
             continue
         actuator_error: str | None = None
+        if row.actuator == "slurm":
+            actuator_error = await _refresh_slurm_job_registry(
+                session,
+                row,
+                runner=slurm_runner,
+                now=now,
+            )
         observation = await _load_observation(
             session,
             row,

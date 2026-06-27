@@ -1946,7 +1946,10 @@ mock provider and browser automation job.
   intentionally skips those policies; run the autoscaler reconciler on the
   submit host with `include_external_policies=True` and `external_only=True`
   so `sbatch`, `squeue`, `sacct`, `scancel`, and munge stay on the machine
-  that owns those credentials.
+  that owns those credentials. The submit-host reconciler refreshes active
+  Slurm job records before each autoscaler decision, so pending/running/stale
+  job status and `loom_slurm_worker_*` metrics do not depend on an in-pod
+  Slurm controller.
   `actuator_config.exclusive` defaults to `true`; set it to `false` only when
   the requested CPU, memory, and concurrency are intentionally sized for a
   shared Slurm node.
