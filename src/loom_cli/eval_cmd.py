@@ -38,6 +38,7 @@ from loom_cli.server_client import (
     authed_client,
     require_logged_in,
 )
+from loom_cli.time_format import format_local_datetime
 from loom_service.agent_catalog import get_agent
 
 # Map provider_connection.type → ModelSpec.provider. The agent uses
@@ -160,9 +161,9 @@ def _print_trial_summary(item: dict[str, Any]) -> None:
             f"completion={item.get('total_completion_tokens', 0)}",
         )
     if item.get("submitted_at"):
-        print(f"submitted_at:     {item['submitted_at']}")
+        print(f"submitted_at:     {format_local_datetime(item['submitted_at'])}")
     if item.get("finished_at"):
-        print(f"finished_at:     {item['finished_at']}")
+        print(f"finished_at:     {format_local_datetime(item['finished_at'])}")
     if item.get("failure_reason"):
         print(f"failure_reason:   {item['failure_reason']}")
 
@@ -358,9 +359,9 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
             f"completion={item.get('total_completion_tokens', 0)}",
         )
     if item.get("created_at"):
-        print(f"created_at:            {item['created_at']}")
+        print(f"created_at:            {format_local_datetime(item['created_at'])}")
     if item.get("finished_at"):
-        print(f"finished_at:           {item['finished_at']}")
+        print(f"finished_at:           {format_local_datetime(item['finished_at'])}")
 
 
 def _batch_create(args: argparse.Namespace) -> int:

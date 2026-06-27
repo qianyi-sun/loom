@@ -23,12 +23,14 @@ import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useTrialEventStream } from "../hooks/useTrialEventStream";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { trialStateVariant } from "../lib/statusVariant";
+import { formatTokenUsage } from "../lib/tokenUsage";
 import {
   formatUsageCost,
   usageCostStatus,
@@ -200,7 +202,10 @@ function TrialHeader({
           />
           <StatCard
             label="Tokens"
-            value={`P ${trial.total_prompt_tokens} / C ${trial.total_completion_tokens}`}
+            value={formatTokenUsage(
+              trial.total_prompt_tokens,
+              trial.total_completion_tokens,
+            )}
           />
           {hasCostProjection ? (
             <>
@@ -220,13 +225,11 @@ function TrialHeader({
           ) : null}
           <StatCard
             label="Submitted"
-            value={trial.submitted_at.slice(0, 16).replace("T", " ")}
+            value={formatLocalDateTime(trial.submitted_at)}
           />
           <StatCard
             label="Finished"
-            value={
-              trial.finished_at?.slice(0, 16).replace("T", " ") ?? "—"
-            }
+            value={formatLocalDateTime(trial.finished_at)}
           />
           <StatCard label="Attempts" value={trial.attempt_count} />
         </div>

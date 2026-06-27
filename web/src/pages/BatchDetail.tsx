@@ -18,6 +18,7 @@ import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
@@ -25,6 +26,7 @@ import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { formatTokenUsage } from "../lib/tokenUsage";
 import {
   formatUsageCost,
   usageCostStatus,
@@ -241,7 +243,10 @@ export default function BatchDetail(): JSX.Element {
             />
             <StatCard
               label="Tokens"
-              value={`P ${c.total_prompt_tokens} / C ${c.total_completion_tokens}`}
+              value={formatTokenUsage(
+                c.total_prompt_tokens,
+                c.total_completion_tokens,
+              )}
             />
             {hasCostProjection ? (
               <>
@@ -261,11 +266,11 @@ export default function BatchDetail(): JSX.Element {
             ) : null}
             <StatCard
               label="Created"
-              value={c.created_at.slice(0, 16).replace("T", " ")}
+              value={formatLocalDateTime(c.created_at)}
             />
             <StatCard
               label="Finished"
-              value={c.finished_at?.slice(0, 16).replace("T", " ") ?? "—"}
+              value={formatLocalDateTime(c.finished_at)}
             />
           </div>
 
@@ -354,9 +359,11 @@ export default function BatchDetail(): JSX.Element {
                 {effectiveSucceeded} succeeded, {effectiveFailed} failed ·
                 reward {c.effective_aggregate_reward != null
                   ? c.effective_aggregate_reward.toFixed(3)
-                  : "—"} · {c.effective_llm_calls_count} LLM calls · tokens P{" "}
-                {c.effective_total_prompt_tokens} / C{" "}
-                {c.effective_total_completion_tokens}
+                  : "—"} · {c.effective_llm_calls_count} LLM calls · tokens{" "}
+                {formatTokenUsage(
+                  c.effective_total_prompt_tokens,
+                  c.effective_total_completion_tokens,
+                )}
                 {hasEffectiveCostProjection
                   ? ` · cost ${formatUsageCost({
                       estimated_cost_usd: c.effective_estimated_cost_usd,

@@ -181,6 +181,11 @@ switching between batch and trial views. Failed trial lists include a Failure
 diagnostics summary grouped by platform `failure_reason`, with representative
 messages and links to the first affected trial so provider, sandbox, verifier,
 and artifact failures can be triaged before opening individual logs.
+User-facing web timestamps render in the viewer's local timezone with a short
+timezone label, and CLI text summaries use the executing shell's local
+timezone. API and `--format json` responses keep canonical timezone-aware ISO
+timestamps. Token usage labels use `Input` and `Output` instead of abbreviated
+`P`/`C` wording.
 
 New Batch includes a Release review card before submit. Check that it shows the
 intended task scope, planned trial count, selected backend worker availability,

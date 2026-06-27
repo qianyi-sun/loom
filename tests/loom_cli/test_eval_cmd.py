@@ -6,6 +6,8 @@ integration tests in tests/integration; this file pins the CLI surface
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -982,6 +984,53 @@ def test_batch_show_renders_rollup(
     assert "0.75" in out
     assert "llm_calls:             3" in out
     assert "prompt=120 completion=45" in out
+
+
+def test_batch_show_formats_timestamps_in_local_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/Toronto")
+    if hasattr(time, "tzset"):
+        time.tzset()
+    try:
+        mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(
+            200,
+            json={
+                "id": _BATCH_ID,
+                "team_id": "x",
+                "name": "local-time-batch",
+                "description": None,
+                "task_filter": {},
+                "trial_config": {},
+                "state": "finished",
+                "result_status": "succeeded",
+                "created_at": "2026-06-27T03:04:54Z",
+                "finished_at": "2026-06-27T03:09:00Z",
+                "created_by_token_prefix": "abc",
+                "expected_trial_count": 1,
+                "n_per_task": 1,
+                "backend": "docker",
+                "combinations": [],
+            },
+        )
+
+        rc = main(["eval", "batch", "show", _BATCH_ID])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "created_at:            2026-06-26 23:04 EDT" in out
+        assert "finished_at:           2026-06-26 23:09 EDT" in out
+        assert "2026-06-27T03:04:54Z" not in out
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        if hasattr(time, "tzset"):
+            time.tzset()
 
 
 def test_batch_show_renders_fanout_failure(

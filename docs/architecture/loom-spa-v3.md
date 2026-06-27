@@ -468,6 +468,12 @@ one Batch and surfaces:
 - Aggregate reward (when finished)
 - Estimated cost (rate-card lookup × tokens)
 
+All user-facing SPA timestamps should use the shared local-time formatter:
+render in the viewer's local timezone, include a short timezone label, and
+leave API JSON timestamps as canonical timezone-aware ISO values. Token usage
+summaries should use explicit `Input` and `Output` labels instead of compact
+`P`/`C` abbreviations.
+
 To inspect one trial, click into the Batch and then into the
 trial row inside it.
 

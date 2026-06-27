@@ -29,6 +29,7 @@ import {
   allowedModelsSummary,
   providerStatusSummary,
 } from "../lib/providerDisplay";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { providerSmokeBatchCommand } from "../lib/quickstartSnippets";
 
 type TabName = "overview" | "models" | "settings";
@@ -232,7 +233,7 @@ function OverviewTab({
           {conn.last_validated_at && (
             <>
               <dt className="font-medium text-slate-600">Last tested</dt>
-              <dd>{conn.last_validated_at}</dd>
+              <dd>{formatLocalDateTime(conn.last_validated_at)}</dd>
             </>
           )}
         </dl>
