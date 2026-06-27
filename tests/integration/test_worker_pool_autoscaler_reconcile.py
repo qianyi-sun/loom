@@ -34,12 +34,20 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         self.submitted_nodes: list[str] = []
         self.cancelled_job_ids: list[str] = []
         self.fail_submit_nodes: set[str] = set()
+        self.job_observations: list[SlurmWorkerJobObservation] | None = None
+        self.queried_job_ids: list[tuple[str, ...]] = []
 
     async def query_jobs(
         self,
         job_ids: tuple[str, ...],
     ) -> list[SlurmWorkerJobObservation]:
-        return []
+        self.queried_job_ids.append(job_ids)
+        if self.job_observations is not None:
+            return self.job_observations
+        return [
+            SlurmWorkerJobObservation(job_id=job_id, slurm_state="RUNNING")
+            for job_id in job_ids
+        ]
 
     async def submit_worker(
         self,
@@ -366,6 +374,113 @@ async def test_submit_host_reconcile_processes_external_slurm_runner_policies(
         assert job.job_id == "job-oldlab-1"
         assert job.state == "pending"
         assert policy.last_decision == "scale_up"
+    finally:
+        await engine.dispose()
+
+
+async def test_external_slurm_runner_reconcile_refreshes_known_job_state(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Worker).values(
+                id=worker_id,
+                hostname="oldlab-1",
+                version="test",
+                capabilities=[{
+                    "backend": "docker",
+                    "os": "linux",
+                    "cpu_arch": "x86_64",
+                    "gpu_vendor": "none",
+                    "network_policies": ["none"],
+                }],
+                max_concurrent=1,
+                pool_name="oldlab",
+                drain_state="active",
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            ))
+            await s.execute(insert(SlurmWorkerJob).values(
+                environment="production",
+                pool_name="oldlab",
+                nodelist="oldlab-1",
+                requested_cpus=2,
+                requested_memory_mib=8000,
+                requested_concurrency=1,
+                job_id="9001",
+                slurm_state="PENDING",
+                state="pending",
+                redacted_env={},
+                submitted_at=now - timedelta(seconds=300),
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=1,
+                max_slots=1,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "external_runner": True,
+                    "allowed_nodes": ["oldlab-1"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 2,
+                    "requested_memory_mib": 8000,
+                    "requested_concurrency": 1,
+                    "max_jobs": 1,
+                    "pending_job_cap": 1,
+                    "time_limit": "7-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observations = [
+            SlurmWorkerJobObservation(
+                job_id="9001",
+                slurm_state="RUNNING",
+                nodelist="oldlab-1",
+                worker_id=worker_id,
+                observed_at=now,
+            ),
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+                include_external_policies=True,
+                external_only=True,
+            )
+            await s.commit()
+
+        assert runner.queried_job_ids == [("9001",)]
+        assert results[0].action == "noop"
+        assert results[0].actual_slots == 1
+        assert results[0].pending_slots == 0
+
+        async with session_factory() as s:
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+
+        assert job.state == "running"
+        assert job.slurm_state == "RUNNING"
+        assert job.worker_id == worker_id
+        assert policy.last_actual_slots == 1
+        assert policy.last_pending_slots == 0
     finally:
         await engine.dispose()
 
