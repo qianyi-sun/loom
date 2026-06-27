@@ -853,6 +853,13 @@ async def _apply_gb10_host_intent(
 ) -> None:
     if not worker_ids:
         return
+    release_workers = (await session.execute(
+        select(Worker.id, Worker.hostname).where(Worker.id.in_(worker_ids)),
+    )).all()
+    worker_id_by_hostname = {
+        str(hostname): worker_id for worker_id, hostname in release_workers
+    }
+    hostname_matches = tuple(worker_id_by_hostname)
     desired = (await session.execute(
         select(GB10WorkerPoolDesiredState).where(
             GB10WorkerPoolDesiredState.environment == row.environment,
@@ -872,15 +879,24 @@ async def _apply_gb10_host_intent(
             updated_at=now,
         )
         session.add(desired)
+    node_match_filters: list[Any] = [
+        GB10WorkerNodeStatus.worker_id.in_(worker_ids),
+    ]
+    if hostname_matches:
+        node_match_filters.append(
+            GB10WorkerNodeStatus.hostname.in_(hostname_matches),
+        )
     nodes = (await session.execute(
         select(GB10WorkerNodeStatus).where(
             GB10WorkerNodeStatus.environment == row.environment,
             GB10WorkerNodeStatus.pool_name == row.pool_name,
-            GB10WorkerNodeStatus.worker_id.in_(worker_ids),
+            or_(*node_match_filters),
         ),
     )).scalars().all()
     host_intents = dict(desired.host_intents or {})
     for node in nodes:
+        if node.worker_id is None:
+            node.worker_id = worker_id_by_hostname.get(node.hostname)
         host_intents[node.hostname] = intent
         node.desired_intent = intent
         node.updated_at = now
