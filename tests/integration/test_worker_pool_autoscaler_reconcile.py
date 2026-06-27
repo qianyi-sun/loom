@@ -468,6 +468,98 @@ async def test_reconcile_releases_drained_slurm_worker_job(
         await engine.dispose()
 
 
+async def test_reconcile_releases_drained_slurm_job_by_worker_hostname(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    worker_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Worker).values(
+                id=worker_id,
+                hostname="oldlab-1",
+                version="test",
+                capabilities=[{
+                    "backend": "docker",
+                    "os": "linux",
+                    "cpu_arch": "x86_64",
+                    "gpu_vendor": "none",
+                    "network_policies": ["none"],
+                }],
+                max_concurrent=6,
+                pool_name="oldlab",
+                drain_state="draining",
+                drain_requested_at=now - timedelta(seconds=601),
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            ))
+            await s.execute(insert(SlurmWorkerJob).values(
+                environment="production",
+                pool_name="oldlab",
+                nodelist="oldlab-1",
+                requested_cpus=12,
+                requested_memory_mib=58000,
+                requested_concurrency=6,
+                job_id="9001",
+                slurm_state="RUNNING",
+                state="running",
+                redacted_env={},
+                submitted_at=now - timedelta(seconds=900),
+                started_at=now - timedelta(seconds=800),
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=6,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 12,
+                    "requested_memory_mib": 58000,
+                    "requested_concurrency": 6,
+                    "max_jobs": 1,
+                    "pending_job_cap": 1,
+                    "time_limit": "7-00:00:00",
+                },
+                idle_since_at=now - timedelta(seconds=601),
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "release_drained"
+        assert runner.cancelled_job_ids == ["9001"]
+
+        async with session_factory() as s:
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+
+        assert job.worker_id == worker_id
+        assert job.state == "cancelled"
+    finally:
+        await engine.dispose()
+
+
 async def test_reconcile_sets_gb10_host_intent_to_draining(
     postgres_url: str,
 ) -> None:

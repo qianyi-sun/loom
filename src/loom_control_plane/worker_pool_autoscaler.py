@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -796,16 +796,33 @@ async def _apply_slurm_release_drained(
         return
     config = _slurm_config_from_policy(row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    released_worker_ids = set(decision.worker_ids_to_release)
+    release_workers = (await session.execute(
+        select(Worker.id, Worker.hostname).where(Worker.id.in_(released_worker_ids)),
+    )).all()
+    worker_id_by_hostname = {
+        str(hostname): worker_id for worker_id, hostname in release_workers
+    }
+    hostname_matches = tuple(worker_id_by_hostname)
+    job_match_filters: list[Any] = [
+        SlurmWorkerJob.worker_id.in_(released_worker_ids),
+    ]
+    if hostname_matches:
+        job_match_filters.append(
+            SlurmWorkerJob.worker_id.is_(None)
+            & SlurmWorkerJob.nodelist.in_(hostname_matches)
+        )
     jobs = (await session.execute(
         select(SlurmWorkerJob).where(
             SlurmWorkerJob.environment == row.environment,
             SlurmWorkerJob.pool_name == row.pool_name,
-            SlurmWorkerJob.worker_id.in_(decision.worker_ids_to_release),
             SlurmWorkerJob.state == "running",
+            or_(*job_match_filters),
         ),
     )).scalars().all()
-    released_worker_ids = set(decision.worker_ids_to_release)
     for job in jobs:
+        if job.worker_id is None:
+            job.worker_id = worker_id_by_hostname.get(job.nodelist)
         if job.job_id:
             await runner.cancel_job(job.job_id)
         job.state = "cancelled"
