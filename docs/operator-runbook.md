@@ -1856,7 +1856,8 @@ mock provider and browser automation job.
 - The default production shape is a fixed Kubernetes worker baseline plus
   OLDLAB 1-5 as elastic capacity. The staged OLDLAB inventory, launch plan,
   and controller env example live in `deploy/worker-pools/oldlab/`. Configure
-  each environment independently:
+  each environment independently. The env-driven Slurm controller uses one
+  fixed concurrency slice per submitted job:
 
   ```bash
   LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=true
@@ -1891,6 +1892,56 @@ mock provider and browser automation job.
   normal exits, idle exits, and `scancel` release the compose worker container
   with `docker compose down --remove-orphans` instead of leaving an orphaned
   worker outside Slurm accounting.
+  For normal shared OLDLAB autoscaling, prefer a worker-pool autoscaler policy
+  with `actuator_config.resource_aware=true` instead of raising
+  `REQUESTED_CONCURRENCY` manually. The conservative OLDLAB policy keeps
+  `min_slots=1`, sets `max_slots=40`, allows only OLDLAB-1..5, and computes
+  each submitted worker's concurrency from live `sinfo` data:
+
+  ```json
+  {
+    "actuator": "slurm",
+    "enabled": true,
+    "min_slots": 1,
+    "max_slots": 40,
+    "actuator_config": {
+      "external_runner": true,
+      "allowed_nodes": [
+        "TRT-EAI-OLDLAB-1",
+        "trt-EAI-OLDLAB-2",
+        "trt-eai-oldlab-3",
+        "trt-eai-oldlab-4",
+        "trt-eai-oldlab-5"
+      ],
+      "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env",
+      "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+      "requested_cpus": 2,
+      "requested_memory_mib": 8192,
+      "requested_concurrency": 1,
+      "max_jobs": 5,
+      "pending_job_cap": 2,
+      "resource_aware": true,
+      "cpu_per_slot": 2,
+      "memory_mib_per_slot": 8192,
+      "reserved_cpus": 4,
+      "reserved_memory_mib": 24576,
+      "max_concurrency_per_node": 8,
+      "max_cpu_load_ratio": 1.0,
+      "exclusive": true
+    }
+  }
+  ```
+
+  The safety formula is
+  `min((idle_cpus_or_total_cpus - reserved_cpus) / cpu_per_slot,
+  (free_memory_mib - reserved_memory_mib) / memory_mib_per_slot,
+  max_concurrency_per_node)`, floored to whole slots. Nodes are excluded when
+  they already have a Loom Slurm job, Slurm state is not idle/mixed, resource
+  data is missing, CPU load is above `cpus_total * max_cpu_load_ratio`, free
+  memory is below the reserve plus one slot, or idle CPU is below the reserve
+  plus one slot. With `max_concurrency_per_node=8`, five safe OLDLAB nodes can
+  reach 40 slots; if current node load is near 24 on 24-CPU hosts, the
+  conservative policy should explain the exclusion and avoid scaling out.
   Temporarily exclude a node by removing it from `ALLOWED_NODES`; lower
   footprint with `MAX_JOBS`; lower per-node pressure with
   `REQUESTED_CONCURRENCY`; disable the pool with

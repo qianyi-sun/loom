@@ -22,9 +22,12 @@ from loom.db.schema import (
 )
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
+    SlurmWorkerCapacitySnapshot,
     SlurmWorkerCommandRunner,
     SubprocessSlurmCommandRunner,
     build_controller_config,
+    compute_controller_decision,
+    slurm_submission_config_for_node,
 )
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
@@ -372,12 +375,14 @@ async def get_autoscaler_policy(
 ) -> WorkerPoolAutoscalerPolicy | None:
     environment = _clean_nonempty(environment, "environment")
     pool_name = _clean_nonempty(pool_name, "pool_name")
-    return (await session.execute(
-        select(WorkerPoolAutoscalerPolicy).where(
-            WorkerPoolAutoscalerPolicy.environment == environment,
-            WorkerPoolAutoscalerPolicy.pool_name == pool_name,
-        ),
-    )).scalar_one_or_none()
+    return (
+        await session.execute(
+            select(WorkerPoolAutoscalerPolicy).where(
+                WorkerPoolAutoscalerPolicy.environment == environment,
+                WorkerPoolAutoscalerPolicy.pool_name == pool_name,
+            ),
+        )
+    ).scalar_one_or_none()
 
 
 async def upsert_autoscaler_policy(
@@ -455,12 +460,18 @@ async def fetch_autoscaler_status(
         stmt = stmt.where(WorkerPoolAutoscalerPolicy.environment == environment)
     if pool_name:
         stmt = stmt.where(WorkerPoolAutoscalerPolicy.pool_name == pool_name)
-    rows = (await session.execute(
-        stmt.order_by(
-            WorkerPoolAutoscalerPolicy.environment,
-            WorkerPoolAutoscalerPolicy.pool_name,
-        ),
-    )).scalars().all()
+    rows = (
+        (
+            await session.execute(
+                stmt.order_by(
+                    WorkerPoolAutoscalerPolicy.environment,
+                    WorkerPoolAutoscalerPolicy.pool_name,
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     return {"policies": [autoscaler_policy_to_dict(row) for row in rows]}
 
 
@@ -534,28 +545,41 @@ async def _load_observation(
     freshness_sec: int,
 ) -> AutoscalerObservation:
     cutoff = now - timedelta(seconds=freshness_sec)
-    workers = (await session.execute(
-        select(Worker).where(
-            Worker.pool_name == row.pool_name,
-            Worker.status == "active",
-            Worker.last_seen_at >= cutoff,
-        ).order_by(Worker.hostname, Worker.id),
-    )).scalars().all()
+    workers = (
+        (
+            await session.execute(
+                select(Worker)
+                .where(
+                    Worker.pool_name == row.pool_name,
+                    Worker.status == "active",
+                    Worker.last_seen_at >= cutoff,
+                )
+                .order_by(Worker.hostname, Worker.id),
+            )
+        )
+        .scalars()
+        .all()
+    )
     worker_ids = [worker.id for worker in workers]
     in_flight_by_worker = {worker_id: 0 for worker_id in worker_ids}
     if worker_ids:
-        trial_rows = (await session.execute(
-            select(Trial.worker_id).where(
-                Trial.worker_id.in_(worker_ids),
-                Trial.state.in_(("claimed", "running")),
-            ),
-        )).all()
+        trial_rows = (
+            await session.execute(
+                select(Trial.worker_id).where(
+                    Trial.worker_id.in_(worker_ids),
+                    Trial.state.in_(("claimed", "running")),
+                ),
+            )
+        ).all()
         for (worker_id,) in trial_rows:
             if worker_id is not None:
-                in_flight_by_worker[worker_id] = in_flight_by_worker.get(
-                    worker_id,
-                    0,
-                ) + 1
+                in_flight_by_worker[worker_id] = (
+                    in_flight_by_worker.get(
+                        worker_id,
+                        0,
+                    )
+                    + 1
+                )
 
     active_slots = 0
     draining_slots = 0
@@ -582,26 +606,28 @@ async def _load_observation(
         selected_idle.append(worker_id)
         selected_slots += slots
 
-    queued_rows = (await session.execute(
-        select(Trial.requires_caps).where(Trial.state == "queued"),
-    )).all()
+    queued_rows = (
+        await session.execute(
+            select(Trial.requires_caps).where(Trial.state == "queued"),
+        )
+    ).all()
     queued_slots = sum(
-        1
-        for (requires_caps,) in queued_rows
-        if _queued_trial_matches_policy(requires_caps, row)
+        1 for (requires_caps,) in queued_rows if _queued_trial_matches_policy(requires_caps, row)
     )
 
     pending_slots = int(row.last_pending_slots or 0)
     if row.actuator == "slurm":
         pending_slots = sum(
             int(slots or 0)
-            for (slots,) in (await session.execute(
-                select(SlurmWorkerJob.requested_concurrency).where(
-                    SlurmWorkerJob.environment == row.environment,
-                    SlurmWorkerJob.pool_name == row.pool_name,
-                    SlurmWorkerJob.state == "pending",
-                ),
-            )).all()
+            for (slots,) in (
+                await session.execute(
+                    select(SlurmWorkerJob.requested_concurrency).where(
+                        SlurmWorkerJob.environment == row.environment,
+                        SlurmWorkerJob.pool_name == row.pool_name,
+                        SlurmWorkerJob.state == "pending",
+                    ),
+                )
+            ).all()
         )
 
     return AutoscalerObservation(
@@ -626,14 +652,16 @@ async def _refresh_slurm_job_registry(
         return None
     job_ids = tuple(
         str(job_id)
-        for (job_id,) in (await session.execute(
-            select(SlurmWorkerJob.job_id).where(
-                SlurmWorkerJob.environment == row.environment,
-                SlurmWorkerJob.pool_name == row.pool_name,
-                SlurmWorkerJob.state.in_(ACTIVE_STATES),
-                SlurmWorkerJob.job_id.is_not(None),
-            ),
-        )).all()
+        for (job_id,) in (
+            await session.execute(
+                select(SlurmWorkerJob.job_id).where(
+                    SlurmWorkerJob.environment == row.environment,
+                    SlurmWorkerJob.pool_name == row.pool_name,
+                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                    SlurmWorkerJob.job_id.is_not(None),
+                ),
+            )
+        ).all()
         if job_id is not None
     )
     if not job_ids:
@@ -729,13 +757,22 @@ def _slurm_config_from_policy(
     allowed_nodes_raw = actor_config.get("allowed_nodes", ())
     if isinstance(allowed_nodes_raw, str):
         allowed_nodes_csv = allowed_nodes_raw
+        allowed_nodes = tuple(
+            node for node in (part.strip() for part in allowed_nodes_raw.split(",")) if node
+        )
     else:
-        allowed_nodes_csv = ",".join(str(node) for node in allowed_nodes_raw)
+        allowed_nodes = tuple(
+            node for node in (str(raw_node).strip() for raw_node in allowed_nodes_raw) if node
+        )
+        allowed_nodes_csv = ",".join(allowed_nodes)
     requested_concurrency = int(actor_config.get("requested_concurrency") or 1)
-    max_jobs = int(
-        actor_config.get("max_jobs")
-        or max(1, math.ceil(row.max_slots / requested_concurrency)),
-    )
+    resource_aware = _optional_bool(actor_config.get("resource_aware"), default=False)
+    if actor_config.get("max_jobs") is not None:
+        max_jobs = int(actor_config["max_jobs"])
+    elif resource_aware:
+        max_jobs = max(1, len(allowed_nodes))
+    else:
+        max_jobs = max(1, math.ceil(row.max_slots / requested_concurrency))
     pending_job_cap = int(actor_config.get("pending_job_cap") or max_jobs)
     config = build_controller_config(
         enabled=True,
@@ -761,10 +798,31 @@ def _slurm_config_from_policy(
             actor_config.get("command_timeout_seconds") or 20.0,
         ),
         exclusive=_optional_bool(actor_config.get("exclusive"), default=True),
+        sinfo_path=str(actor_config.get("sinfo_path") or "sinfo"),
+        resource_aware=resource_aware,
+        cpu_per_slot=int(actor_config.get("cpu_per_slot") or 2),
+        memory_mib_per_slot=int(actor_config.get("memory_mib_per_slot") or 8192),
+        reserved_cpus=int(actor_config.get("reserved_cpus") or 4),
+        reserved_memory_mib=int(actor_config.get("reserved_memory_mib") or 24_576),
+        max_concurrency_per_node=int(
+            actor_config.get("max_concurrency_per_node") or 8,
+        ),
+        max_cpu_load_ratio=float(actor_config.get("max_cpu_load_ratio") or 1.0),
     )
     if config is None:
         raise ValueError("Slurm autoscaler policy unexpectedly disabled")
     return config
+
+
+def _worker_env_from_slurm_config(
+    config: ElasticSlurmWorkerControllerConfig,
+) -> dict[str, str]:
+    return {
+        "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
+        "LOOM_WORKER_POOL_NAME": config.pool_name,
+        "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
+        "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
+    }
 
 
 async def _apply_slurm_scale_up(
@@ -777,50 +835,68 @@ async def _apply_slurm_scale_up(
 ) -> str | None:
     config = _slurm_config_from_policy(row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
-    active_jobs = (await session.execute(
-        select(SlurmWorkerJob).where(
-            SlurmWorkerJob.environment == row.environment,
-            SlurmWorkerJob.pool_name == row.pool_name,
-            SlurmWorkerJob.state.in_(ACTIVE_STATES),
-        ),
-    )).scalars().all()
+    active_jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob).where(
+                    SlurmWorkerJob.environment == row.environment,
+                    SlurmWorkerJob.pool_name == row.pool_name,
+                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     active_nodes = {job.nodelist for job in active_jobs}
     pending_jobs = sum(1 for job in active_jobs if job.state == "pending")
-    current_jobs = len(active_jobs)
-    remaining_jobs = max(0, config.max_jobs - current_jobs)
-    if pending_jobs >= config.pending_job_cap or remaining_jobs <= 0:
-        return None
-
-    missing_slots = max(
-        0,
-        decision.desired_slots - (decision.actual_slots + decision.pending_slots),
+    running_jobs = sum(1 for job in active_jobs if job.state == "running")
+    active_job_ids = tuple(
+        str(job.job_id) for job in active_jobs if getattr(job, "job_id", None) is not None
     )
-    required_jobs = math.ceil(missing_slots / config.requested_concurrency)
-    candidate_nodes = [
-        node for node in config.allowed_nodes if node not in active_nodes
-    ]
-    submit_count = min(required_jobs, remaining_jobs, len(candidate_nodes))
-    actuator_error: str | None = None
-    for node in candidate_nodes[:submit_count]:
+    node_resources = None
+    if config.resource_aware:
         try:
-            job_id = await runner.submit_worker(node=node, config=config)
+            node_resources = await runner.query_node_resources(config.allowed_nodes)
+        except Exception as exc:
+            return str(exc)
+
+    slurm_decision = compute_controller_decision(
+        config,
+        SlurmWorkerCapacitySnapshot(
+            queued_trials=decision.desired_slots,
+            running_trials=decision.occupied_slots,
+            pending_jobs=pending_jobs,
+            running_jobs=running_jobs,
+            active_slots=decision.actual_slots,
+            pending_slots=decision.pending_slots,
+            active_nodes=active_nodes,
+            cancellable_pending_job_ids=(),
+            active_job_ids=active_job_ids,
+            node_resources=node_resources,
+        ),
+    )
+    actuator_error: str | None = None
+    for node in slurm_decision.submit_nodes:
+        node_config = slurm_submission_config_for_node(
+            config,
+            slurm_decision,
+            node=node,
+        )
+        try:
+            job_id = await runner.submit_worker(node=node, config=node_config)
             await record_slurm_worker_job(
                 session,
                 environment=row.environment,
                 pool_name=row.pool_name,
                 nodelist=node,
-                requested_cpus=config.requested_cpus,
-                requested_memory_mib=config.requested_memory_mib,
-                requested_concurrency=config.requested_concurrency,
+                requested_cpus=node_config.requested_cpus,
+                requested_memory_mib=node_config.requested_memory_mib,
+                requested_concurrency=node_config.requested_concurrency,
                 job_id=job_id,
                 slurm_state="PENDING",
                 pending_reason=None,
-                env={
-                    "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
-                    "LOOM_WORKER_POOL_NAME": config.pool_name,
-                    "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
-                    "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
-                },
+                env=_worker_env_from_slurm_config(node_config),
                 submitted_at=now,
             )
         except Exception as exc:
@@ -830,18 +906,13 @@ async def _apply_slurm_scale_up(
                 environment=row.environment,
                 pool_name=row.pool_name,
                 nodelist=node,
-                requested_cpus=config.requested_cpus,
-                requested_memory_mib=config.requested_memory_mib,
-                requested_concurrency=config.requested_concurrency,
+                requested_cpus=node_config.requested_cpus,
+                requested_memory_mib=node_config.requested_memory_mib,
+                requested_concurrency=node_config.requested_concurrency,
                 job_id=None,
                 slurm_state="FAILED",
                 pending_reason=None,
-                env={
-                    "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
-                    "LOOM_WORKER_POOL_NAME": config.pool_name,
-                    "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
-                    "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
-                },
+                env=_worker_env_from_slurm_config(node_config),
                 submitted_at=now,
                 submission_error=str(exc),
             )
@@ -861,29 +932,34 @@ async def _apply_slurm_release_drained(
     config = _slurm_config_from_policy(row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
     released_worker_ids = set(decision.worker_ids_to_release)
-    release_workers = (await session.execute(
-        select(Worker.id, Worker.hostname).where(Worker.id.in_(released_worker_ids)),
-    )).all()
-    worker_id_by_hostname = {
-        str(hostname): worker_id for worker_id, hostname in release_workers
-    }
+    release_workers = (
+        await session.execute(
+            select(Worker.id, Worker.hostname).where(Worker.id.in_(released_worker_ids)),
+        )
+    ).all()
+    worker_id_by_hostname = {str(hostname): worker_id for worker_id, hostname in release_workers}
     hostname_matches = tuple(worker_id_by_hostname)
     job_match_filters: list[Any] = [
         SlurmWorkerJob.worker_id.in_(released_worker_ids),
     ]
     if hostname_matches:
         job_match_filters.append(
-            SlurmWorkerJob.worker_id.is_(None)
-            & SlurmWorkerJob.nodelist.in_(hostname_matches)
+            SlurmWorkerJob.worker_id.is_(None) & SlurmWorkerJob.nodelist.in_(hostname_matches)
         )
-    jobs = (await session.execute(
-        select(SlurmWorkerJob).where(
-            SlurmWorkerJob.environment == row.environment,
-            SlurmWorkerJob.pool_name == row.pool_name,
-            SlurmWorkerJob.state == "running",
-            or_(*job_match_filters),
-        ),
-    )).scalars().all()
+    jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob).where(
+                    SlurmWorkerJob.environment == row.environment,
+                    SlurmWorkerJob.pool_name == row.pool_name,
+                    SlurmWorkerJob.state == "running",
+                    or_(*job_match_filters),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     for job in jobs:
         if job.worker_id is None:
             job.worker_id = worker_id_by_hostname.get(job.nodelist)
@@ -917,19 +993,21 @@ async def _apply_gb10_host_intent(
 ) -> None:
     if not worker_ids:
         return
-    release_workers = (await session.execute(
-        select(Worker.id, Worker.hostname).where(Worker.id.in_(worker_ids)),
-    )).all()
-    worker_id_by_hostname = {
-        str(hostname): worker_id for worker_id, hostname in release_workers
-    }
+    release_workers = (
+        await session.execute(
+            select(Worker.id, Worker.hostname).where(Worker.id.in_(worker_ids)),
+        )
+    ).all()
+    worker_id_by_hostname = {str(hostname): worker_id for worker_id, hostname in release_workers}
     hostname_matches = tuple(worker_id_by_hostname)
-    desired = (await session.execute(
-        select(GB10WorkerPoolDesiredState).where(
-            GB10WorkerPoolDesiredState.environment == row.environment,
-            GB10WorkerPoolDesiredState.pool_name == row.pool_name,
-        ),
-    )).scalar_one_or_none()
+    desired = (
+        await session.execute(
+            select(GB10WorkerPoolDesiredState).where(
+                GB10WorkerPoolDesiredState.environment == row.environment,
+                GB10WorkerPoolDesiredState.pool_name == row.pool_name,
+            ),
+        )
+    ).scalar_one_or_none()
     if desired is None:
         actor_config = dict(row.actuator_config or {})
         desired = GB10WorkerPoolDesiredState(
@@ -950,13 +1028,19 @@ async def _apply_gb10_host_intent(
         node_match_filters.append(
             GB10WorkerNodeStatus.hostname.in_(hostname_matches),
         )
-    nodes = (await session.execute(
-        select(GB10WorkerNodeStatus).where(
-            GB10WorkerNodeStatus.environment == row.environment,
-            GB10WorkerNodeStatus.pool_name == row.pool_name,
-            or_(*node_match_filters),
-        ),
-    )).scalars().all()
+    nodes = (
+        (
+            await session.execute(
+                select(GB10WorkerNodeStatus).where(
+                    GB10WorkerNodeStatus.environment == row.environment,
+                    GB10WorkerNodeStatus.pool_name == row.pool_name,
+                    or_(*node_match_filters),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     host_intents = dict(desired.host_intents or {})
     for node in nodes:
         if node.worker_id is None:
@@ -975,12 +1059,14 @@ async def _get_or_create_gb10_desired_state(
     *,
     now: datetime,
 ) -> GB10WorkerPoolDesiredState:
-    desired = (await session.execute(
-        select(GB10WorkerPoolDesiredState).where(
-            GB10WorkerPoolDesiredState.environment == row.environment,
-            GB10WorkerPoolDesiredState.pool_name == row.pool_name,
-        ),
-    )).scalar_one_or_none()
+    desired = (
+        await session.execute(
+            select(GB10WorkerPoolDesiredState).where(
+                GB10WorkerPoolDesiredState.environment == row.environment,
+                GB10WorkerPoolDesiredState.pool_name == row.pool_name,
+            ),
+        )
+    ).scalar_one_or_none()
     if desired is not None:
         return desired
     actor_config = dict(row.actuator_config or {})
@@ -1016,21 +1102,31 @@ async def _apply_gb10_scale_up(
     else:
         hosts = list((desired.host_intents or {}).keys())
     if not hosts:
-        nodes = (await session.execute(
-            select(GB10WorkerNodeStatus.hostname).where(
-                GB10WorkerNodeStatus.environment == row.environment,
-                GB10WorkerNodeStatus.pool_name == row.pool_name,
-            ).order_by(GB10WorkerNodeStatus.hostname),
-        )).all()
+        nodes = (
+            await session.execute(
+                select(GB10WorkerNodeStatus.hostname)
+                .where(
+                    GB10WorkerNodeStatus.environment == row.environment,
+                    GB10WorkerNodeStatus.pool_name == row.pool_name,
+                )
+                .order_by(GB10WorkerNodeStatus.hostname),
+            )
+        ).all()
         hosts = [hostname for (hostname,) in nodes]
 
-    node_rows = (await session.execute(
-        select(GB10WorkerNodeStatus).where(
-            GB10WorkerNodeStatus.environment == row.environment,
-            GB10WorkerNodeStatus.pool_name == row.pool_name,
-            GB10WorkerNodeStatus.hostname.in_(hosts),
-        ),
-    )).scalars().all()
+    node_rows = (
+        (
+            await session.execute(
+                select(GB10WorkerNodeStatus).where(
+                    GB10WorkerNodeStatus.environment == row.environment,
+                    GB10WorkerNodeStatus.pool_name == row.pool_name,
+                    GB10WorkerNodeStatus.hostname.in_(hosts),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     current_intent_by_host = {
         node.hostname: node.current_intent
         for node in node_rows
@@ -1044,9 +1140,7 @@ async def _apply_gb10_scale_up(
     for host in hosts:
         host_intents.setdefault(host, current_intent_by_host.get(host, "stopped"))
 
-    active_capacity = sum(
-        max_concurrent for host in hosts if host_intents.get(host) == "active"
-    )
+    active_capacity = sum(max_concurrent for host in hosts if host_intents.get(host) == "active")
     for host in hosts:
         if active_capacity >= decision.desired_slots:
             break
@@ -1058,9 +1152,7 @@ async def _apply_gb10_scale_up(
     desired.target_slots = decision.desired_slots
     desired.updated_at = now
     for intent in ("active", "draining", "stopped"):
-        intent_hosts = tuple(
-            host for host in hosts if host_intents.get(host) == intent
-        )
+        intent_hosts = tuple(host for host in hosts if host_intents.get(host) == intent)
         if not intent_hosts:
             continue
         await session.execute(
@@ -1082,14 +1174,20 @@ async def reconcile_worker_pool_autoscaler_once(
     external_only: bool = False,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
-    policies = (await session.execute(
-        select(WorkerPoolAutoscalerPolicy)
-        .where(WorkerPoolAutoscalerPolicy.enabled.is_(True))
-        .order_by(
-            WorkerPoolAutoscalerPolicy.environment,
-            WorkerPoolAutoscalerPolicy.pool_name,
-        ),
-    )).scalars().all()
+    policies = (
+        (
+            await session.execute(
+                select(WorkerPoolAutoscalerPolicy)
+                .where(WorkerPoolAutoscalerPolicy.enabled.is_(True))
+                .order_by(
+                    WorkerPoolAutoscalerPolicy.environment,
+                    WorkerPoolAutoscalerPolicy.pool_name,
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     decisions: list[AutoscalerDecision] = []
     for row in policies:
         uses_external_runner = _policy_uses_external_runner(row)
@@ -1174,9 +1272,8 @@ async def reconcile_worker_pool_autoscaler_once(
                     drain_owner="worker-pool-autoscaler",
                 ),
             )
-        if (
-            decision.action == "release_drained"
-            or (decision.action == "scale_up" and row.actuator == "slurm")
+        if decision.action == "release_drained" or (
+            decision.action == "scale_up" and row.actuator == "slurm"
         ):
             observation = await _load_observation(
                 session,
