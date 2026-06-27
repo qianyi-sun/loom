@@ -14,8 +14,8 @@ import {
 describe("quickstartSnippets", () => {
   it("builds public CLI login commands from the current server origin", () => {
     expect(cliLoginCommands("https://loom.example.com")).toEqual([
-      "export LOOM_API_TOKEN=loom_api_...",
-      "loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN",
+      "export LOOM_PASSWORD=...",
+      "loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD",
       "loom auth whoami",
     ]);
   });

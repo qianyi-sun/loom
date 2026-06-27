@@ -26,9 +26,9 @@ What you're looking for, where it lives:
 - **[operator-runbook.md](operator-runbook.md)** — deployment,
   upgrade/rollback, rate-card management, token rotation, alarm
   response, backup/restore, capacity planning
-- **[public-beta-launch.md](public-beta-launch.md)** — invite-only public beta
-  release gate, required evidence, two-team Run Library smoke, and launch
-  decision checklist
+- **[public-beta-launch.md](public-beta-launch.md)** — public beta release
+  gate, username/password onboarding evidence, two-team Run Library smoke, and
+  launch decision checklist
 - **[benchmark-score-alignment.md](benchmark-score-alignment.md)** — v1.0
   Layer 1 score-credibility manifest: canonical references, score semantics,
   Harbor/upstream parity decisions, and same-output replay cases
@@ -89,15 +89,16 @@ Start with the overview, drill into the area you care about:
   Control Plane + Worker + LLM Gateway + Postgres + MinIO; auth
   model; persistence schema
 - **[architecture/auth-threat-model.md](architecture/auth-threat-model.md)** —
-  threat model for singleton admin auth, team registration, audit,
-  rotation, and production rollout gates
+  threat model for singleton admin auth, username registration, password reset,
+  audit, rotation, and production rollout gates
 - **[architecture/sandbox-isolation.md](architecture/sandbox-isolation.md)** —
   honest description of the sandbox trust boundary as shipped: what
   iptables policies enforce, what's still aspirational, the known
   `Public`-policy metadata-IP gap, and the #78 roadmap
 - **[architecture/auth-registration-spec.md](architecture/auth-registration-spec.md)** —
-  implementation spec for #10: singleton admin secret, team registration,
-  audit events, operator rotation commands, and DB-admin removal
+  implementation spec for singleton admin secret, no-email username/password
+  accounts, admin-approved setup/reset links, audit events, operator rotation
+  commands, and DB-admin removal
 - **[architecture/config-consolidation.md](architecture/config-consolidation.md)** —
   `config/loom-schema.toml` as the single source of truth for
   Pydantic Settings + k8s env blocks + Secret bootstrap + operator

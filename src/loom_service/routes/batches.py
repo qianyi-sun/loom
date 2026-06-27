@@ -31,6 +31,7 @@ from loom.db.schema import (
     Task,
     Team,
     Trial,
+    User,
 )
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
@@ -253,6 +254,7 @@ def _serialize(
     aggregate_reward: float | None = None,
     usage: dict[str, int] | None = None,
     owner_team: Team | None = None,
+    submitted_by_user: User | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
@@ -279,6 +281,15 @@ def _serialize(
         "visibility": b.visibility,
         "share_status": b.share_status,
         "source_provenance": b.source_provenance,
+        "submitted_by_user": (
+            {
+                "id": str(submitted_by_user.id),
+                "username": submitted_by_user.username,
+                "team_id": str(b.team_id),
+                "team_name": owner_team.name if owner_team else None,
+            }
+            if submitted_by_user is not None else None
+        ),
     }
     if owner_team is not None:
         out["team_name"] = owner_team.name
@@ -522,6 +533,7 @@ async def create_batch(
         trial_config=payload.trial_config,
         state="submitted",
         created_by_token_prefix=token_prefix,
+        submitted_by_user_id=ctx.user_id,
         expected_trial_count=expected,
         n_per_task=payload.n_per_task,
         backend=payload.backend,
@@ -614,6 +626,7 @@ async def list_batches(
         next_cursor = None
     usage_by_batch = await _usage_by_batch_ids(s, [r.id for r in items])
     teams_by_id: dict[UUID, Team] = {}
+    users_by_id: dict[UUID, User] = {}
     if items:
         team_rows = (
             (
@@ -625,12 +638,28 @@ async def list_batches(
             .all()
         )
         teams_by_id = {team.id: team for team in team_rows}
+        user_ids = {r.submitted_by_user_id for r in items if r.submitted_by_user_id is not None}
+        if user_ids:
+            user_rows = (
+                (
+                    await s.execute(
+                        select(User).where(User.id.in_(user_ids)),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            users_by_id = {user.id: user for user in user_rows}
     return {
         "items": [
             _serialize(
                 r,
                 usage=usage_by_batch.get(r.id),
                 owner_team=teams_by_id.get(r.team_id),
+                submitted_by_user=(
+                    users_by_id.get(r.submitted_by_user_id)
+                    if r.submitted_by_user_id is not None else None
+                ),
             )
             for r in items
         ],
@@ -986,6 +1015,13 @@ async def get_batch(
             select(Team).where(Team.id == b.team_id),
         )
     ).scalar_one_or_none()
+    submitted_by_user = None
+    if b.submitted_by_user_id is not None:
+        submitted_by_user = (
+            await s.execute(
+                select(User).where(User.id == b.submitted_by_user_id),
+            )
+        ).scalar_one_or_none()
 
     original_trials = (
         (
@@ -1100,6 +1136,7 @@ async def get_batch(
         aggregate_reward=avg_reward,
         usage=usage,
         owner_team=owner_team,
+        submitted_by_user=submitted_by_user,
         extra=extra,
     )
 
@@ -1291,6 +1328,7 @@ async def rerun_failed_batch(
         trial_config=dict(b.trial_config),
         state="submitted",
         created_by_token_prefix=token_prefix,
+        submitted_by_user_id=ctx.user_id or b.submitted_by_user_id,
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,

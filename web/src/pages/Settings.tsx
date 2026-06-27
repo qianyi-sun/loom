@@ -1,4 +1,4 @@
-/** Invite-only onboarding and team settings. */
+/** Account onboarding and team settings. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -103,13 +103,15 @@ export default function Settings(): JSX.Element {
     authError,
     currentTeamId,
     teams,
-    loginComplete,
+    loginPassword,
     switchTeam,
     logout,
   } = useAuth();
-  const [loginToken, setLoginToken] = useState("");
-  const [requestTeamName, setRequestTeamName] = useState("");
-  const [requestEmail, setRequestEmail] = useState("");
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPasswordValue, setLoginPasswordValue] = useState("");
+  const [registerUsername, setRegisterUsername] = useState("");
+  const [registerTeamId, setRegisterTeamId] = useState("");
+  const [resetUsername, setResetUsername] = useState("");
   const serverOrigin = currentServerOrigin();
   const cliLoginCommand = cliLoginCommands(serverOrigin).join("\n");
 
@@ -134,8 +136,13 @@ export default function Settings(): JSX.Element {
     retry: false,
   });
 
-  const complete = useMutation({
-    mutationFn: (value: string) => loginComplete(value),
+  const publicTeams = useQuery({
+    queryKey: ["public-teams"],
+    queryFn: () => api.publicTeams(),
+    enabled: !isAuthenticated,
+  });
+  const signIn = useMutation({
+    mutationFn: () => loginPassword(loginUsername.trim(), loginPasswordValue),
   });
 
   const switchTeamMutation = useMutation({
@@ -152,13 +159,17 @@ export default function Settings(): JSX.Element {
   });
   const requestAccess = useMutation({
     mutationFn: () =>
-      api.requestTeamRegistration({
-        name: requestTeamName.trim(),
-        contact_email: requestEmail.trim(),
+      api.requestRegistration({
+        username: registerUsername.trim(),
+        team_id: registerTeamId || publicTeams.data?.items[0]?.id || "",
       }),
+  });
+  const requestReset = useMutation({
+    mutationFn: () => api.requestPasswordReset(resetUsername.trim()),
   });
 
   if (!isAuthenticated) {
+    const selectedRegistrationTeamId = registerTeamId || publicTeams.data?.items[0]?.id || "";
     return (
       <div className="space-y-8">
         <header className="max-w-3xl">
@@ -169,11 +180,9 @@ export default function Settings(): JSX.Element {
             Sign in to run and review evaluations
           </h1>
           <p className="mt-3 text-base text-slate-600">
-            Public beta access requests are reviewed by an admin. Use an invite
-            link, request access, or paste a one-time login code already issued
-            by an operator or development environment. Browser sessions use
-            HttpOnly cookies; CLI access uses scoped API tokens created by a
-            team owner.
+            Public beta account requests are reviewed by an admin. Request a
+            username for an existing team, set your password from the approved
+            setup link, then use the same account in the browser and CLI.
           </p>
         </header>
 
@@ -185,36 +194,40 @@ export default function Settings(): JSX.Element {
                   Sign in
                 </h2>
                 <p className="mt-2 text-sm text-slate-500">
-                  Loom does not send automatic email in public beta. Open an
-                  invite link from an admin, or paste a one-time login code if
-                  an operator or local dev server already gave you one.
+                  Use the username and password you set from an admin-approved
+                  account link.
                 </p>
               </div>
-              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+              <div className="grid gap-3">
                 <Input
-                  placeholder="One-time login code"
-                  value={loginToken}
-                  onChange={(e) => setLoginToken(e.target.value)}
-                  aria-label="login token"
-                  title="Paste a one-time login code from an operator or local dev response."
+                  placeholder="Username"
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  aria-label="Username"
+                />
+                <Input
+                  type="password"
+                  placeholder="Password"
+                  value={loginPasswordValue}
+                  onChange={(e) => setLoginPasswordValue(e.target.value)}
+                  aria-label="Password"
                 />
                 <Button
                   variant="primary"
                   className="w-full"
-                  onClick={() => complete.mutate(loginToken.trim())}
-                  disabled={!loginToken.trim() || complete.isPending}
-                  title="Complete sign-in and create a browser session."
+                  onClick={() => signIn.mutate()}
+                  disabled={!loginUsername.trim() || !loginPasswordValue || signIn.isPending}
                 >
                   Sign in
                 </Button>
               </div>
-              {authError || complete.isError ? (
+              {authError || signIn.isError ? (
                 <p
                   role="alert"
                   className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
                 >
                   {authError ??
-                    (complete.error instanceof Error ? complete.error.message : null) ??
+                    (signIn.error instanceof Error ? signIn.error.message : null) ??
                     "Sign-in failed."}
                 </p>
               ) : null}
@@ -228,77 +241,90 @@ export default function Settings(): JSX.Element {
               className="md:col-span-2 lg:col-span-1"
             >
               <ol className="list-decimal space-y-1 pl-4">
-                <li>Open an invite link or request access.</li>
-                <li>Wait for an admin to review the request and share an invite link.</li>
-                <li>Ask a team owner for a scoped CLI token.</li>
-                <li>Log in with the CLI snippet below.</li>
+                <li>Submit a username request for an existing team.</li>
+                <li>Wait for an admin to approve it and share a password link.</li>
+                <li>Set your password, then sign in here or from CLI.</li>
                 <li>Create a provider, then launch a one-task smoke batch.</li>
               </ol>
             </DocsCallout>
 
             <Card>
               <Card.Header
-                title="Have an invite"
-                description="Open an invite link to join a team."
-              />
-              <Card.Body>
-                <Link
-                  to="/invites/accept"
-                  className={cn(
-                    LINK_BUTTON,
-                    "w-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-                  )}
-                >
-                  Open invite page
-                </Link>
-              </Card.Body>
-            </Card>
-
-            <Card>
-              <Card.Header
-                title="Request access"
-                description="Submit a team request for admin review."
+                title="Request account"
+                description="Choose an existing team. Ask an admin to create the team first if it is missing."
               />
               <Card.Body className="space-y-3">
                 <Input
-                  aria-label="Requested team name"
-                  value={requestTeamName}
-                  onChange={(event) => setRequestTeamName(event.target.value)}
-                  placeholder="Team name"
+                  aria-label="Requested username"
+                  value={registerUsername}
+                  onChange={(event) => setRegisterUsername(event.target.value)}
+                  placeholder="Username"
                 />
-                <Input
-                  type="email"
-                  aria-label="Request contact email"
-                  value={requestEmail}
-                  onChange={(event) => setRequestEmail(event.target.value)}
-                  placeholder="you@example.com"
-                />
+                <select
+                  aria-label="Registration team"
+                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                  value={selectedRegistrationTeamId}
+                  onChange={(event) => setRegisterTeamId(event.target.value)}
+                >
+                  {(publicTeams.data?.items ?? []).map((team) => (
+                    <option key={team.id} value={team.id}>{team.name}</option>
+                  ))}
+                </select>
                 <Button
                   variant="secondary"
                   className="w-full"
                   disabled={
-                    !requestTeamName.trim() ||
-                    !requestEmail.trim() ||
+                    !registerUsername.trim() ||
+                    !selectedRegistrationTeamId ||
                     requestAccess.isPending
                   }
                   onClick={() => requestAccess.mutate()}
                 >
-                  Request access
+                  Request account
                 </Button>
                 {requestAccess.isSuccess ? (
                   <p className="text-sm text-emerald-700">
-                    Request submitted. An admin will review it and share an
-                    invite link manually if approved.
+                    Request submitted. An admin will review it and share a
+                    password setup link manually if approved.
                   </p>
                 ) : null}
                 {requestAccess.isError ? <ErrorState error={requestAccess.error} /> : null}
               </Card.Body>
             </Card>
 
+            <Card>
+              <Card.Header
+                title="Forgot password"
+                description="Submit a reset request for admin approval."
+              />
+              <Card.Body className="space-y-3">
+                <Input
+                  aria-label="Reset username"
+                  value={resetUsername}
+                  onChange={(event) => setResetUsername(event.target.value)}
+                  placeholder="Username"
+                />
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  disabled={!resetUsername.trim() || requestReset.isPending}
+                  onClick={() => requestReset.mutate()}
+                >
+                  Request reset
+                </Button>
+                {requestReset.isSuccess ? (
+                  <p className="text-sm text-emerald-700">
+                    Reset request submitted. An admin will share a reset link if approved.
+                  </p>
+                ) : null}
+                {requestReset.isError ? <ErrorState error={requestReset.error} /> : null}
+              </Card.Body>
+            </Card>
+
             <Card className="md:col-span-2 lg:col-span-1">
               <Card.Header
                 title="CLI setup"
-                description="After an owner creates a scoped API token, point the CLI at this server."
+                description="Use the same approved username and password with the CLI."
               />
               <Card.Body>
                 <CommandSnippet label="CLI login" command={cliLoginCommand} />
@@ -344,7 +370,7 @@ export default function Settings(): JSX.Element {
               <StatusPill variant={isAdmin ? "info" : "success"}>
                 {isAdmin ? "Platform admin" : roleLabel(currentTeam?.role)}
               </StatusPill>
-              <span className="text-sm text-slate-700">{me?.user.email}</span>
+              <span className="text-sm text-slate-700">{me?.user.username}</span>
               {currentTeam ? (
                 <span className="text-sm font-medium text-slate-900">
                   {currentTeam.name}

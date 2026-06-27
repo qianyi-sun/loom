@@ -1,13 +1,14 @@
 # Public Beta Launch Gate
 
-This page is the release-owner checklist for Loom's invite-only public beta. It
+This page is the release-owner checklist for Loom's public beta. It
 pulls together the deployment, onboarding, Run Library, security, and smoke
 evidence needed before `dev` can be promoted to `main`.
 
 ## Launch Shape
 
-- Loom is invite-only. Public users join through browser invites, then create
-  named team API tokens for CLI use.
+- Loom uses no-email username/password accounts. Public users request a
+  username for an existing team, an admin approves the request and manually
+  shares a one-time setup link, and the same account works in browser and CLI.
 - Team is the boundary for execution, provider credentials, cost attribution,
   members, and API tokens.
 - Completed run metadata and safe artifacts are shared org-wide only through
@@ -25,7 +26,7 @@ evidence needed before `dev` can be promoted to `main`.
 - Public deployment and private service boundary:
   [`docs/operator-runbook.md`](operator-runbook.md) and
   [`docs/architecture/cluster-deploy.md`](architecture/cluster-deploy.md).
-- Invite-only browser and CLI onboarding:
+- Browser and CLI onboarding:
   [`docs/user-guide.md#web-sessions-and-teams`](user-guide.md#web-sessions-and-teams)
   and
   [`docs/user-guide.md#public-server-cli-flow`](user-guide.md#public-server-cli-flow).
@@ -56,9 +57,10 @@ Attach these to the release issue or release PR:
 - `loom cluster audit` output showing TLS ingress, only `/` and `/api/v1`
   public backends, no public LLM Gateway, no public Control Plane, and no public
   object store.
-- Screenshots or notes for logged-out SPA load, invite creation, invite
-  acceptance, Team Settings API-token creation, provider setup, SPA batch
-  submission, Monitor progress, and Run Library My team / All teams views.
+- Screenshots or notes for logged-out SPA load, account request, admin account
+  approval link, password setup, forgot-password request/reset approval, Team
+  Settings, provider setup, SPA batch submission, Monitor progress showing
+  `username / team`, and Run Library My team / All teams views.
 - CLI transcript for `loom auth login`, `loom auth whoami`,
   `loom providers test`, `loom providers models`, `loom eval batch create`,
   `loom eval batch show`, `loom eval trial show`, and

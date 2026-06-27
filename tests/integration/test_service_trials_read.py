@@ -37,6 +37,7 @@ from loom.db.schema import (
     TeamQuota,
     Token,
     Trial,
+    User,
 )
 from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service.app import create_app
@@ -78,6 +79,8 @@ async def trials_setup(
     )
 
     team_id = uuid4()
+    username = f"TrialOwner-{team_id.hex[:8]}"
+    user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
     task_id = f"local/task-{uuid4().hex[:8]}"
     trial_ids = [uuid4() for _ in range(3)]
@@ -88,11 +91,21 @@ async def trials_setup(
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(
+            insert(User).values(
+                id=user_id,
+                username=username,
+                username_normalized=username.casefold(),
+                status="active",
+                is_platform_admin=False,
+            )
+        )
+        s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
                 type="team",
                 scopes=["read:own", "submit"],
                 team_id=team_id,
+                created_by_user_id=user_id,
                 issued_at=now,
                 expires_at=None,
             )
@@ -115,6 +128,7 @@ async def trials_setup(
                     state="succeeded" if i % 2 == 0 else "running",
                     config={"agent": {"name": "oracle", "model": None}},
                     requires_caps={},
+                    submitted_by_user_id=user_id,
                     submitted_at=now - timedelta(minutes=i),
                     result=({"aggregate_reward": 1.0, "cost_usd": 0.05} if i % 2 == 0 else None),
                 )
@@ -165,6 +179,7 @@ async def trials_setup(
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.username_normalized == username.casefold()))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -194,6 +209,11 @@ async def test_list_my_trials(
         "id": str(team_id),
         "name": f"t-{team_id}",
     }
+    submitted = items[0]["submitted_by_user"]
+    UUID(submitted["id"])
+    assert submitted["username"] == f"TrialOwner-{team_id.hex[:8]}"
+    assert submitted["team_id"] == str(team_id)
+    assert submitted["team_name"] == f"t-{team_id}"
     # Reward stays projected from result, but LLM usage is derived from
     # llm_calls so stale/frozen cost values are not exposed.
     assert items[0]["aggregate_reward"] == 1.0
@@ -272,6 +292,11 @@ async def test_trial_list_and_detail_project_current_agent_config_shape(
         "provider": "openai-compatible",
         "name": "gpt-5-mini",
     }
+    submitted = detail["submitted_by_user"]
+    UUID(submitted["id"])
+    assert submitted["username"] == f"TrialOwner-{_team_id.hex[:8]}"
+    assert submitted["team_id"] == str(_team_id)
+    assert submitted["team_name"] == f"t-{_team_id}"
 
 
 async def test_filter_by_state_succeeded_only(

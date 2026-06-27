@@ -28,6 +28,7 @@ export type AuthCtx = {
   authError: string | null;
   loginStart: (email: string) => Promise<{ status: "sent"; login_token?: string }>;
   loginComplete: (token: string) => Promise<void>;
+  loginPassword: (username: string, password: string) => Promise<void>;
   acceptInvite: (code: string, email: string) => Promise<AuthMe>;
   switchTeam: (teamId: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -109,6 +110,17 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     setAuthError(null);
   }, [queryClient]);
 
+  const loginPassword = useCallback(async (
+    username: string,
+    password: string,
+  ): Promise<void> => {
+    const next = await api.loginPassword(username, password);
+    setCsrfToken(next.csrf_token ?? null);
+    queryClient.clear();
+    setMe(next);
+    setAuthError(null);
+  }, [queryClient]);
+
   const acceptInvite = useCallback(
     async (code: string, email: string): Promise<AuthMe> => {
       const next = await api.acceptInvite({ code, email });
@@ -149,6 +161,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     acceptInvite,
     loginStart,
     loginComplete,
+    loginPassword,
     switchTeam,
     logout,
     refreshMe,
@@ -157,6 +170,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     acceptInvite,
     isLoading,
     loginComplete,
+    loginPassword,
     loginStart,
     logout,
     me,

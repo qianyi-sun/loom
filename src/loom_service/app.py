@@ -202,6 +202,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(auth.admin_router, prefix="/api/v1")
     app.include_router(invites.router, prefix="/api/v1")
     app.include_router(tokens.router, prefix="/api/v1")
     app.include_router(trials.router, prefix="/api/v1")

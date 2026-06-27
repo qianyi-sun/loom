@@ -288,8 +288,8 @@ clears query cache so Home, Monitor, Batch Detail, Trial Detail, Providers,
 Usage, and Settings reload against the new team context.
 
 The separate org-wide Run Library shows completed run metadata and safe shared
-artifacts across teams, with owner-team labels, provenance, and explicit share
-states. It must not reuse current-team execution routes as a cross-team bypass:
+artifacts across teams, with `username / team` owner labels, provenance, and
+explicit share states. It must not reuse current-team execution routes as a cross-team bypass:
 running/submitted work, provider secrets, member management, cancellation,
 reruns, private artifacts, and blocked artifacts remain controlled by the owner
 team.
@@ -320,22 +320,22 @@ The SPA reduces the old mixed navigation into a role-aware primary set:
   preserves filters. Monitor filter state is URL-backed for
   shareable support links: `state`, `q`, `batch_id`, `team_id`,
   `benchmark_id`, `agent`, and `model` round-trip through the query
-  string. Batch and Trial rows render an owner-team label from
-  `owner_team.name`/`team_name`; platform-admin sessions also expose a
-  team selector.
+  string. Batch and Trial rows render `username / team` from
+  `submitted_by_user` with legacy team fallback; platform-admin sessions also
+  expose a team selector.
 - **Run Library** — org-wide completed-result browser with **My team** and
-  **All teams** scopes, owner-team labels, task/config summaries, artifact
+  **All teams** scopes, `username / team` owner labels, task/config summaries, artifact
   groups, safe shared artifact downloads, clone-config actions, reuse actions,
   and provenance.
 - **Usage** — cost/token/trial rollups scoped to the selected current team for
   ordinary users. Platform-admin sessions use the fixed internal-team registry
   for a team-name selector and can leave the filter blank for platform-wide
   rollups; the UI does not ask users to paste raw team UUIDs.
-- **Settings** — signed-out invite/request-access/manual-code/CLI setup
-  guidance; signed-in current team, role, team switcher, joined browser members,
-  role-aware setup links, and API-token summaries. Token-paste login is no
-  longer the normal production SPA auth path, and public beta does not promise
-  automatic email delivery.
+- **Settings** — signed-out username/password login, account request,
+  forgot-password request, and CLI setup guidance; signed-in current team,
+  role, team switcher, joined browser members, role-aware setup links, and
+  API-token summaries. Token-paste login is no longer the normal production SPA
+  auth path, and public beta does not collect email.
 - **InviteAccept** — invite lookup and acceptance states for pending, expired,
   revoked, and already-used links.
 - **Admin access** — team-owner invite create/list/revoke/resend, scoped

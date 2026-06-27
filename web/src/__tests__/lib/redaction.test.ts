@@ -10,6 +10,8 @@ describe("redaction helpers", () => {
       "http://minio.internal/artifacts/a?X-Amz-Signature=abc123",
       "http://loom-control-plane:8080/trials",
       "loom://provider-connection/team-1/key",
+      "setup link https://loom.example.com/auth/setup?token=loom_setup_abcdefghijklmnopqrstuvwxyz012345",
+      "reset link https://loom.example.com/auth/reset?token=loom_reset_abcdefghijklmnopqrstuvwxyz012345",
     ].join("\n");
 
     const redacted = redactText(text);
@@ -20,6 +22,8 @@ describe("redaction helpers", () => {
     expect(redacted).not.toContain("minio.internal");
     expect(redacted).not.toContain("loom-control-plane");
     expect(redacted).not.toContain("loom://provider-connection");
+    expect(redacted).not.toContain("loom_setup_abcdefghijklmnopqrstuvwxyz012345");
+    expect(redacted).not.toContain("loom_reset_abcdefghijklmnopqrstuvwxyz012345");
     expect(redacted).toContain("[REDACTED]");
   });
 

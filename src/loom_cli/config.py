@@ -55,11 +55,13 @@ class LoomConfig:
 
     tokens: dict[str, str] = field(default_factory=dict)
     server_url: str | None = None
-    # Bearer token for `server_url` API calls (set by `loom auth login`).
-    # Stored in plain TOML — operators with shared-machine concerns should
-    # either rely on the default 0600 config file mode or use env-var-only
-    # auth (LOOM_API_TOKEN, set per-shell, never persisted).
+    # Bearer token for `server_url` API calls (set by token-mode
+    # `loom auth login`).
     auth_token: str | None = None
+    # Username/password login stores the same session cookie + CSRF token the
+    # web UI uses. Stored in the same owner-only config file as bearer tokens.
+    auth_session_cookie: str | None = None
+    auth_csrf_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
 
     def to_toml_dict(self) -> dict[str, object]:
@@ -70,6 +72,10 @@ class LoomConfig:
             out["server_url"] = self.server_url
         if self.auth_token is not None:
             out["auth_token"] = self.auth_token
+        if self.auth_session_cookie is not None:
+            out["auth_session_cookie"] = self.auth_session_cookie
+        if self.auth_csrf_token is not None:
+            out["auth_csrf_token"] = self.auth_csrf_token
         if self.local_providers:
             local: dict[str, dict[str, str]] = {}
             for name, p in self.local_providers.items():
@@ -98,6 +104,12 @@ def load_config() -> LoomConfig:
     auth_token = raw.get("auth_token")
     if auth_token is not None and not isinstance(auth_token, str):
         raise ValueError(f"{path}: auth_token must be a string")
+    auth_session_cookie = raw.get("auth_session_cookie")
+    if auth_session_cookie is not None and not isinstance(auth_session_cookie, str):
+        raise ValueError(f"{path}: auth_session_cookie must be a string")
+    auth_csrf_token = raw.get("auth_csrf_token")
+    if auth_csrf_token is not None and not isinstance(auth_csrf_token, str):
+        raise ValueError(f"{path}: auth_csrf_token must be a string")
     local_raw = raw.get("local_providers", {})
     if not isinstance(local_raw, dict):
         raise ValueError(f"{path}: [local_providers] must be a table")
@@ -133,6 +145,8 @@ def load_config() -> LoomConfig:
         tokens=tokens,
         server_url=server_url,
         auth_token=auth_token,
+        auth_session_cookie=auth_session_cookie,
+        auth_csrf_token=auth_csrf_token,
         local_providers=local_providers,
     )
 

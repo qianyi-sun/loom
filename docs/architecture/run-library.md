@@ -99,7 +99,8 @@ work remains explainable outside the Library.
 
 Run Library changes should cover these cases:
 
-- My team and All teams views include the right rows and owner-team labels.
+- My team and All teams views include the right rows and `username / team`
+  ownership labels, with legacy team fallback for old rows.
 - Private, pending-scan, and non-terminal runs do not leak into another team's
   All teams view.
 - Cross-team direct artifact routes remain denied.

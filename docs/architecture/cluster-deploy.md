@@ -301,7 +301,8 @@ loom cluster {render,preflight,up,down} --nodes HOSTFILE
 `loom auth` / `loom providers` / `loom eval` talk to any deployed Loom (cluster or single-box, after `loom auth login`):
 
 ```
-loom auth login --server URL --token {env:VAR | file:PATH | -}    # --token required; no interactive paste
+loom auth login --server URL --username USER --password {env:VAR | file:PATH | -}
+loom auth login --server URL --token {env:VAR | file:PATH | -}    # automation/legacy token path
 loom auth {status,whoami,logout}
 
 loom providers create --name N --type {openai-compatible,anthropic,google,custom} \

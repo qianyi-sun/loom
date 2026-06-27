@@ -12,6 +12,7 @@ import InviteAccept from "./pages/InviteAccept";
 import Monitor from "./pages/Monitor";
 import NewBatch from "./pages/NewBatch";
 import NotFound from "./pages/NotFound";
+import PasswordAction from "./pages/PasswordAction";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
 import RunLibrary from "./pages/RunLibrary";
 import RunLibraryBatchDetail from "./pages/RunLibraryBatchDetail";
@@ -45,6 +46,8 @@ export default function App(): JSX.Element {
         <Route path="providers/:id" element={<ProviderDetail />} />
         <Route path="providers" element={<ProvidersList />} />
         <Route path="admin/access" element={<AdminAccess />} />
+        <Route path="auth/setup" element={<PasswordAction mode="setup" />} />
+        <Route path="auth/reset" element={<PasswordAction mode="reset" />} />
         <Route path="invites/accept" element={<InviteAccept />} />
         <Route path="rate-cards" element={<RateCardsAdmin />} />
         <Route path="settings" element={<Settings />} />

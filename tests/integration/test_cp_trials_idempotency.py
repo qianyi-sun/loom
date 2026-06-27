@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial
+from loom.db.schema import Batch, Task, Team, TeamQuota, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -25,13 +25,22 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     team_id = uuid4()
+    user_id = uuid4()
     raw = f"loom_team_{uuid4().hex}"
     with session_factory() as s:
         s.execute(insert(Team).values(id=team_id, name=f"sub-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
+        s.execute(insert(User).values(
+            id=user_id,
+            username=f"CpSubmitUser-{team_id.hex[:8]}",
+            username_normalized=f"cp-submit-user-{team_id.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
+            created_by_user_id=user_id,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
         s.execute(insert(Task).values(
@@ -53,6 +62,7 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
             s.execute(delete(Trial))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
+            s.execute(delete(User).where(User.username_normalized.like("cp-submit-user-%")))
             s.execute(delete(Team))
             s.execute(delete(Task))
             s.commit()
@@ -148,6 +158,38 @@ def test_no_idempotency_key_creates_distinct_trials(
             json={"task_id": "hello", "config": {"agent_name": "oracle", "agent_model": None}},
         )
     assert r1.json()["trial_id"] != r2.json()["trial_id"]
+
+
+def test_team_token_records_submitter_user(
+    app,  # type: ignore[no-untyped-def]
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    team_id, raw = seed_team
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+    assert r.status_code == 201, r.text
+    trial_id = UUID(r.json()["trial_id"])
+
+    engine = create_engine(postgres_url)
+    sl = sessionmaker(engine)
+    with sl() as s:
+        token_user_id = s.execute(
+            select(Token.created_by_user_id).where(Token.team_id == team_id),
+        ).scalar_one()
+        trial_user_id = s.execute(
+            select(Trial.submitted_by_user_id).where(Trial.id == trial_id),
+        ).scalar_one()
+    engine.dispose()
+
+    assert trial_user_id == token_user_id
 
 
 def test_unknown_batch_id_returns_400(
@@ -267,6 +309,7 @@ def test_batch_submit_token_creates_trial_for_batch_team(
     trial's tenant.
     """
     owner_team, _owner_raw = seed_team
+    owner_user_id = uuid4()
     runner_raw = f"loom_w_{uuid4().hex}"
     batch_id = uuid4()
 
@@ -280,9 +323,17 @@ def test_batch_submit_token_creates_trial_for_batch_team(
             team_id=None,
             issued_at=datetime.now(UTC),
         ))
+        s.execute(insert(User).values(
+            id=owner_user_id,
+            username=f"BatchRunnerOwner-{owner_team.hex[:8]}",
+            username_normalized=f"batch-runner-owner-{owner_team.hex[:8]}",
+            status="active",
+            is_platform_admin=False,
+        ))
         s.add(Batch(
             id=batch_id,
             team_id=owner_team,
+            submitted_by_user_id=owner_user_id,
             name="owner-batch",
             task_filter={},
             trial_config={},
@@ -320,6 +371,7 @@ def test_batch_submit_token_creates_trial_for_batch_team(
         engine.dispose()
         assert trial.team_id == owner_team
         assert trial.batch_id == batch_id
+        assert trial.submitted_by_user_id == owner_user_id
     finally:
         engine = create_engine(postgres_url)
         sl = sessionmaker(engine)
@@ -329,6 +381,7 @@ def test_batch_submit_token_creates_trial_for_batch_team(
             s.execute(delete(Token).where(Token.token_hash == (
                 hashlib.sha256(runner_raw.encode()).digest()
             )))
+            s.execute(delete(User).where(User.id == owner_user_id))
             s.commit()
         engine.dispose()
 

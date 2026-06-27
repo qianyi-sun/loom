@@ -9,6 +9,7 @@ import { useAuth } from "../auth/useAuth";
 const memberMe = {
   user: {
     id: "user-1",
+    username: "Owner",
     email: "owner@example.com",
     display_name: "Owner Example",
     is_platform_admin: false,
@@ -34,6 +35,7 @@ function Display(): JSX.Element {
     currentTeamId,
     loginStart,
     loginComplete,
+    loginPassword,
     switchTeam,
     logout,
   } = useAuth();
@@ -41,12 +43,14 @@ function Display(): JSX.Element {
     <div>
       <span data-testid="loading">{isLoading ? "loading" : "ready"}</span>
       <span data-testid="auth">{isAuthenticated ? "in" : "out"}</span>
+      <span data-testid="username">{me?.user.username ?? "none"}</span>
       <span data-testid="email">{me?.user.email ?? "none"}</span>
       <span data-testid="team">{currentTeamId ?? "none"}</span>
       <span data-testid="admin">{isAdmin ? "admin" : "not-admin"}</span>
       <span data-testid="err">{authError ?? "no-error"}</span>
       <button onClick={() => void loginStart("owner@example.com")}>start</button>
       <button onClick={() => void loginComplete("login-token")}>complete</button>
+      <button onClick={() => void loginPassword("Owner", "long-passphrase-1")}>password</button>
       <button onClick={() => void switchTeam("team-b")}>switch</button>
       <button onClick={() => void logout()}>logout</button>
     </div>
@@ -160,6 +164,49 @@ describe("AuthContext", () => {
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/v1/auth/login/complete",
       expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+
+  it("loginPassword stores the returned session state and clears cached data", async () => {
+    const loginMe = { ...memberMe, csrf_token: "csrf-password" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 401 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(loginMe), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["batches"], { items: [{ id: "old" }] });
+    const user = userEvent.setup();
+    render(
+      withQueryClient(
+        <AuthProvider>
+          <Display />
+        </AuthProvider>,
+        qc,
+      ),
+    );
+
+    await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("out"));
+    await user.click(screen.getByText("password"));
+
+    await waitFor(() => expect(screen.getByTestId("auth").textContent).toBe("in"));
+    expect(screen.getByTestId("username").textContent).toBe("Owner");
+    expect(qc.getQueryData(["batches"])).toBeUndefined();
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/auth/login",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({
+          username: "Owner",
+          password: "long-passphrase-1",
+        }),
+      }),
     );
   });
 

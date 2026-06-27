@@ -15,6 +15,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const platformAdminMe = {
   user: {
     id: "admin-user",
+    username: "Qianyi",
     email: "admin@example.com",
     display_name: "Admin Example",
     is_platform_admin: true,
@@ -30,6 +31,7 @@ const platformAdminMe = {
 const ownerMe = {
   user: {
     id: "owner-user",
+    username: "Owner",
     email: "owner@example.com",
     display_name: "Owner Example",
     is_platform_admin: false,
@@ -279,6 +281,136 @@ describe("AdminAccess", () => {
         team_id: "team-1",
         role: "member",
       });
+    });
+  });
+
+  it("approves username accounts and password resets with manual links", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "team-dev",
+                name: "Dev",
+                created_at: "2026-06-16T00:00:00Z",
+                disabled_at: null,
+                disabled_reason: null,
+                submissions_paused_at: null,
+                submissions_paused_reason: null,
+                quota: null,
+                members: [],
+                user_members: [],
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
+        if (
+          url.includes("/api/v1/admin/registration-requests/reg-account-1/approve") &&
+          init?.method === "POST"
+        ) {
+          expect(init.headers).not.toHaveProperty("X-Loom-Admin-Actor");
+          expect(JSON.parse(String(init.body))).toEqual({ role: "member" });
+          return jsonResponse({
+            setup_link: "https://loom.example.com/auth/setup?token=loom_setup_manual",
+            setup_token_prefix: "setuppfx",
+            user: { id: "user-ada", username: "Ada" },
+            team: { id: "team-dev", name: "Dev" },
+          });
+        }
+        if (
+          url.includes("/api/v1/admin/password-reset-requests/reset-1/approve") &&
+          init?.method === "POST"
+        ) {
+          expect(init.headers).not.toHaveProperty("X-Loom-Admin-Actor");
+          return jsonResponse({
+            reset_link: "https://loom.example.com/auth/reset?token=loom_reset_manual",
+            reset_token_prefix: "resetpfx",
+            user: { id: "user-hongjian", username: "Hongjian" },
+          });
+        }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "reg-account-1",
+                username: "Ada",
+                username_normalized: "ada",
+                team_id: "team-dev",
+                team_name: "Dev",
+                role: "member",
+                status: "pending",
+                requested_at: "2026-06-24T00:00:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+                setup_token_prefix: null,
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/admin/password-reset-requests")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "reset-1",
+                username: "Hongjian",
+                username_normalized: "hongjian",
+                status: "pending",
+                requested_at: "2026-06-24T00:10:00Z",
+                reviewed_at: null,
+                reviewed_by_actor: null,
+                reset_token_prefix: null,
+              },
+            ],
+          });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+
+    renderWithProviders(<AdminAccess />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "Accounts" }));
+
+    expect(await screen.findByText("Account requests")).toBeInTheDocument();
+    expect(screen.getByText("Ada")).toBeInTheDocument();
+    expect(screen.getByText("Dev")).toBeInTheDocument();
+    expect(screen.getByText("Password resets")).toBeInTheDocument();
+    expect(screen.getByText("Hongjian")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve account Ada" }));
+    expect(await screen.findByText(
+      "https://loom.example.com/auth/setup?token=loom_setup_manual",
+    )).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve reset Hongjian" }));
+    expect(await screen.findByText(
+      "https://loom.example.com/auth/reset?token=loom_reset_manual",
+    )).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.some(([input]) =>
+        String(input).includes("/api/v1/admin/registration-requests/reg-account-1/approve"),
+      )).toBe(true);
+      expect(fetchSpy.mock.calls.some(([input]) =>
+        String(input).includes("/api/v1/admin/password-reset-requests/reset-1/approve"),
+      )).toBe(true);
     });
   });
 

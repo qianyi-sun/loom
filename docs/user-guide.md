@@ -103,14 +103,17 @@ plugin; on macOS, install and start Docker Desktop, then verify
 ## Web sessions and teams
 
 When Loom is served as a web platform, the SPA uses browser user sessions.
-Users join from invite links or request access from Settings. Public beta does
-not send automatic email links: an admin reviews requests, chooses a fixed
-internal team and role, and manually shares the one-time invite link. If an
-operator or local development server gives you a one-time login code, Settings
-can also complete that browser sign-in. The service sets an HttpOnly session
-cookie. Auth responses return a CSRF token that the SPA keeps in memory; the
-browser sends cookies automatically, and mutating requests include the CSRF
-header. You should not paste a raw bearer token into the production SPA.
+Users sign in with username and password. First-time users request an account
+from Settings by entering a username and selecting an existing team. If the
+team is missing, contact an admin to create it first. Public beta does not
+collect email and does not send automatic mail: an admin reviews the request,
+approves a team role, and manually shares the one-time password setup link.
+Forgot-password follows the same pattern: the user submits a reset request,
+the admin approves it, and the user receives a one-time reset link. The service
+sets an HttpOnly session cookie. Auth responses return a CSRF token that the
+SPA keeps in memory; the browser sends cookies automatically, and mutating
+requests include the CSRF header. You should not paste a raw bearer token into
+the production SPA.
 
 Your current team controls execution, cost attribution, provider credentials,
 members, and team API tokens. Roles are enforced by the API:
@@ -123,22 +126,21 @@ members, and team API tokens. Roles are enforced by the API:
 
 The app shell always shows the current team and role beside the primary
 navigation, so users can confirm which team will own new batches, provider
-connections, invites, and API-token actions before they act. After sign-in,
+connections, reset/setup approvals, and API-token actions before they act. After sign-in,
 Home is the default landing page. It summarizes team readiness, provider
 health, benchmark readiness, active workers, recent batch/trial activity, and
 separates user-owned next actions from operator-owned prerequisites. Team
-Settings shows the signed-in user, current team, role, team switcher, joined
+Settings shows the signed-in username, current team, role, team switcher, joined
 browser users, and role-aware setup links. Team owners get Team access for
-invites and API tokens; platform admins also manage fixed internal teams and
-approve pending access requests into a selected team and role. Members and
-viewers see only the actions their role allows.
+legacy invites and API tokens; platform admins also manage fixed internal
+teams, approve pending username account requests, and approve password reset
+requests. Members and viewers see only the actions their role allows.
 
-Team access is split into task-focused sections. Platform admins start on
-pending requests, can switch to fixed-team maintenance, create/list invites,
-manage API tokens, or inspect the audit log. Team owners see only invite and
-API-token sections. Invite creation uses the visible team selector instead of a
-raw team id field; the raw invite link is still revealed only once and must be
-shared manually.
+Team access is split into task-focused sections. Platform admins can review
+legacy team requests, approve account setup and password reset requests, switch
+to fixed-team maintenance, create/list legacy invites, manage API tokens, or
+inspect the audit log. Team owners see only invite and API-token sections.
+Account setup/reset links are revealed only once and must be shared manually.
 
 Most web workflows now include contextual quickstarts directly on the page. Use
 the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
@@ -150,18 +152,19 @@ service reports that platform prerequisites are missing. The examples use safe
 placeholders and `env:`/`file:` secret references so users do not need to switch
 back to this guide for the common path.
 
-The CLI uses named team API tokens for service workflows. Create, rotate, or
-revoke those tokens from Team access only as a team owner. The one-time reveal
-shows CLI setup commands such as `export LOOM_API_TOKEN=loom_api_...` and
-`loom auth login --server URL --token env:LOOM_API_TOKEN`. Use
-`loom auth whoami` to verify the active server, team, scopes, and token prefix
-without printing the raw token. Completed run metadata and safe artifacts are
+The CLI uses the same username/password account by default. Use
+`loom auth login --server URL --username USER --password env:LOOM_PASSWORD`,
+then `loom auth whoami` to verify the active server, user, current team, role,
+and scopes. Team owners can still create, rotate, or revoke named API tokens
+from Team access for automation; those tokens are user-owned, scoped, and
+shown only once on create/rotate. Completed run metadata and safe artifacts are
 shared across teams through the Run Library; ordinary batch, trial, trajectory,
 ATIF, artifact, cancellation, rerun, and provider routes remain current-team
 scoped.
 
-Monitor lists show the owning team for each batch and trial. Ordinary users see
-their current team's work; platform admins can use the team filter to inspect
+Monitor lists show `username / team` for each batch and trial when the submitter
+is known, with legacy team fallback for old rows. Ordinary users see their
+current team's work; platform admins can use the team filter to inspect
 cross-team queues without losing context. The Monitor health card summarizes
 the current URL scope with batch/trial state counters, queued/claimed/running
 trial pressure, concurrent task slots, active worker count, worker backends, and
@@ -197,11 +200,11 @@ confidence because some provider usage fields were absent.
 
 ### Public server CLI flow
 
-From a fresh shell, authenticate with a scoped team API token from Team access:
+From a fresh shell, authenticate with your approved username/password account:
 
 ```bash
-export LOOM_API_TOKEN=loom_api_...
-loom auth login --server https://loom.example.com --token env:LOOM_API_TOKEN
+export LOOM_PASSWORD=...
+loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD
 loom auth whoami
 ```
 

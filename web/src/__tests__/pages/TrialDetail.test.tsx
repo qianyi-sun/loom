@@ -26,6 +26,12 @@ const TRIAL_BODY: components["schemas"]["TrialDetail"] = {
   task_id: "hello-world",
   team_id: "team-1",
   owner_team: { id: "team-1", name: "Alpha Research" },
+  submitted_by_user: {
+    id: "user-ada",
+    username: "Ada",
+    team_id: "team-dev",
+    team_name: "Dev",
+  },
   state: "queued",
   agent_name: "oracle",
   model: {
@@ -207,7 +213,7 @@ describe("TrialDetail trajectory section", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows owner team, share status, and provenance", async () => {
+  it("shows submitting user owner, share status, and provenance", async () => {
     fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
     renderWithProviders(
       <Routes>
@@ -216,8 +222,8 @@ describe("TrialDetail trajectory section", () => {
       { route: `/trials/${TRIAL_ID}` },
     );
 
-    expect(await screen.findByText("Owner team")).toBeInTheDocument();
-    expect(screen.getByText("Alpha Research")).toBeInTheDocument();
+    expect(await screen.findByText("Owner")).toBeInTheDocument();
+    expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();

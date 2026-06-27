@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 
-from loom.db.schema import LlmCall, Task, Team, Trial
+from loom.db.schema import LlmCall, Task, Team, Trial, User
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
     known_names,
@@ -190,6 +190,7 @@ def _trial_row(
     *,
     usage: dict[str, Any] | None = None,
     owner_team: Team | None = None,
+    submitted_by_user: User | None = None,
 ) -> dict[str, Any]:
     agent_name, model = _extract_agent_projection(t.config)
     usage_projection = usage or _empty_usage_projection()
@@ -229,6 +230,15 @@ def _trial_row(
         "visibility": t.visibility,
         "share_status": t.share_status,
         "source_provenance": t.source_provenance,
+        "submitted_by_user": (
+            {
+                "id": str(submitted_by_user.id),
+                "username": submitted_by_user.username,
+                "team_id": str(t.team_id),
+                "team_name": owner_team.name if owner_team else None,
+            }
+            if submitted_by_user is not None else None
+        ),
     }
     if owner_team is not None:
         out["team_name"] = owner_team.name
@@ -307,6 +317,7 @@ async def list_trials(
         next_c = None
     usage_by_trial = await _usage_by_trial_ids(s, [r.id for r in rows])
     teams_by_id: dict[UUID, Team] = {}
+    users_by_id: dict[UUID, User] = {}
     if rows:
         team_rows = (
             (
@@ -318,12 +329,28 @@ async def list_trials(
             .all()
         )
         teams_by_id = {team.id: team for team in team_rows}
+        user_ids = {r.submitted_by_user_id for r in rows if r.submitted_by_user_id is not None}
+        if user_ids:
+            user_rows = (
+                (
+                    await s.execute(
+                        select(User).where(User.id.in_(user_ids)),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            users_by_id = {user.id: user for user in user_rows}
     return {
         "items": [
             _trial_row(
                 r,
                 usage=usage_by_trial.get(r.id),
                 owner_team=teams_by_id.get(r.team_id),
+                submitted_by_user=(
+                    users_by_id.get(r.submitted_by_user_id)
+                    if r.submitted_by_user_id is not None else None
+                ),
             )
             for r in rows
         ],
@@ -439,6 +466,13 @@ async def get_trial(
             select(Team).where(Team.id == trial.team_id),
         )
     ).scalar_one_or_none()
+    submitted_by_user = None
+    if trial.submitted_by_user_id is not None:
+        submitted_by_user = (
+            await s.execute(
+                select(User).where(User.id == trial.submitted_by_user_id),
+            )
+        ).scalar_one_or_none()
     task = (
         await s.execute(
             select(Task).where(Task.id == trial.task_id),
@@ -459,6 +493,7 @@ async def get_trial(
         trial,
         usage=usage_by_trial.get(trial.id),
         owner_team=owner_team,
+        submitted_by_user=submitted_by_user,
     )
     base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])
     trajectory_index = trial.trajectory_index or {}

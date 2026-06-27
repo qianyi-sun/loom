@@ -31,6 +31,11 @@ import Pagination, {
 import { StatusPill, type StatusVariant } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import {
+  ownershipLabel,
+  ownershipSearchText,
+  type SubmittedByUser,
+} from "../lib/ownership";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
 
@@ -125,6 +130,7 @@ interface BatchRow {
   team_id?: string;
   team_name?: string | null;
   owner_team?: { id: string; name: string } | null;
+  submitted_by_user?: SubmittedByUser | null;
   name: string;
   state: string;
   expected_trial_count: number;
@@ -136,6 +142,7 @@ interface TrialRow {
   team_id?: string;
   team_name?: string | null;
   owner_team?: { id: string; name: string } | null;
+  submitted_by_user?: SubmittedByUser | null;
   task_id: string;
   state: string;
   agent_name: string | null;
@@ -510,7 +517,9 @@ function BatchesView({
     if (!q) return raw;
     return raw.filter(
       (b) =>
-        b.name.toLowerCase().includes(q) || b.id.toLowerCase().includes(q),
+        b.name.toLowerCase().includes(q) ||
+        b.id.toLowerCase().includes(q) ||
+        ownershipSearchText(b).includes(q),
     );
   }, [query.data, debouncedSearch]);
 
@@ -534,7 +543,7 @@ function BatchesView({
               <tr className="bg-slate-50/50">
                 {[
                   "Name",
-                  "Team",
+                  "Owner",
                   "State",
                   "Planned trials",
                   "Created",
@@ -584,7 +593,7 @@ function BatchesView({
                       </Link>
                     </td>
                     <td className="px-4 py-3 text-slate-700">
-                      {c.owner_team?.name ?? c.team_name ?? "—"}
+                      {ownershipLabel(c)}
                     </td>
                     <td className="px-4 py-3">
                       <StatusPill variant={batchStateVariant(c.state)}>
@@ -695,7 +704,7 @@ function TrialsView({
       (t) =>
         t.task_id.toLowerCase().includes(q) ||
         t.id.toLowerCase().includes(q) ||
-        (t.owner_team?.name ?? t.team_name ?? "").toLowerCase().includes(q),
+        ownershipSearchText(t).includes(q),
     );
   }, [query.data, debouncedSearch]);
   const failureGroups: FailureGroup[] = useMemo(() => {
@@ -774,7 +783,7 @@ function TrialsView({
                 {[
                   "ID",
                   "Task",
-                  "Team",
+                  "Owner",
                   "State",
                   "Agent",
                   "Evaluator score",
@@ -835,7 +844,7 @@ function TrialsView({
                       {t.task_id}
                     </td>
                     <td className="px-4 py-3 text-slate-700">
-                      {t.owner_team?.name ?? t.team_name ?? "—"}
+                      {ownershipLabel(t)}
                     </td>
                     <td className="px-4 py-3">
                       <StatusPill variant={trialStateVariant(t.state)}>

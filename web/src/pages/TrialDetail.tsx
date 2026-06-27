@@ -25,6 +25,7 @@ import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useTrialEventStream } from "../hooks/useTrialEventStream";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
+import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { trialStateVariant } from "../lib/statusVariant";
@@ -176,8 +177,8 @@ function TrialHeader({
 
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
           <StatCard
-            label="Owner team"
-            value={trial.owner_team?.name ?? trial.team_id}
+            label="Owner"
+            value={ownershipLabel(trial)}
           />
           <StatCard
             label="Visibility"
