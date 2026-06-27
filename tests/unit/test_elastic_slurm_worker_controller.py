@@ -119,7 +119,11 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--mem=58000M",
         "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom",
     )
-    assert "docker compose --env-file \"$LOOM_REMOTE_WORKER_ENV_FILE\"" in request.stdin
+    assert (
+        'compose_args=(--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" '
+        "-f deploy/docker-compose.remote-worker.yml)"
+    ) in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --build' in request.stdin
     assert "cd \"$LOOM_REMOTE_WORKER_REPO_DIR\"" in request.stdin
 
 
@@ -127,6 +131,14 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
     request = build_sbatch_request(_config(exclusive=False), node="oldlab-4")
 
     assert "--exclusive" not in request.args
+
+
+def test_build_sbatch_request_cleans_up_compose_on_exit() -> None:
+    request = build_sbatch_request(_config(), node="oldlab-4")
+
+    assert "trap cleanup EXIT INT TERM" in request.stdin
+    assert "docker compose \"${compose_args[@]}\" down --remove-orphans" in request.stdin
+    assert "docker compose \"${compose_args[@]}\" up --build" in request.stdin
 
 
 def test_build_controller_config_rejects_enabled_missing_required_settings() -> None:

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import SlurmWorkerJob, Task, Team, Trial, Worker
+from loom.db.schema import SlurmWorkerJob, Task, Team, TeamQuota, Trial, Worker
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmWorkerCommandRunner,
@@ -90,6 +90,7 @@ async def _cleanup_db(postgres_url: str) -> Iterator[None]:
         await s.execute(delete(SlurmWorkerJob))
         await s.execute(delete(Worker))
         await s.execute(delete(Task))
+        await s.execute(delete(TeamQuota))
         await s.execute(delete(Team))
         await s.commit()
     await engine.dispose()

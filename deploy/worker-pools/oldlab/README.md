@@ -32,6 +32,9 @@ contains `deploy/docker-compose.remote-worker.yml`. Use a shared checkout path
 such as `/shared_work/<operator>/loom-remote-worker` for public-beta style
 capacity. Keep `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` in the remote-worker env
 file so elastic jobs release the allocation after the Loom queue drains.
+The generated Slurm job script also traps `EXIT`, `INT`, and `TERM` and runs
+`docker compose down --remove-orphans`, so `scancel` and idle exits clean up the
+worker container instead of leaving a live worker outside Slurm accounting.
 
 Shared-resource smoke evidence from 2026-06-24 is stored on platform-dev at
 `/shared_work/qianyi/loom-worker-capacity/issue435-20260624T164151Z/`. It used
