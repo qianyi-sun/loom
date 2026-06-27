@@ -464,6 +464,7 @@ async def test_reconcile_releases_drained_slurm_worker_job(
         assert job.state == "cancelled"
         assert job.pending_reason == "cancelled after autoscaler drain"
         assert policy.last_decision == "release_drained"
+        assert policy.last_draining_slots == 0
     finally:
         await engine.dispose()
 

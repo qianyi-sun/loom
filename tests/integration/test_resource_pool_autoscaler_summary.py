@@ -8,7 +8,14 @@ import pytest
 from sqlalchemy import delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Task, Team, Trial, Worker, WorkerPoolAutoscalerPolicy
+from loom.db.schema import (
+    Task,
+    Team,
+    TeamQuota,
+    Trial,
+    Worker,
+    WorkerPoolAutoscalerPolicy,
+)
 from loom.resource_pools import get_resource_pool_summary
 
 
@@ -22,6 +29,7 @@ async def _cleanup_db(postgres_url: str) -> Iterator[None]:
         await s.execute(delete(WorkerPoolAutoscalerPolicy))
         await s.execute(delete(Worker))
         await s.execute(delete(Task))
+        await s.execute(delete(TeamQuota))
         await s.execute(delete(Team))
         await s.commit()
     await engine.dispose()
@@ -126,5 +134,66 @@ async def test_resource_summary_exposes_policy_and_draining_capacity(
         assert pool["autoscaler_idle_seconds"] >= 120
         assert pool["last_autoscaler_decision"] == "request_drain"
         assert summary["aggregate"]["draining_slots"] == 6
+    finally:
+        await engine.dispose()
+
+
+async def test_resource_summary_excludes_released_drained_workers(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    worker_id = uuid4()
+    now = datetime.now(UTC)
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Worker).values(
+                id=worker_id,
+                hostname="oldlab-1",
+                version="test",
+                capabilities=[{
+                    "backend": "docker",
+                    "os": "linux",
+                    "cpu_arch": "x86_64",
+                    "gpu_vendor": "none",
+                    "network_policies": ["none"],
+                }],
+                max_concurrent=6,
+                pool_name="oldlab",
+                drain_state="drained",
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=6,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
+                last_decision="release_drained",
+                last_decision_reason="drain_complete",
+                last_desired_slots=0,
+                last_pending_slots=0,
+                last_draining_slots=0,
+            ))
+            await s.commit()
+
+        async with session_factory() as s:
+            summary = await get_resource_pool_summary(s, freshness_sec=120)
+
+        pool = summary["pools"][0]
+        assert pool["active_workers"] == 0
+        assert pool["total_slots"] == 0
+        assert pool["draining_workers"] == 0
+        assert pool["draining_slots"] == 0
+        assert summary["aggregate"]["draining_slots"] == 0
     finally:
         await engine.dispose()

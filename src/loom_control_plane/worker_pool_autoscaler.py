@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -564,7 +564,7 @@ async def _load_observation(
             active_slots += slots
             if in_flight == 0:
                 active_idle.append((str(worker.id), slots))
-        else:
+        elif worker.drain_state == "draining":
             draining_slots += slots
             if in_flight == 0:
                 drained_worker_ids.append(str(worker.id))
@@ -656,6 +656,20 @@ def _persist_decision(
         row.last_scale_up_at = now
     if decision.action in {"request_drain", "release_drained"}:
         row.last_scale_down_at = now
+
+
+def _decision_with_observation(
+    decision: AutoscalerDecision,
+    observation: AutoscalerObservation,
+) -> AutoscalerDecision:
+    return replace(
+        decision,
+        actual_slots=observation.active_slots,
+        pending_slots=observation.pending_slots,
+        draining_slots=observation.draining_slots,
+        occupied_slots=observation.occupied_slots,
+        queued_slots=observation.queued_slots,
+    )
 
 
 def _slurm_config_from_policy(
@@ -1100,9 +1114,17 @@ async def reconcile_worker_pool_autoscaler_once(
                 .values(
                     drain_state="drained",
                     drain_reason="autoscaler release completed",
-                drain_owner="worker-pool-autoscaler",
+                    drain_owner="worker-pool-autoscaler",
                 ),
             )
+        if decision.action == "release_drained":
+            observation = await _load_observation(
+                session,
+                row,
+                now=now,
+                freshness_sec=freshness_sec,
+            )
+            decision = _decision_with_observation(decision, observation)
         _persist_decision(row, decision, now=now)
         if actuator_error is not None:
             row.last_error = actuator_error
