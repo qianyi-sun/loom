@@ -33,6 +33,12 @@ from loom_control_plane.slurm_worker_jobs import (
     record_slurm_worker_job,
     slurm_worker_job_to_dict,
 )
+from loom_control_plane.worker_pool_autoscaler import (
+    autoscaler_policy_to_dict,
+    fetch_autoscaler_status,
+    get_autoscaler_policy,
+    upsert_autoscaler_policy,
+)
 
 router = APIRouter(prefix="/admin")
 
@@ -75,6 +81,8 @@ class _GB10DesiredStatePayload(BaseModel):
     image_tag: str
     max_concurrent: int = Field(gt=0)
     env_config_version: str
+    target_slots: int | None = Field(default=None, ge=0)
+    host_intents: dict[str, str] = Field(default_factory=dict)
     rollout_policy: dict[str, Any] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     force: bool = False
@@ -84,6 +92,7 @@ class _GB10NodeReportPayload(BaseModel):
     current_image_tag: str | None = None
     current_max_concurrent: int | None = Field(default=None, gt=0)
     current_env_config_version: str | None = None
+    current_intent: str | None = None
     apply_state: str = "unknown"
     last_apply_result: str | None = None
     error_message: str | None = None
@@ -91,6 +100,21 @@ class _GB10NodeReportPayload(BaseModel):
     compose_project_dir: str | None = None
     worker_id: UUID | None = None
     last_apply_at: datetime | None = None
+
+
+class _AutoscalerPolicyPayload(BaseModel):
+    actuator: str
+    enabled: bool = False
+    min_slots: int = Field(default=0, ge=0)
+    max_slots: int = Field(ge=0)
+    scale_up_threshold_slots: int = Field(default=1, ge=0)
+    scale_down_idle_seconds: int = Field(default=600, ge=0)
+    scale_up_cooldown_seconds: int = Field(default=60, ge=0)
+    scale_down_cooldown_seconds: int = Field(default=300, ge=0)
+    drain_timeout_seconds: int = Field(default=600, gt=0)
+    force: bool = False
+    disabled_reason: str | None = None
+    actuator_config: dict[str, Any] = Field(default_factory=dict)
 
 
 async def _require_admin_scope(
@@ -280,6 +304,78 @@ async def get_slurm_worker_job_status(
     }
 
 
+@router.put("/worker-pool-autoscaler-policies/{environment}/{pool_name}")
+async def put_worker_pool_autoscaler_policy(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    payload: _AutoscalerPolicyPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_autoscaler_policy(
+                session,
+                environment=environment,
+                pool_name=pool_name,
+                actuator=payload.actuator,
+                enabled=payload.enabled,
+                min_slots=payload.min_slots,
+                max_slots=payload.max_slots,
+                scale_up_threshold_slots=payload.scale_up_threshold_slots,
+                scale_down_idle_seconds=payload.scale_down_idle_seconds,
+                scale_up_cooldown_seconds=payload.scale_up_cooldown_seconds,
+                scale_down_cooldown_seconds=payload.scale_down_cooldown_seconds,
+                drain_timeout_seconds=payload.drain_timeout_seconds,
+                force=payload.force,
+                disabled_reason=payload.disabled_reason,
+                actuator_config=payload.actuator_config,
+            )
+            await session.commit()
+            return autoscaler_policy_to_dict(row)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/worker-pool-autoscaler-policies/{environment}/{pool_name}")
+async def get_worker_pool_autoscaler_policy(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    async with request.app.state.session_factory() as session:
+        row = await get_autoscaler_policy(
+            session,
+            environment=environment,
+            pool_name=pool_name,
+        )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="worker pool autoscaler policy not found",
+        )
+    return autoscaler_policy_to_dict(row)
+
+
+@router.get("/worker-pool-autoscalers/status")
+async def get_worker_pool_autoscaler_status(
+    request: Request,
+    environment: str | None = Query(default=None),
+    pool_name: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, list[dict[str, object]]]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    async with request.app.state.session_factory() as session:
+        return await fetch_autoscaler_status(
+            session,
+            environment=environment,
+            pool_name=pool_name,
+        )
+
+
 @router.put("/gb10-worker-pools/{environment}/{pool_name}/desired-state")
 async def put_gb10_worker_pool_desired_state(
     environment: str,
@@ -298,6 +394,8 @@ async def put_gb10_worker_pool_desired_state(
                 image_tag=payload.image_tag,
                 max_concurrent=payload.max_concurrent,
                 env_config_version=payload.env_config_version,
+                target_slots=payload.target_slots,
+                host_intents=payload.host_intents,
                 rollout_policy=payload.rollout_policy,
                 env=payload.env,
                 force=payload.force,
@@ -349,6 +447,7 @@ async def report_gb10_worker_node_status(
                 current_image_tag=payload.current_image_tag,
                 current_max_concurrent=payload.current_max_concurrent,
                 current_env_config_version=payload.current_env_config_version,
+                current_intent=payload.current_intent,
                 apply_state=payload.apply_state,
                 last_apply_result=payload.last_apply_result,
                 error_message=payload.error_message,

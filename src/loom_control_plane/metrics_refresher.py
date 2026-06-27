@@ -37,8 +37,15 @@ from loom_control_plane.metrics import (
     SLURM_WORKER_STALE_JOBS,
     SLURM_WORKER_STALE_SLOTS,
     TRIALS_INFLIGHT,
+    WORKER_POOL_AUTOSCALER_DECISION,
+    WORKER_POOL_AUTOSCALER_ERROR,
+    WORKER_POOL_AUTOSCALER_IDLE_SECONDS,
+    WORKER_POOL_DESIRED_SLOTS,
+    WORKER_POOL_DRAINING_SLOTS,
+    WORKER_POOL_DRAINING_WORKERS,
     WORKER_POOL_FREE_SLOTS,
     WORKER_POOL_OCCUPIED_SLOTS,
+    WORKER_POOL_PENDING_SLOTS,
     WORKER_POOL_TOTAL_SLOTS,
     WORKER_POOL_WORKERS,
     WORKERS_ACTIVE,
@@ -94,6 +101,13 @@ _WORKER_POOL_GAUGES = (
     WORKER_POOL_OCCUPIED_SLOTS,
     WORKER_POOL_FREE_SLOTS,
     WORKER_POOL_WORKERS,
+    WORKER_POOL_DESIRED_SLOTS,
+    WORKER_POOL_PENDING_SLOTS,
+    WORKER_POOL_DRAINING_SLOTS,
+    WORKER_POOL_DRAINING_WORKERS,
+    WORKER_POOL_AUTOSCALER_DECISION,
+    WORKER_POOL_AUTOSCALER_ERROR,
+    WORKER_POOL_AUTOSCALER_IDLE_SECONDS,
 )
 
 
@@ -149,6 +163,31 @@ async def refresh_once(session: Any, *, expiry_sec: int) -> None:
         )
         WORKER_POOL_FREE_SLOTS.labels(**labels).set(int(pool["free_slots"]))
         WORKER_POOL_WORKERS.labels(**labels).set(int(pool["active_workers"]))
+        WORKER_POOL_DESIRED_SLOTS.labels(**labels).set(
+            int(pool["desired_slots"]),
+        )
+        WORKER_POOL_PENDING_SLOTS.labels(**labels).set(
+            int(pool["pending_slots"]),
+        )
+        WORKER_POOL_DRAINING_SLOTS.labels(**labels).set(
+            int(pool["draining_slots"]),
+        )
+        WORKER_POOL_DRAINING_WORKERS.labels(**labels).set(
+            int(pool["draining_workers"]),
+        )
+        decision = pool.get("last_autoscaler_decision")
+        if decision:
+            WORKER_POOL_AUTOSCALER_DECISION.labels(
+                **labels,
+                action=str(decision),
+                reason=str(pool.get("last_autoscaler_reason") or ""),
+            ).set(1)
+        WORKER_POOL_AUTOSCALER_ERROR.labels(**labels).set(
+            1 if pool.get("last_autoscaler_error") else 0,
+        )
+        WORKER_POOL_AUTOSCALER_IDLE_SECONDS.labels(**labels).set(
+            int(pool.get("autoscaler_idle_seconds") or 0),
+        )
 
     slurm_summary = summarize_jobs(await fetch_slurm_worker_metric_rows(session))
     for gauge in _SLURM_WORKER_GAUGES:

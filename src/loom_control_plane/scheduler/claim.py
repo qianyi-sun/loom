@@ -39,6 +39,13 @@ WITH next AS (
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
+     AND EXISTS (
+       SELECT 1
+         FROM workers w
+        WHERE w.id = (:worker_id)::uuid
+          AND w.status = 'active'
+          AND w.drain_state = 'active'
+     )
    ORDER BY
        (q.in_flight_count * 1.0) / NULLIF(q.fair_share_weight, 0) ASC,
        t.submit_priority DESC,

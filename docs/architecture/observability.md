@@ -31,6 +31,13 @@ All metrics use the `loom_*` prefix and follow these cardinality rules:
 | Control Plane | `loom_worker_pool_occupied_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_free_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_worker_pool_workers` | Gauge | `pool_name`, `backend`, `cpu_arch` |
+| Control Plane | `loom_worker_pool_desired_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
+| Control Plane | `loom_worker_pool_pending_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
+| Control Plane | `loom_worker_pool_draining_slots` | Gauge | `pool_name`, `backend`, `cpu_arch` |
+| Control Plane | `loom_worker_pool_draining_workers` | Gauge | `pool_name`, `backend`, `cpu_arch` |
+| Control Plane | `loom_worker_pool_autoscaler_decision` | Gauge | `pool_name`, `backend`, `cpu_arch`, `action`, `reason` |
+| Control Plane | `loom_worker_pool_autoscaler_error` | Gauge | `pool_name`, `backend`, `cpu_arch` |
+| Control Plane | `loom_worker_pool_autoscaler_idle_seconds` | Gauge | `pool_name`, `backend`, `cpu_arch` |
 | Control Plane | `loom_slurm_worker_desired_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_active_slots` | Gauge | `environment`, `pool_name` |
 | Control Plane | `loom_slurm_worker_pending_slots` | Gauge | `environment`, `pool_name` |
@@ -96,7 +103,8 @@ Grafana sidecar auto-discovers and imports them.
 - State PATCH outcomes (ok / fenced / timeout)
 - Worker reclaim rate
 - Active workers gauge
-- Worker pool total, occupied, and free slots by pool/backend/CPU architecture
+- Worker pool total, occupied, free, desired, pending, draining, idle-window,
+  and autoscaler decision state by pool/backend/CPU architecture
 - Elastic Slurm worker desired, active, and pending slots by environment/pool
 - Elastic Slurm job counts for running, pending, failed submissions, cancelled
   pending jobs, and idle exits

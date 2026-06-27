@@ -222,10 +222,15 @@ function ResourcePoolBreakdown({
               "Backend",
               "Arch",
               "Slots",
+              "Desired",
+              "Pending",
+              "Draining",
+              "Idle",
               "Running",
               "Starting",
               "Queued",
               "Workers",
+              "Decision",
             ].map((h) => (
               <th
                 key={h}
@@ -251,6 +256,20 @@ function ResourcePoolBreakdown({
                 {pool.occupied_slots}/{pool.total_slots}
               </td>
               <td className="px-3 py-2 text-slate-700">
+                {pool.desired_slots}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.pending_slots}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.draining_slots}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.autoscaler_idle_seconds == null
+                  ? "-"
+                  : `${pool.autoscaler_idle_seconds}s`}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
                 {pool.running_tasks}
               </td>
               <td className="px-3 py-2 text-slate-700">
@@ -261,6 +280,9 @@ function ResourcePoolBreakdown({
               </td>
               <td className="px-3 py-2 text-slate-700">
                 {pool.active_workers}
+              </td>
+              <td className="px-3 py-2 text-slate-700">
+                {pool.last_autoscaler_decision ?? "-"}
               </td>
             </tr>
           ))}

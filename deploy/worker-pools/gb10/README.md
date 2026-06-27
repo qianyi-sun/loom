@@ -314,7 +314,9 @@ credentials.
 
 Set desired state through the CP admin API. This example canaries only
 `trt-gb10-1`; after it reports `applied`, change `rollout_policy` to
-`{"mode":"all"}` or expand `canary_hosts`.
+`{"mode":"all"}` or expand `canary_hosts`. Autoscaler-managed policies may also
+write `target_slots` plus per-host `host_intents` of `active`, `draining`, or
+`stopped`; the node-agent applies those through the same pull-based path.
 
 ```bash
 curl -sS -X PUT \
@@ -498,4 +500,5 @@ worker cache state.
 If a host becomes unstable, lower `LOOM_WORKER_MAX_CONCURRENT` first, restart
 that host's worker, and record the observed bottleneck before raising capacity
 again. Use `loom resources status` to confirm the GB10 row reports the expected
-occupied/total slot count before starting another sweep.
+occupied/total slot count plus autoscaler desired, pending, draining, idle, and
+decision state before starting another sweep.

@@ -336,6 +336,62 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 2
+
+    url = f"{args.cp_url.rstrip('/')}/admin/worker-pool-autoscalers/status"
+    try:
+        resp = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as e:
+        sys.stderr.write(f"error: could not reach CP at {url}: {e}\n")
+        return 2
+
+    if resp.status_code != 200:
+        sys.stderr.write(
+            f"error: CP returned {resp.status_code}: {resp.text}\n",
+        )
+        return 1
+
+    data = resp.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    policies = data.get("policies", [])
+    sys.stdout.write("Worker-pool autoscalers:\n")
+    if not policies:
+        sys.stdout.write("  no autoscaler policies recorded\n")
+        return 0
+    for row in policies:
+        error = row.get("last_error") or "-"
+        blocked = row.get("last_blocked_reason") or "-"
+        sys.stdout.write(
+            f"  {row['environment']}/{row['pool_name']} "
+            f"{row['actuator']} "
+            f"enabled={row['enabled']} "
+            f"min={row['min_slots']} max={row['max_slots']} "
+            f"desired={row.get('last_desired_slots') or 0} "
+            f"actual={row.get('last_actual_slots') or 0} "
+            f"pending={row.get('last_pending_slots') or 0} "
+            f"draining={row.get('last_draining_slots') or 0} "
+            f"occupied={row.get('last_occupied_slots') or 0} "
+            f"queued={row.get('last_queued_slots') or 0} "
+            f"decision={row.get('last_decision') or '-'} "
+            f"reason={row.get('last_decision_reason') or '-'} "
+            f"blocked={blocked} error={error}\n",
+        )
+    return 0
+
+
 _KNOWN_TEAM_SCOPES = (
     "read:own",
     "submit",
@@ -839,6 +895,33 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_gb10_status.set_defaults(handler=_gb10_workers_status)
+
+    p_worker_pools = sub.add_parser(
+        "worker-pools",
+        help="Inspect worker-pool autoscaler policy and decision state.",
+    )
+    worker_pools_sub = p_worker_pools.add_subparsers(
+        dest="worker_pools_op",
+        required=True,
+    )
+    p_autoscaler = worker_pools_sub.add_parser(
+        "autoscaler",
+        help="Worker-pool autoscaler operations.",
+    )
+    autoscaler_sub = p_autoscaler.add_subparsers(
+        dest="autoscaler_op",
+        required=True,
+    )
+    p_autoscaler_status = autoscaler_sub.add_parser(
+        "status",
+        help="Show worker-pool autoscaler desired/actual/drain state.",
+    )
+    _add_common_args(p_autoscaler_status)
+    p_autoscaler_status.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="Output format.",
+    )
+    p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
 
     p_team = tok_sub.add_parser(
         "team",

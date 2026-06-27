@@ -68,6 +68,48 @@ WORKER_POOL_WORKERS = Gauge(
     labelnames=("pool_name", "backend", "cpu_arch"),
 )
 
+WORKER_POOL_DESIRED_SLOTS = Gauge(
+    "loom_worker_pool_desired_slots",
+    "Autoscaler desired execution slots by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_PENDING_SLOTS = Gauge(
+    "loom_worker_pool_pending_slots",
+    "Autoscaler pending execution slots by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_DRAINING_SLOTS = Gauge(
+    "loom_worker_pool_draining_slots",
+    "Draining worker execution slots by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_DRAINING_WORKERS = Gauge(
+    "loom_worker_pool_draining_workers",
+    "Draining worker processes by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_AUTOSCALER_DECISION = Gauge(
+    "loom_worker_pool_autoscaler_decision",
+    "Last autoscaler decision by resource pool, action, and reason",
+    labelnames=("pool_name", "backend", "cpu_arch", "action", "reason"),
+)
+
+WORKER_POOL_AUTOSCALER_ERROR = Gauge(
+    "loom_worker_pool_autoscaler_error",
+    "Autoscaler actuator error present by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
+WORKER_POOL_AUTOSCALER_IDLE_SECONDS = Gauge(
+    "loom_worker_pool_autoscaler_idle_seconds",
+    "Autoscaler idle-window age in seconds by resource pool",
+    labelnames=("pool_name", "backend", "cpu_arch"),
+)
+
 WORKER_RECLAIM_TOTAL = Counter(
     "loom_worker_reclaim_total",
     "Trials reclaimed by crash detector",

@@ -165,8 +165,10 @@ their current team's work; platform admins can use the team filter to inspect
 cross-team queues without losing context. The Monitor health card summarizes
 the current URL scope with batch/trial state counters, queued/claimed/running
 trial pressure, concurrent task slots, active worker count, worker backends, and
-per-resource-pool slot usage before the row table. The same slot summary is
-available from the CLI with `loom resources status` and
+per-resource-pool slot usage before the row table. For autoscaled worker pools,
+the resource summary also includes desired slots, pending slots, draining
+slots, idle-window age, and the last autoscaler decision. The same slot summary
+is available from the CLI with `loom resources status` and
 `loom resources status --json`. The table's State dropdown is still reflected
 in the URL, but the health card keeps all lifecycle counters visible so queue
 pressure does not disappear when you filter the rows to failures. Monitor

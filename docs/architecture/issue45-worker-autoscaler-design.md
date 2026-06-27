@@ -140,17 +140,18 @@ rollout-safe changes.
 
 Admin API:
 
-- CRUD policy endpoint:
+- upsert/read policy endpoint:
   `/admin/worker-pool-autoscaler-policies/{environment}/{pool_name}`
 - status endpoint:
   `/admin/worker-pool-autoscalers/status`
-- admin drain/force-release helpers for manual override.
+- Manual overrides use reviewed policy updates, GB10 desired-state updates, or
+  the documented Slurm/Docker break-glass playbooks.
 
 CLI:
 
 - `loom admin worker-pools autoscaler status`
-- `loom admin worker-pools autoscaler set`
-- `loom admin worker-pools drain` and `force-release`
+- Policy mutation remains on the admin API so operators can apply reviewed JSON
+  policy documents through curl or automation.
 
 Monitor/API resource summary:
 
@@ -160,9 +161,10 @@ Monitor/API resource summary:
 Prometheus:
 
 - desired/actual/pending/draining slots by pool
+- idle-window age by pool
 - scale-up and scale-down decisions by reason
-- blocked/error counters
-- drain waiting and force release counters
+- blocked/error status
+- drain waiting state through autoscaler decision reason
 
 ## Public-Beta Validation
 
