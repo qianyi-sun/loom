@@ -31,15 +31,106 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_llm_gateway.dialect import USAGE_STATUS_KEY
 from loom_service.auth_guards import (
     is_admin,
     require_team_or_admin,
 )
 from loom_service.dependencies import SessionAndCtx
+from loom_service.usage_accounting import summarize_usage_counts
 
 router = APIRouter()
 
 _TRUNC_UNITS: frozenset[str] = frozenset({"day", "week", "month"})
+_PRICING_MODES: frozenset[str] = frozenset(
+    {"priced", "tokens-only", "price-unknown"},
+)
+_USAGE_STATUS_SQL = f"l.provider_extras ->> '{USAGE_STATUS_KEY}'"
+_BREAKDOWN_FIELDS: dict[str, tuple[str, str]] = {
+    "team": ("t.team_id::text", "tm.name"),
+    "user": ("tok.created_by_user_id::text", "usr.display_name"),
+    "provider_connection": (
+        "COALESCE(t.provider_connection_id, b.provider_connection_id)::text",
+        "pc.display_name",
+    ),
+    "model": ("l.model", "l.model"),
+    "benchmark": ("task.benchmark_id", "bench.display_name"),
+    "batch": ("b.id::text", "b.name"),
+    "status": ("t.state", "t.state"),
+    "pricing_mode": ("pricing_mode", "pricing_mode"),
+}
+
+
+def _pricing_mode_expr() -> str:
+    return (
+        "CASE "
+        "WHEN l.rate_card_hash LIKE 'facade:tokens-only%%' THEN 'tokens-only' "
+        "WHEN l.rate_card_hash LIKE 'facade:rate-card:missing%%' "
+        "THEN 'price-unknown' "
+        "ELSE 'priced' END"
+    )
+
+
+def _llm_usage_from_sql() -> str:
+    return """
+          FROM llm_calls l
+          JOIN trials t ON t.id = l.trial_id
+          LEFT JOIN batches b ON b.id = t.batch_id
+          LEFT JOIN tasks task ON task.id = t.task_id
+          LEFT JOIN benchmarks bench ON bench.id = task.benchmark_id
+          LEFT JOIN teams tm ON tm.id = t.team_id
+          LEFT JOIN provider_connections pc
+            ON pc.id = COALESCE(t.provider_connection_id, b.provider_connection_id)
+          LEFT JOIN tokens tok
+            ON LEFT(encode(tok.token_hash, 'hex'), 8) = b.created_by_token_prefix
+          LEFT JOIN users usr ON usr.id = tok.created_by_user_id
+         WHERE l.captured_at BETWEEN :start AND :end
+    """
+
+
+def _usage_where_filters(
+    *,
+    target_team: UUID | None,
+    provider_connection_id: UUID | None,
+    model: str | None,
+    benchmark_id: str | None,
+    batch_id: UUID | None,
+    status: str | None,
+    pricing_mode: str | None,
+    user_id: UUID | None,
+) -> tuple[str, dict[str, Any]]:
+    filters: list[str] = []
+    params: dict[str, Any] = {}
+    if target_team is not None:
+        filters.append("t.team_id = :team_id")
+        params["team_id"] = str(target_team)
+    if provider_connection_id is not None:
+        filters.append(
+            "COALESCE(t.provider_connection_id, b.provider_connection_id) "
+            "= :provider_connection_id",
+        )
+        params["provider_connection_id"] = str(provider_connection_id)
+    if model:
+        filters.append("l.model = :model")
+        params["model"] = model
+    if benchmark_id:
+        filters.append("task.benchmark_id = :benchmark_id")
+        params["benchmark_id"] = benchmark_id
+    if batch_id is not None:
+        filters.append("b.id = :batch_id")
+        params["batch_id"] = str(batch_id)
+    if status:
+        filters.append("t.state = :status")
+        params["status"] = status
+    if pricing_mode:
+        filters.append(f"{_pricing_mode_expr()} = :pricing_mode")
+        params["pricing_mode"] = pricing_mode
+    if user_id is not None:
+        filters.append("tok.created_by_user_id = :user_id")
+        params["user_id"] = str(user_id)
+    if not filters:
+        return "", params
+    return " AND " + " AND ".join(filters), params
 
 
 async def _llm_calls_exists(session: AsyncSession) -> bool:
@@ -64,6 +155,15 @@ async def get_usage(
     end: Annotated[date, Query()],
     team_id: Annotated[UUID | None, Query()] = None,
     group_by: Annotated[str, Query()] = "day",
+    include_batches: Annotated[bool, Query()] = False,
+    user_id: Annotated[UUID | None, Query()] = None,
+    provider_connection_id: Annotated[UUID | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
+    benchmark_id: Annotated[str | None, Query()] = None,
+    batch_id: Annotated[UUID | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+    pricing_mode: Annotated[str | None, Query()] = None,
+    breakdown_by: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     if group_by not in _TRUNC_UNITS:
         raise HTTPException(
@@ -72,7 +172,18 @@ async def get_usage(
         )
     if end < start:
         raise HTTPException(
-            status_code=400, detail="end must be >= start",
+            status_code=400,
+            detail="end must be >= start",
+        )
+    if pricing_mode is not None and pricing_mode not in _PRICING_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"pricing_mode must be one of {sorted(_PRICING_MODES)}",
+        )
+    if breakdown_by is not None and breakdown_by not in _BREAKDOWN_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"breakdown_by must be one of {sorted(_BREAKDOWN_FIELDS)}",
         )
 
     s, ctx = sc
@@ -92,12 +203,20 @@ async def get_usage(
     end_ts = datetime.combine(end, time.max, tzinfo=UTC)
 
     params: dict[str, Any] = {"start": start_ts, "end": end_ts}
-    team_clause = ""
     cloud_team_clause = ""
+    where_filters, filter_params = _usage_where_filters(
+        target_team=target_team,
+        provider_connection_id=provider_connection_id,
+        model=model,
+        benchmark_id=benchmark_id,
+        batch_id=batch_id,
+        status=status,
+        pricing_mode=pricing_mode,
+        user_id=user_id,
+    )
+    params.update(filter_params)
     if target_team is not None:
-        team_clause = "AND t.team_id = :team_id"
         cloud_team_clause = "AND d.team_id = :team_id"
-        params["team_id"] = str(target_team)
 
     # `date_trunc` argument is a literal interpolated into the SQL
     # text — only the 3 strings in `_TRUNC_UNITS` can reach it, so
@@ -107,7 +226,39 @@ async def get_usage(
     # fields; otherwise we run the original LLM-only query.
     # The cloud CTE uses FILTER aggregates so each provider gets its
     # own column without needing a separate CTE per provider.
-    if has_cloud:
+    has_llm_dimension_filter = any(
+        item is not None and item != ""
+        for item in (
+            user_id,
+            provider_connection_id,
+            model,
+            benchmark_id,
+            batch_id,
+            status,
+            pricing_mode,
+            breakdown_by,
+        )
+    )
+    include_cloud = has_cloud and not has_llm_dimension_filter
+
+    pricing_mode_sql = _pricing_mode_expr()
+    breakdown_select = ""
+    breakdown_group_by = ""
+    breakdown_order_by = ""
+    if breakdown_by is not None:
+        raw_key_expr, raw_label_expr = _BREAKDOWN_FIELDS[breakdown_by]
+        key_expr = raw_key_expr.replace("pricing_mode", pricing_mode_sql)
+        label_expr = raw_label_expr.replace("pricing_mode", pricing_mode_sql)
+        breakdown_select = (
+            f", COALESCE({key_expr}, 'unattributed') AS breakdown_key, "
+            f"COALESCE({label_expr}, {key_expr}, 'unattributed') "
+            "AS breakdown_label"
+        )
+        breakdown_group_by = ", breakdown_key, breakdown_label"
+        breakdown_order_by = ", breakdown_key"
+
+    llm_from_sql = _llm_usage_from_sql()
+    if include_cloud:
         sql = f"""
             WITH llm_buckets AS (
                 SELECT
@@ -121,11 +272,30 @@ async def get_usage(
                         AS trials_currently_failed,
                     COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
                     COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
-                    COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens
-                  FROM llm_calls l
-                  JOIN trials t ON t.id = l.trial_id
-                 WHERE l.captured_at BETWEEN :start AND :end
-                   {team_clause}
+                    COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
+                              AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                        ) AS priced_llm_calls_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE l.rate_card_hash LIKE 'facade:tokens-only%%'
+                        ) AS token_only_llm_calls_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
+                        ) AS price_unknown_llm_calls_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_USAGE_STATUS_SQL} = 'partial'
+                        ) AS partial_usage_llm_calls_count,
+                    COUNT(l.id)
+                        FILTER (
+                            WHERE {_USAGE_STATUS_SQL} = 'missing'
+                        ) AS missing_usage_llm_calls_count
+                  {llm_from_sql}
+                   {where_filters}
               GROUP BY bucket_start
             ),
             cloud_buckets AS (
@@ -169,6 +339,16 @@ async def get_usage(
                 COALESCE(l.total_cost_usd, 0) AS total_cost_usd,
                 COALESCE(l.llm_input_tokens, 0) AS llm_input_tokens,
                 COALESCE(l.llm_output_tokens, 0) AS llm_output_tokens,
+                COALESCE(l.priced_llm_calls_count, 0)
+                    AS priced_llm_calls_count,
+                COALESCE(l.token_only_llm_calls_count, 0)
+                    AS token_only_llm_calls_count,
+                COALESCE(l.price_unknown_llm_calls_count, 0)
+                    AS price_unknown_llm_calls_count,
+                COALESCE(l.partial_usage_llm_calls_count, 0)
+                    AS partial_usage_llm_calls_count,
+                COALESCE(l.missing_usage_llm_calls_count, 0)
+                    AS missing_usage_llm_calls_count,
                 COALESCE(d.daytona_compute_seconds, 0)
                     AS daytona_compute_seconds,
                 COALESCE(d.daytona_cost_usd, 0) AS daytona_cost_usd,
@@ -185,7 +365,8 @@ async def get_usage(
     else:
         sql = f"""
             SELECT
-                date_trunc('{group_by}', l.captured_at) AS bucket_start,
+                date_trunc('{group_by}', l.captured_at) AS bucket_start
+                {breakdown_select},
                 COUNT(DISTINCT t.id) AS trial_count,
                 COUNT(DISTINCT t.id)
                     FILTER (WHERE t.state = 'succeeded')
@@ -195,19 +376,69 @@ async def get_usage(
                     AS trials_currently_failed,
                 COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
                 COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
-                COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens
-              FROM llm_calls l
-              JOIN trials t ON t.id = l.trial_id
-             WHERE l.captured_at BETWEEN :start AND :end
-               {team_clause}
-          GROUP BY bucket_start
-          ORDER BY bucket_start
+                COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
+                          AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                    ) AS priced_llm_calls_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE l.rate_card_hash LIKE 'facade:tokens-only%%'
+                    ) AS token_only_llm_calls_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
+                    ) AS price_unknown_llm_calls_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_USAGE_STATUS_SQL} = 'partial'
+                    ) AS partial_usage_llm_calls_count,
+                COUNT(l.id)
+                    FILTER (
+                        WHERE {_USAGE_STATUS_SQL} = 'missing'
+                    ) AS missing_usage_llm_calls_count
+              {llm_from_sql}
+               {where_filters}
+          GROUP BY bucket_start{breakdown_group_by}
+          ORDER BY bucket_start{breakdown_order_by}
         """
     rows = (await s.execute(text(sql), params)).all()
+    batches_by_bucket = (
+        await _batch_usage_rollups(
+            s,
+            group_by=group_by,
+            params=params,
+            where_filters=where_filters,
+        )
+        if include_batches and breakdown_by is None
+        else {}
+    )
 
     buckets: list[dict[str, Any]] = []
     for r in rows:
         bs = r.bucket_start
+        usage = summarize_usage_counts(
+            llm_calls_count=int(
+                (r.priced_llm_calls_count or 0)
+                + (r.token_only_llm_calls_count or 0)
+                + (r.price_unknown_llm_calls_count or 0)
+            ),
+            total_prompt_tokens=int(r.llm_input_tokens or 0),
+            total_completion_tokens=int(r.llm_output_tokens or 0),
+            total_cost_usd=r.total_cost_usd,
+            priced_llm_calls_count=int(r.priced_llm_calls_count or 0),
+            token_only_llm_calls_count=int(r.token_only_llm_calls_count or 0),
+            price_unknown_llm_calls_count=int(
+                r.price_unknown_llm_calls_count or 0,
+            ),
+            partial_usage_llm_calls_count=int(
+                r.partial_usage_llm_calls_count or 0,
+            ),
+            missing_usage_llm_calls_count=int(
+                r.missing_usage_llm_calls_count or 0,
+            ),
+        )
         bucket = {
             "start_at": bs.isoformat(),
             "end_at": None,
@@ -216,27 +447,139 @@ async def get_usage(
             "trials_currently_failed": int(r.trials_currently_failed),
             "succeeded_count": int(r.trials_currently_succeeded),
             "failed_count": int(r.trials_currently_failed),
-            "total_cost_usd": float(r.total_cost_usd),
+            "total_cost_usd": usage["total_cost_usd"],
+            "estimated_cost_usd": usage["estimated_cost_usd"],
+            "cost_currency": usage["cost_currency"],
+            "cost_status": usage["cost_status"],
+            "pricing_modes": usage["pricing_modes"],
+            "priced_llm_calls_count": usage["priced_llm_calls_count"],
+            "token_only_llm_calls_count": usage["token_only_llm_calls_count"],
+            "price_unknown_llm_calls_count": usage["price_unknown_llm_calls_count"],
+            "partial_usage_llm_calls_count": usage[
+                "partial_usage_llm_calls_count"
+            ],
+            "missing_usage_llm_calls_count": usage[
+                "missing_usage_llm_calls_count"
+            ],
+            "usage_reporting_status": usage["usage_reporting_status"],
+            "usage_estimate_confidence": usage["usage_estimate_confidence"],
             "llm_input_tokens": int(r.llm_input_tokens),
             "llm_output_tokens": int(r.llm_output_tokens),
             "daytona_compute_seconds": (
-                float(r.daytona_compute_seconds) if has_cloud else 0.0
+                float(r.daytona_compute_seconds) if include_cloud else 0.0
             ),
             "daytona_cost_usd": (
-                float(r.daytona_cost_usd) if has_cloud else 0.0
+                float(r.daytona_cost_usd) if include_cloud else 0.0
             ),
             "modal_compute_seconds": (
-                float(r.modal_compute_seconds) if has_cloud else 0.0
+                float(r.modal_compute_seconds) if include_cloud else 0.0
             ),
             "modal_cost_usd": (
-                float(r.modal_cost_usd) if has_cloud else 0.0
+                float(r.modal_cost_usd) if include_cloud else 0.0
             ),
             "cloud_compute_seconds": (
-                float(r.cloud_compute_seconds) if has_cloud else 0.0
+                float(r.cloud_compute_seconds) if include_cloud else 0.0
             ),
             "cloud_cost_usd": (
-                float(r.cloud_cost_usd) if has_cloud else 0.0
+                float(r.cloud_cost_usd) if include_cloud else 0.0
             ),
         }
+        if breakdown_by is not None:
+            bucket["breakdown_by"] = breakdown_by
+            bucket["breakdown_key"] = r.breakdown_key
+            bucket["breakdown_label"] = r.breakdown_label
+        if include_batches and breakdown_by is None:
+            bucket["batches"] = batches_by_bucket.get(bs, [])
         buckets.append(bucket)
     return {"buckets": buckets, "degraded": False}
+
+
+async def _batch_usage_rollups(
+    session: AsyncSession,
+    *,
+    group_by: str,
+    params: dict[str, Any],
+    where_filters: str,
+) -> dict[datetime, list[dict[str, Any]]]:
+    sql = f"""
+        SELECT
+            date_trunc('{group_by}', l.captured_at) AS bucket_start,
+            b.id AS batch_id,
+            b.name AS batch_name,
+            t.team_id AS team_id,
+            tm.name AS team_name,
+            COUNT(DISTINCT t.id) AS trial_count,
+            COALESCE(SUM(l.cost_usd), 0) AS total_cost_usd,
+            COALESCE(SUM(l.input_tokens), 0) AS llm_input_tokens,
+            COALESCE(SUM(l.output_tokens), 0) AS llm_output_tokens,
+            COUNT(l.id)
+                FILTER (
+                    WHERE l.rate_card_hash NOT LIKE 'facade:tokens-only%%'
+                      AND l.rate_card_hash NOT LIKE 'facade:rate-card:missing%%'
+                ) AS priced_llm_calls_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE l.rate_card_hash LIKE 'facade:tokens-only%%'
+                ) AS token_only_llm_calls_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE l.rate_card_hash LIKE 'facade:rate-card:missing%%'
+                ) AS price_unknown_llm_calls_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_USAGE_STATUS_SQL} = 'partial'
+                ) AS partial_usage_llm_calls_count,
+            COUNT(l.id)
+                FILTER (
+                    WHERE {_USAGE_STATUS_SQL} = 'missing'
+                ) AS missing_usage_llm_calls_count
+          {_llm_usage_from_sql()}
+           {where_filters}
+           AND b.id IS NOT NULL
+      GROUP BY bucket_start, b.id, b.name, t.team_id, tm.name
+      ORDER BY bucket_start, b.name, b.id
+    """
+    out: dict[datetime, list[dict[str, Any]]] = {}
+    rows = (await session.execute(text(sql), params)).all()
+    for row in rows:
+        usage = summarize_usage_counts(
+            llm_calls_count=int(
+                (row.priced_llm_calls_count or 0)
+                + (row.token_only_llm_calls_count or 0)
+                + (row.price_unknown_llm_calls_count or 0)
+            ),
+            total_prompt_tokens=int(row.llm_input_tokens or 0),
+            total_completion_tokens=int(row.llm_output_tokens or 0),
+            total_cost_usd=row.total_cost_usd,
+            priced_llm_calls_count=int(row.priced_llm_calls_count or 0),
+            token_only_llm_calls_count=int(row.token_only_llm_calls_count or 0),
+            price_unknown_llm_calls_count=int(
+                row.price_unknown_llm_calls_count or 0,
+            ),
+            partial_usage_llm_calls_count=int(
+                row.partial_usage_llm_calls_count or 0,
+            ),
+            missing_usage_llm_calls_count=int(
+                row.missing_usage_llm_calls_count or 0,
+            ),
+        )
+        item = {
+            "batch_id": str(row.batch_id),
+            "batch_name": row.batch_name,
+            "team_id": str(row.team_id),
+            "team_name": row.team_name,
+            "trial_count": int(row.trial_count or 0),
+            "llm_input_tokens": usage["total_prompt_tokens"],
+            "llm_output_tokens": usage["total_completion_tokens"],
+            **{
+                key: value
+                for key, value in usage.items()
+                if key
+                not in {
+                    "total_prompt_tokens",
+                    "total_completion_tokens",
+                }
+            },
+        }
+        out.setdefault(row.bucket_start, []).append(item)
+    return out

@@ -105,10 +105,12 @@ export function usageCommand(
   start: string,
   end: string,
   teamId?: string,
+  includeBatches = false,
 ): string {
   const trimmedTeamId = teamId?.trim();
   const teamFlag = trimmedTeamId ? ` --team-id ${trimmedTeamId}` : "";
-  return `loom eval usage --start ${start} --end ${end}${teamFlag}`;
+  const batchesFlag = includeBatches ? " --include-batches" : "";
+  return `loom eval usage --start ${start} --end ${end}${teamFlag}${batchesFlag}`;
 }
 
 export function rateCardExampleJson(): string {

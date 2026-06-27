@@ -28,6 +28,11 @@ import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { trialStateVariant } from "../lib/statusVariant";
+import {
+  formatUsageCost,
+  usageCostStatus,
+  usageEstimateConfidence,
+} from "../lib/usageCost";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
 type TrialArtifact = components["schemas"]["TrialDetail"]["artifacts"][number];
@@ -131,6 +136,10 @@ function TrialHeader({
     ? trial.source_provenance
     : [];
   const firstArtifactKey = trial.artifacts[0]?.key ?? null;
+  const hasCostProjection =
+    "estimated_cost_usd" in trial ||
+    "cost_status" in trial ||
+    "cost_currency" in trial;
 
   return (
     <Card>
@@ -192,6 +201,22 @@ function TrialHeader({
             label="Tokens"
             value={`P ${trial.total_prompt_tokens} / C ${trial.total_completion_tokens}`}
           />
+          {hasCostProjection ? (
+            <>
+              <StatCard
+                label="Estimated LLM cost"
+                value={formatUsageCost(trial)}
+              />
+              <StatCard
+                label="Cost status"
+                value={usageCostStatus(trial)}
+              />
+              <StatCard
+                label="Usage confidence"
+                value={usageEstimateConfidence(trial)}
+              />
+            </>
+          ) : null}
           <StatCard
             label="Submitted"
             value={trial.submitted_at.slice(0, 16).replace("T", " ")}

@@ -193,6 +193,30 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText(/cloned batch config/i)).toBeInTheDocument();
   });
 
+  it("shows token-only batch cost as not applicable instead of zero dollars", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      llm_calls_count: 2,
+      total_prompt_tokens: 77,
+      total_completion_tokens: 11,
+      estimated_cost_usd: null,
+      cost_status: "not_applicable",
+      cost_currency: null,
+      pricing_modes: ["tokens-only"],
+      partial_usage_llm_calls_count: 1,
+      missing_usage_llm_calls_count: 0,
+      usage_reporting_status: "partial",
+      usage_estimate_confidence: "partial",
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText("Estimated LLM cost")).toBeInTheDocument();
+    expect(screen.getByText("n/a")).toBeInTheDocument();
+    expect(screen.getByText("not_applicable")).toBeInTheDocument();
+    expect(screen.getByText("partial")).toBeInTheDocument();
+    expect(screen.queryByText("$0.0000")).not.toBeInTheDocument();
+  });
+
   it("shows structured debug evidence without exposing raw JSON by default", async () => {
     mockBatch({
       ...BATCH_BODY,

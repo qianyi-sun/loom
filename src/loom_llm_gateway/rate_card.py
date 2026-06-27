@@ -34,12 +34,26 @@ class RateCardEntry(BaseModel):
     output_per_mtok: float = Field(ge=0)
     cache_read_per_mtok: float = Field(ge=0)
     cache_write_per_mtok: float = Field(ge=0)
+    currency: str = "USD"
+    source_url: str | None = None
+    pricing_version: str | None = None
+    source_model: str | None = None
+    pricing_unit: str | None = None
 
 
 class RateCardTable(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     id: str
     captured_at: datetime
+    provider: str | None = None
+    source_url: str | None = None
+    pricing_version: str | None = None
+    last_checked_at: datetime | None = None
+    currency: str = "USD"
+    group: str | None = None
+    group_ratio: float | None = None
+    entry_count: int | None = None
+    skipped_model_count: int | None = None
     entries: list[RateCardEntry]
 
 
@@ -55,10 +69,7 @@ def lookup_entry(table: RateCardTable, spec: ModelSpec) -> RateCardEntry:
     - mismatch (both non-None, different values): -2
     - spec is None, entry is non-None (irrelevant specialization): 0
     """
-    candidates = [
-        e for e in table.entries
-        if e.provider == spec.provider and e.model == spec.name
-    ]
+    candidates = [e for e in table.entries if e.provider == spec.provider and e.model == spec.name]
     if not candidates:
         raise RateCardNotFoundError(
             f"no entry for {spec.provider}/{spec.name}",
@@ -73,7 +84,7 @@ def lookup_entry(table: RateCardTable, spec: ModelSpec) -> RateCardEntry:
             return 1  # generic fallback for tier-specific spec
         if spec_v is None and entry_v is not None:
             return 0
-        return -2     # both non-None, different
+        return -2  # both non-None, different
 
     def _score(e: RateCardEntry) -> int:
         return _pair_score(spec.tier, e.tier) + _pair_score(spec.region, e.region)
@@ -117,9 +128,11 @@ class RateCardCache:
 
     async def _fetch_latest(self) -> RateCardTable:
         async with self.session_factory() as session:
-            row = (await session.execute(
-                select(RateCard).order_by(RateCard.captured_at.desc()).limit(1),
-            )).scalar_one_or_none()
+            row = (
+                await session.execute(
+                    select(RateCard).order_by(RateCard.captured_at.desc()).limit(1),
+                )
+            ).scalar_one_or_none()
         if row is None:
             raise RateCardNotFoundError("no rate card registered")
         payload = dict(row.table or {})

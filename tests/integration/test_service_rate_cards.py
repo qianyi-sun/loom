@@ -80,6 +80,20 @@ async def rc_setup(
             )
         if req.method == "POST" and req.url.path == "/admin/rate-cards":
             return httpx.Response(201, json={"id": "rc-new"})
+        if (
+            req.method == "POST"
+            and req.url.path == "/admin/rate-cards/sync/yibuapi"
+        ):
+            return httpx.Response(
+                201,
+                json={
+                    "id": "yibuapi-pricing-v1",
+                    "source_url": "https://yibuapi.test/api/pricing",
+                    "pricing_version": "pricing-v1",
+                    "entry_count": 1,
+                    "skipped_model_count": 0,
+                },
+            )
         return httpx.Response(404)
 
     app.state.http_client = httpx.AsyncClient(base_url="http://cp")
@@ -204,6 +218,26 @@ async def test_admin_can_post(
     assert r.status_code == 201
     assert captured[0]["method"] == "POST"
     assert "rc-new" in captured[0]["body"]
+
+
+async def test_admin_can_sync_yibuapi_rate_card(
+    rc_setup: tuple[FastAPI, str, str, list[dict[str, str]]],
+) -> None:
+    app, admin_raw, _team_raw, captured = rc_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/rate-cards/sync/yibuapi",
+            headers={"Authorization": f"Bearer {admin_raw}"},
+            json={"source_url": "https://yibuapi.test/api/pricing"},
+        )
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] == "yibuapi-pricing-v1"
+    assert captured[0]["method"] == "POST"
+    assert captured[0]["path"] == "/admin/rate-cards/sync/yibuapi"
+    assert "https://yibuapi.test/api/pricing" in captured[0]["body"]
 
 
 async def test_unauthenticated_401(

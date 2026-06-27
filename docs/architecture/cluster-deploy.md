@@ -318,7 +318,12 @@ loom eval batch create --agent oracle --name N [--benchmark B | --task-filter JS
 loom eval batch create --provider N --model M --agent A --name N
     [--benchmark B | --task-filter JSON] [--n-per-task N] [--backend B]
 loom eval batch {list,show,cancel}
-loom eval usage --start YYYY-MM-DD --end YYYY-MM-DD [--group-by day|week|month]
+loom eval usage --start YYYY-MM-DD --end YYYY-MM-DD [--group-by day|week|month] [--include-batches]
+    [--team-id UUID] [--user-id UUID] [--provider-connection-id UUID]
+    [--model MODEL] [--benchmark-id ID] [--batch-id UUID]
+    [--status STATE] [--pricing-mode priced|tokens-only|price-unknown]
+    [--breakdown-by team|user|provider_connection|model|benchmark|batch|status|pricing_mode]
+loom admin rate-cards sync-yibuapi [--group GROUP] [--source-url URL]
 loom eval trial {list,show}
 loom eval trial show TRIAL_ID
 loom eval trial download TRIAL_ID --kind atif --output atif.json
@@ -470,9 +475,15 @@ Rewrap during master-key rotation bumps `provider_connections.updated_at` for ev
 
 | `pricing_source` | Behavior |
 |---|---|
-| `rate-card` | Look up `(rate_card_provider, model_id)` for facade-routed calls, falling back to safe type defaults (`anthropic`, `google`, `openai` for `openai-compatible`). Missing entries record `cost_usd=0` with a missing-rate-card marker. |
-| `tokens-only` | Record tokens; `cost_usd = 0`. Default for `openai-compatible` and `custom`. |
+| `rate-card` | Look up `(rate_card_provider, model_id)` for facade-routed calls, falling back to safe type defaults (`anthropic`, `google`, `openai` for `openai-compatible`). For YibuAPI, sync the official catalog with `loom admin rate-cards sync-yibuapi` and set `rate_card_provider=yibuapi`. Missing entries record `cost_usd=0` with a missing-rate-card marker and surface as `cost_status=price_unknown`. |
+| `tokens-only` | Record tokens; `cost_usd = 0`. Default for `openai-compatible` and `custom`; use this for user-managed/self-deployed APIs so API and CLI views return token totals with `cost_status=not_applicable`. |
 | `operator-supplied` | Use `pricing_data.{input_usd_per_1m, output_usd_per_1m}`; route-validates non-null + non-negative. |
+
+Provider usage completeness is tracked separately from pricing. Facade calls
+that receive missing or partial provider usage blocks still write an
+`llm_calls` row, but mark `provider_extras._loom_usage_status` as `missing` or
+`partial`; `/api/v1/trials`, `/api/v1/batches`, and `/api/v1/usage` surface the
+corresponding incomplete-usage counts and `usage_estimate_confidence`.
 
 ## Worker concurrency
 

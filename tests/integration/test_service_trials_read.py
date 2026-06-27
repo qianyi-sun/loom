@@ -31,12 +31,14 @@ from loom.db.schema import (
     Batch,
     Benchmark,
     LlmCall,
+    RateCard,
     Task,
     Team,
     TeamQuota,
     Token,
     Trial,
 )
+from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -144,7 +146,7 @@ async def trials_setup(
                     "output_tokens": 1,
                     "provider_extras": {},
                     "cost_usd": Decimal("0.000000"),
-                    "rate_card_hash": "missing-rate-card",
+                    "rate_card_hash": "facade:rate-card:missing",
                 },
             ],
         )
@@ -158,6 +160,7 @@ async def trials_setup(
             s.execute(delete(LlmCall))
             s.execute(delete(Trial))
             s.execute(delete(Batch))
+            s.execute(delete(RateCard))
             s.execute(delete(Token))
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
@@ -197,11 +200,17 @@ async def test_list_my_trials(
     assert "cost_usd" not in items[0]
     assert items[0]["total_prompt_tokens"] == 12
     assert items[0]["total_completion_tokens"] == 6
+    assert items[0]["estimated_cost_usd"] == pytest.approx(9.99)
+    assert items[0]["cost_currency"] == "USD"
+    assert items[0]["cost_status"] == "mixed"
+    assert items[0]["pricing_modes"] == ["priced", "price-unknown"]
     assert items[0]["llm_calls_count"] == 2
     # Running trial: no reward.
     assert items[1]["aggregate_reward"] is None
     assert items[1]["total_prompt_tokens"] == 0
     assert items[1]["total_completion_tokens"] == 0
+    assert items[1]["estimated_cost_usd"] is None
+    assert items[1]["cost_status"] == "no_usage"
     assert items[1]["llm_calls_count"] == 0
     # Agent name pulled from config.
     assert items[0]["agent_name"] == "oracle"
@@ -422,9 +431,158 @@ async def test_trial_detail_returns_service_download_urls(
     assert "cost_usd" not in body
     assert body["total_prompt_tokens"] == 12
     assert body["total_completion_tokens"] == 6
+    assert body["estimated_cost_usd"] == pytest.approx(9.99)
+    assert body["cost_currency"] == "USD"
+    assert body["cost_status"] == "mixed"
+    assert body["pricing_modes"] == ["priced", "price-unknown"]
     assert body["llm_calls_count"] == 2
     # failure_message field present in response (issue #164).
     assert "failure_message" in body
+
+
+async def test_trial_detail_exposes_rate_card_snapshot_metadata(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    captured_at = datetime(2026, 6, 27, tzinfo=UTC)
+    table = RateCardTable(
+        id="yibuapi-pricing-v1",
+        captured_at=captured_at,
+        provider="yibuapi",
+        source_url="https://yibuapi.com/api/pricing",
+        pricing_version="pricing-v1",
+        last_checked_at=captured_at,
+        currency="USD",
+        group="default",
+        group_ratio=1.0,
+        entry_count=1,
+        skipped_model_count=0,
+        entries=[
+            {
+                "provider": "yibuapi",
+                "model": "qwen3.6-35b-a3b",
+                "input_per_mtok": 0.25,
+                "output_per_mtok": 0.75,
+                "cache_read_per_mtok": 0.0,
+                "cache_write_per_mtok": 0.0,
+                "currency": "USD",
+                "source_url": "https://yibuapi.com/api/pricing",
+                "pricing_version": "pricing-v1",
+                "source_model": "Qwen3.6 35B A3B",
+                "pricing_unit": "mtok",
+            }
+        ],
+    )
+    table_hash = hash_table(table)
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(RateCard).values(
+                id=table.id,
+                captured_at=table.captured_at,
+                table=table.model_dump(mode="json", exclude={"captured_at"}),
+            )
+        )
+        s.execute(
+            update(LlmCall)
+            .where(
+                LlmCall.trial_id == trial_ids[0],
+                LlmCall.rate_card_hash == "old-rate-card",
+            )
+            .values(rate_card_hash=table_hash),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["price_snapshots"] == [
+        {
+            "rate_card_hash": table_hash,
+            "rate_card_id": "yibuapi-pricing-v1",
+            "resolved": True,
+            "provider": "yibuapi",
+            "source_url": "https://yibuapi.com/api/pricing",
+            "pricing_version": "pricing-v1",
+            "last_checked_at": "2026-06-27T00:00:00+00:00",
+            "currency": "USD",
+            "group": "default",
+            "group_ratio": 1.0,
+        }
+    ]
+
+
+async def test_trial_detail_exposes_incomplete_usage_confidence(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(LlmCall)
+            .where(
+                LlmCall.trial_id == trial_ids[0],
+                LlmCall.rate_card_hash == "facade:rate-card:missing",
+            )
+            .values(
+                input_tokens=0,
+                output_tokens=0,
+                provider_extras={"_loom_usage_status": "missing"},
+            ),
+        )
+        s.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_ids[0],
+                step_id="main",
+                model="openai/gpt-test",
+                dialect="openai_facade",
+                input_tokens=3,
+                output_tokens=0,
+                provider_extras={
+                    "_loom_usage_status": "partial",
+                    "_loom_missing_usage_keys": ["completion_tokens"],
+                    "_loom_provider_usage": {"prompt_tokens": 3},
+                },
+                cost_usd=Decimal("0.000000"),
+                rate_card_hash="facade:tokens-only",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_ids[0]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["partial_usage_llm_calls_count"] == 1
+    assert body["missing_usage_llm_calls_count"] == 1
+    assert body["usage_reporting_status"] == "partial"
+    assert body["usage_estimate_confidence"] == "partial"
 
 
 async def test_trial_debug_evidence_is_structured_and_redacted(

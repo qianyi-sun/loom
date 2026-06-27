@@ -32,7 +32,8 @@ async def list_rate_cards(
     _ = sc
     resp = await forward(
         request.app.state.gateway_client,
-        method="GET", path="/admin/rate-cards",
+        method="GET",
+        path="/admin/rate-cards",
         authorization=authorization,
     )
     return propagate(resp)
@@ -66,7 +67,28 @@ async def create_rate_card(
     require_scope(ctx, "admin:rate_cards")
     resp = await forward(
         request.app.state.gateway_client,
-        method="POST", path="/admin/rate-cards",
-        authorization=authorization, json_body=payload,
+        method="POST",
+        path="/admin/rate-cards",
+        authorization=authorization,
+        json_body=payload,
+    )
+    return propagate(resp)
+
+
+@router.post("/rate-cards/sync/yibuapi", status_code=201)
+async def sync_yibuapi_rate_card(
+    request: Request,
+    sc: SessionAndCtx,
+    payload: dict[str, Any] | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    _session, ctx = sc
+    require_scope(ctx, "admin:rate_cards")
+    resp = await forward(
+        request.app.state.gateway_client,
+        method="POST",
+        path="/admin/rate-cards/sync/yibuapi",
+        authorization=authorization,
+        json_body=payload or {},
     )
     return propagate(resp)

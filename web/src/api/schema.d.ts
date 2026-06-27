@@ -363,6 +363,7 @@ export interface paths {
           start: string;
           end: string;
           group_by?: string;
+          include_batches?: string;
         };
       };
       responses: {
@@ -447,6 +448,42 @@ export interface components {
       starting_tasks: number;
       queued_tasks: number;
     };
+    UsageCostStatus:
+      | "no_usage"
+      | "estimated"
+      | "not_applicable"
+      | "price_unknown"
+      | "mixed"
+      | string;
+    UsagePricingMode:
+      | "priced"
+      | "tokens-only"
+      | "price-unknown"
+      | string;
+    UsageReportingStatus:
+      | "no_usage"
+      | "complete"
+      | "partial"
+      | "missing"
+      | string;
+    UsageEstimateConfidence:
+      | "none"
+      | "high"
+      | "partial"
+      | "missing"
+      | string;
+    PriceSnapshot: {
+      rate_card_hash: string;
+      rate_card_id: string | null;
+      resolved: boolean;
+      provider: string | null;
+      source_url: string | null;
+      pricing_version: string | null;
+      last_checked_at: string | null;
+      currency: string | null;
+      group: string | null;
+      group_ratio: number | null;
+    };
     Trial: {
       id: string;
       task_id: string;
@@ -460,7 +497,19 @@ export interface components {
       aggregate_reward: number | null;
       total_prompt_tokens: number;
       total_completion_tokens: number;
+      total_tokens?: number;
       llm_calls_count: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+      pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
+      partial_usage_llm_calls_count?: number;
+      missing_usage_llm_calls_count?: number;
+      usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
+      usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
       agent_name: string | null;
       model: components["schemas"]["ModelSpec"] | null;
     };
@@ -496,6 +545,7 @@ export interface components {
         share_status?: "pending_scan" | "shared" | "blocked";
         blocked_reason?: string | null;
       }[];
+      price_snapshots?: components["schemas"]["PriceSnapshot"][];
       debug_evidence?: components["schemas"]["DebugEvidence"];
       diagnosis?: components["schemas"]["DiagnosisReport"];
     };
@@ -667,7 +717,19 @@ export interface components {
       expected_trial_count: number;
       total_prompt_tokens: number;
       total_completion_tokens: number;
+      total_tokens?: number;
       llm_calls_count: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+      pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
+      partial_usage_llm_calls_count?: number;
+      missing_usage_llm_calls_count?: number;
+      usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
+      usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
       visibility?: "team" | "org" | "private";
       share_status?: "pending_scan" | "shared" | "blocked";
       source_provenance?: Record<string, unknown>[];
@@ -712,8 +774,42 @@ export interface components {
       effective_total_prompt_tokens: number;
       effective_total_completion_tokens: number;
       effective_llm_calls_count: number;
+      effective_total_tokens?: number;
+      effective_estimated_cost_usd?: number | null;
+      effective_cost_currency?: string | null;
+      effective_cost_status?: components["schemas"]["UsageCostStatus"];
+      effective_pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      effective_priced_llm_calls_count?: number;
+      effective_token_only_llm_calls_count?: number;
+      effective_price_unknown_llm_calls_count?: number;
+      effective_partial_usage_llm_calls_count?: number;
+      effective_missing_usage_llm_calls_count?: number;
+      effective_usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
+      effective_usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
+      price_snapshots?: components["schemas"]["PriceSnapshot"][];
+      effective_price_snapshots?: components["schemas"]["PriceSnapshot"][];
       debug_evidence?: components["schemas"]["DebugEvidence"];
       diagnosis?: components["schemas"]["DiagnosisReport"];
+    };
+    UsageBatch: {
+      batch_id: string;
+      batch_name: string;
+      team_id: string;
+      team_name?: string | null;
+      trial_count: number;
+      llm_input_tokens: number;
+      llm_output_tokens: number;
+      estimated_cost_usd: number | null;
+      cost_currency: string | null;
+      cost_status: components["schemas"]["UsageCostStatus"];
+      pricing_modes: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
+      partial_usage_llm_calls_count?: number;
+      missing_usage_llm_calls_count?: number;
+      usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
+      usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
     };
     UsageBucket: {
       start_at: string;
@@ -724,8 +820,20 @@ export interface components {
       succeeded_count: number;
       failed_count: number;
       total_cost_usd: number;
+      estimated_cost_usd?: number | null;
+      cost_currency?: string | null;
+      cost_status?: components["schemas"]["UsageCostStatus"];
+      pricing_modes?: components["schemas"]["UsagePricingMode"][];
+      priced_llm_calls_count?: number;
+      token_only_llm_calls_count?: number;
+      price_unknown_llm_calls_count?: number;
+      partial_usage_llm_calls_count?: number;
+      missing_usage_llm_calls_count?: number;
+      usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
+      usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
       llm_input_tokens: number;
       llm_output_tokens: number;
+      batches?: components["schemas"]["UsageBatch"][];
     };
     Usage: {
       buckets: components["schemas"]["UsageBucket"][];

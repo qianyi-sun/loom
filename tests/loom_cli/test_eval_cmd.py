@@ -21,15 +21,21 @@ _TRIAL_ID = "00000000-0000-0000-0000-0000000000cc"
 
 @pytest.fixture(autouse=True)
 def _isolated_logged_in_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setenv("MY_TOK", "loom_admin_test123456")
-    main([
-        "auth", "login",
-        "--server", "https://loom.test",
-        "--token", "env:MY_TOK",
-    ])
+    main(
+        [
+            "auth",
+            "login",
+            "--server",
+            "https://loom.test",
+            "--token",
+            "env:MY_TOK",
+        ]
+    )
 
 
 class MockServer:
@@ -80,7 +86,9 @@ def mock_server(monkeypatch: pytest.MonkeyPatch) -> MockServer:
 
 
 def _make_connection(
-    *, name: str = "openai-prod", type_: str = "openai-compatible",
+    *,
+    name: str = "openai-prod",
+    type_: str = "openai-compatible",
 ) -> dict[str, Any]:
     return {
         "id": _CONN_ID,
@@ -105,7 +113,8 @@ def _make_connection(
 def _stub_connection_lookup(server: MockServer, **kwargs: Any) -> dict[str, Any]:
     conn = _make_connection(**kwargs)
     server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
-        200, json={"items": [conn]},
+        200,
+        json={"items": [conn]},
     )
     return conn
 
@@ -116,11 +125,13 @@ def _stub_connection_lookup(server: MockServer, **kwargs: Any) -> dict[str, Any]
 
 
 def test_run_resolves_provider_then_posts_trial(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
-        201, json={
+        201,
+        json={
             "id": _TRIAL_ID,
             "task_id": "humaneval/HumanEval/0",
             "state": "queued",
@@ -129,13 +140,20 @@ def test_run_resolves_provider_then_posts_trial(
             "submitted_at": "2026-06-16T00:00:00Z",
         },
     )
-    rc = main([
-        "eval", "run",
-        "--provider", "openai-prod",
-        "--model", "gpt-4o",
-        "--agent", "litellm",
-        "--task", "humaneval/HumanEval/0",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task",
+            "humaneval/HumanEval/0",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "Submitted trial" in out
@@ -166,20 +184,29 @@ def test_run_resolves_provider_then_posts_trial(
 
 
 def test_run_summary_uses_submitted_task_when_response_omits_task_id(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
-        201, json={"id": _TRIAL_ID, "state": "queued"},
+        201,
+        json={"id": _TRIAL_ID, "state": "queued"},
     )
 
-    rc = main([
-        "eval", "run",
-        "--provider", "openai-prod",
-        "--model", "gpt-4o",
-        "--agent", "litellm",
-        "--task", "hello-world",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task",
+            "hello-world",
+        ]
+    )
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -192,18 +219,28 @@ def test_run_with_anthropic_provider_maps_type_to_provider(
 ) -> None:
     """type='anthropic' → agent_model.provider='anthropic'."""
     _stub_connection_lookup(
-        mock_server, name="anthropic-prod", type_="anthropic",
+        mock_server,
+        name="anthropic-prod",
+        type_="anthropic",
     )
     mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
-        201, json={"id": _TRIAL_ID, "task_id": "t", "state": "queued"},
+        201,
+        json={"id": _TRIAL_ID, "task_id": "t", "state": "queued"},
     )
-    rc = main([
-        "eval", "run",
-        "--provider", "anthropic-prod",
-        "--model", "claude-opus-4-7",
-        "--agent", "litellm",
-        "--task", "humaneval/HumanEval/0",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "anthropic-prod",
+            "--model",
+            "claude-opus-4-7",
+            "--agent",
+            "litellm",
+            "--task",
+            "humaneval/HumanEval/0",
+        ]
+    )
     assert rc == 0
     body = json.loads(mock_server[1].content)
     assert body["config"]["agent_model"]["provider"] == "anthropic"
@@ -218,25 +255,34 @@ def test_run_agent_provider_override_wins_over_type_mapping(
     over the type→provider default (which would have produced 'openai'
     and silently dropped the rate-card lookup)."""
     _stub_connection_lookup(
-        mock_server, name="together-prod", type_="openai-compatible",
+        mock_server,
+        name="together-prod",
+        type_="openai-compatible",
     )
     mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
-        201, json={"id": _TRIAL_ID, "task_id": "t", "state": "queued"},
+        201,
+        json={"id": _TRIAL_ID, "task_id": "t", "state": "queued"},
     )
-    rc = main([
-        "eval", "run",
-        "--provider", "together-prod",
-        "--model", "meta-llama/Llama-3.1-70B-Instruct",
-        "--agent", "litellm",
-        "--task", "humaneval/HumanEval/0",
-        "--agent-provider", "together",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "together-prod",
+            "--model",
+            "meta-llama/Llama-3.1-70B-Instruct",
+            "--agent",
+            "litellm",
+            "--task",
+            "humaneval/HumanEval/0",
+            "--agent-provider",
+            "together",
+        ]
+    )
     assert rc == 0
     body = json.loads(mock_server[1].content)
     assert body["config"]["agent_model"]["provider"] == "together"
-    assert body["config"]["agent_model"]["name"] == (
-        "meta-llama/Llama-3.1-70B-Instruct"
-    )
+    assert body["config"]["agent_model"]["name"] == ("meta-llama/Llama-3.1-70B-Instruct")
 
 
 def test_batch_create_agent_provider_override(
@@ -244,44 +290,69 @@ def test_batch_create_agent_provider_override(
 ) -> None:
     """Same override on batch create."""
     _stub_connection_lookup(
-        mock_server, name="fireworks-prod", type_="custom",
+        mock_server,
+        name="fireworks-prod",
+        type_="custom",
     )
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={
-            "batch_id": _BATCH_ID, "expected_trial_count": 1,
-            "n_per_task": 1, "backend": "docker",
-            "combinations": [], "state": "submitted",
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
             "created_at": "2026-06-16T00:00:00Z",
         },
     )
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "fireworks-prod",
-        "--model", "accounts/fireworks/models/llama-v3p1-70b-instruct",
-        "--agent", "litellm",
-        "--benchmark", "humaneval",
-        "--name", "fw-run",
-        "--agent-provider", "fireworks_ai",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "fireworks-prod",
+            "--model",
+            "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--name",
+            "fw-run",
+            "--agent-provider",
+            "fireworks_ai",
+        ]
+    )
     assert rc == 0
     body = json.loads(mock_server[1].content)
     assert body["trial_config"]["agent_model"]["provider"] == "fireworks_ai"
 
 
 def test_run_unknown_provider_returns_1(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Provider lookup miss → exit 1, no POST issued."""
     mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
-        200, json={"items": []},
+        200,
+        json={"items": []},
     )
-    rc = main([
-        "eval", "run",
-        "--provider", "nope",
-        "--model", "gpt-4o",
-        "--agent", "litellm",
-        "--task", "t",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "nope",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task",
+            "t",
+        ]
+    )
     assert rc == 1
     err = capsys.readouterr().err
     assert "no provider connection named 'nope'" in err
@@ -290,19 +361,28 @@ def test_run_unknown_provider_returns_1(
 
 
 def test_run_server_error_surfaces_detail(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/trials")] = httpx.Response(
-        400, json={"detail": "unknown agent_name 'bogus'"},
+        400,
+        json={"detail": "unknown agent_name 'bogus'"},
     )
-    rc = main([
-        "eval", "run",
-        "--provider", "openai-prod",
-        "--model", "gpt-4o",
-        "--agent", "bogus",
-        "--task", "t",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "bogus",
+            "--task",
+            "t",
+        ]
+    )
     assert rc == 1
     err = capsys.readouterr().err
     assert "HTTP 400" in err
@@ -315,11 +395,13 @@ def test_run_server_error_surfaces_detail(
 
 
 def test_batch_create_with_benchmark_shortcut(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={
+        201,
+        json={
             "batch_id": _BATCH_ID,
             "expected_trial_count": 5,
             "n_per_task": 1,
@@ -329,14 +411,23 @@ def test_batch_create_with_benchmark_shortcut(
             "created_at": "2026-06-16T00:00:00Z",
         },
     )
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod",
-        "--model", "gpt-4o",
-        "--agent", "litellm",
-        "--benchmark", "humaneval",
-        "--name", "smoke-run",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--name",
+            "smoke-run",
+        ]
+    )
     assert rc == 0
     assert "Created batch 'smoke-run'" in capsys.readouterr().out
 
@@ -346,7 +437,9 @@ def test_batch_create_with_benchmark_shortcut(
     assert body["trial_config"] == {
         "agent_name": "litellm",
         "agent_model": {
-            "provider": "openai", "name": "gpt-4o", "source": "api",
+            "provider": "openai",
+            "name": "gpt-4o",
+            "source": "api",
         },
     }
     assert body["provider_connection_id"] == _CONN_ID
@@ -354,10 +447,12 @@ def test_batch_create_with_benchmark_shortcut(
 
 
 def test_batch_create_oracle_does_not_require_provider_or_model(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={
+        201,
+        json={
             "batch_id": _BATCH_ID,
             "expected_trial_count": 1,
             "n_per_task": 1,
@@ -368,12 +463,19 @@ def test_batch_create_oracle_does_not_require_provider_or_model(
         },
     )
 
-    rc = main([
-        "eval", "batch", "create",
-        "--agent", "oracle",
-        "--benchmark", "qa275-custom",
-        "--name", "oracle-smoke",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--agent",
+            "oracle",
+            "--benchmark",
+            "qa275-custom",
+            "--name",
+            "oracle-smoke",
+        ]
+    )
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -392,14 +494,22 @@ def test_batch_create_oracle_does_not_require_provider_or_model(
 
 
 def test_batch_create_model_agent_requires_provider_and_model(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = main([
-        "eval", "batch", "create",
-        "--agent", "litellm",
-        "--benchmark", "humaneval",
-        "--name", "missing-model",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--name",
+            "missing-model",
+        ]
+    )
 
     assert rc == 2
     assert "requires --provider and --model" in capsys.readouterr().err
@@ -407,11 +517,13 @@ def test_batch_create_model_agent_requires_provider_and_model(
 
 
 def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={
+        201,
+        json={
             "batch_id": _BATCH_ID,
             "expected_trial_count": 5,
             "n_per_task": 1,
@@ -421,14 +533,23 @@ def test_batch_create_summary_uses_submitted_name_when_response_omits_name(
             "created_at": "2026-06-16T00:00:00Z",
         },
     )
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod",
-        "--model", "gpt-4o",
-        "--agent", "litellm",
-        "--benchmark", "humaneval",
-        "--name", "smoke-run",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--name",
+            "smoke-run",
+        ]
+    )
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -441,18 +562,35 @@ def test_batch_create_task_filter_json(
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 3,
-                   "n_per_task": 1, "backend": "docker",
-                   "combinations": [], "state": "submitted",
-                   "created_at": "2026-06-16T00:00:00Z"},
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 3,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
     )
     filt = '{"benchmark_id":"humaneval","subset_kind":"first_n","n":3}'
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "litellm", "--task-filter", filt,
-        "--name", "first3",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task-filter",
+            filt,
+            "--name",
+            "first3",
+        ]
+    )
     assert rc == 0
     body = json.loads(mock_server[1].content)
     assert body["task_filter"] == {
@@ -463,41 +601,71 @@ def test_batch_create_task_filter_json(
 
 
 def test_batch_create_task_filter_at_path(
-    mock_server: MockServer, tmp_path: Path,
+    mock_server: MockServer,
+    tmp_path: Path,
 ) -> None:
     """`--task-filter @path/to/file.json` reads from disk."""
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 1,
-                   "n_per_task": 1, "backend": "docker",
-                   "combinations": [], "state": "submitted",
-                   "created_at": "2026-06-16T00:00:00Z"},
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
     )
     f = tmp_path / "filt.json"
     f.write_text('{"task_ids":["humaneval/HumanEval/0"]}')
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "litellm", "--task-filter", f"@{f}",
-        "--name", "n",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--task-filter",
+            f"@{f}",
+            "--name",
+            "n",
+        ]
+    )
     assert rc == 0
     body = json.loads(mock_server[1].content)
     assert body["task_filter"] == {"task_ids": ["humaneval/HumanEval/0"]}
 
 
 def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "litellm",
-        "--benchmark", "humaneval",
-        "--task-filter", '{"benchmark_id":"humaneval"}',
-        "--name", "n",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--task-filter",
+            '{"benchmark_id":"humaneval"}',
+            "--name",
+            "n",
+        ]
+    )
     assert rc == 2
     assert "mutually exclusive" in capsys.readouterr().err
     # Connection lookup happened, but no POST.
@@ -506,14 +674,25 @@ def test_batch_create_benchmark_and_task_filter_mutually_exclusive(
 
 
 def test_batch_create_requires_benchmark_or_filter(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _stub_connection_lookup(mock_server)
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "litellm", "--name", "n",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--name",
+            "n",
+        ]
+    )
     assert rc == 2
     assert "one of --benchmark or --task-filter" in capsys.readouterr().err
 
@@ -522,13 +701,23 @@ def test_batch_create_invalid_task_filter_json_rejected_at_argparse(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as exc:
-        main([
-            "eval", "batch", "create",
-            "--provider", "openai-prod", "--model", "gpt-4o",
-            "--agent", "litellm",
-            "--task-filter", "{not json",
-            "--name", "n",
-        ])
+        main(
+            [
+                "eval",
+                "batch",
+                "create",
+                "--provider",
+                "openai-prod",
+                "--model",
+                "gpt-4o",
+                "--agent",
+                "litellm",
+                "--task-filter",
+                "{not json",
+                "--name",
+                "n",
+            ]
+        )
     assert exc.value.code == 2
     assert "invalid JSON" in capsys.readouterr().err
 
@@ -538,18 +727,40 @@ def test_batch_create_forwards_optional_fields(
 ) -> None:
     _stub_connection_lookup(mock_server)
     mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
-        201, json={"batch_id": _BATCH_ID, "expected_trial_count": 10,
-                   "n_per_task": 2, "backend": "fake",
-                   "combinations": [], "state": "submitted",
-                   "created_at": "2026-06-16T00:00:00Z"},
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 10,
+            "n_per_task": 2,
+            "backend": "fake",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
     )
-    rc = main([
-        "eval", "batch", "create",
-        "--provider", "openai-prod", "--model", "gpt-4o",
-        "--agent", "litellm", "--benchmark", "humaneval",
-        "--name", "n", "--description", "smoke",
-        "--n-per-task", "2", "--backend", "fake",
-    ])
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--name",
+            "n",
+            "--description",
+            "smoke",
+            "--n-per-task",
+            "2",
+            "--backend",
+            "fake",
+        ]
+    )
     assert rc == 0
     body = json.loads(mock_server[1].content)
     assert body["description"] == "smoke"
@@ -563,10 +774,12 @@ def test_batch_create_forwards_optional_fields(
 
 
 def test_batch_list_empty(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
-        200, json={"items": [], "next_cursor": None},
+        200,
+        json={"items": [], "next_cursor": None},
     )
     rc = main(["eval", "batch", "list"])
     assert rc == 0
@@ -574,18 +787,33 @@ def test_batch_list_empty(
 
 
 def test_batch_list_table_and_state_filter_param(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
-        200, json={"items": [{
-            "id": _BATCH_ID, "team_id": "x", "name": "b1",
-            "description": None, "task_filter": {}, "trial_config": {},
-            "state": "running", "result_status": None,
-            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
-            "created_by_token_prefix": "abc",
-            "expected_trial_count": 7, "n_per_task": 1,
-            "backend": "docker", "combinations": [],
-        }], "next_cursor": None},
+        200,
+        json={
+            "items": [
+                {
+                    "id": _BATCH_ID,
+                    "team_id": "x",
+                    "name": "b1",
+                    "description": None,
+                    "task_filter": {},
+                    "trial_config": {},
+                    "state": "running",
+                    "result_status": None,
+                    "created_at": "2026-06-16T00:00:00Z",
+                    "finished_at": None,
+                    "created_by_token_prefix": "abc",
+                    "expected_trial_count": 7,
+                    "n_per_task": 1,
+                    "backend": "docker",
+                    "combinations": [],
+                }
+            ],
+            "next_cursor": None,
+        },
     )
     rc = main(["eval", "batch", "list", "--state", "running,queued"])
     assert rc == 0
@@ -597,21 +825,36 @@ def test_batch_list_table_and_state_filter_param(
 
 
 def test_batch_list_warns_on_truncation(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Issue #67: non-null `next_cursor` triggers a stderr hint so
     operators know they're seeing a partial result. Stdout still
     contains just the table so `| awk` pipelines keep working."""
     mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
-        200, json={"items": [{
-            "id": _BATCH_ID, "team_id": "x", "name": "b1",
-            "description": None, "task_filter": {}, "trial_config": {},
-            "state": "running", "result_status": None,
-            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
-            "created_by_token_prefix": "abc",
-            "expected_trial_count": 7, "n_per_task": 1,
-            "backend": "docker", "combinations": [],
-        }], "next_cursor": "opaque-cursor-token"},
+        200,
+        json={
+            "items": [
+                {
+                    "id": _BATCH_ID,
+                    "team_id": "x",
+                    "name": "b1",
+                    "description": None,
+                    "task_filter": {},
+                    "trial_config": {},
+                    "state": "running",
+                    "result_status": None,
+                    "created_at": "2026-06-16T00:00:00Z",
+                    "finished_at": None,
+                    "created_by_token_prefix": "abc",
+                    "expected_trial_count": 7,
+                    "n_per_task": 1,
+                    "backend": "docker",
+                    "combinations": [],
+                }
+            ],
+            "next_cursor": "opaque-cursor-token",
+        },
     )
     rc = main(["eval", "batch", "list"])
     assert rc == 0
@@ -623,19 +866,34 @@ def test_batch_list_warns_on_truncation(
 
 
 def test_batch_list_no_warning_when_not_truncated(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`next_cursor=None` means full result; no hint."""
     mock_server.canned[("GET", "/api/v1/batches")] = httpx.Response(
-        200, json={"items": [{
-            "id": _BATCH_ID, "team_id": "x", "name": "b1",
-            "description": None, "task_filter": {}, "trial_config": {},
-            "state": "running", "result_status": None,
-            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
-            "created_by_token_prefix": "abc",
-            "expected_trial_count": 7, "n_per_task": 1,
-            "backend": "docker", "combinations": [],
-        }], "next_cursor": None},
+        200,
+        json={
+            "items": [
+                {
+                    "id": _BATCH_ID,
+                    "team_id": "x",
+                    "name": "b1",
+                    "description": None,
+                    "task_filter": {},
+                    "trial_config": {},
+                    "state": "running",
+                    "result_status": None,
+                    "created_at": "2026-06-16T00:00:00Z",
+                    "finished_at": None,
+                    "created_by_token_prefix": "abc",
+                    "expected_trial_count": 7,
+                    "n_per_task": 1,
+                    "backend": "docker",
+                    "combinations": [],
+                }
+            ],
+            "next_cursor": None,
+        },
     )
     rc = main(["eval", "batch", "list"])
     assert rc == 0
@@ -644,21 +902,34 @@ def test_batch_list_no_warning_when_not_truncated(
 
 
 def test_trial_list_warns_on_truncation(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Issue #67: matching hint on trial list."""
     mock_server.canned[("GET", "/api/v1/trials")] = httpx.Response(
-        200, json={"items": [{
-            "id": _TRIAL_ID, "task_id": "t", "team_id": "x",
-            "state": "succeeded", "failure_reason": None,
-            "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
-            "finished_at": None, "attempt_count": 1,
-            "aggregate_reward": 0.5,
-            "total_prompt_tokens": 12,
-            "total_completion_tokens": 3,
-            "llm_calls_count": 1,
-            "agent_name": "litellm", "model": None,
-        }], "next_cursor": "opaque-cursor-token"},
+        200,
+        json={
+            "items": [
+                {
+                    "id": _TRIAL_ID,
+                    "task_id": "t",
+                    "team_id": "x",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "submitted_at": "2026-06-16T00:00:00Z",
+                    "started_at": None,
+                    "finished_at": None,
+                    "attempt_count": 1,
+                    "aggregate_reward": 0.5,
+                    "total_prompt_tokens": 12,
+                    "total_completion_tokens": 3,
+                    "llm_calls_count": 1,
+                    "agent_name": "litellm",
+                    "model": None,
+                }
+            ],
+            "next_cursor": "opaque-cursor-token",
+        },
     )
     rc = main(["eval", "trial", "list"])
     assert rc == 0
@@ -668,19 +939,35 @@ def test_trial_list_warns_on_truncation(
 
 
 def test_batch_show_renders_rollup(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(
-        200, json={
-            "id": _BATCH_ID, "team_id": "x", "name": "b1",
-            "description": None, "task_filter": {}, "trial_config": {},
-            "state": "succeeded", "result_status": "ok",
-            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
+        200,
+        json={
+            "id": _BATCH_ID,
+            "team_id": "x",
+            "name": "b1",
+            "description": None,
+            "task_filter": {},
+            "trial_config": {},
+            "state": "succeeded",
+            "result_status": "ok",
+            "created_at": "2026-06-16T00:00:00Z",
+            "finished_at": None,
             "created_by_token_prefix": "abc",
-            "expected_trial_count": 4, "n_per_task": 1,
-            "backend": "docker", "combinations": [],
-            "trial_summary": {"queued": 0, "claimed": 0, "running": 0,
-                              "succeeded": 3, "failed": 1, "cancelled": 0},
+            "expected_trial_count": 4,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "trial_summary": {
+                "queued": 0,
+                "claimed": 0,
+                "running": 0,
+                "succeeded": 3,
+                "failed": 1,
+                "cancelled": 0,
+            },
             "aggregate_reward": 0.75,
             "total_prompt_tokens": 120,
             "total_completion_tokens": 45,
@@ -698,22 +985,38 @@ def test_batch_show_renders_rollup(
 
 
 def test_batch_show_renders_fanout_failure(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(
-        200, json={
-            "id": _BATCH_ID, "team_id": "x", "name": "b1",
-            "description": None, "task_filter": {}, "trial_config": {},
-            "state": "finished", "result_status": "all_failed",
+        200,
+        json={
+            "id": _BATCH_ID,
+            "team_id": "x",
+            "name": "b1",
+            "description": None,
+            "task_filter": {},
+            "trial_config": {},
+            "state": "finished",
+            "result_status": "all_failed",
             "failure_reason": "fanout_submit_failed",
             "failure_message": "task t1 submit failed: HTTP 403: blocked",
             "fanout_errors": [{"task_id": "t1", "status_code": 403}],
-            "created_at": "2026-06-16T00:00:00Z", "finished_at": None,
+            "created_at": "2026-06-16T00:00:00Z",
+            "finished_at": None,
             "created_by_token_prefix": "abc",
-            "expected_trial_count": 0, "n_per_task": 1,
-            "backend": "docker", "combinations": [],
-            "trial_summary": {"queued": 0, "claimed": 0, "running": 0,
-                              "succeeded": 0, "failed": 0, "cancelled": 0},
+            "expected_trial_count": 0,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "trial_summary": {
+                "queued": 0,
+                "claimed": 0,
+                "running": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "cancelled": 0,
+            },
             "aggregate_reward": None,
             "total_prompt_tokens": 0,
             "total_completion_tokens": 0,
@@ -729,7 +1032,8 @@ def test_batch_show_renders_fanout_failure(
 
 
 def test_batch_debug_fetches_machine_readable_evidence(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     payload = {
         "schema_version": "1",
@@ -748,25 +1052,22 @@ def test_batch_debug_fetches_machine_readable_evidence(
         },
         "next_actions": ["Inspect batch fan-out errors."],
     }
-    mock_server.canned[
-        ("GET", f"/api/v1/batches/{_BATCH_ID}/debug")
-    ] = httpx.Response(200, json=payload)
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/debug")] = httpx.Response(
+        200, json=payload
+    )
 
     rc = main(["eval", "batch", "debug", _BATCH_ID, "--format", "json"])
 
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["failure"] == (
-        payload["failure"]
-    )
+    assert json.loads(capsys.readouterr().out)["failure"] == (payload["failure"])
     assert mock_server[0].url.path == f"/api/v1/batches/{_BATCH_ID}/debug"
 
 
 def test_batch_debug_renders_text_summary(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    mock_server.canned[
-        ("GET", f"/api/v1/batches/{_BATCH_ID}/debug")
-    ] = httpx.Response(
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/debug")] = httpx.Response(
         200,
         json={
             "schema_version": "1",
@@ -793,7 +1094,8 @@ def test_batch_debug_renders_text_summary(
 
 
 def test_diagnose_batch_fetches_machine_readable_report(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     payload = {
         "schema_version": "1",
@@ -824,27 +1126,22 @@ def test_diagnose_batch_fetches_machine_readable_report(
             }
         ],
     }
-    mock_server.canned[
-        ("GET", f"/api/v1/batches/{_BATCH_ID}/diagnosis")
-    ] = httpx.Response(200, json=payload)
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/diagnosis")] = httpx.Response(
+        200, json=payload
+    )
 
     rc = main(["eval", "diagnose", "batch", _BATCH_ID, "--format", "json"])
 
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["primary_cause"] == (
-        payload["primary_cause"]
-    )
-    assert mock_server[0].url.path == (
-        f"/api/v1/batches/{_BATCH_ID}/diagnosis"
-    )
+    assert json.loads(capsys.readouterr().out)["primary_cause"] == (payload["primary_cause"])
+    assert mock_server[0].url.path == (f"/api/v1/batches/{_BATCH_ID}/diagnosis")
 
 
 def test_diagnose_batch_renders_text_report(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    mock_server.canned[
-        ("GET", f"/api/v1/batches/{_BATCH_ID}/diagnosis")
-    ] = httpx.Response(
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}/diagnosis")] = httpx.Response(
         200,
         json={
             "schema_version": "1",
@@ -893,11 +1190,12 @@ def test_diagnose_batch_renders_text_report(
 
 
 def test_batch_cancel(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    mock_server.canned[
-        ("POST", f"/api/v1/batches/{_BATCH_ID}/cancel")
-    ] = httpx.Response(200, json={"batch_id": _BATCH_ID, "state": "cancelled"})
+    mock_server.canned[("POST", f"/api/v1/batches/{_BATCH_ID}/cancel")] = httpx.Response(
+        200, json={"batch_id": _BATCH_ID, "state": "cancelled"}
+    )
     rc = main(["eval", "batch", "cancel", _BATCH_ID])
     assert rc == 0
     assert "Cancelled batch" in capsys.readouterr().out
@@ -909,26 +1207,43 @@ def test_batch_cancel(
 
 
 def test_trial_list_with_task_id_filter(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", "/api/v1/trials")] = httpx.Response(
-        200, json={"items": [{
-            "id": _TRIAL_ID, "task_id": "humaneval/HumanEval/0",
-            "team_id": "x", "state": "succeeded", "failure_reason": None,
-            "submitted_at": "2026-06-16T00:00:00Z", "started_at": None,
-            "finished_at": None, "attempt_count": 1,
-            "aggregate_reward": 0.875,
-            "total_prompt_tokens": 20,
-            "total_completion_tokens": 8,
-            "llm_calls_count": 1,
-            "agent_name": "litellm",
-            "model": {"provider": "openai", "name": "gpt-4o"},
-        }], "next_cursor": None},
+        200,
+        json={
+            "items": [
+                {
+                    "id": _TRIAL_ID,
+                    "task_id": "humaneval/HumanEval/0",
+                    "team_id": "x",
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "submitted_at": "2026-06-16T00:00:00Z",
+                    "started_at": None,
+                    "finished_at": None,
+                    "attempt_count": 1,
+                    "aggregate_reward": 0.875,
+                    "total_prompt_tokens": 20,
+                    "total_completion_tokens": 8,
+                    "llm_calls_count": 1,
+                    "agent_name": "litellm",
+                    "model": {"provider": "openai", "name": "gpt-4o"},
+                }
+            ],
+            "next_cursor": None,
+        },
     )
-    rc = main([
-        "eval", "trial", "list",
-        "--task-id", "humaneval/HumanEval/0",
-    ])
+    rc = main(
+        [
+            "eval",
+            "trial",
+            "list",
+            "--task-id",
+            "humaneval/HumanEval/0",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert _TRIAL_ID in out
@@ -937,38 +1252,43 @@ def test_trial_list_with_task_id_filter(
 
 
 def test_trial_show_renders_public_download_commands_when_ready(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
-        200, json={
-            "id": _TRIAL_ID, "task_id": "t", "team_id": "x",
-            "state": "succeeded", "failure_reason": None,
+        200,
+        json={
+            "id": _TRIAL_ID,
+            "task_id": "t",
+            "team_id": "x",
+            "state": "succeeded",
+            "failure_reason": None,
             "submitted_at": "2026-06-16T00:00:00Z",
             "started_at": "2026-06-16T00:01:00Z",
             "finished_at": "2026-06-16T00:02:00Z",
-            "attempt_count": 1, "aggregate_reward": 1.0,
+            "attempt_count": 1,
+            "aggregate_reward": 1.0,
             "total_prompt_tokens": 50,
             "total_completion_tokens": 12,
             "llm_calls_count": 1,
             "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
             "atif_url": f"https://loom.test/api/v1/trials/{_TRIAL_ID}/atif",
-            "trajectory_url": (
-                f"https://loom.test/api/v1/trials/{_TRIAL_ID}"
-                "/trajectory/download"
-            ),
+            "trajectory_url": (f"https://loom.test/api/v1/trials/{_TRIAL_ID}/trajectory/download"),
             "atif_ready": True,
             "trajectory_ready": True,
-            "artifacts": [{
-                "path": "result.txt",
-                "key": f"team/{_TRIAL_ID}/artifacts/result.txt",
-                "download_url": (
-                    f"https://loom.test/api/v1/trials/{_TRIAL_ID}"
-                    "/artifacts/download?key=team/result.txt"
-                ),
-                "share_status": "shared",
-                "blocked_reason": None,
-            }],
+            "artifacts": [
+                {
+                    "path": "result.txt",
+                    "key": f"team/{_TRIAL_ID}/artifacts/result.txt",
+                    "download_url": (
+                        f"https://loom.test/api/v1/trials/{_TRIAL_ID}"
+                        "/artifacts/download?key=team/result.txt"
+                    ),
+                    "share_status": "shared",
+                    "blocked_reason": None,
+                }
+            ],
         },
     )
     rc = main(["eval", "trial", "show", _TRIAL_ID])
@@ -982,41 +1302,42 @@ def test_trial_show_renders_public_download_commands_when_ready(
 
 
 def test_trial_show_redacts_legacy_signed_urls_in_text_output(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
-        200, json={
-            "id": _TRIAL_ID, "task_id": "t", "team_id": "x",
-            "state": "succeeded", "failure_reason": None,
+        200,
+        json={
+            "id": _TRIAL_ID,
+            "task_id": "t",
+            "team_id": "x",
+            "state": "succeeded",
+            "failure_reason": None,
             "submitted_at": "2026-06-16T00:00:00Z",
             "started_at": "2026-06-16T00:01:00Z",
             "finished_at": "2026-06-16T00:02:00Z",
-            "attempt_count": 1, "aggregate_reward": 1.0,
+            "attempt_count": 1,
+            "aggregate_reward": 1.0,
             "total_prompt_tokens": 50,
             "total_completion_tokens": 12,
             "llm_calls_count": 1,
             "agent_name": "litellm",
             "model": {"provider": "openai", "name": "gpt-4o"},
-            "atif_url": (
-                "https://minio.internal/atif.json?"
-                "X-Amz-Signature=secret-sig"
-            ),
-            "trajectory_url": (
-                "https://minio.internal/events.jsonl?"
-                "X-Amz-Signature=secret-sig"
-            ),
+            "atif_url": ("https://minio.internal/atif.json?X-Amz-Signature=secret-sig"),
+            "trajectory_url": ("https://minio.internal/events.jsonl?X-Amz-Signature=secret-sig"),
             "atif_ready": True,
             "trajectory_ready": True,
-            "artifacts": [{
-                "path": "secret.txt",
-                "key": "team/trial/artifacts/secret.txt",
-                "download_url": (
-                    "https://minio.internal/secret.txt?"
-                    "X-Amz-Signature=secret-sig"
-                ),
-                "share_status": "shared",
-                "blocked_reason": None,
-            }],
+            "artifacts": [
+                {
+                    "path": "secret.txt",
+                    "key": "team/trial/artifacts/secret.txt",
+                    "download_url": (
+                        "https://minio.internal/secret.txt?X-Amz-Signature=secret-sig"
+                    ),
+                    "share_status": "shared",
+                    "blocked_reason": None,
+                }
+            ],
         },
     )
 
@@ -1030,24 +1351,34 @@ def test_trial_show_redacts_legacy_signed_urls_in_text_output(
 
 
 def test_trial_show_json_format(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     payload = {
-        "id": _TRIAL_ID, "task_id": "t", "team_id": "x",
-        "state": "queued", "failure_reason": None,
+        "id": _TRIAL_ID,
+        "task_id": "t",
+        "team_id": "x",
+        "state": "queued",
+        "failure_reason": None,
         "submitted_at": "2026-06-16T00:00:00Z",
-        "started_at": None, "finished_at": None,
-        "attempt_count": 0, "aggregate_reward": None,
+        "started_at": None,
+        "finished_at": None,
+        "attempt_count": 0,
+        "aggregate_reward": None,
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
         "llm_calls_count": 0,
-        "agent_name": None, "model": None,
+        "agent_name": None,
+        "model": None,
         "atif_url": "https://minio.internal/atif?X-Amz-Signature=abc",
         "trajectory_url": "https://minio.internal/traj?X-Amz-Signature=abc",
-        "atif_ready": False, "trajectory_ready": False, "artifacts": [],
+        "atif_ready": False,
+        "trajectory_ready": False,
+        "artifacts": [],
     }
     mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
-        200, json=payload,
+        200,
+        json=payload,
     )
     rc = main(["eval", "trial", "show", _TRIAL_ID, "--format", "json"])
     assert rc == 0
@@ -1057,7 +1388,8 @@ def test_trial_show_json_format(
 
 
 def test_trial_debug_fetches_machine_readable_evidence(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     payload = {
         "schema_version": "1",
@@ -1077,9 +1409,9 @@ def test_trial_debug_fetches_machine_readable_evidence(
         "provider": {"llm_calls_count": 1, "models": ["openai/gpt-4o"]},
         "next_actions": ["Inspect verifier output and benchmark task assets."],
     }
-    mock_server.canned[
-        ("GET", f"/api/v1/trials/{_TRIAL_ID}/debug")
-    ] = httpx.Response(200, json=payload)
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}/debug")] = httpx.Response(
+        200, json=payload
+    )
 
     rc = main(["eval", "trial", "debug", _TRIAL_ID, "--format", "json"])
 
@@ -1090,7 +1422,8 @@ def test_trial_debug_fetches_machine_readable_evidence(
 
 
 def test_diagnose_trial_fetches_machine_readable_report(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     payload = {
         "schema_version": "1",
@@ -1114,34 +1447,39 @@ def test_diagnose_trial_fetches_machine_readable_report(
         ],
         "reason_clusters": [],
     }
-    mock_server.canned[
-        ("GET", f"/api/v1/trials/{_TRIAL_ID}/diagnosis")
-    ] = httpx.Response(200, json=payload)
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}/diagnosis")] = httpx.Response(
+        200, json=payload
+    )
 
     rc = main(["eval", "diagnose", "trial", _TRIAL_ID, "--format", "json"])
 
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["primary_cause"] == (
-        payload["primary_cause"]
-    )
-    assert mock_server[0].url.path == (
-        f"/api/v1/trials/{_TRIAL_ID}/diagnosis"
-    )
+    assert json.loads(capsys.readouterr().out)["primary_cause"] == (payload["primary_cause"])
+    assert mock_server[0].url.path == (f"/api/v1/trials/{_TRIAL_ID}/diagnosis")
 
 
 def test_trial_download_atif_writes_public_route_response(
-    mock_server: MockServer, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    mock_server.canned[
-        ("GET", f"/api/v1/trials/{_TRIAL_ID}/atif")
-    ] = httpx.Response(200, content=b'{"atif":"ok"}')
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}/atif")] = httpx.Response(
+        200, content=b'{"atif":"ok"}'
+    )
     output = tmp_path / "atif.json"
 
-    rc = main([
-        "eval", "trial", "download", _TRIAL_ID,
-        "--kind", "atif",
-        "--output", str(output),
-    ])
+    rc = main(
+        [
+            "eval",
+            "trial",
+            "download",
+            _TRIAL_ID,
+            "--kind",
+            "atif",
+            "--output",
+            str(output),
+        ]
+    )
 
     assert rc == 0
     assert output.read_bytes() == b'{"atif":"ok"}'
@@ -1153,38 +1491,50 @@ def test_trial_download_atif_writes_public_route_response(
 
 
 def test_trial_download_artifact_requires_key_and_uses_proxy_route(
-    mock_server: MockServer, tmp_path: Path,
+    mock_server: MockServer,
+    tmp_path: Path,
 ) -> None:
-    mock_server.canned[
-        ("GET", f"/api/v1/trials/{_TRIAL_ID}/artifacts/download")
-    ] = httpx.Response(200, content=b"artifact-bytes")
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}/artifacts/download")] = httpx.Response(
+        200, content=b"artifact-bytes"
+    )
     output = tmp_path / "result.txt"
 
-    rc = main([
-        "eval", "trial", "download", _TRIAL_ID,
-        "--kind", "artifact",
-        "--artifact-key", "team/trial/artifacts/result.txt",
-        "--output", str(output),
-    ])
+    rc = main(
+        [
+            "eval",
+            "trial",
+            "download",
+            _TRIAL_ID,
+            "--kind",
+            "artifact",
+            "--artifact-key",
+            "team/trial/artifacts/result.txt",
+            "--output",
+            str(output),
+        ]
+    )
 
     assert rc == 0
     assert output.read_bytes() == b"artifact-bytes"
     assert mock_server[0].method == "GET"
-    assert mock_server[0].url.path == (
-        f"/api/v1/trials/{_TRIAL_ID}/artifacts/download"
-    )
-    assert mock_server[0].url.params.get("key") == (
-        "team/trial/artifacts/result.txt"
-    )
+    assert mock_server[0].url.path == (f"/api/v1/trials/{_TRIAL_ID}/artifacts/download")
+    assert mock_server[0].url.params.get("key") == ("team/trial/artifacts/result.txt")
 
 
 def test_trial_download_artifact_without_key_errors_before_http(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = main([
-        "eval", "trial", "download", _TRIAL_ID,
-        "--kind", "artifact",
-    ])
+    rc = main(
+        [
+            "eval",
+            "trial",
+            "download",
+            _TRIAL_ID,
+            "--kind",
+            "artifact",
+        ]
+    )
 
     assert rc == 2
     assert "requires --artifact-key" in capsys.readouterr().err
@@ -1192,39 +1542,48 @@ def test_trial_download_artifact_without_key_errors_before_http(
 
 
 def test_eval_usage_calls_public_usage_route(
-    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mock_server.canned[("GET", "/api/v1/usage")] = httpx.Response(
         200,
         json={
             "degraded": False,
-            "buckets": [{
-                "start_at": "2026-06-01T00:00:00+00:00",
-                "end_at": None,
-                "trial_count": 2,
-                "trials_currently_succeeded": 1,
-                "trials_currently_failed": 1,
-                "succeeded_count": 1,
-                "failed_count": 1,
-                "total_cost_usd": 0.125,
-                "llm_input_tokens": 100,
-                "llm_output_tokens": 50,
-                "daytona_compute_seconds": 0.0,
-                "daytona_cost_usd": 0.0,
-                "modal_compute_seconds": 0.0,
-                "modal_cost_usd": 0.0,
-                "cloud_compute_seconds": 0.0,
-                "cloud_cost_usd": 0.0,
-            }],
+            "buckets": [
+                {
+                    "start_at": "2026-06-01T00:00:00+00:00",
+                    "end_at": None,
+                    "trial_count": 2,
+                    "trials_currently_succeeded": 1,
+                    "trials_currently_failed": 1,
+                    "succeeded_count": 1,
+                    "failed_count": 1,
+                    "total_cost_usd": 0.125,
+                    "llm_input_tokens": 100,
+                    "llm_output_tokens": 50,
+                    "daytona_compute_seconds": 0.0,
+                    "daytona_cost_usd": 0.0,
+                    "modal_compute_seconds": 0.0,
+                    "modal_cost_usd": 0.0,
+                    "cloud_compute_seconds": 0.0,
+                    "cloud_cost_usd": 0.0,
+                }
+            ],
         },
     )
 
-    rc = main([
-        "eval", "usage",
-        "--start", "2026-06-01",
-        "--end", "2026-06-02",
-        "--group-by", "day",
-    ])
+    rc = main(
+        [
+            "eval",
+            "usage",
+            "--start",
+            "2026-06-01",
+            "--end",
+            "2026-06-02",
+            "--group-by",
+            "day",
+        ]
+    )
 
     assert rc == 0
     assert mock_server[0].method == "GET"
@@ -1233,7 +1592,150 @@ def test_eval_usage_calls_public_usage_route(
     assert mock_server[0].url.params.get("end") == "2026-06-02"
     out = capsys.readouterr().out
     assert "2026-06-01" in out
-    assert "0.125" in out
+
+
+def test_eval_usage_include_batches_shows_token_only_cost_status(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/usage")] = httpx.Response(
+        200,
+        json={
+            "degraded": False,
+            "buckets": [
+                {
+                    "start_at": "2026-06-02T00:00:00+00:00",
+                    "end_at": None,
+                    "trial_count": 1,
+                    "trials_currently_succeeded": 0,
+                    "trials_currently_failed": 1,
+                    "succeeded_count": 0,
+                    "failed_count": 1,
+                    "total_cost_usd": 0.0,
+                    "estimated_cost_usd": None,
+                    "cost_status": "not_applicable",
+                    "cost_currency": None,
+                    "pricing_modes": ["tokens-only"],
+                    "partial_usage_llm_calls_count": 1,
+                    "missing_usage_llm_calls_count": 0,
+                    "usage_reporting_status": "partial",
+                    "usage_estimate_confidence": "partial",
+                    "llm_input_tokens": 77,
+                    "llm_output_tokens": 11,
+                    "batches": [
+                        {
+                            "batch_id": "batch-token-only",
+                            "batch_name": "self-deployed token-only batch",
+                            "team_id": "team-1",
+                            "team_name": "Team One",
+                            "trial_count": 1,
+                            "llm_input_tokens": 77,
+                            "llm_output_tokens": 11,
+                            "estimated_cost_usd": None,
+                            "cost_status": "not_applicable",
+                            "cost_currency": None,
+                            "pricing_modes": ["tokens-only"],
+                            "partial_usage_llm_calls_count": 1,
+                            "usage_estimate_confidence": "partial",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "usage",
+            "--start",
+            "2026-06-02",
+            "--end",
+            "2026-06-02",
+            "--include-batches",
+        ]
+    )
+
+    assert rc == 0
+    assert mock_server[0].url.params.get("include_batches") == "true"
+    out = capsys.readouterr().out
+    assert "not_applicable" in out
+    assert "n/a" in out
+    assert "self-deployed token-only batch" in out
+    assert "partial" in out
+    assert "0.125" not in out
+
+
+def test_eval_usage_forwards_admin_filters_and_breakdown(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/usage")] = httpx.Response(
+        200,
+        json={
+            "degraded": False,
+            "buckets": [
+                {
+                    "start_at": "2026-06-02T00:00:00+00:00",
+                    "breakdown_by": "pricing_mode",
+                    "breakdown_key": "tokens-only",
+                    "breakdown_label": "tokens-only",
+                    "trial_count": 1,
+                    "succeeded_count": 0,
+                    "failed_count": 1,
+                    "estimated_cost_usd": None,
+                    "cost_status": "not_applicable",
+                    "cost_currency": None,
+                    "pricing_modes": ["tokens-only"],
+                    "llm_input_tokens": 77,
+                    "llm_output_tokens": 11,
+                }
+            ],
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "usage",
+            "--start",
+            "2026-06-02",
+            "--end",
+            "2026-06-02",
+            "--team-id",
+            "team-1",
+            "--user-id",
+            "user-1",
+            "--provider-connection-id",
+            "provider-1",
+            "--model",
+            "qwen3.6-35b-a3b",
+            "--benchmark-id",
+            "skilllearnbench",
+            "--batch-id",
+            "batch-1",
+            "--status",
+            "failed",
+            "--pricing-mode",
+            "tokens-only",
+            "--breakdown-by",
+            "pricing_mode",
+        ]
+    )
+
+    assert rc == 0
+    params = mock_server[0].url.params
+    assert params.get("user_id") == "user-1"
+    assert params.get("provider_connection_id") == "provider-1"
+    assert params.get("model") == "qwen3.6-35b-a3b"
+    assert params.get("benchmark_id") == "skilllearnbench"
+    assert params.get("batch_id") == "batch-1"
+    assert params.get("status") == "failed"
+    assert params.get("pricing_mode") == "tokens-only"
+    assert params.get("breakdown_by") == "pricing_mode"
+    out = capsys.readouterr().out
+    assert "tokens-only" in out
+    assert "not_applicable" in out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1246,10 +1748,20 @@ def test_eval_run_not_logged_in(
 ) -> None:
     main(["auth", "logout"])
     capsys.readouterr()
-    rc = main([
-        "eval", "run",
-        "--provider", "n", "--model", "m", "--agent", "a", "--task", "t",
-    ])
+    rc = main(
+        [
+            "eval",
+            "run",
+            "--provider",
+            "n",
+            "--model",
+            "m",
+            "--agent",
+            "a",
+            "--task",
+            "t",
+        ]
+    )
     assert rc == 2
     err = capsys.readouterr().err
     assert "not logged in" in err

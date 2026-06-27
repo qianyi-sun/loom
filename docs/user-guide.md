@@ -186,7 +186,12 @@ Usage follows the same team-context model. Ordinary users see usage scoped to
 their current team and do not enter raw team ids. Platform admins can leave the
 team filter blank for platform-wide usage or choose an internal team by name;
 the copyable CLI command still includes the stable `--team-id` value when a
-team is selected.
+team is selected. Admin usage views can request per-batch drilldown; token-only
+or self-deployed calls show token totals with `cost_status=not_applicable`
+instead of a fabricated dollar amount. Usage views also show
+`usage_estimate_confidence`: `high` means the provider returned a complete usage
+block, while `partial` or `missing` means token and cost totals are lower
+confidence because some provider usage fields were absent.
 
 ### Public server CLI flow
 
@@ -227,7 +232,12 @@ loom eval diagnose batch <batch-id>
 loom eval batch debug <batch-id> --format json
 loom resources status
 loom eval trial list --state succeeded --limit 5
-loom eval usage --start 2026-06-01 --end 2026-06-30
+loom eval usage --start 2026-06-01 --end 2026-06-30 --include-batches
+loom eval usage --start 2026-06-01 --end 2026-06-30 \
+  --provider-connection-id <provider-id> \
+  --model qwen3.6-35b-a3b \
+  --benchmark-id skilllearnbench \
+  --breakdown-by pricing_mode
 loom eval trial show <trial-id>
 loom eval diagnose trial <trial-id>
 loom eval trial debug <trial-id> --format json
@@ -880,6 +890,18 @@ run from `src/loom_cli/data/default-rate-cards.toml`. Edit the file
 to add or override entries (e.g. for a self-hosted model or a
 provider Loom doesn't ship a default for). Cost is computed locally
 from these rates plus the token counts returned by the provider SDK.
+For service-mode hosted YibuAPI pricing, an admin can sync the official
+catalog with:
+
+```bash
+loom admin rate-cards sync-yibuapi
+```
+
+Self-deployed provider connections should usually remain `tokens-only`,
+which records tokens but leaves dollar cost as not applicable. Hosted YibuAPI
+connections that use the synced rate card return per-trial, per-batch, and
+admin usage costs; self-deployed/private APIs return token totals and usage
+confidence without inventing a dollar amount.
 
 <a id="pasting-task-ids"></a>
 
