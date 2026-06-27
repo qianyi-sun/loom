@@ -151,6 +151,10 @@ def _print_trial_summary(item: dict[str, Any]) -> None:
         print(f"reward:           {item['aggregate_reward']}")
     if item.get("llm_calls_count") is not None:
         print(f"llm_calls:        {item['llm_calls_count']}")
+    if item.get("llm_evidence_status") is not None:
+        print(f"llm_evidence:     {item['llm_evidence_status']}")
+    if item.get("no_call") is True:
+        print("warning:          invalid benchmark evidence; trial did not reach the gateway/provider.")
     if (
         item.get("total_prompt_tokens") is not None
         or item.get("total_completion_tokens") is not None
@@ -349,6 +353,18 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
         print(f"aggregate_reward:      {item['aggregate_reward']}")
     if item.get("llm_calls_count") is not None:
         print(f"llm_calls:             {item['llm_calls_count']}")
+    if item.get("llm_evidence_status") is not None:
+        print(f"llm_evidence_status: {item['llm_evidence_status']}")
+    if item.get("no_call_trial_count") is not None:
+        print(f"no_call_trials:      {item['no_call_trial_count']}")
+    if item.get("llm_evidence_status") in {
+        "no_calls_invalid",
+        "partial_no_calls",
+    }:
+        print(
+            "warning:               invalid benchmark evidence; terminal "
+            "model-backed trials did not reach the gateway/provider.",
+        )
     if (
         item.get("total_prompt_tokens") is not None
         or item.get("total_completion_tokens") is not None

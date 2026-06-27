@@ -153,6 +153,8 @@ interface TrialRow {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   llm_calls_count: number;
+  llm_evidence_status?: string | null;
+  no_call?: boolean | null;
   failure_reason?: string | null;
   failure_message?: string | null;
   submitted_at: string;
@@ -862,13 +864,27 @@ function TrialsView({
                         : "—"}
                     </td>
                     <td className="px-4 py-3 text-slate-700">
-                      <div>{t.llm_calls_count} calls</div>
-                      <div className="text-xs text-slate-500">
-                        {formatTokenUsage(
-                          t.total_prompt_tokens,
-                          t.total_completion_tokens,
-                        )}
-                      </div>
+                      {t.llm_evidence_status === "no_calls_invalid" ||
+                      t.no_call ? (
+                        <>
+                          <div className="font-medium text-red-700">
+                            no LLM calls
+                          </div>
+                          <div className="text-xs text-red-600">
+                            invalid evidence
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div>{t.llm_calls_count} calls</div>
+                          <div className="text-xs text-slate-500">
+                            {formatTokenUsage(
+                              t.total_prompt_tokens,
+                              t.total_completion_tokens,
+                            )}
+                          </div>
+                        </>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
                       {formatLocalDateTime(t.submitted_at)}

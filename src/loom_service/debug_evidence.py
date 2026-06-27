@@ -19,6 +19,11 @@ from fastapi import Request
 
 from loom.db.schema import Batch, LlmCall, Task, Trial
 from loom.security.redaction import redact_mapping
+from loom_service.usage_accounting import (
+    llm_call_counts_by_trial_id,
+    project_trial_llm_evidence,
+    summarize_llm_evidence_for_trials,
+)
 
 _ACTIVE_STATES = {"queued", "claimed", "running", "submitted"}
 
@@ -327,6 +332,29 @@ def build_trial_debug_evidence(
         trial.started_at is not None
     )
     result = trial.result if isinstance(trial.result, dict) else None
+    provider_summary = {
+        **_provider_summary(llm_calls),
+        **project_trial_llm_evidence(
+            trial,
+            llm_calls_count=len(llm_calls),
+        ),
+        "provider_connection_id": (
+            str(trial.provider_connection_id)
+            if trial.provider_connection_id else None
+        ),
+        "provider_model_id": trial.provider_model_id,
+    }
+    failure = _failure_for_trial(trial)
+    if provider_summary["llm_evidence_status"] == "no_calls_invalid":
+        failure = {
+            "reason_code": "trial.no_llm_calls",
+            "reason": "no_llm_calls",
+            "category": "gateway",
+            "attribution": "platform",
+            "message": (
+                "Terminal model-backed trial did not record any LLM calls."
+            ),
+        }
     evidence = {
         "schema_version": "1",
         "generated_at": datetime.now(UTC).isoformat(),
@@ -355,15 +383,8 @@ def build_trial_debug_evidence(
             "requires_caps": trial.requires_caps,
         },
         "agent": _extract_agent(trial.config),
-        "provider": {
-            **_provider_summary(llm_calls),
-            "provider_connection_id": (
-                str(trial.provider_connection_id)
-                if trial.provider_connection_id else None
-            ),
-            "provider_model_id": trial.provider_model_id,
-        },
-        "failure": _failure_for_trial(trial),
+        "provider": provider_summary,
+        "failure": failure,
         "task": {
             "task_id": trial.task_id,
             "benchmark_id": task.benchmark_id if task else None,
@@ -398,7 +419,14 @@ def build_trial_debug_evidence(
                 trajectory_index=trajectory_index,
             ),
         },
-        "next_actions": _next_actions_for_trial(trial),
+        "next_actions": (
+            [
+                "Check subprocess gateway URL, provider route, and worker env.",
+                "Rerun after the model path records LLM calls.",
+            ]
+            if provider_summary["llm_evidence_status"] == "no_calls_invalid"
+            else _next_actions_for_trial(trial)
+        ),
     }
     return cast(dict[str, Any], redact_mapping(evidence))
 
@@ -489,7 +517,12 @@ def build_batch_debug_evidence(
     trials: Sequence[Trial],
     llm_calls: Sequence[LlmCall],
 ) -> dict[str, Any]:
-    failed_trials = [
+    llm_call_counts = llm_call_counts_by_trial_id(llm_calls)
+    llm_evidence = summarize_llm_evidence_for_trials(
+        trials,
+        llm_call_counts=llm_call_counts,
+    )
+    failed_trials: list[dict[str, Any]] = [
         {
             "id": str(trial.id),
             "task_id": trial.task_id,
@@ -504,6 +537,29 @@ def build_batch_debug_evidence(
         for trial in trials
         if trial.state == "failed" or trial.failure_reason
     ]
+    no_call_trials: list[dict[str, Any]] = [
+        {
+            "id": str(trial.id),
+            "task_id": trial.task_id,
+            "state": trial.state,
+            "reason_code": "trial.no_llm_calls",
+            "failure_reason": "no_llm_calls",
+            "failure_message": (
+                "Terminal model-backed trial did not record any LLM calls."
+            ),
+        }
+        for trial in trials
+        if project_trial_llm_evidence(
+            trial,
+            llm_calls_count=llm_call_counts.get(trial.id, 0),
+        )["no_call"]
+    ]
+    if no_call_trials:
+        seen_failed_ids = {trial["id"] for trial in failed_trials}
+        failed_trials.extend(
+            trial for trial in no_call_trials
+            if trial["id"] not in seen_failed_ids
+        )
     rewards = [
         reward for trial in trials
         if (reward := _aggregate_reward(trial.result)) is not None
@@ -529,6 +585,7 @@ def build_batch_debug_evidence(
         },
         "provider": {
             **_provider_summary(llm_calls),
+            **llm_evidence,
             "provider_connection_id": (
                 str(batch.provider_connection_id)
                 if batch.provider_connection_id else None

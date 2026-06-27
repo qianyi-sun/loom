@@ -160,6 +160,11 @@ For `host.docker.internal` URLs, the script runs outside the sandbox and probes
 the equivalent host-side loopback URL, for example
 `http://127.0.0.1:30444/healthz`. Repeated `subprocess-gateway` failures cause
 the watchdog to restart `loom-remote-worker-tunnel-gateway.service`.
+Set the URL to the gateway root or to the adapter-compatible facade root. Codex
+and other OpenAI-compatible subprocess agents use `/openai/v1`; Claude Code
+uses `/anthropic`; Gemini adapters use `/google`. An explicit incompatible
+facade, such as a Codex worker env pointing at `/anthropic`, is rejected during
+agent startup.
 
 The same script provides the rollout gate for those exact URLs:
 
@@ -475,6 +480,21 @@ loom admin gb10-workers status \
   --admin-token env:LOOM_ADMIN_TOKEN
 ```
 
+For release rollouts, make the status check a convergence gate by passing the
+expected image tag and env config version. The command exits non-zero if any
+active GB10 node, or the desired state itself, is still on the previous target;
+capacity marked draining/stopped is ignored.
+
+```bash
+loom admin gb10-workers status \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --release-image-tag "$IMAGE_TAG" \
+  --release-env-config-version "$ENV_CONFIG_VERSION"
+```
+
 On each GB10 host, the node-agent reads the host-local
 `.env.remote-worker` file, compares it with Control Plane desired state, writes
 only non-secret env updates, then runs Docker Compose locally. The apply path
@@ -588,7 +608,9 @@ worker normalizes that sandbox-facing URL by adapter dialect before
 injecting SDK env vars, so OpenAI-compatible adapters receive
 `http://host.docker.internal:19100/openai/v1`, Anthropic adapters receive
 `http://host.docker.internal:19100/anthropic`, and Gemini adapters receive
-`http://host.docker.internal:19100/google`.
+`http://host.docker.internal:19100/google`. Do not pre-normalize a
+Codex/OpenAI env file to `/anthropic`; that path is now treated as a bad
+release configuration and fails before the agent subprocess starts.
 
 Watch registration and claim activity:
 

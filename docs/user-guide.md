@@ -270,6 +270,11 @@ derived from redacted debug evidence. It summarizes the primary cause, owner
 layer, confidence, affected trial count, score reliability, supporting
 evidence, reason clusters for batches, and next actions. Pass `--format json`
 to retrieve the same schema-versioned `DiagnosisReport` for automation.
+If `loom eval batch show <batch-id>` prints
+`llm_evidence_status: no_calls_invalid` or a no-call warning, treat the batch
+as invalid benchmark evidence. A model-backed terminal trial finished without
+persisting gateway call records, so a reward of `0` in that state is not a
+clean model-quality score.
 
 Use `loom eval batch debug <batch-id>` or
 `loom eval trial debug <trial-id>` when an API agent needs structured failure

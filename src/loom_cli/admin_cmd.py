@@ -23,7 +23,7 @@ import json
 import os
 import re
 import sys
-from typing import cast
+from typing import Any, cast
 
 import httpx
 
@@ -42,6 +42,80 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 _DEFAULT_CP_URL = "http://localhost:8080"
 _DEFAULT_EXPIRES_DAYS = 365
 _DEFAULT_ADMIN_TOKEN_SOURCE = "env:LOOM_ADMIN_TOKEN"
+
+
+def _gb10_release_target_mismatches(
+    data: dict[str, Any],
+    *,
+    release_image_tag: str | None,
+    release_env_config_version: str | None,
+) -> list[str]:
+    if release_image_tag is None and release_env_config_version is None:
+        return []
+
+    mismatches: list[str] = []
+    for row in data.get("desired_states", []):
+        if not isinstance(row, dict):
+            continue
+        image = row.get("image_tag")
+        env = row.get("env_config_version")
+        image_bad = release_image_tag is not None and image != release_image_tag
+        env_bad = (
+            release_env_config_version is not None
+            and env != release_env_config_version
+        )
+        if image_bad or env_bad:
+            mismatches.append(
+                "desired "
+                f"{row.get('environment', '-')}/{row.get('pool_name', '-')} "
+                f"image={image or '-'}/{release_image_tag or '-'} "
+                f"env={env or '-'}/{release_env_config_version or '-'}"
+            )
+
+    ignored_intents = {"stopped", "draining", "drained", "unavailable"}
+    ignored_apply_states = {"stopped", "draining", "unavailable"}
+    for node in data.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        intent = node.get("desired_intent") or node.get("current_intent")
+        apply_state = node.get("apply_state")
+        if intent in ignored_intents or apply_state in ignored_apply_states:
+            continue
+        image = node.get("current_image_tag")
+        env = node.get("current_env_config_version")
+        image_bad = release_image_tag is not None and image != release_image_tag
+        env_bad = (
+            release_env_config_version is not None
+            and env != release_env_config_version
+        )
+        if image_bad or env_bad:
+            mismatches.append(
+                "node "
+                f"{node.get('hostname', '-')} "
+                f"image={image or '-'}/{release_image_tag or '-'} "
+                f"env={env or '-'}/{release_env_config_version or '-'} "
+                f"apply_state={apply_state or '-'}"
+            )
+
+    return mismatches
+
+
+def _print_gb10_release_target_mismatches(
+    mismatches: list[str],
+    *,
+    release_image_tag: str | None,
+    release_env_config_version: str | None,
+) -> None:
+    if not mismatches:
+        return
+    sys.stderr.write(
+        "GB10 rollout target mismatch: "
+        f"{len(mismatches)} active desired/node state(s) do not match "
+        f"release target image={release_image_tag or '-'} "
+        f"env={release_env_config_version or '-'}\n",
+    )
+    for item in mismatches:
+        sys.stderr.write(f"  {item}\n")
 
 
 def _resolve_admin_token(source: str) -> str:
@@ -296,10 +370,20 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
         return 1
 
     data = resp.json()
+    mismatches = _gb10_release_target_mismatches(
+        data,
+        release_image_tag=args.release_image_tag,
+        release_env_config_version=args.release_env_config_version,
+    )
     if args.format == "json":
         json.dump(data, sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
+        _print_gb10_release_target_mismatches(
+            mismatches,
+            release_image_tag=args.release_image_tag,
+            release_env_config_version=args.release_env_config_version,
+        )
+        return 1 if mismatches else 0
 
     desired_states = data.get("desired_states", [])
     nodes = data.get("nodes", [])
@@ -333,7 +417,12 @@ def _gb10_workers_status(args: argparse.Namespace) -> int:
             f"{node.get('desired_env_config_version') or '-'} "
             f"result={result} error={error}\n",
         )
-    return 0
+    _print_gb10_release_target_mismatches(
+        mismatches,
+        release_image_tag=args.release_image_tag,
+        release_env_config_version=args.release_env_config_version,
+    )
+    return 1 if mismatches else 0
 
 
 def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
@@ -888,6 +977,22 @@ def dispatch(argv: list[str]) -> int:
     _add_common_args(p_gb10_status)
     p_gb10_status.add_argument("--environment", default=None)
     p_gb10_status.add_argument("--pool-name", default=None)
+    p_gb10_status.add_argument(
+        "--release-image-tag",
+        default=None,
+        help=(
+            "Fail if active GB10 nodes or desired state have not converged "
+            "to this release image tag."
+        ),
+    )
+    p_gb10_status.add_argument(
+        "--release-env-config-version",
+        default=None,
+        help=(
+            "Fail if active GB10 nodes or desired state have not converged "
+            "to this env config version."
+        ),
+    )
     p_gb10_status.add_argument(
         "--format",
         choices=["text", "json"],

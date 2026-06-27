@@ -1222,6 +1222,80 @@ async def test_get_batch_detail_with_rollup(
     ]
 
 
+async def test_get_batch_detail_marks_real_provider_zero_call_evidence_invalid(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Task).values(
+                id="skilllearnbench/poster-design",
+                checksum="z" * 64,
+                config=_valid_task_config("skilllearnbench/poster-design"),
+                source="local",
+                license="MIT",
+            )
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="zero-call-real-provider",
+                task_filter={"benchmark_id": "skilllearnbench"},
+                trial_config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=2,
+                n_per_task=1,
+                result_status="partial_failed",
+            )
+        )
+        for state, reward in (
+            ("succeeded", 0.0),
+            ("failed", None),
+        ):
+            conn.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    task_id="skilllearnbench/poster-design",
+                    team_id=team_id,
+                    state=state,
+                    failure_reason=None if state == "succeeded" else "agent_error",
+                    failure_message=None if state == "succeeded" else "gateway refused",
+                    config={
+                        "agent_name": "codex",
+                        "agent_model": {"provider": "openai", "name": "qwen"},
+                    },
+                    requires_caps={},
+                    submitted_at=datetime.now(UTC),
+                    batch_id=batch_id,
+                    result=({"aggregate_reward": reward} if reward is not None else None),
+                )
+            )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm_calls_count"] == 0
+    assert body["no_call_trial_count"] == 2
+    assert body["llm_evidence_status"] == "no_calls_invalid"
+    assert body["diagnosis"]["primary_cause"]["reason_code"] == "batch.no_llm_calls"
+    assert "did not record any LLM calls" in body["diagnosis"]["summary"]
+
+
 async def test_get_batch_detail_includes_per_benchmark_rollup(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

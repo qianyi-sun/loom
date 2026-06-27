@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -118,6 +119,112 @@ def empty_usage_projection() -> dict[str, Any]:
         token_only_llm_calls_count=0,
         price_unknown_llm_calls_count=0,
     )
+
+
+_TERMINAL_TRIAL_STATES: frozenset[str] = frozenset(
+    {"succeeded", "failed", "cancelled"},
+)
+
+
+def _model_from_config(config: Any) -> Mapping[str, Any] | None:
+    if not isinstance(config, Mapping):
+        return None
+    model = config.get("agent_model")
+    if isinstance(model, Mapping) and model:
+        return model
+    agent = config.get("agent")
+    if isinstance(agent, Mapping):
+        legacy_model = agent.get("model")
+        if isinstance(legacy_model, Mapping) and legacy_model:
+            return legacy_model
+    return None
+
+
+def trial_requires_llm(trial: Any) -> bool:
+    """Return True when a trial is configured to call a real model provider."""
+
+    if getattr(trial, "provider_connection_id", None) is not None:
+        return True
+    provider_model_id = getattr(trial, "provider_model_id", None)
+    if isinstance(provider_model_id, str) and provider_model_id:
+        return True
+    return _model_from_config(getattr(trial, "config", None)) is not None
+
+
+def project_trial_llm_evidence(
+    trial: Any,
+    *,
+    llm_calls_count: int,
+) -> dict[str, Any]:
+    """Project whether persisted LLM-call evidence is usable for a trial."""
+
+    requires_llm = trial_requires_llm(trial)
+    state = str(getattr(trial, "state", ""))
+    calls = max(int(llm_calls_count or 0), 0)
+    if not requires_llm:
+        return {
+            "llm_evidence_status": "not_applicable",
+            "no_call": False,
+        }
+    if state not in _TERMINAL_TRIAL_STATES:
+        return {
+            "llm_evidence_status": "pending",
+            "no_call": False,
+        }
+    if calls == 0:
+        return {
+            "llm_evidence_status": "no_calls_invalid",
+            "no_call": True,
+        }
+    return {
+        "llm_evidence_status": "calls_observed",
+        "no_call": False,
+    }
+
+
+def llm_call_counts_by_trial_id(
+    llm_calls: Sequence[LlmCall],
+) -> dict[UUID, int]:
+    counts: dict[UUID, int] = {}
+    for call in llm_calls:
+        if call.trial_id is None:
+            continue
+        counts[call.trial_id] = counts.get(call.trial_id, 0) + 1
+    return counts
+
+
+def summarize_llm_evidence_for_trials(
+    trials: Sequence[Any],
+    *,
+    llm_call_counts: Mapping[UUID, int],
+) -> dict[str, Any]:
+    terminal_model_backed = 0
+    no_call = 0
+    for trial in trials:
+        if str(getattr(trial, "state", "")) not in _TERMINAL_TRIAL_STATES:
+            continue
+        if not trial_requires_llm(trial):
+            continue
+        terminal_model_backed += 1
+        calls = int(llm_call_counts.get(trial.id, 0) or 0)
+        if calls == 0:
+            no_call += 1
+
+    total_calls = sum(max(int(value or 0), 0) for value in llm_call_counts.values())
+    if terminal_model_backed == 0:
+        status = "not_applicable"
+    elif no_call == 0:
+        status = "calls_observed" if total_calls > 0 else "pending"
+    elif total_calls == 0:
+        status = "no_calls_invalid"
+    else:
+        status = "partial_no_calls"
+
+    return {
+        "llm_evidence_status": status,
+        "no_call_trial_count": no_call,
+        "model_backed_terminal_trial_count": terminal_model_backed,
+    }
 
 
 def usage_status_filter(status: str) -> Any:

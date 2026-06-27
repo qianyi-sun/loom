@@ -236,6 +236,21 @@ host-side loopback URL. This gate is separate from the public API smoke test:
 `https://loom.example.com` can be healthy while the
 remote-worker pool is detached.
 
+For GB10 public-beta rollouts, also gate node-agent convergence against the
+release target. This catches stale host-local checkouts, local-build fallback
+using an old tree, and env files that did not apply even when the pool still
+has healthy heartbeats.
+
+```bash
+loom admin gb10-workers status \
+  --cp-url http://control-node.lan:18081 \
+  --admin-token file:/secure/path/admin-token \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --release-image-tag "$IMAGE_TAG" \
+  --release-env-config-version "$ENV_CONFIG_VERSION"
+```
+
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,
 requested Slurm slice, and controller env overrides. OLDLAB 4/5 must not be

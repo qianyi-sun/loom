@@ -678,6 +678,11 @@ OpenAI adapters use `/openai/v1`, Anthropic adapters use the sibling
 deployments where another host service already owns `30443`, such as
 platform-dev with the shared dev compose stack, should set:
 
+Do not point OpenAI-compatible adapters such as Codex at an explicit
+`/anthropic` or `/google` subprocess facade. The worker now rejects
+incompatible explicit facade paths during agent startup so a bad remote-worker
+env file fails fast instead of producing a zero-call benchmark result.
+
 ```toml
 worker_subprocess_gateway_url = "http://host.docker.internal:30444/openai/v1"
 ```
@@ -1672,6 +1677,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    inspect `partial_usage_llm_calls_count` and
    `missing_usage_llm_calls_count` before treating token or dollar totals
    as complete.
+   For model-backed provider runs, terminal trials and batches also carry
+   `llm_evidence_status`. Treat `no_calls_invalid` and `partial_no_calls` as
+   invalid benchmark evidence: the model path did not persist the expected
+   gateway call records. `loom eval batch show <id>` prints
+   `no_call_trials` and an invalid-evidence warning for this case, and
+   diagnosis uses `batch.no_llm_calls` when a finished batch has zero calls.
    For multi-benchmark batches, `GET /api/v1/batches/{id}` also
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform
@@ -1890,11 +1901,22 @@ mock provider and browser automation job.
   hosts together. Keep Docker data-root, worker trajectory cache, benchmark
   cache, and trial scratch on each node's local ext4 disk; do not put those hot
   paths on `/shared_work`. Current public-beta validation uses
-  `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=2`, for 30 configured ARM64
+  `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150 configured ARM64
   slots. After every rollout, confirm the OLDLAB-1
   `loom-remote-worker-tunnel-watchdog.timer` is active, run the local plus GB10
-  `check-remote` tunnel gates, and check `loom resources status` before
-  treating the pool as healthy.
+  `check-remote` tunnel gates, then gate the node-agent release target before
+  treating the pool as healthy:
+
+  ```bash
+  loom admin gb10-workers status \
+    --cp-url http://control-node.lan:18081 \
+    --admin-token file:/secure/path/admin-token \
+    --environment production \
+    --pool-name gb10-arm64 \
+    --release-image-tag "$IMAGE_TAG" \
+    --release-env-config-version "$ENV_CONFIG_VERSION"
+  loom resources status --json
+  ```
 - For elastic Slurm pools, the Control Plane records submitted worker jobs in
   `slurm_worker_jobs` and exposes safe capacity status with:
 
