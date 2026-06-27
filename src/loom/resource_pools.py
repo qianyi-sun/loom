@@ -236,14 +236,15 @@ async def get_resource_pool_summary(
             capabilities=capabilities,
         )
         worker_to_key[worker_id] = key
-        is_claimable = str(drain_state or "active") == "active"
+        drain_state_name = str(drain_state or "active")
+        is_claimable = drain_state_name == "active"
         worker_is_claimable[worker_id] = is_claimable
         pool = pools_by_key.setdefault(key, _MutablePool(key=key))
         slots = max(1, int(max_concurrent or 1))
         if is_claimable:
             pool.active_workers += 1
             pool.total_slots += slots
-        else:
+        elif drain_state_name == "draining":
             pool.draining_workers += 1
             pool.draining_slots += slots
 
