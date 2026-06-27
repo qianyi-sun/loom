@@ -112,6 +112,16 @@ Pending jobs:
 - Continue cancelling pending jobs when the queue drains and pending slots
   exceed desired slots.
 
+Deployment boundary:
+
+- When the Control Plane runs in Kubernetes but Slurm CLI and munge credentials
+  exist only on the OLDLAB submit host, set
+  `actuator_config.external_runner=true`.
+- The in-pod autoscaler loop skips external-runner policies. A runner on the
+  submit host executes the same reconciler with external policies enabled, so
+  `sbatch`, `squeue`, `sacct`, and `scancel` run only where Slurm is available
+  while API/status/metrics still come from the shared policy row.
+
 ### GB10 Node-Agent Actuator
 
 Extend GB10 desired state with per-host capacity intent.

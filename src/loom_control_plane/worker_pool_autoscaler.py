@@ -482,6 +482,11 @@ def _policy_to_config(row: WorkerPoolAutoscalerPolicy) -> AutoscalerPolicyConfig
     )
 
 
+def _policy_uses_external_runner(row: WorkerPoolAutoscalerPolicy) -> bool:
+    actor_config = row.actuator_config or {}
+    return bool(actor_config.get("external_runner"))
+
+
 def _queued_trial_matches_policy(
     requires_caps: object,
     row: WorkerPoolAutoscalerPolicy,
@@ -961,6 +966,8 @@ async def reconcile_worker_pool_autoscaler_once(
     now: datetime | None = None,
     freshness_sec: int = 120,
     slurm_runner: SlurmWorkerCommandRunner | None = None,
+    include_external_policies: bool = False,
+    external_only: bool = False,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
     policies = (await session.execute(
@@ -973,6 +980,11 @@ async def reconcile_worker_pool_autoscaler_once(
     )).scalars().all()
     decisions: list[AutoscalerDecision] = []
     for row in policies:
+        uses_external_runner = _policy_uses_external_runner(row)
+        if uses_external_runner and not include_external_policies:
+            continue
+        if external_only and not uses_external_runner:
+            continue
         actuator_error: str | None = None
         observation = await _load_observation(
             session,
@@ -1056,6 +1068,8 @@ async def run_worker_pool_autoscaler_loop(
     session_factory: Any,
     interval_sec: int = 30,
     freshness_sec: int = 120,
+    include_external_policies: bool = False,
+    external_only: bool = False,
 ) -> None:
     while True:
         try:
@@ -1063,6 +1077,8 @@ async def run_worker_pool_autoscaler_loop(
                 await reconcile_worker_pool_autoscaler_once(
                     session,
                     freshness_sec=freshness_sec,
+                    include_external_policies=include_external_policies,
+                    external_only=external_only,
                 )
                 await session.commit()
         except asyncio.CancelledError:
