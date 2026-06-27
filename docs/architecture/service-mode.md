@@ -252,7 +252,11 @@ The projection carries two durable outputs:
   `aggregate_reward` scalar for list/batch rollups. Trial and batch
   read APIs aggregate `llm_calls` separately for
   `total_prompt_tokens`, `total_completion_tokens`, and
-  `llm_calls_count`.
+  `llm_calls_count`. Model-backed terminal trials also project
+  `llm_evidence_status`; `no_calls_invalid` means the run cannot be used as
+  benchmark evidence because the selected model path did not persist any
+  gateway calls. Batch detail includes `no_call_trial_count` and promotes a
+  zero-call model-backed batch to diagnosis reason `batch.no_llm_calls`.
 - `trials.trajectory_index`: trajectory URI, ATIF URI/schema version,
   and the actual uploaded artifact object keys and sizes.
 

@@ -19,6 +19,7 @@ from loom_launcher import get_adapter
 
 from loom.agent.subprocess import SubprocessAgent
 from loom.driver.fake import FakeDriver, scripted_streaming_handler
+from loom.errors import AgentError
 from loom.models.types import ModelSpec
 from loom.trajectory.storage import FakeObjectStore
 from loom.trajectory.writer import TrajectoryWriter
@@ -235,6 +236,54 @@ async def test_claude_code_uses_anthropic_facade_from_openai_subprocess_url(
         )
         assert captured_env["ANTHROPIC_AUTH_TOKEN"] == "loom_step_test-mocked-token"
         assert "ANTHROPIC_API_KEY" not in captured_env
+        await driver.stop()
+    finally:
+        await http.aclose()
+
+
+async def test_codex_rejects_anthropic_subprocess_gateway_url(
+    tmp_path: Path,
+    mocked_cp_client,
+) -> None:
+    """#72: Codex/openai_responses must fail before launching when a
+    remote-worker env points subprocess agents at the Anthropic facade."""
+    cp, http = mocked_cp_client
+
+    def _unexpected_streaming(argv, env_vars, cwd, user):
+        raise AssertionError("Codex should fail before exec_streaming")
+
+    try:
+        driver = FakeDriver(streaming_handler=_unexpected_streaming)
+        await driver.start()
+        adapter = get_adapter("codex")
+        assert adapter is not None
+        agent = SubprocessAgent(
+            adapter=adapter,
+            model=ModelSpec(provider="openai", name="gpt-5"),
+            cp_client=cp,
+            gateway_url="http://worker-only-gateway:9100",
+            agent_gateway_url="http://host.docker.internal:19100/anthropic",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+
+        with pytest.raises(AgentError, match=r"openai_responses.*openai/v1.*anthropic"):
+            async with TrajectoryWriter(
+                local_path=tmp_path / "trajectory.jsonl",
+                store=store,
+                bucket="trajectories",
+                key="t/t/events.jsonl",
+                min_part_bytes=0,
+            ) as trajectory:
+                await agent.run(
+                    instruction="x",
+                    env=driver,
+                    trajectory=trajectory,
+                    mcp=[],
+                    skills_dir=None,
+                    step_id="main",
+                )
         await driver.stop()
     finally:
         await http.aclose()

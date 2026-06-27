@@ -38,6 +38,9 @@ _BATCH_FAILURE_SUMMARIES: dict[str, str] = {
         "The batch partially failed without a dominant child-trial cluster."
     ),
     "batch.cancelled": "The batch was cancelled before all work completed.",
+    "batch.no_llm_calls": (
+        "The batch finished terminal model-backed trials but did not record any LLM calls."
+    ),
 }
 
 _BATCH_FAILURE_ACTIONS: dict[str, tuple[str, ...]] = {
@@ -45,6 +48,7 @@ _BATCH_FAILURE_ACTIONS: dict[str, tuple[str, ...]] = {
     "batch.all_failed": ("generic",),
     "batch.partial_failed": ("generic",),
     "batch.cancelled": ("clone_config",),
+    "batch.no_llm_calls": ("provider_preflight", "inspect_trajectory", "rerun_failed"),
 }
 
 _REASON_META: dict[str, _ReasonMeta] = {
@@ -241,6 +245,23 @@ _REASON_META: dict[str, _ReasonMeta] = {
             "failure reason is inspected."
         ),
         actions=("inspect_retries", "rerun_failed"),
+    ),
+    "trial.no_llm_calls": _ReasonMeta(
+        label="No LLM calls recorded",
+        category="gateway",
+        attribution="platform",
+        trial_summary=(
+            "The terminal model-backed trial did not record any LLM calls."
+        ),
+        batch_summary=(
+            "The batch has terminal model-backed trials that did not record "
+            "any LLM calls."
+        ),
+        impact=(
+            "The reward is not valid benchmark evidence for model-quality "
+            "comparison because the model path did not reach the gateway."
+        ),
+        actions=("provider_preflight", "inspect_trajectory", "rerun_failed"),
     ),
     "trial.succeeded": _ReasonMeta(
         label="Succeeded",
@@ -581,6 +602,11 @@ def _batch_impact(
             "The aggregate score is not reliable because the batch did not "
             "submit child trials for scoring."
         )
+    if failure.get("reason_code") == "batch.no_llm_calls":
+        return (
+            "The aggregate score is invalid benchmark evidence because "
+            "terminal model-backed trials did not record provider calls."
+        )
     if status == "succeeded" and failure_count == 0:
         return "The aggregate score is reliable for model-quality comparison."
     if failure_count >= total_trials:
@@ -609,6 +635,66 @@ def build_batch_diagnosis(
 ) -> dict[str, Any]:
     """Build a deterministic diagnosis report for one batch."""
     entity = _mapping(evidence.get("entity"))
+    provider = _mapping(evidence.get("provider"))
+    if provider.get("llm_evidence_status") == "no_calls_invalid":
+        total_trials = _trial_summary_total(evidence)
+        affected = int(provider.get("no_call_trial_count") or 0)
+        affected_ratio = affected / max(total_trials, 1)
+        reason_code = "batch.no_llm_calls"
+        action_ids = _BATCH_FAILURE_ACTIONS[reason_code]
+        actions = [
+            _action(action_id, evidence=evidence)
+            for action_id in action_ids
+        ]
+        report = {
+            "schema_version": "1",
+            "generated_at": _iso_now(),
+            "entity": {
+                "type": str(entity.get("type") or "batch"),
+                "id": str(entity.get("id") or ""),
+            },
+            "summary": _BATCH_FAILURE_SUMMARIES[reason_code],
+            "primary_cause": {
+                "reason_code": reason_code,
+                "category": "gateway",
+                "attribution": "platform",
+                "confidence": "high",
+                "affected_trials": affected,
+                "affected_ratio": affected_ratio,
+            },
+            "impact": _batch_impact(
+                {
+                    **dict(evidence),
+                    "failure": {
+                        "reason_code": reason_code,
+                        "category": "gateway",
+                        "attribution": "platform",
+                    },
+                },
+                failure_count=affected,
+                total_trials=total_trials,
+            ),
+            "evidence": _evidence_bullets(
+                evidence,
+                reason_code=reason_code,
+                affected=affected,
+                total=total_trials,
+            ),
+            "next_actions": _dedupe_actions(actions),
+            "reason_clusters": [
+                {
+                    "reason_code": reason_code,
+                    "category": "gateway",
+                    "attribution": "platform",
+                    "count": affected,
+                    "affected_ratio": affected_ratio,
+                    "representative_trial_id": None,
+                    "representative_task_id": None,
+                }
+            ],
+        }
+        return cast(dict[str, Any], redact_mapping(report))
+
     failures = trial_failures
     if failures is None:
         failures = cast(

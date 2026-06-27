@@ -610,6 +610,57 @@ async def test_trial_detail_exposes_incomplete_usage_confidence(
     assert body["usage_estimate_confidence"] == "partial"
 
 
+async def test_trial_detail_marks_real_provider_zero_call_evidence_invalid(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, _ = trials_setup
+    trial_id = uuid4()
+    task_id = f"local/task-{uuid4().hex[:8]}"
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="z" * 64,
+                config={"task": {"id": task_id, "name": "zero-call"}},
+                source="local",
+                license="MIT",
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_id,
+                team_id=team_id,
+                state="succeeded",
+                config={
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                result={"aggregate_reward": 0.0},
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            f"/api/v1/trials/{trial_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["aggregate_reward"] == 0.0
+    assert body["llm_calls_count"] == 0
+    assert body["llm_evidence_status"] == "no_calls_invalid"
+    assert body["no_call"] is True
+
+
 async def test_trial_debug_evidence_is_structured_and_redacted(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
     postgres_url: str,

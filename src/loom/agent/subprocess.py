@@ -130,9 +130,20 @@ def _gateway_url_for_adapter(base_url: str, adapter: AgentAdapter) -> str:
     path = parts.path.rstrip("/")
     dialect = adapter.endpoint_dialect
 
+    def _invalid(expected: str) -> AgentError:
+        return AgentError(
+            f"{adapter.name}: incompatible subprocess gateway URL {base_url!r} "
+            f"for endpoint dialect {dialect!r}; expected {expected}, got path "
+            f"{path or '/'}",
+        )
+
     if dialect in {"openai_chat", "openai_responses"}:
+        if path in {"/anthropic", "/google"} or path.startswith(("/anthropic/", "/google/")):
+            raise _invalid("a bare gateway root or /openai/v1")
         if not path or path == "/openai":
             return urlunsplit(parts._replace(path="/openai/v1"))
+        if path.startswith("/openai/v1/"):
+            raise _invalid("/openai/v1, not a concrete OpenAI endpoint path")
         return urlunsplit(parts._replace(path=path))
 
     if dialect == "gemini":
@@ -140,6 +151,8 @@ def _gateway_url_for_adapter(base_url: str, adapter: AgentAdapter) -> str:
             return urlunsplit(parts._replace(path="/google"))
         if path == "/google":
             return urlunsplit(parts._replace(path=path))
+        if path.startswith("/google/") or path.startswith("/anthropic"):
+            raise _invalid("a bare gateway root or /google")
         return base_url
 
     if dialect != "anthropic":
@@ -147,6 +160,8 @@ def _gateway_url_for_adapter(base_url: str, adapter: AgentAdapter) -> str:
 
     if path == "/anthropic":
         return urlunsplit(parts._replace(path=path))
+    if path.startswith("/anthropic/") or path.startswith("/google"):
+        raise _invalid("a bare gateway root or /anthropic")
     if path in {"/openai", "/openai/v1"} or path.startswith("/openai/v1/"):
         return urlunsplit(parts._replace(path="/anthropic"))
     if not path:
@@ -220,6 +235,12 @@ class SubprocessAgent:
         base_url = _gateway_url_for_adapter(
             self.agent_gateway_url or self.gateway_url,
             self.adapter,
+        )
+        logger.info(
+            "subprocess_agent_gateway_config adapter=%s dialect=%s base_url=%s",
+            self.adapter.name,
+            self.adapter.endpoint_dialect,
+            base_url,
         )
         env_vars: dict[str, str] = {
             self.adapter.api_key_env: step_token,

@@ -527,6 +527,8 @@ export interface components {
       missing_usage_llm_calls_count?: number;
       usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
       usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
+      llm_evidence_status?: string;
+      no_call?: boolean;
       agent_name: string | null;
       model: components["schemas"]["ModelSpec"] | null;
     };
@@ -747,6 +749,9 @@ export interface components {
       missing_usage_llm_calls_count?: number;
       usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
       usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
+      no_call_trial_count?: number;
+      llm_evidence_status?: string;
+      model_backed_terminal_trial_count?: number;
       visibility?: "team" | "org" | "private";
       share_status?: "pending_scan" | "shared" | "blocked";
       source_provenance?: Record<string, unknown>[];
@@ -803,6 +808,9 @@ export interface components {
       effective_missing_usage_llm_calls_count?: number;
       effective_usage_reporting_status?: components["schemas"]["UsageReportingStatus"];
       effective_usage_estimate_confidence?: components["schemas"]["UsageEstimateConfidence"];
+      effective_no_call_trial_count?: number;
+      effective_llm_evidence_status?: string;
+      effective_model_backed_terminal_trial_count?: number;
       price_snapshots?: components["schemas"]["PriceSnapshot"][];
       effective_price_snapshots?: components["schemas"]["PriceSnapshot"][];
       debug_evidence?: components["schemas"]["DebugEvidence"];

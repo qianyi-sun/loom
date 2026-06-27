@@ -245,6 +245,25 @@ describe("BatchDetail run plan", () => {
     expect(screen.queryByText("$0.0000")).not.toBeInTheDocument();
   });
 
+  it("warns when a real-provider batch records no LLM calls", async () => {
+    mockBatch({
+      ...BATCH_BODY,
+      state: "finished",
+      result_status: "partial_failed",
+      aggregate_reward: 0,
+      llm_calls_count: 0,
+      no_call_trial_count: 2,
+      llm_evidence_status: "no_calls_invalid",
+    });
+    renderBatchDetail();
+
+    expect(await screen.findByText("No LLM calls recorded")).toBeInTheDocument();
+    expect(
+      screen.getByText(/2 terminal model-backed trials finished without reaching the gateway/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/invalid benchmark evidence/i)).toBeInTheDocument();
+  });
+
   it("shows structured debug evidence without exposing raw JSON by default", async () => {
     mockBatch({
       ...BATCH_BODY,

@@ -64,7 +64,9 @@ from loom_service.task_config_validation import (
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.usage_accounting import (
     empty_usage_projection,
+    llm_call_counts_by_trial_id,
     price_snapshots_for_trials,
+    summarize_llm_evidence_for_trials,
     summarize_usage_counts,
     usage_status_filter,
 )
@@ -1040,6 +1042,10 @@ async def get_batch(
         {trial.id for trial in original_trials},
     )
     llm_calls = await _llm_calls_for_trials(s, original_trials)
+    llm_evidence = summarize_llm_evidence_for_trials(
+        original_trials,
+        llm_call_counts=llm_call_counts_by_trial_id(llm_calls),
+    )
     benchmark_summary = await _benchmark_summary_from_trials(
         s,
         original_trials,
@@ -1072,6 +1078,11 @@ async def get_batch(
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
     effective_usage = await _usage_totals_for_trials(s, effective_trials)
+    effective_llm_calls = await _llm_calls_for_trials(s, effective_trials)
+    effective_llm_evidence = summarize_llm_evidence_for_trials(
+        effective_trials,
+        llm_call_counts=llm_call_counts_by_trial_id(effective_llm_calls),
+    )
     effective_price_snapshots = await price_snapshots_for_trials(
         s,
         {trial.id for trial in effective_trials},
@@ -1119,6 +1130,20 @@ async def get_batch(
         "effective_usage_reporting_status": effective_usage["usage_reporting_status"],
         "effective_usage_estimate_confidence": effective_usage[
             "usage_estimate_confidence"
+        ],
+        "no_call_trial_count": llm_evidence["no_call_trial_count"],
+        "llm_evidence_status": llm_evidence["llm_evidence_status"],
+        "model_backed_terminal_trial_count": llm_evidence[
+            "model_backed_terminal_trial_count"
+        ],
+        "effective_no_call_trial_count": effective_llm_evidence[
+            "no_call_trial_count"
+        ],
+        "effective_llm_evidence_status": effective_llm_evidence[
+            "llm_evidence_status"
+        ],
+        "effective_model_backed_terminal_trial_count": effective_llm_evidence[
+            "model_backed_terminal_trial_count"
         ],
         "price_snapshots": price_snapshots,
         "effective_price_snapshots": effective_price_snapshots,

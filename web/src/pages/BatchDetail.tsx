@@ -139,6 +139,10 @@ export default function BatchDetail(): JSX.Element {
     "effective_estimated_cost_usd" in c ||
     "effective_cost_status" in c ||
     "effective_cost_currency" in c;
+  const noCallTrialCount = c.no_call_trial_count ?? 0;
+  const showNoCallWarning =
+    c.llm_evidence_status === "no_calls_invalid" ||
+    c.llm_evidence_status === "partial_no_calls";
 
   return (
     <div className="space-y-6">
@@ -216,6 +220,17 @@ export default function BatchDetail(): JSX.Element {
                   {c.fanout_errors.length} fan-out submissions failed.
                 </div>
               ) : null}
+            </div>
+          ) : null}
+
+          {showNoCallWarning ? (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+              <div className="font-semibold">No LLM calls recorded</div>
+              <div className="mt-1 text-red-800">
+                {noCallTrialCount} terminal model-backed trials finished
+                without reaching the gateway; this is invalid benchmark
+                evidence.
+              </div>
             </div>
           ) : null}
 

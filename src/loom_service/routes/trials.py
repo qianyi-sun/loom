@@ -53,6 +53,7 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.usage_accounting import (
     empty_usage_projection,
     price_snapshots_for_trials,
+    project_trial_llm_evidence,
     summarize_usage_counts,
     usage_status_filter,
 )
@@ -194,6 +195,10 @@ def _trial_row(
 ) -> dict[str, Any]:
     agent_name, model = _extract_agent_projection(t.config)
     usage_projection = usage or _empty_usage_projection()
+    llm_evidence = project_trial_llm_evidence(
+        t,
+        llm_calls_count=int(usage_projection["llm_calls_count"]),
+    )
     out: dict[str, Any] = {
         "id": str(t.id),
         "task_id": t.task_id,
@@ -225,6 +230,8 @@ def _trial_row(
         ],
         "usage_reporting_status": usage_projection["usage_reporting_status"],
         "usage_estimate_confidence": usage_projection["usage_estimate_confidence"],
+        "llm_evidence_status": llm_evidence["llm_evidence_status"],
+        "no_call": llm_evidence["no_call"],
         "agent_name": agent_name,
         "model": model,
         "visibility": t.visibility,

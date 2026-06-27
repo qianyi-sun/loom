@@ -36,6 +36,12 @@ trial sandboxes still need a sandbox-visible gateway URL, so the env file sets:
 LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:19100
 ```
 
+The worker normalizes this sandbox-facing gateway root by agent adapter:
+Codex/OpenAI-compatible agents receive `/openai/v1`, Claude Code receives
+`/anthropic`, and Gemini receives `/google`. A GB10 env file that pins Codex to
+an explicit `/anthropic` facade is invalid and fails before the subprocess
+starts.
+
 ## SSH Trust And Tunnel Recovery
 
 The operator path has two SSH hops: the Mac reaches `cudo-sudo-trt`, then
@@ -108,9 +114,12 @@ Evidence date: 2026-06-25.
 - Control Plane, Gateway, and MinIO health checks pass from every host through
   the local tunnel endpoints.
 - Every host runs one Docker Compose worker container.
-- Per-host trial concurrency is currently `LOOM_WORKER_MAX_CONCURRENT=2`.
+- Historical issue #518 smoke used per-host trial concurrency
+  `LOOM_WORKER_MAX_CONCURRENT=2`.
+- Current public-beta capacity after the node-agent/autoscaler rollout uses
+  `LOOM_WORKER_MAX_CONCURRENT=10`.
 - Every host advertises `LOOM_WORKER_POOL_NAME=gb10-arm64`.
-- Total configured GB10 trial capacity is therefore `15 * 2 = 30` slots.
+- Total configured GB10 trial capacity is therefore `15 * 10 = 150` slots.
 - Canary batch `b18d1a92-909a-443f-a768-f0aae8229cea` finished `succeeded`.
   Trial `6e833772-ae85-4bf0-9621-904cb9bca0ea` was claimed by
   `trt-gb10-6`, used the real Lux provider model
@@ -347,12 +356,29 @@ loom admin gb10-workers status \
   --format json
 ```
 
+For release rollouts, gate convergence against the intended image/env target.
+This exits non-zero if active nodes or Control Plane desired state are still on
+the old release.
+
+```bash
+loom admin gb10-workers status \
+  --cp-url http://127.0.0.1:18081 \
+  --admin-token env:LOOM_ADMIN_TOKEN \
+  --environment production \
+  --pool-name gb10-arm64 \
+  --release-image-tag "$IMAGE_TAG" \
+  --release-env-config-version "$ENV_CONFIG_VERSION"
+```
+
 The node-agent applies updates by writing non-secret keys in
 `.env.remote-worker`, then running `docker compose pull`. If the worker image
 tag is not available from a registry, it falls back to `docker compose build`
 from the host-local checkout before running `docker compose stop --timeout
 <drain-timeout> worker` and `docker compose up -d worker`. The stop path sends
 SIGTERM to the worker, which uses the existing worker drain logic before the
+restart. When the local-build fallback is used, make sure the host-local
+checkout is on the release commit; the release-target status gate above is the
+operator-visible guardrail for stale image/env state.
 container exits. Use `--force` only for an explicit emergency override.
 
 Retry a failed rollout by fixing the local cause and restarting the service:

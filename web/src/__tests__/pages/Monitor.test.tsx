@@ -318,6 +318,8 @@ function mockFailureMonitorEndpoints(): ReturnType<typeof vi.spyOn> {
                   total_prompt_tokens: 0,
                   total_completion_tokens: 0,
                   llm_calls_count: 0,
+                  llm_evidence_status: "no_calls_invalid",
+                  no_call: true,
                   submitted_at: "2026-06-19T20:24:00Z",
                   failure_reason: "task_image_build_failed",
                   failure_message: "Docker build failed",
@@ -453,5 +455,7 @@ describe("Monitor human-readable labels", () => {
     expect(
       screen.getByRole("link", { name: /Open trial-provider/i }),
     ).toHaveAttribute("href", "/trials/trial-provider");
+    expect(screen.getByText("no LLM calls")).toBeInTheDocument();
+    expect(screen.getByText(/invalid evidence/i)).toBeInTheDocument();
   });
 });

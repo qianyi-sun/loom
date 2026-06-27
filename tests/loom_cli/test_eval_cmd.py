@@ -1033,6 +1033,55 @@ def test_batch_show_formats_timestamps_in_local_timezone(
             time.tzset()
 
 
+def test_batch_show_warns_on_zero_call_real_provider_evidence(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(
+        200,
+        json={
+            "id": _BATCH_ID,
+            "team_id": "x",
+            "name": "zero-call",
+            "description": None,
+            "task_filter": {},
+            "trial_config": {
+                "agent_name": "codex",
+                "agent_model": {"provider": "openai", "name": "qwen"},
+            },
+            "state": "finished",
+            "result_status": "partial_failed",
+            "created_at": "2026-06-16T00:00:00Z",
+            "finished_at": None,
+            "created_by_token_prefix": "abc",
+            "expected_trial_count": 2,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "trial_summary": {
+                "queued": 0,
+                "claimed": 0,
+                "running": 0,
+                "succeeded": 1,
+                "failed": 1,
+                "cancelled": 0,
+            },
+            "aggregate_reward": 0.0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "llm_calls_count": 0,
+            "no_call_trial_count": 2,
+            "llm_evidence_status": "no_calls_invalid",
+        },
+    )
+    rc = main(["eval", "batch", "show", _BATCH_ID])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "llm_evidence_status: no_calls_invalid" in out
+    assert "no_call_trials:      2" in out
+    assert "invalid benchmark evidence" in out
+
+
 def test_batch_show_renders_fanout_failure(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],
