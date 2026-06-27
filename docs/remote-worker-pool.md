@@ -77,10 +77,9 @@ for the three private dependencies:
 | `loom-remote-worker-tunnel-gateway.service` | `19100` | `loom-llm-gateway:9100` |
 | `loom-remote-worker-tunnel-minio.service` | `19000` | `loom-minio:9000` |
 
-The default Gateway tunnel port is `19100`. If an environment intentionally
-uses a different local Gateway tunnel port for Docker sandboxes, such as
-`http://host.docker.internal:30444/openai/v1`, install the managed Gateway
-tunnel on that port instead of leaving a separate ad-hoc port-forward running:
+The default worker-process Gateway tunnel port is `19100`. If the worker
+process and Docker sandbox can share one port, override the managed Gateway
+tunnel instead of leaving a separate ad-hoc port-forward running:
 
 ```bash
 scripts/ops/worker_service_tunnels.py install-systemd \
@@ -89,6 +88,22 @@ scripts/ops/worker_service_tunnels.py install-systemd \
   --kubeconfig /secure/path/public-beta.kubeconfig \
   --gateway-local-port 30444
 ```
+
+If the worker process must keep using `19100` while subprocess agents in
+Docker sandboxes use a separate host bridge such as
+`http://host.docker.internal:30444/openai/v1`, install an additional managed
+`subprocess-gateway` tunnel:
+
+```bash
+scripts/ops/worker_service_tunnels.py install-systemd \
+  --namespace loom-public-beta \
+  --kubectl /usr/local/bin/kubectl \
+  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --subprocess-gateway-local-port 30444
+```
+
+This creates `loom-remote-worker-tunnel-subprocess-gateway.service` and keeps
+the normal `loom-remote-worker-tunnel-gateway.service` on `19100`.
 
 Render units for review:
 
@@ -159,7 +174,9 @@ LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 For `host.docker.internal` URLs, the script runs outside the sandbox and probes
 the equivalent host-side loopback URL, for example
 `http://127.0.0.1:30444/healthz`. Repeated `subprocess-gateway` failures cause
-the watchdog to restart `loom-remote-worker-tunnel-gateway.service`.
+the watchdog to restart `loom-remote-worker-tunnel-subprocess-gateway.service`
+when the subprocess port differs from `LOOM_WORKER_GATEWAY_URL`; otherwise it
+restarts `loom-remote-worker-tunnel-gateway.service`.
 Set the URL to the gateway root or to the adapter-compatible facade root. Codex
 and other OpenAI-compatible subprocess agents use `/openai/v1`; Claude Code
 uses `/anthropic`; Gemini adapters use `/google`. An explicit incompatible

@@ -236,6 +236,18 @@ host-side loopback URL. This gate is separate from the public API smoke test:
 `https://loom.example.com` can be healthy while the
 remote-worker pool is detached.
 
+When the subprocess gateway URL uses a different local port than
+`LOOM_WORKER_GATEWAY_URL`, install that port as a managed tunnel instead of an
+ad-hoc `kubectl port-forward`:
+
+```bash
+scripts/ops/worker_service_tunnels.py install-systemd \
+  --namespace loom-public-beta \
+  --kubectl /usr/local/bin/kubectl \
+  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --subprocess-gateway-local-port 30444
+```
+
 For GB10 public-beta rollouts, also gate node-agent convergence against the
 release target. This catches stale host-local checkouts, local-build fallback
 using an old tree, and env files that did not apply even when the pool still

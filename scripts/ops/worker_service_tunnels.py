@@ -67,9 +67,10 @@ DEFAULT_TUNNELS: tuple[TunnelSpec, ...] = (
 )
 
 _SUBPROCESS_GATEWAY_ENV = "LOOM_WORKER_SUBPROCESS_GATEWAY_URL"
+_SUBPROCESS_GATEWAY_TUNNEL_NAME = "subprocess-gateway"
 _HOST_GATEWAY_NAMES = {"host.docker.internal"}
 _RESTART_TUNNEL_BY_PROBE_NAME = {
-    "subprocess-gateway": "gateway",
+    _SUBPROCESS_GATEWAY_TUNNEL_NAME: "gateway",
 }
 
 
@@ -78,7 +79,9 @@ def unit_name(spec: TunnelSpec) -> str:
 
 
 def unit_name_for_tunnel_name(name: str) -> str:
-    known = {spec.name for spec in DEFAULT_TUNNELS}
+    known = {spec.name for spec in DEFAULT_TUNNELS} | {
+        _SUBPROCESS_GATEWAY_TUNNEL_NAME,
+    }
     if name not in known:
         raise KeyError(f"unknown tunnel {name!r}; expected one of {sorted(known)}")
     return f"loom-remote-worker-tunnel-{name}.service"
@@ -229,10 +232,15 @@ def write_systemd_units(
     kubeconfig: str,
     address: str,
     local_port_overrides: dict[str, int] | None = None,
+    subprocess_gateway_local_port: int | None = None,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for spec in _apply_local_port_overrides(DEFAULT_TUNNELS, local_port_overrides or {}):
+    specs = _systemd_tunnels(
+        local_port_overrides=local_port_overrides or {},
+        subprocess_gateway_local_port=subprocess_gateway_local_port,
+    )
+    for spec in specs:
         path = output_dir / unit_name(spec)
         path.write_text(
             render_systemd_unit(
@@ -246,6 +254,34 @@ def write_systemd_units(
         )
         written.append(path)
     return written
+
+
+def _systemd_tunnels(
+    *,
+    local_port_overrides: dict[str, int],
+    subprocess_gateway_local_port: int | None,
+) -> list[TunnelSpec]:
+    specs = _apply_local_port_overrides(DEFAULT_TUNNELS, local_port_overrides)
+    if subprocess_gateway_local_port is None:
+        return specs
+    if subprocess_gateway_local_port < 1 or subprocess_gateway_local_port > 65535:
+        raise ValueError("subprocess-gateway local port must be in 1..65535")
+    used_ports = {spec.local_port for spec in specs}
+    if subprocess_gateway_local_port in used_ports:
+        raise ValueError(
+            "subprocess-gateway local port must be distinct from existing tunnels",
+        )
+    specs.append(
+        TunnelSpec(
+            name=_SUBPROCESS_GATEWAY_TUNNEL_NAME,
+            service_name="loom-llm-gateway",
+            local_port=subprocess_gateway_local_port,
+            service_port=9100,
+            health_env=_SUBPROCESS_GATEWAY_ENV,
+            health_path="/healthz",
+        )
+    )
+    return specs
 
 
 def _apply_local_port_overrides(
@@ -345,6 +381,30 @@ def _join_url(root: str, path: str) -> str:
     return root.rstrip("/") + "/" + path.lstrip("/")
 
 
+def _url_port(raw_url: str) -> int | None:
+    parsed = urlsplit(raw_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"expected absolute URL, got {raw_url!r}")
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "http":
+        return 80
+    if parsed.scheme == "https":
+        return 443
+    return None
+
+
+def _restart_tunnel_by_probe_name_for_env(env: dict[str, str]) -> dict[str, str]:
+    mapping = dict(_RESTART_TUNNEL_BY_PROBE_NAME)
+    subprocess_gateway = env.get(_SUBPROCESS_GATEWAY_ENV)
+    gateway = env.get("LOOM_WORKER_GATEWAY_URL")
+    if not subprocess_gateway or not gateway:
+        return mapping
+    if _url_port(subprocess_gateway) != _url_port(gateway):
+        mapping[_SUBPROCESS_GATEWAY_TUNNEL_NAME] = _SUBPROCESS_GATEWAY_TUNNEL_NAME
+    return mapping
+
+
 def worker_health_urls(env: dict[str, str]) -> list[tuple[str, str]]:
     urls: list[tuple[str, str]] = []
     for spec in DEFAULT_TUNNELS:
@@ -437,11 +497,13 @@ def apply_watchdog_results(
     *,
     state_file: Path,
     failure_threshold: int,
+    restart_tunnel_by_probe_name: dict[str, str] | None = None,
 ) -> list[str]:
     if failure_threshold < 1:
         raise ValueError("failure_threshold must be >= 1")
 
     state = _load_watchdog_state(state_file)
+    restart_map = restart_tunnel_by_probe_name or _RESTART_TUNNEL_BY_PROBE_NAME
     restarted: list[str] = []
     restarted_units: set[str] = set()
     for result in results:
@@ -452,7 +514,7 @@ def apply_watchdog_results(
         state[result.name] = failures
         if failures < failure_threshold:
             continue
-        tunnel_name = _RESTART_TUNNEL_BY_PROBE_NAME.get(result.name, result.name)
+        tunnel_name = restart_map.get(result.name, result.name)
         unit = unit_name_for_tunnel_name(tunnel_name)
         if unit not in restarted_units:
             subprocess.run(["systemctl", "--user", "restart", unit], check=True)
@@ -533,6 +595,7 @@ def _run_watchdog(args: argparse.Namespace) -> int:
         results,
         state_file=Path(args.state_file).expanduser(),
         failure_threshold=args.failure_threshold,
+        restart_tunnel_by_probe_name=_restart_tunnel_by_probe_name_for_env(env),
     )
     for result in results:
         status = "ok" if result.ok else "failed"
@@ -554,6 +617,7 @@ def _run_render_systemd(args: argparse.Namespace) -> int:
         kubeconfig=args.kubeconfig,
         address=args.address,
         local_port_overrides=_local_port_overrides_from_args(args),
+        subprocess_gateway_local_port=getattr(args, "subprocess_gateway_local_port", None),
     )
     for path in written:
         print(path)
@@ -574,6 +638,7 @@ def _run_install_systemd(args: argparse.Namespace) -> int:
         kubeconfig=args.kubeconfig,
         address=args.address,
         local_port_overrides=_local_port_overrides_from_args(args),
+        subprocess_gateway_local_port=getattr(args, "subprocess_gateway_local_port", None),
     )
     unit_names = [path.name for path in written]
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
@@ -645,6 +710,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Override the local port for the Gateway tunnel, for example 30444.",
     )
+    render.add_argument(
+        "--subprocess-gateway-local-port",
+        type=int,
+        help=(
+            "Add a distinct Gateway tunnel for sandbox-facing subprocess agent "
+            "traffic, for example 30444 while the worker Gateway remains 19100."
+        ),
+    )
     render.set_defaults(func=_run_render_systemd)
 
     install = subparsers.add_parser(
@@ -663,6 +736,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--gateway-local-port",
         type=int,
         help="Override the local port for the Gateway tunnel, for example 30444.",
+    )
+    install.add_argument(
+        "--subprocess-gateway-local-port",
+        type=int,
+        help=(
+            "Add a distinct Gateway tunnel for sandbox-facing subprocess agent "
+            "traffic, for example 30444 while the worker Gateway remains 19100."
+        ),
     )
     install.add_argument(
         "--allow-volatile-paths",

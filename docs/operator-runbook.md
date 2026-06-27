@@ -687,12 +687,15 @@ env file fails fast instead of producing a zero-call benchmark result.
 worker_subprocess_gateway_url = "http://host.docker.internal:30444/openai/v1"
 ```
 
-and run a durable host `kubectl port-forward` from `30444` to
-`svc/loom-llm-gateway:9100`, for example:
+and install a durable managed subprocess Gateway tunnel from `30444` to
+`svc/loom-llm-gateway:9100`:
 
 ```bash
-kubectl -n loom-public-beta port-forward --address 0.0.0.0 \
-  svc/loom-llm-gateway 30444:9100
+scripts/ops/worker_service_tunnels.py install-systemd \
+  --namespace loom-public-beta \
+  --kubectl /usr/local/bin/kubectl \
+  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --subprocess-gateway-local-port 30444
 ```
 
 Bind only on an address/firewall boundary reachable by the local Docker
