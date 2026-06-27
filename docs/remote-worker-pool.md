@@ -805,6 +805,10 @@ For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,
 remote worker env file, remote checkout path, requested CPU/memory, requested
 worker concurrency, max jobs, pending-job cap, and Slurm command paths if
 they differ from `sbatch`, `squeue`, `sacct`, and `scancel`.
+Autoscaler Slurm submissions request exclusive node allocation by default.
+Set `actuator_config.exclusive=false` only for deliberately shared Slurm nodes
+after lowering `requested_cpus`, `requested_memory_mib`, and
+`requested_concurrency` to a load-tested slice that coexists with other jobs.
 
 If the Control Plane runs inside Kubernetes and the Slurm CLI/munge socket are
 available only on the OLDLAB submit host, mark the policy as externally run:
@@ -822,7 +826,8 @@ available only on the OLDLAB submit host, mark the policy as externally run:
     "requested_memory_mib": 58000,
     "requested_concurrency": 6,
     "max_jobs": 1,
-    "pending_job_cap": 1
+    "pending_job_cap": 1,
+    "exclusive": true
   }
 }
 ```

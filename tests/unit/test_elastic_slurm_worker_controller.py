@@ -123,6 +123,12 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
     assert "cd \"$LOOM_REMOTE_WORKER_REPO_DIR\"" in request.stdin
 
 
+def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
+    request = build_sbatch_request(_config(exclusive=False), node="oldlab-4")
+
+    assert "--exclusive" not in request.args
+
+
 def test_build_controller_config_rejects_enabled_missing_required_settings() -> None:
     with pytest.raises(ValueError, match="allowed nodes"):
         build_controller_config(

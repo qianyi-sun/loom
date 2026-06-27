@@ -1865,6 +1865,11 @@ mock provider and browser automation job.
   path such as `/shared_work/<operator>/loom-remote-worker`; a control-node
   `/home` checkout can be incomplete on OLDLAB 4/5 and must not be assumed
   valid without a Slurm-side check.
+  Autoscaler Slurm jobs default to exclusive node allocation. For shared
+  OLDLAB validation where a node already has another small Slurm job, set the
+  policy `actuator_config.exclusive=false` only with a reduced, tested CPU,
+  memory, and worker-concurrency slice; leave exclusive allocation enabled for
+  full-node production capacity.
   Temporarily exclude a node by removing it from `ALLOWED_NODES`; lower
   footprint with `MAX_JOBS`; lower per-node pressure with
   `REQUESTED_CONCURRENCY`; disable the pool with
@@ -1938,6 +1943,9 @@ mock provider and browser automation job.
   submit host with `include_external_policies=True` and `external_only=True`
   so `sbatch`, `squeue`, `sacct`, `scancel`, and munge stay on the machine
   that owns those credentials.
+  `actuator_config.exclusive` defaults to `true`; set it to `false` only when
+  the requested CPU, memory, and concurrency are intentionally sized for a
+  shared Slurm node.
 - Until Docker sandbox CPU/RAM limits are enforced per trial, treat
   higher worker concurrency as an operator decision backed by load-test
   evidence, not just a CPU-count formula.

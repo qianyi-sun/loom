@@ -62,6 +62,7 @@ class ElasticSlurmWorkerControllerConfig:
     sacct_path: str
     scancel_path: str
     command_timeout_seconds: float
+    exclusive: bool = True
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ def build_controller_config(
     sacct_path: str,
     scancel_path: str,
     command_timeout_seconds: float,
+    exclusive: bool = True,
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
         return None
@@ -208,6 +210,7 @@ def build_controller_config(
         sacct_path=sacct_path,
         scancel_path=scancel_path,
         command_timeout_seconds=command_timeout_seconds,
+        exclusive=exclusive,
     )
 
 
@@ -284,9 +287,10 @@ def build_sbatch_request(
         "--parsable",
         f"--job-name=loom-worker-{job_node}",
         f"--nodelist={node}",
-        "--exclusive",
-        f"--time={config.time_limit}",
     ]
+    if config.exclusive:
+        args.append("--exclusive")
+    args.append(f"--time={config.time_limit}")
     if config.partition:
         args.append(f"--partition={config.partition}")
     args.extend((
