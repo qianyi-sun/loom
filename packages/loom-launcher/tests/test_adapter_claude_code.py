@@ -30,7 +30,10 @@ def test_build_invocation_argv_uses_sh_c_cd_and_print() -> None:
     assert "claude --verbose --output-format stream-json" in cmd
     assert "--model claude-sonnet-4" in cmd
     assert "--print 'solve fizzbuzz'" in cmd
-    assert "--permission-mode bypassPermissions" in cmd
+    assert "--permission-mode acceptEdits" in cmd
+    assert "--tools Bash,Write,Edit,Read,Glob,Grep" in cmd
+    assert "--allowedTools Bash Write Edit Read Glob Grep" in cmd
+    assert "--no-session-persistence" in cmd
     # Telemetry / auto-update disabled via env, NOT flags.
     assert env["DISABLE_TELEMETRY"] == "1"
     assert env["CLAUDE_CODE_AUTO_UPDATE"] == "false"

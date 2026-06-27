@@ -27,6 +27,14 @@ from loom_launcher.registry import register_adapter
 # (claude-code's node-tree-kill dep shells out to ps/pgrep).
 _CLAUDE_CODE_PKG = "@anthropic-ai/claude-code"
 _CLAUDE_CODE_VERSION = "2.1.183"
+_CLAUDE_CODE_ALLOWED_TOOLS = (
+    "Bash",
+    "Write",
+    "Edit",
+    "Read",
+    "Glob",
+    "Grep",
+)
 _CLAUDE_CODE_INSTALL_SCRIPT = f"""\
 set -euo pipefail
 if command -v apk >/dev/null 2>&1; then
@@ -84,13 +92,18 @@ class ClaudeCodeAdapter:
     ) -> list[str]:
         env["DISABLE_TELEMETRY"] = "1"
         env["CLAUDE_CODE_AUTO_UPDATE"] = "false"
+        allowed_tools = " ".join(shlex.quote(tool) for tool in _CLAUDE_CODE_ALLOWED_TOOLS)
+        visible_tools = ",".join(_CLAUDE_CODE_ALLOWED_TOOLS)
         return [
             "sh",
             "-c",
             (
                 f"cd {shlex.quote(str(workdir))} && "
                 f"claude --verbose --output-format stream-json "
-                f"--permission-mode bypassPermissions "
+                f"--permission-mode acceptEdits "
+                f"--tools {shlex.quote(visible_tools)} "
+                f"--allowedTools {allowed_tools} "
+                f"--no-session-persistence "
                 f"--model {shlex.quote(model.name)} "
                 f"--print {shlex.quote(instruction)}"
             ),
