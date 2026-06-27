@@ -13,6 +13,12 @@ per-call `cost_usd` snapshot and `rate_card_hash` used at emit time.
 Trial, batch, and usage read APIs project these rows into token totals,
 estimated spend, and cost diagnostics; they do not hide token-only or
 missing-rate-card calls behind a zero-dollar total.
+If a provider omits all or part of its usage block, the Gateway records
+that fact in `provider_extras` and the read APIs expose
+`partial_usage_llm_calls_count`, `missing_usage_llm_calls_count`,
+`usage_reporting_status`, and `usage_estimate_confidence` so callers can
+distinguish a complete estimate from a lower-confidence token/cost
+projection.
 
 ```
 provider response
@@ -29,8 +35,9 @@ TokenUsage ──► llm_calls row
  { total_prompt_tokens,           { derived spend totals,
    total_completion_tokens,         rate-card diagnostics,
    llm_calls_count,                 optional batch drilldown }
-   estimated_cost_usd,
-   cost_status }
+  estimated_cost_usd,
+  cost_status,
+  usage_estimate_confidence }
 ```
 
 Why this shape:
@@ -51,6 +58,11 @@ Why this shape:
   diagnostics. Consumers that need fleet-wide totals should query
   `/api/v1/usage`; trial and batch detail responses expose the same
   projection fields for local debugging.
+- **Usage confidence is separate from pricing mode** — `cost_status`
+  says whether Loom had a price source (`estimated`,
+  `not_applicable`, `price_unknown`, `mixed`); `usage_estimate_confidence`
+  says whether the provider returned complete token usage (`high`,
+  `partial`, `missing`, `none`).
 
 (Harbor froze `cost_usd` at emit time. RFC0001 acknowledges this
 goes wrong when prices move.)
@@ -124,7 +136,26 @@ and stores the catalog with `source_url`, `pricing_version`,
 `last_checked_at`, `currency`, `group`, `group_ratio`, entry count, and
 skipped model count. Model lookup normalizes common prefixes such as
 `yibuapi/<model>` and `models/<model>`. The synced card is auditable by
-its stored JSON payload and `rate_card_hash`.
+its stored JSON payload and `rate_card_hash`. Trial and batch detail
+responses include `price_snapshots` for resolved historical hashes with
+the rate-card id, source URL, pricing version, check time, currency,
+group, and group ratio; unresolved non-facade hashes remain visible with
+`resolved=false`.
+
+## Usage API and CLI
+
+`GET /api/v1/usage` is the admin/user API for totals. It supports:
+
+- `team_id`, `user_id`, `provider_connection_id`, `model`,
+  `benchmark_id`, `batch_id`, `status`, and `pricing_mode` filters.
+- `breakdown_by=team|user|provider_connection|model|benchmark|batch|status|pricing_mode`.
+- `include_batches=true` for per-batch drilldown when not using a
+  breakdown dimension.
+
+`loom eval usage` exposes the same filters and prints cost status plus
+usage confidence. Use `--format json` for the full API payload,
+including per-batch `partial_usage_llm_calls_count` and
+`missing_usage_llm_calls_count`.
 
 ## Local / self-hosted rates
 

@@ -643,7 +643,11 @@ loom admin rate-cards sync-yibuapi
 ```
 
 This stores the official `source_url`, `pricing_version`, check time, group
-ratio, and model count metadata in the service rate-card payload.
+ratio, and model count metadata in the service rate-card payload. Hosted
+YibuAPI provider connections should use `rate_card_provider=yibuapi`; user
+self-deployed/private API connections should normally stay `tokens-only`, which
+reports token totals and `cost_status=not_applicable` without assigning a
+fabricated dollar amount.
 
 ## Trial-cache (per-trial agent install)
 
@@ -1660,8 +1664,12 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    Artifact rows include `share_status` and a safe `blocked_reason`
    when org-wide sharing is blocked. Trial and batch detail responses
    carry local token and cost projections (`estimated_cost_usd`,
-   `cost_status`, `pricing_modes`); use `/api/v1/usage` with optional
-   `include_batches=true` for admin totals and per-batch drilldown.
+   `cost_status`, `pricing_modes`, `usage_estimate_confidence`); use
+   `/api/v1/usage` with optional `include_batches=true` for admin totals
+   and per-batch drilldown. If confidence is `partial` or `missing`,
+   inspect `partial_usage_llm_calls_count` and
+   `missing_usage_llm_calls_count` before treating token or dollar totals
+   as complete.
    For multi-benchmark batches, `GET /api/v1/batches/{id}` also
    returns `benchmark_summary`; verify the SPA Batch Detail page shows
    each benchmark's score, completed/expected trial count, and platform

@@ -23,6 +23,7 @@ from loom.db.schema import (
     Batch,
     Benchmark,
     LlmCall,
+    RateCard,
     Task,
     Team,
     TeamQuota,
@@ -30,6 +31,7 @@ from loom.db.schema import (
     Trial,
     Worker,
 )
+from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 
@@ -181,6 +183,7 @@ async def camp_setup(
         with sl() as s:
             s.execute(delete(LlmCall))
             s.execute(delete(Trial))
+            s.execute(delete(RateCard))
             s.execute(delete(Token))
             s.execute(delete(Batch))
             s.execute(delete(Task))
@@ -1044,9 +1047,46 @@ async def test_get_batch_detail_with_rollup(
     # Seed 3 trial rows under this batch: 2 succeeded with rewards,
     # 1 still running. LLM usage should come from llm_calls, not the
     # stale/frozen cost_usd values in Trial.result.
+    captured_at = datetime(2026, 6, 27, tzinfo=UTC)
+    table = RateCardTable(
+        id="yibuapi-pricing-v1",
+        captured_at=captured_at,
+        provider="yibuapi",
+        source_url="https://yibuapi.com/api/pricing",
+        pricing_version="pricing-v1",
+        last_checked_at=captured_at,
+        currency="USD",
+        group="default",
+        group_ratio=1.0,
+        entry_count=1,
+        skipped_model_count=0,
+        entries=[
+            {
+                "provider": "yibuapi",
+                "model": "qwen3.6-35b-a3b",
+                "input_per_mtok": 0.25,
+                "output_per_mtok": 0.75,
+                "cache_read_per_mtok": 0.0,
+                "cache_write_per_mtok": 0.0,
+                "currency": "USD",
+                "source_url": "https://yibuapi.com/api/pricing",
+                "pricing_version": "pricing-v1",
+                "source_model": "Qwen3.6 35B A3B",
+                "pricing_unit": "mtok",
+            }
+        ],
+    )
+    table_hash = hash_table(table)
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        s.execute(
+            insert(RateCard).values(
+                id=table.id,
+                captured_at=table.captured_at,
+                table=table.model_dump(mode="json", exclude={"captured_at"}),
+            )
+        )
         seeded_trial_ids: list[UUID] = []
         for i, (state, result) in enumerate(
             (
@@ -1084,7 +1124,7 @@ async def test_get_batch_detail_with_rollup(
                     "output_tokens": 5,
                     "provider_extras": {},
                     "cost_usd": Decimal("9.990000"),
-                    "rate_card_hash": "stale-rate-card",
+                    "rate_card_hash": table_hash,
                 },
                 {
                     "id": uuid4(),
@@ -1110,7 +1150,7 @@ async def test_get_batch_detail_with_rollup(
                     "output_tokens": 1,
                     "provider_extras": {},
                     "cost_usd": Decimal("0.000001"),
-                    "rate_card_hash": "running-rate-card",
+                    "rate_card_hash": table_hash,
                 },
             ],
         )
@@ -1139,6 +1179,20 @@ async def test_get_batch_detail_with_rollup(
     assert body["cost_status"] == "mixed"
     assert body["pricing_modes"] == ["priced", "price-unknown"]
     assert body["llm_calls_count"] == 3
+    assert body["price_snapshots"] == [
+        {
+            "rate_card_hash": table_hash,
+            "rate_card_id": "yibuapi-pricing-v1",
+            "resolved": True,
+            "provider": "yibuapi",
+            "source_url": "https://yibuapi.com/api/pricing",
+            "pricing_version": "pricing-v1",
+            "last_checked_at": "2026-06-27T00:00:00+00:00",
+            "currency": "USD",
+            "group": "default",
+            "group_ratio": 1.0,
+        }
+    ]
 
 
 async def test_get_batch_detail_includes_per_benchmark_rollup(

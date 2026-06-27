@@ -236,6 +236,10 @@ describe("TrialDetail trajectory section", () => {
         cost_status: "not_applicable",
         cost_currency: null,
         pricing_modes: ["tokens-only"],
+        partial_usage_llm_calls_count: 1,
+        missing_usage_llm_calls_count: 0,
+        usage_reporting_status: "partial",
+        usage_estimate_confidence: "partial",
       },
     );
     renderWithProviders(
@@ -248,6 +252,7 @@ describe("TrialDetail trajectory section", () => {
     expect(await screen.findByText("Estimated LLM cost")).toBeInTheDocument();
     expect(screen.getByText("n/a")).toBeInTheDocument();
     expect(screen.getByText("not_applicable")).toBeInTheDocument();
+    expect(screen.getByText("partial")).toBeInTheDocument();
     expect(screen.queryByText("$0.0000")).not.toBeInTheDocument();
   });
 

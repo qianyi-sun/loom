@@ -52,7 +52,9 @@ from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.usage_accounting import (
     empty_usage_projection,
+    price_snapshots_for_trials,
     summarize_usage_counts,
+    usage_status_filter,
 )
 
 router = APIRouter()
@@ -123,6 +125,12 @@ async def _usage_by_trial_ids(
                     LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
                 )
                 .label("price_unknown_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("partial"))
+                .label("partial_usage_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("missing"))
+                .label("missing_usage_llm_calls_count"),
             )
             .where(LlmCall.trial_id.in_(trial_ids))
             .group_by(LlmCall.trial_id),
@@ -140,6 +148,12 @@ async def _usage_by_trial_ids(
             ),
             price_unknown_llm_calls_count=int(
                 row.price_unknown_llm_calls_count or 0,
+            ),
+            partial_usage_llm_calls_count=int(
+                row.partial_usage_llm_calls_count or 0,
+            ),
+            missing_usage_llm_calls_count=int(
+                row.missing_usage_llm_calls_count or 0,
             ),
         )
         for row in rows
@@ -202,6 +216,14 @@ def _trial_row(
         "priced_llm_calls_count": usage_projection["priced_llm_calls_count"],
         "token_only_llm_calls_count": usage_projection["token_only_llm_calls_count"],
         "price_unknown_llm_calls_count": usage_projection["price_unknown_llm_calls_count"],
+        "partial_usage_llm_calls_count": usage_projection[
+            "partial_usage_llm_calls_count"
+        ],
+        "missing_usage_llm_calls_count": usage_projection[
+            "missing_usage_llm_calls_count"
+        ],
+        "usage_reporting_status": usage_projection["usage_reporting_status"],
+        "usage_estimate_confidence": usage_projection["usage_estimate_confidence"],
         "agent_name": agent_name,
         "model": model,
         "visibility": t.visibility,
@@ -438,6 +460,7 @@ async def get_trial(
         usage=usage_by_trial.get(trial.id),
         owner_team=owner_team,
     )
+    base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])
     trajectory_index = trial.trajectory_index or {}
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;

@@ -588,6 +588,39 @@ async def test_facade_handles_missing_upstream_usage_block(
     assert row["input_tokens"] == 0
     assert row["output_tokens"] == 0
     assert float(row["cost_usd"]) == 0.0
+    assert row["provider_extras"]["_loom_usage_status"] == "missing"
+
+
+async def test_facade_marks_partial_upstream_usage_block(
+    facade_setup, postgres_url: str,
+) -> None:
+    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    captures["response"] = httpx.Response(200, json={  # type: ignore[index]
+        "id": "partial-usage",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}}],
+        "usage": {"prompt_tokens": 123},
+    })
+    r = await _post(
+        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 200
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["input_tokens"] == 123
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == pytest.approx(0.000615)
+    assert row["provider_extras"]["_loom_usage_status"] == "partial"
+    assert row["provider_extras"]["_loom_missing_usage_keys"] == [
+        "completion_tokens"
+    ]
+    assert row["provider_extras"]["_loom_provider_usage"] == {
+        "prompt_tokens": 123
+    }
 
 
 async def test_facade_returns_502_on_upstream_request_error(

@@ -48,7 +48,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from loom_llm_gateway.dialect import TokenUsage
+from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
@@ -193,21 +193,7 @@ async def openai_chat_facade(
     # A non-2xx already 4xx'd above, so this is the happy path. Missing
     # `usage` (some operator endpoints omit it) → 0/0 with a 0 cost row
     # so attribution still exists for debug.
-    usage_d = body.get("usage") if isinstance(body, dict) else None
-    if isinstance(usage_d, dict):
-        try:
-            input_tokens = int(usage_d.get("prompt_tokens", 0) or 0)
-            output_tokens = int(usage_d.get("completion_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            input_tokens = output_tokens = 0
-    else:
-        input_tokens = output_tokens = 0
-
-    usage = TokenUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        provider_extras={},
-    )
+    usage = DIALECTS["openai_chat"].extract_tokens(body)
     cost_usd, rate_card_hash = await compute_facade_cost_usd(
         row,
         payload["model"],

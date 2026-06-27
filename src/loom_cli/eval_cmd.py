@@ -578,6 +578,16 @@ def _format_usage_cost(item: dict[str, Any]) -> str:
     return str(value)
 
 
+def _usage_estimate_confidence(item: dict[str, Any]) -> str:
+    confidence = item.get("usage_estimate_confidence")
+    if isinstance(confidence, str) and confidence:
+        return confidence
+    status = item.get("usage_reporting_status")
+    if isinstance(status, str) and status:
+        return status
+    return "-"
+
+
 # ──────────────────────────────────────────────────────────────────────
 # eval trial list / show
 # ──────────────────────────────────────────────────────────────────────
@@ -768,6 +778,19 @@ def _usage(args: argparse.Namespace) -> int:
             params["team_id"] = args.team_id
         if args.include_batches:
             params["include_batches"] = "true"
+        for attr, param_name in (
+            ("user_id", "user_id"),
+            ("provider_connection_id", "provider_connection_id"),
+            ("model", "model"),
+            ("benchmark_id", "benchmark_id"),
+            ("batch_id", "batch_id"),
+            ("status", "status"),
+            ("pricing_mode", "pricing_mode"),
+            ("breakdown_by", "breakdown_by"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                params[param_name] = value
         with authed_client(cfg) as c:
             resp = c.get("/api/v1/usage", params=params)
         body = assert_2xx(resp, action="fetch usage")
@@ -783,15 +806,23 @@ def _usage(args: argparse.Namespace) -> int:
             return 0
         print(
             "start_at                      trials  success  failed  "
-            "cost_status      cost_usd  in_tok  out_tok",
+            "breakdown                 cost_status      usage_conf  cost_usd  in_tok  out_tok",
         )
         for bucket in buckets:
+            breakdown = ""
+            if bucket.get("breakdown_by"):
+                breakdown = (
+                    f"{bucket.get('breakdown_by')}="
+                    f"{bucket.get('breakdown_label') or bucket.get('breakdown_key')}"
+                )
             print(
                 f"{bucket.get('start_at', '')!s:<29} "
                 f"{bucket.get('trial_count', 0):>6} "
                 f"{bucket.get('succeeded_count', 0):>8} "
                 f"{bucket.get('failed_count', 0):>7} "
+                f"{breakdown:<25} "
                 f"{_usage_cost_status(bucket):<15} "
+                f"{_usage_estimate_confidence(bucket):<10} "
                 f"{_format_usage_cost(bucket):>8} "
                 f"{bucket.get('llm_input_tokens', 0):>7} "
                 f"{bucket.get('llm_output_tokens', 0):>8}",
@@ -800,7 +831,7 @@ def _usage(args: argparse.Namespace) -> int:
             if args.include_batches and isinstance(batches, list) and batches:
                 print(
                     "  batch_id                              trials  "
-                    "cost_status      cost_usd  in_tok  out_tok  name",
+                    "cost_status      usage_conf  cost_usd  in_tok  out_tok  name",
                 )
                 for batch in batches:
                     if not isinstance(batch, dict):
@@ -809,6 +840,7 @@ def _usage(args: argparse.Namespace) -> int:
                         f"  {batch.get('batch_id', '')!s:<36} "
                         f"{batch.get('trial_count', 0):>6} "
                         f"{_usage_cost_status(batch):<15} "
+                        f"{_usage_estimate_confidence(batch):<10} "
                         f"{_format_usage_cost(batch):>8} "
                         f"{batch.get('llm_input_tokens', 0):>7} "
                         f"{batch.get('llm_output_tokens', 0):>8} "
@@ -1072,6 +1104,31 @@ def dispatch(argv: list[str]) -> int:
         default="day",
     )
     p_usage.add_argument("--team-id", default=None)
+    p_usage.add_argument("--user-id", default=None)
+    p_usage.add_argument("--provider-connection-id", default=None)
+    p_usage.add_argument("--model", default=None)
+    p_usage.add_argument("--benchmark-id", default=None)
+    p_usage.add_argument("--batch-id", default=None)
+    p_usage.add_argument("--status", default=None)
+    p_usage.add_argument(
+        "--pricing-mode",
+        choices=["priced", "tokens-only", "price-unknown"],
+        default=None,
+    )
+    p_usage.add_argument(
+        "--breakdown-by",
+        choices=[
+            "team",
+            "user",
+            "provider_connection",
+            "model",
+            "benchmark",
+            "batch",
+            "status",
+            "pricing_mode",
+        ],
+        default=None,
+    )
     p_usage.add_argument(
         "--include-batches",
         action="store_true",

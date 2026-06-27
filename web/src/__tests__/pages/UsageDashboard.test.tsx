@@ -141,6 +141,10 @@ describe("UsageDashboard", () => {
             cost_status: "not_applicable",
             cost_currency: null,
             pricing_modes: ["tokens-only"],
+            partial_usage_llm_calls_count: 1,
+            missing_usage_llm_calls_count: 0,
+            usage_reporting_status: "partial",
+            usage_estimate_confidence: "partial",
             llm_input_tokens: 77,
             llm_output_tokens: 11,
             trials_currently_succeeded: 0,
@@ -156,6 +160,10 @@ describe("UsageDashboard", () => {
                 cost_status: "not_applicable",
                 cost_currency: null,
                 pricing_modes: ["tokens-only"],
+                partial_usage_llm_calls_count: 1,
+                missing_usage_llm_calls_count: 0,
+                usage_reporting_status: "partial",
+                usage_estimate_confidence: "partial",
                 llm_input_tokens: 77,
                 llm_output_tokens: 11,
               },
@@ -171,6 +179,7 @@ describe("UsageDashboard", () => {
       .toBeInTheDocument();
     expect(screen.getAllByText("n/a").length).toBeGreaterThan(0);
     expect(screen.getAllByText("not_applicable").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("partial").length).toBeGreaterThan(0);
 
     await waitFor(() => {
       const usageRequests = fetchMock.mock.calls.filter(([input]) =>

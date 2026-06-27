@@ -63,7 +63,9 @@ from loom_service.task_config_validation import (
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 from loom_service.usage_accounting import (
     empty_usage_projection,
+    price_snapshots_for_trials,
     summarize_usage_counts,
+    usage_status_filter,
 )
 from loom_service.worker_backends import get_active_backends
 
@@ -695,6 +697,12 @@ async def _usage_totals_for_trials(
                     LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
                 )
                 .label("price_unknown_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("partial"))
+                .label("partial_usage_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("missing"))
+                .label("missing_usage_llm_calls_count"),
             ).where(LlmCall.trial_id.in_(trial_ids)),
         )
     ).one()
@@ -707,6 +715,12 @@ async def _usage_totals_for_trials(
         token_only_llm_calls_count=int(row.token_only_llm_calls_count or 0),
         price_unknown_llm_calls_count=int(
             row.price_unknown_llm_calls_count or 0,
+        ),
+        partial_usage_llm_calls_count=int(
+            row.partial_usage_llm_calls_count or 0,
+        ),
+        missing_usage_llm_calls_count=int(
+            row.missing_usage_llm_calls_count or 0,
         ),
     )
 
@@ -765,6 +779,12 @@ async def _usage_by_batch_ids(
                     LlmCall.rate_card_hash.like("facade:rate-card:missing%"),
                 )
                 .label("price_unknown_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("partial"))
+                .label("partial_usage_llm_calls_count"),
+                func.count(LlmCall.id)
+                .filter(usage_status_filter("missing"))
+                .label("missing_usage_llm_calls_count"),
             )
             .join(LlmCall, LlmCall.trial_id == Trial.id)
             .where(Trial.batch_id.in_(batch_ids))
@@ -783,6 +803,12 @@ async def _usage_by_batch_ids(
             ),
             price_unknown_llm_calls_count=int(
                 row.price_unknown_llm_calls_count or 0,
+            ),
+            partial_usage_llm_calls_count=int(
+                row.partial_usage_llm_calls_count or 0,
+            ),
+            missing_usage_llm_calls_count=int(
+                row.missing_usage_llm_calls_count or 0,
             ),
         )
         for row in rows
@@ -973,6 +999,10 @@ async def get_batch(
     summary = _summary_from_trials(original_trials)
     avg_reward = _rollup_from_trials(original_trials)
     usage = await _usage_totals_for_trials(s, original_trials)
+    price_snapshots = await price_snapshots_for_trials(
+        s,
+        {trial.id for trial in original_trials},
+    )
     llm_calls = await _llm_calls_for_trials(s, original_trials)
     benchmark_summary = await _benchmark_summary_from_trials(
         s,
@@ -1006,6 +1036,10 @@ async def get_batch(
     effective_summary = _summary_from_trials(effective_trials)
     effective_reward = _rollup_from_trials(effective_trials)
     effective_usage = await _usage_totals_for_trials(s, effective_trials)
+    effective_price_snapshots = await price_snapshots_for_trials(
+        s,
+        {trial.id for trial in effective_trials},
+    )
     rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
     debug_evidence = build_batch_debug_evidence(
         b,
@@ -1040,6 +1074,18 @@ async def get_batch(
         "effective_priced_llm_calls_count": effective_usage["priced_llm_calls_count"],
         "effective_token_only_llm_calls_count": effective_usage["token_only_llm_calls_count"],
         "effective_price_unknown_llm_calls_count": effective_usage["price_unknown_llm_calls_count"],
+        "effective_partial_usage_llm_calls_count": effective_usage[
+            "partial_usage_llm_calls_count"
+        ],
+        "effective_missing_usage_llm_calls_count": effective_usage[
+            "missing_usage_llm_calls_count"
+        ],
+        "effective_usage_reporting_status": effective_usage["usage_reporting_status"],
+        "effective_usage_estimate_confidence": effective_usage[
+            "usage_estimate_confidence"
+        ],
+        "price_snapshots": price_snapshots,
+        "effective_price_snapshots": effective_price_snapshots,
         "benchmark_summary": benchmark_summary,
         "debug_evidence": debug_evidence,
         "diagnosis": build_batch_diagnosis(

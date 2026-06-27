@@ -28,7 +28,11 @@ import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
 import { trialStateVariant } from "../lib/statusVariant";
-import { formatUsageCost, usageCostStatus } from "../lib/usageCost";
+import {
+  formatUsageCost,
+  usageCostStatus,
+  usageEstimateConfidence,
+} from "../lib/usageCost";
 
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
 type TrialArtifact = components["schemas"]["TrialDetail"]["artifacts"][number];
@@ -206,6 +210,10 @@ function TrialHeader({
               <StatCard
                 label="Cost status"
                 value={usageCostStatus(trial)}
+              />
+              <StatCard
+                label="Usage confidence"
+                value={usageEstimateConfidence(trial)}
               />
             </>
           ) : null}

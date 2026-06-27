@@ -24,7 +24,11 @@ import { modelLabel } from "../lib/modelLabel";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
-import { formatUsageCost, usageCostStatus } from "../lib/usageCost";
+import {
+  formatUsageCost,
+  usageCostStatus,
+  usageEstimateConfidence,
+} from "../lib/usageCost";
 
 function resultStatusVariant(s: string): "success" | "warning" | "failed" | "cancelled" | "neutral" {
   switch (s) {
@@ -248,6 +252,10 @@ export default function BatchDetail(): JSX.Element {
                   label="Cost status"
                   value={usageCostStatus(c)}
                 />
+                <StatCard
+                  label="Usage confidence"
+                  value={usageEstimateConfidence(c)}
+                />
               </>
             ) : null}
             <StatCard
@@ -359,6 +367,8 @@ export default function BatchDetail(): JSX.Element {
                       cost_currency: c.effective_cost_currency,
                       cost_status: c.effective_cost_status,
                       pricing_modes: c.effective_pricing_modes,
+                      usage_estimate_confidence:
+                        c.effective_usage_estimate_confidence,
                     })})`
                   : ""}
               </div>

@@ -1616,6 +1616,10 @@ def test_eval_usage_include_batches_shows_token_only_cost_status(
                     "cost_status": "not_applicable",
                     "cost_currency": None,
                     "pricing_modes": ["tokens-only"],
+                    "partial_usage_llm_calls_count": 1,
+                    "missing_usage_llm_calls_count": 0,
+                    "usage_reporting_status": "partial",
+                    "usage_estimate_confidence": "partial",
                     "llm_input_tokens": 77,
                     "llm_output_tokens": 11,
                     "batches": [
@@ -1631,6 +1635,8 @@ def test_eval_usage_include_batches_shows_token_only_cost_status(
                             "cost_status": "not_applicable",
                             "cost_currency": None,
                             "pricing_modes": ["tokens-only"],
+                            "partial_usage_llm_calls_count": 1,
+                            "usage_estimate_confidence": "partial",
                         }
                     ],
                 }
@@ -1656,7 +1662,80 @@ def test_eval_usage_include_batches_shows_token_only_cost_status(
     assert "not_applicable" in out
     assert "n/a" in out
     assert "self-deployed token-only batch" in out
+    assert "partial" in out
     assert "0.125" not in out
+
+
+def test_eval_usage_forwards_admin_filters_and_breakdown(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", "/api/v1/usage")] = httpx.Response(
+        200,
+        json={
+            "degraded": False,
+            "buckets": [
+                {
+                    "start_at": "2026-06-02T00:00:00+00:00",
+                    "breakdown_by": "pricing_mode",
+                    "breakdown_key": "tokens-only",
+                    "breakdown_label": "tokens-only",
+                    "trial_count": 1,
+                    "succeeded_count": 0,
+                    "failed_count": 1,
+                    "estimated_cost_usd": None,
+                    "cost_status": "not_applicable",
+                    "cost_currency": None,
+                    "pricing_modes": ["tokens-only"],
+                    "llm_input_tokens": 77,
+                    "llm_output_tokens": 11,
+                }
+            ],
+        },
+    )
+
+    rc = main(
+        [
+            "eval",
+            "usage",
+            "--start",
+            "2026-06-02",
+            "--end",
+            "2026-06-02",
+            "--team-id",
+            "team-1",
+            "--user-id",
+            "user-1",
+            "--provider-connection-id",
+            "provider-1",
+            "--model",
+            "qwen3.6-35b-a3b",
+            "--benchmark-id",
+            "skilllearnbench",
+            "--batch-id",
+            "batch-1",
+            "--status",
+            "failed",
+            "--pricing-mode",
+            "tokens-only",
+            "--breakdown-by",
+            "pricing_mode",
+        ]
+    )
+
+    assert rc == 0
+    params = mock_server[0].url.params
+    assert params.get("user_id") == "user-1"
+    assert params.get("provider_connection_id") == "provider-1"
+    assert params.get("model") == "qwen3.6-35b-a3b"
+    assert params.get("benchmark_id") == "skilllearnbench"
+    assert params.get("batch_id") == "batch-1"
+    assert params.get("status") == "failed"
+    assert params.get("pricing_mode") == "tokens-only"
+    assert params.get("breakdown_by") == "pricing_mode"
+    out = capsys.readouterr().out
+    assert "tokens-only" in out
+    assert "not_applicable" in out
 
 
 # ──────────────────────────────────────────────────────────────────────

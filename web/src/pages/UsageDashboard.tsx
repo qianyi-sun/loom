@@ -21,6 +21,7 @@ import {
   summarizeUsageCost,
   usageCostAmount,
   usageCostStatus,
+  usageEstimateConfidence,
 } from "../lib/usageCost";
 
 const SELECT_CLASSES =
@@ -203,12 +204,16 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <StatCard label="Trials" value={totals.trial_count.toLocaleString()} />
         <StatCard
           label="Estimated LLM cost"
           value={formatUsageCost(totals.usageCost)}
           note={usageCostStatus(totals.usageCost)}
+        />
+        <StatCard
+          label="Usage confidence"
+          value={usageEstimateConfidence(totals.usageCost)}
         />
         <StatCard
           label="Input tokens"
@@ -253,6 +258,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
                     "Input tokens",
                     "Output tokens",
                     "Cost status",
+                    "Usage confidence",
                     "LLM cost",
                   ].map((h) => (
                     <th
@@ -311,12 +317,15 @@ function UsageBucketRows({
           {usageCostStatus(bucket)}
         </td>
         <td className="px-4 py-3 text-slate-700">
+          {usageEstimateConfidence(bucket)}
+        </td>
+        <td className="px-4 py-3 text-slate-700">
           {formatUsageCost(bucket)}
         </td>
       </tr>
       {showBatchBreakdown && (bucket.batches ?? []).length > 0 ? (
         <tr>
-          <td colSpan={8} className="bg-slate-50/70 px-4 py-3">
+          <td colSpan={9} className="bg-slate-50/70 px-4 py-3">
             <div className="overflow-x-auto">
               <table className="min-w-full text-xs">
                 <thead>
@@ -328,6 +337,7 @@ function UsageBucketRows({
                       "Input tokens",
                       "Output tokens",
                       "Cost status",
+                      "Usage confidence",
                       "LLM cost",
                     ].map((h) => (
                       <th
@@ -374,6 +384,9 @@ function UsageBatchRow({ batch }: { batch: BatchUsage }): JSX.Element {
       </td>
       <td className="px-3 py-2 text-slate-700">
         {usageCostStatus(batch)}
+      </td>
+      <td className="px-3 py-2 text-slate-700">
+        {usageEstimateConfidence(batch)}
       </td>
       <td className="px-3 py-2 text-slate-700">
         {formatUsageCost(batch)}

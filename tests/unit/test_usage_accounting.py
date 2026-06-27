@@ -80,3 +80,23 @@ def test_mixed_usage_marks_partial_cost_status() -> None:
         "tokens-only",
         "price-unknown",
     ]
+
+
+def test_incomplete_provider_usage_marks_estimate_confidence() -> None:
+    summary = summarize_usage_counts(
+        llm_calls_count=3,
+        total_prompt_tokens=2000,
+        total_completion_tokens=800,
+        total_cost_usd=Decimal("0.040000"),
+        priced_llm_calls_count=3,
+        token_only_llm_calls_count=0,
+        price_unknown_llm_calls_count=0,
+        partial_usage_llm_calls_count=1,
+        missing_usage_llm_calls_count=1,
+    )
+
+    assert summary["estimated_cost_usd"] == 0.04
+    assert summary["partial_usage_llm_calls_count"] == 1
+    assert summary["missing_usage_llm_calls_count"] == 1
+    assert summary["usage_reporting_status"] == "partial"
+    assert summary["usage_estimate_confidence"] == "partial"
