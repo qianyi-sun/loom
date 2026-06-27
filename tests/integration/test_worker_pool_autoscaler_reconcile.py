@@ -221,7 +221,7 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
         assert {job.state for job in jobs} == {"pending"}
         assert policy.last_decision == "scale_up"
         assert policy.last_decision_reason == "queued_deficit"
-        assert policy.last_pending_slots == 0
+        assert policy.last_pending_slots == 12
     finally:
         await engine.dispose()
 

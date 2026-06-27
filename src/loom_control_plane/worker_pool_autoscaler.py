@@ -1117,7 +1117,10 @@ async def reconcile_worker_pool_autoscaler_once(
                     drain_owner="worker-pool-autoscaler",
                 ),
             )
-        if decision.action == "release_drained":
+        if (
+            decision.action == "release_drained"
+            or (decision.action == "scale_up" and row.actuator == "slurm")
+        ):
             observation = await _load_observation(
                 session,
                 row,
