@@ -35,6 +35,7 @@ from loom_cli.server_client import (
     authed_client,
     require_logged_in,
 )
+from loom_cli.time_format import format_local_datetime
 
 
 class _NameNotFoundError(Exception):
@@ -104,7 +105,7 @@ def _print_connection_summary(item: dict[str, Any]) -> None:
         print(f"allowed:       {', '.join(item['allowed_models'])}")
     if item.get("last_validation_error"):
         print(f"last_error:    {item['last_validation_error']}")
-    print(f"created_at:    {item['created_at']}")
+    print(f"created_at:    {format_local_datetime(item['created_at'])}")
 
 
 def _print_create_next_steps(name: str) -> None:
@@ -554,7 +555,10 @@ def _test(args: argparse.Namespace) -> int:
         if body.get("last_validation_error"):
             print(f"last_validation_error: {body['last_validation_error']}")
         if body.get("last_validated_at"):
-            print(f"last_validated_at:     {body['last_validated_at']}")
+            print(
+                "last_validated_at:     "
+                f"{format_local_datetime(body['last_validated_at'])}",
+            )
         return 0 if status == "valid" else 1
 
     return _run_with_error_handling(_body)

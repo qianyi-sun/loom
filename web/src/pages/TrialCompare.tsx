@@ -25,6 +25,7 @@ import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import { modelLabel } from "../lib/modelLabel";
 import { trialStateVariant } from "../lib/statusVariant";
+import { formatTokenUsage } from "../lib/tokenUsage";
 
 type Trial = components["schemas"]["TrialDetail"];
 type TrajEvent = components["schemas"]["TrajectoryEvent"];
@@ -85,7 +86,10 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
           <StatCard label="LLM calls" value={t.llm_calls_count} />
           <StatCard
             label="Tokens"
-            value={`P ${t.total_prompt_tokens} / C ${t.total_completion_tokens}`}
+            value={formatTokenUsage(
+              t.total_prompt_tokens,
+              t.total_completion_tokens,
+            )}
           />
         </div>
 

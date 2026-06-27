@@ -9,6 +9,7 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
@@ -48,7 +49,7 @@ function primaryModel(batch: RunLibraryBatch): string {
 }
 
 function formatDate(value: string | null): string {
-  return value ? value.slice(0, 16).replace("T", " ") : "--";
+  return formatLocalDateTime(value, { fallback: "--" });
 }
 
 function ArtifactBadges({ summary }: { summary: ArtifactSummary }): JSX.Element {

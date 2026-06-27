@@ -18,6 +18,7 @@ import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
@@ -235,7 +236,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             />
             <StatCard
               label="Created"
-              value={batch.created_at.slice(0, 16).replace("T", " ")}
+              value={formatLocalDateTime(batch.created_at)}
             />
           </div>
 

@@ -42,6 +42,7 @@ from loom_cli.server_client import (
     authed_client,
     require_logged_in,
 )
+from loom_cli.time_format import format_local_datetime
 
 CellState = Literal[
     "PASS_PLATFORM", "FAIL_PLATFORM", "SUSPECT_PASS",
@@ -451,9 +452,9 @@ def _render_markdown(result: MatrixResult) -> str:
     lines.append(f"- Cluster: `{result.cluster_url}`")
     lines.append(f"- Provider connection: `{result.provider_connection}`")
     lines.append(f"- Model: `{result.model}`")
-    lines.append(f"- Started: {result.started_at}")
+    lines.append(f"- Started: {format_local_datetime(result.started_at)}")
     if result.finished_at:
-        lines.append(f"- Finished: {result.finished_at}")
+        lines.append(f"- Finished: {format_local_datetime(result.finished_at)}")
     if result.batch_ids:
         lines.append(f"- Batches: {', '.join(result.batch_ids)}")
     lines.append("")

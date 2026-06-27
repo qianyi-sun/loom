@@ -31,6 +31,7 @@ import Pagination, {
 import { StatusPill, type StatusVariant } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { formatLocalDateTime } from "../lib/dateTime";
 import {
   ownershipLabel,
   ownershipSearchText,
@@ -38,6 +39,7 @@ import {
 } from "../lib/ownership";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { formatTokenUsage } from "../lib/tokenUsage";
 
 type View = "batches" | "trials";
 
@@ -604,7 +606,7 @@ function BatchesView({
                       {c.expected_trial_count}
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
-                      {c.created_at.slice(0, 16).replace("T", " ")}
+                      {formatLocalDateTime(c.created_at)}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
                       {c.created_by_token_prefix}
@@ -862,12 +864,14 @@ function TrialsView({
                     <td className="px-4 py-3 text-slate-700">
                       <div>{t.llm_calls_count} calls</div>
                       <div className="text-xs text-slate-500">
-                        P {t.total_prompt_tokens} / C{" "}
-                        {t.total_completion_tokens}
+                        {formatTokenUsage(
+                          t.total_prompt_tokens,
+                          t.total_completion_tokens,
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
-                      {t.submitted_at.slice(0, 16).replace("T", " ")}
+                      {formatLocalDateTime(t.submitted_at)}
                     </td>
                   </tr>
                 ))

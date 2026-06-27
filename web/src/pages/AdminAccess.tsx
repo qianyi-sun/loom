@@ -23,12 +23,12 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { oracleSmokeBatchCommand } from "../lib/quickstartSnippets";
 import { currentServerOrigin } from "../lib/serverOrigin";
 
 function formatDate(value: string | null): string {
-  if (!value) return "—";
-  return new Date(value).toLocaleString();
+  return formatLocalDateTime(value);
 }
 
 function downloadInviteLink(link: string, teamName: string | null): void {

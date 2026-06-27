@@ -199,6 +199,28 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText(/cloned batch config/i)).toBeInTheDocument();
   });
 
+  it("renders timestamps in user local time and token usage with explicit labels", async () => {
+    vi.stubEnv("TZ", "America/Toronto");
+    try {
+      mockBatch({
+        ...BATCH_BODY,
+        created_at: "2026-06-27T03:04:54Z",
+        finished_at: "2026-06-27T03:09:00Z",
+        total_prompt_tokens: 77,
+        total_completion_tokens: 11,
+      });
+      renderBatchDetail();
+
+      expect(await screen.findByText("Input 77 / Output 11")).toBeInTheDocument();
+      expect(screen.getByText("2026-06-26 23:04 EDT")).toBeInTheDocument();
+      expect(screen.getByText("2026-06-26 23:09 EDT")).toBeInTheDocument();
+      expect(screen.queryByText("P 77 / C 11")).not.toBeInTheDocument();
+      expect(screen.queryByText("2026-06-27 03:04")).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("shows token-only batch cost as not applicable instead of zero dollars", async () => {
     mockBatch({
       ...BATCH_BODY,

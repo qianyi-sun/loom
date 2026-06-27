@@ -16,6 +16,7 @@ import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
 import { cn } from "../lib/cn";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { cliLoginCommands } from "../lib/quickstartSnippets";
 import { currentServerOrigin } from "../lib/serverOrigin";
 
@@ -37,8 +38,7 @@ function hasScope(scopes: string[] | undefined, scope: string): boolean {
 }
 
 function formatDate(value: string | null | undefined): string {
-  if (!value) return "-";
-  return new Date(value).toLocaleDateString();
+  return formatLocalDateTime(value, { fallback: "-" });
 }
 
 function roleLabel(role: string | null | undefined): string {
