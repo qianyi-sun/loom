@@ -121,6 +121,10 @@ Deployment boundary:
   submit host executes the same reconciler with external policies enabled, so
   `sbatch`, `squeue`, `sacct`, and `scancel` run only where Slurm is available
   while API/status/metrics still come from the shared policy row.
+- Slurm submissions are exclusive by default to preserve the full-node
+  production capacity contract. A policy may set `actuator_config.exclusive=false`
+  for deliberately shared nodes when the requested CPU, memory, and worker
+  concurrency represent a tested partial-node slice.
 
 ### GB10 Node-Agent Actuator
 

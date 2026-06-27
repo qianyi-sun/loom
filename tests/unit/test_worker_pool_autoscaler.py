@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from loom.db.schema import WorkerPoolAutoscalerPolicy
+from loom_control_plane.elastic_slurm_worker_controller import build_sbatch_request
 from loom_control_plane.worker_pool_autoscaler import (
     AutoscalerDecision,
     AutoscalerObservation,
@@ -616,6 +617,25 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
     )
 
     assert _slurm_config_from_policy(csv_row).allowed_nodes == ("oldlab-4",)
+
+
+def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> None:
+    row = _policy_row(
+        max_slots=1,
+        actuator_config={
+            "allowed_nodes": ["oldlab-4"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 1,
+            "requested_cpus": 2,
+            "requested_memory_mib": 8000,
+            "exclusive": False,
+        },
+    )
+
+    request = build_sbatch_request(_slurm_config_from_policy(row), node="oldlab-4")
+
+    assert "--exclusive" not in request.args
 
 
 async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:

@@ -14,6 +14,7 @@ from loom.db.schema import (
     SlurmWorkerJob,
     Task,
     Team,
+    TeamQuota,
     Trial,
     Worker,
     WorkerPoolAutoscalerPolicy,
@@ -68,6 +69,7 @@ async def _cleanup_db(postgres_url: str) -> Iterator[None]:
         await s.execute(delete(WorkerPoolAutoscalerPolicy))
         await s.execute(delete(Worker))
         await s.execute(delete(Task))
+        await s.execute(delete(TeamQuota))
         await s.execute(delete(Team))
         await s.commit()
     await engine.dispose()

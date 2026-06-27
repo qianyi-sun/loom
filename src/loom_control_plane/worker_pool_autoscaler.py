@@ -487,6 +487,20 @@ def _policy_uses_external_runner(row: WorkerPoolAutoscalerPolicy) -> bool:
     return bool(actor_config.get("external_runner"))
 
 
+def _optional_bool(value: object, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
 def _queued_trial_matches_policy(
     requires_caps: object,
     row: WorkerPoolAutoscalerPolicy,
@@ -682,6 +696,7 @@ def _slurm_config_from_policy(
         command_timeout_seconds=float(
             actor_config.get("command_timeout_seconds") or 20.0,
         ),
+        exclusive=_optional_bool(actor_config.get("exclusive"), default=True),
     )
     if config is None:
         raise ValueError("Slurm autoscaler policy unexpectedly disabled")

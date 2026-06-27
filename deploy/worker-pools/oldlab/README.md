@@ -16,7 +16,9 @@ production-like validation.
   elastic Slurm controller from #432. For #45 and later, use the worker-pool
   autoscaler policy as the normal desired-capacity control surface; the same
   Slurm node, checkout, env-file, CPU, memory, concurrency, max-job, and
-  pending-cap settings map into the policy `actuator_config`.
+  pending-cap settings map into the policy `actuator_config`. Slurm submissions
+  are exclusive by default; set `actuator_config.exclusive=false` only for
+  deliberately shared partial-node validation slices.
 
 The initial capacity slice is intentionally conservative: one Slurm job per
 node, `12 CPU`, `58000M`, and `LOOM_WORKER_MAX_CONCURRENT=6`. Raise concurrency
