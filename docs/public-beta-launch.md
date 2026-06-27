@@ -83,8 +83,9 @@ Attach these to the release issue or release PR:
   parity decision, and at least one same-output replay case definition.
 - If a remote-worker pool is attached, private tunnel evidence from
   `scripts/ops/worker_service_tunnels.py check` and `check-remote` showing the
-  Control Plane, Gateway, and MinIO worker-facing URLs are healthy from the
-  control node and from at least one worker-host context, plus evidence that
+  Control Plane, Gateway, optional subprocess Gateway facade, and MinIO
+  worker-facing URLs are healthy from the control node and from at least one
+  worker-host context, plus evidence that
   `loom-remote-worker-tunnel-watchdog.timer` is active on the control node.
 - If OLDLAB elastic workers are enabled, `worker_capacity_smoke` release-gate
   evidence must include the smoke batch id, runtime, failure count, and one
@@ -224,10 +225,15 @@ The env file supplies the same worker-facing URLs used by remote workers:
 LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
 LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
+# Optional when Docker sandboxes use a different host-gateway facade URL.
+# LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30444/openai/v1
 ```
 
-The gate exits non-zero if any tunnel is down. This gate is separate from the
-public API smoke test: `https://loom.example.com` can be healthy while the
+The gate exits non-zero if any required tunnel is down. If
+`LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is set, the gate also prints and probes
+`subprocess-gateway`; `host.docker.internal` is checked through the equivalent
+host-side loopback URL. This gate is separate from the public API smoke test:
+`https://loom.example.com` can be healthy while the
 remote-worker pool is detached.
 
 For OLDLAB 1-5, use the committed staged files in
