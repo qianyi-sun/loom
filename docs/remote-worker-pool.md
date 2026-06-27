@@ -799,6 +799,9 @@ Normal scale-down first marks workers `draining`. Draining workers stop
 claiming new trials but keep heartbeating until in-flight trials finish.
 After a worker has no claimed or running trials, the autoscaler releases
 the underlying Slurm job or changes the GB10 host intent to `stopped`.
+For Slurm jobs, release prefers the registry `worker_id`; if Slurm observations
+never linked the job to a worker, it falls back to the drained worker hostname
+matching the Slurm job `nodelist`.
 Forced termination is a break-glass operator action, not the default path.
 
 For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,

@@ -902,13 +902,14 @@ async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
 
     job = SimpleNamespace(
         job_id="9001",
+        worker_id="worker-1",
         state="running",
         slurm_state="RUNNING",
         pending_reason=None,
         finished_at=None,
         updated_at=None,
     )
-    session = _FakeSession([_FakeResult(scalars=[job])])
+    session = _FakeSession([_FakeResult(rows=[]), _FakeResult(scalars=[job])])
 
     await _apply_slurm_release_drained(
         cast(Any, session),
@@ -933,7 +934,7 @@ async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
     assert job.slurm_state == "CANCELLED"
     assert job.pending_reason == "cancelled after autoscaler drain"
     assert job.finished_at == now
-    assert len(session.executed) == 2
+    assert len(session.executed) == 3
 
 
 async def test_apply_gb10_host_intent_creates_desired_state_and_updates_nodes() -> None:
