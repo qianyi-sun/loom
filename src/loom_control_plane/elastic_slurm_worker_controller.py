@@ -306,14 +306,22 @@ cd "$LOOM_REMOTE_WORKER_REPO_DIR"
 compose_args=(--env-file "$LOOM_REMOTE_WORKER_ENV_FILE" -f deploy/docker-compose.remote-worker.yml)
 
 cleanup() {
-  status=$?
+  status=${1:-$?}
   trap - EXIT INT TERM
+  if [[ -n "${compose_pid:-}" ]]; then
+    kill "$compose_pid" 2>/dev/null || true
+    wait "$compose_pid" 2>/dev/null || true
+  fi
   docker compose "${compose_args[@]}" down --remove-orphans || true
   exit "$status"
 }
 
-trap cleanup EXIT INT TERM
-docker compose "${compose_args[@]}" up --build
+trap cleanup EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
+docker compose "${compose_args[@]}" up --build &
+compose_pid=$!
+wait "$compose_pid"
 """
     return SbatchRequest(args=tuple(args), stdin=stdin)
 

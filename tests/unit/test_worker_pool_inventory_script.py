@@ -166,6 +166,10 @@ def test_worker_pool_slurm_submit_dry_run_cleans_up_compose_on_exit(
         capture_output=True,
     )
 
-    assert "trap cleanup EXIT INT TERM" in result.stdout
+    assert "trap cleanup EXIT" in result.stdout
+    assert "trap 'cleanup 130' INT" in result.stdout
+    assert "trap 'cleanup 143' TERM" in result.stdout
+    assert "docker compose \"${compose_args[@]}\" up --build &" in result.stdout
+    assert "compose_pid=$!" in result.stdout
+    assert "wait \"$compose_pid\"" in result.stdout
     assert "docker compose \"${compose_args[@]}\" down --remove-orphans" in result.stdout
-    assert "docker compose \"${compose_args[@]}\" up --build" in result.stdout
