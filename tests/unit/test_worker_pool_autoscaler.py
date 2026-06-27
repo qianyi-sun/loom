@@ -8,7 +8,10 @@ from uuid import uuid4
 import pytest
 
 from loom.db.schema import WorkerPoolAutoscalerPolicy
-from loom_control_plane.elastic_slurm_worker_controller import build_sbatch_request
+from loom_control_plane.elastic_slurm_worker_controller import (
+    SlurmNodeResource,
+    build_sbatch_request,
+)
 from loom_control_plane.worker_pool_autoscaler import (
     AutoscalerDecision,
     AutoscalerObservation,
@@ -172,17 +175,26 @@ class _FakeSession:
 class _FakeSlurmRunner:
     def __init__(self) -> None:
         self.submitted_nodes: list[str] = []
+        self.submitted_configs: list[Any] = []
         self.cancelled_job_ids: list[str] = []
         self.fail_submit_nodes: set[str] = set()
+        self.node_resources: dict[str, SlurmNodeResource] = {}
 
     async def submit_worker(self, *, node: str, config: Any) -> str:
         self.submitted_nodes.append(node)
+        self.submitted_configs.append(config)
         if node in self.fail_submit_nodes:
             raise RuntimeError(f"sbatch failed for {node}")
         return f"job-{node}"
 
     async def cancel_job(self, job_id: str) -> None:
         self.cancelled_job_ids.append(job_id)
+
+    async def query_node_resources(
+        self,
+        nodes: tuple[str, ...],
+    ) -> dict[str, SlurmNodeResource]:
+        return {node: resource for node, resource in self.node_resources.items() if node in nodes}
 
 
 def test_decision_scales_up_for_queue_deficit_with_max_bound() -> None:
@@ -728,16 +740,20 @@ async def test_load_observation_counts_slots_and_matching_queue() -> None:
             drain_state="draining",
         ),
     ]
-    session = _FakeSession([
-        _FakeResult(scalars=workers),
-        _FakeResult(rows=[(busy_worker_id,), (None,)]),
-        _FakeResult(rows=[
-            ({"backend": "docker", "cpu_arch": "x86_64"},),
-            ({"backend": "docker", "cpu_arch": "arm64"},),
-            ({},),
-        ]),
-        _FakeResult(rows=[(6,), (None,)]),
-    ])
+    session = _FakeSession(
+        [
+            _FakeResult(scalars=workers),
+            _FakeResult(rows=[(busy_worker_id,), (None,)]),
+            _FakeResult(
+                rows=[
+                    ({"backend": "docker", "cpu_arch": "x86_64"},),
+                    ({"backend": "docker", "cpu_arch": "arm64"},),
+                    ({},),
+                ]
+            ),
+            _FakeResult(rows=[(6,), (None,)]),
+        ]
+    )
 
     observation = await _load_observation(
         cast(Any, session),
@@ -835,11 +851,15 @@ async def test_apply_slurm_scale_up_records_success_and_failure(
 
 
 async def test_apply_slurm_scale_up_respects_pending_job_cap() -> None:
-    session = _FakeSession([
-        _FakeResult(scalars=[
-            SimpleNamespace(nodelist="oldlab-1", state="pending"),
-        ]),
-    ])
+    session = _FakeSession(
+        [
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(nodelist="oldlab-1", state="pending"),
+                ]
+            ),
+        ]
+    )
     runner = _FakeSlurmRunner()
 
     error = await _apply_slurm_scale_up(
@@ -874,6 +894,82 @@ async def test_apply_slurm_scale_up_respects_pending_job_cap() -> None:
 
     assert error is None
     assert runner.submitted_nodes == []
+
+
+async def test_apply_slurm_scale_up_records_resource_aware_concurrency_per_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    recorded_jobs: list[dict[str, Any]] = []
+
+    async def fake_record_slurm_worker_job(*args: Any, **kwargs: Any) -> None:
+        recorded_jobs.append(kwargs)
+
+    monkeypatch.setattr(
+        "loom_control_plane.worker_pool_autoscaler.record_slurm_worker_job",
+        fake_record_slurm_worker_job,
+    )
+    session = _FakeSession([_FakeResult(scalars=[])])
+    runner = _FakeSlurmRunner()
+    runner.node_resources = {
+        "oldlab-1": SlurmNodeResource("oldlab-1", "mixed", 24, 120_000, 4.0),
+        "oldlab-2": SlurmNodeResource(
+            "oldlab-2",
+            "mixed",
+            24,
+            57_344,
+            4.0,
+            idle_cpus=12,
+        ),
+        "oldlab-3": SlurmNodeResource("oldlab-3", "mixed", 24, 8_000, 4.0),
+    }
+
+    error = await _apply_slurm_scale_up(
+        cast(Any, session),
+        _policy_row(
+            min_slots=0,
+            max_slots=12,
+            actuator_config={
+                "allowed_nodes": ["oldlab-1", "oldlab-2", "oldlab-3"],
+                "env_file": "/secure/.env.remote-worker",
+                "repo_dir": "/opt/loom",
+                "requested_concurrency": 1,
+                "requested_cpus": 2,
+                "requested_memory_mib": 8192,
+                "max_jobs": 3,
+                "pending_job_cap": 3,
+                "resource_aware": True,
+                "cpu_per_slot": 2,
+                "memory_mib_per_slot": 8192,
+                "reserved_cpus": 4,
+                "reserved_memory_mib": 24_576,
+                "max_concurrency_per_node": 8,
+            },
+        ),
+        AutoscalerDecision(
+            action="scale_up",
+            reason="queued_deficit",
+            desired_slots=12,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=12,
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert error is None
+    assert runner.submitted_nodes == ["oldlab-1", "oldlab-2"]
+    assert [config.requested_concurrency for config in runner.submitted_configs] == [8, 4]
+    assert [job["requested_concurrency"] for job in recorded_jobs] == [8, 4]
+    assert [job["requested_cpus"] for job in recorded_jobs] == [16, 8]
+    assert [job["requested_memory_mib"] for job in recorded_jobs] == [65_536, 32_768]
+    assert [job["env"]["LOOM_WORKER_MAX_CONCURRENT"] for job in recorded_jobs] == [
+        "8",
+        "4",
+    ]
 
 
 async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
@@ -945,11 +1041,13 @@ async def test_apply_gb10_host_intent_creates_desired_state_and_updates_nodes() 
         desired_intent="active",
         updated_at=None,
     )
-    session = _FakeSession([
-        _FakeResult(rows=[("worker-1", "trt-gb10-1")]),
-        _FakeResult(scalar=None),
-        _FakeResult(scalars=[node]),
-    ])
+    session = _FakeSession(
+        [
+            _FakeResult(rows=[("worker-1", "trt-gb10-1")]),
+            _FakeResult(scalar=None),
+            _FakeResult(scalars=[node]),
+        ]
+    )
 
     await _apply_gb10_host_intent(
         cast(Any, session),
@@ -992,10 +1090,12 @@ async def test_apply_gb10_scale_up_creates_desired_state_and_selects_hosts() -> 
         SimpleNamespace(hostname="trt-gb10-2", current_intent="stopped"),
         SimpleNamespace(hostname="trt-gb10-3", current_intent="stopped"),
     ]
-    session = _FakeSession([
-        _FakeResult(scalar=None),
-        _FakeResult(scalars=nodes),
-    ])
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=None),
+            _FakeResult(scalars=nodes),
+        ]
+    )
 
     await _apply_gb10_scale_up(
         cast(Any, session),

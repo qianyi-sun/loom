@@ -273,10 +273,12 @@ candidate worker node the operator is allowed to use. Exclude a node
 only with a recorded reason such as missing Docker, failed endpoint
 reachability, insufficient disk, or Slurm reservation policy.
 
-The staged OLDLAB public-beta plan is recorded under
+The staged OLDLAB public-beta manual plan is recorded under
 `deploy/worker-pools/oldlab/`. It intentionally requests only `12 CPU` and
 `58000M` per node with `LOOM_WORKER_MAX_CONCURRENT=6`, even when inventory
-shows more total host capacity.
+shows more total host capacity. For normal shared OLDLAB capacity, prefer the
+worker-pool autoscaler policy described below; it can use live Slurm node
+resources instead of this fixed manual slice.
 
 The staged GB10 public-beta plan is recorded under
 `deploy/worker-pools/gb10/`. GB10 differs from OLDLAB in two important ways:
@@ -354,6 +356,9 @@ The Control Plane can run an internal elastic Slurm worker controller loop. It
 observes queued Loom trials and the `slurm_worker_jobs` registry, submits
 worker jobs when backlog exceeds active capacity, and cancels still-pending
 jobs after the queue drains. Batch creation never calls Slurm synchronously.
+This legacy env-driven controller uses one fixed concurrency slice per
+submitted job. For OLDLAB resource-aware scaling across the five shared nodes,
+use the worker-pool autoscaler policy section instead.
 
 Enable it only in environments where the Control Plane process can run
 `sbatch`, `squeue`, `sacct`, and `scancel` with the intended Slurm identity:
@@ -872,11 +877,35 @@ Forced termination is a break-glass operator action, not the default path.
 For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,
 remote worker env file, remote checkout path, requested CPU/memory, requested
 worker concurrency, max jobs, pending-job cap, and Slurm command paths if
-they differ from `sbatch`, `squeue`, `sacct`, and `scancel`.
+they differ from `sbatch`, `squeue`, `sacct`, `scancel`, and `sinfo`.
 Autoscaler Slurm submissions request exclusive node allocation by default.
 Set `actuator_config.exclusive=false` only for deliberately shared Slurm nodes
 after lowering `requested_cpus`, `requested_memory_mib`, and
 `requested_concurrency` to a load-tested slice that coexists with other jobs.
+
+OLDLAB 1-5 should use conservative resource-aware scale-up rather than a
+static high `requested_concurrency`. With `resource_aware=true`, the autoscaler
+queries `sinfo` before each scale-up and excludes nodes with an active Loom
+Slurm job, unsafe Slurm state, missing resource data, high CPU load, too little
+free memory, or too little idle CPU. The submitted worker concurrency is
+computed per node:
+
+```text
+safe_slots = min(
+  floor((idle_cpus_or_total_cpus - reserved_cpus) / cpu_per_slot),
+  floor((free_memory_mib - reserved_memory_mib) / memory_mib_per_slot),
+  max_concurrency_per_node
+)
+```
+
+The conservative OLDLAB default is `cpu_per_slot=2`,
+`memory_mib_per_slot=8192`, `reserved_cpus=4`,
+`reserved_memory_mib=24576`, `max_concurrency_per_node=8`, and
+`max_cpu_load_ratio=1.0`. Across five allowed OLDLAB nodes this caps the pool
+at `5 * 8 = 40` slots, but only when all five nodes pass the live Slurm safety
+checks. If the nodes are already loaded near their CPU count or a node has only
+single-digit GiB free memory, the autoscaler should keep the warm minimum
+instead of submitting more jobs.
 
 If the Control Plane runs inside Kubernetes and the Slurm CLI/munge socket are
 available only on the OLDLAB submit host, mark the policy as externally run:
@@ -885,16 +914,31 @@ available only on the OLDLAB submit host, mark the policy as externally run:
 {
   "actuator": "slurm",
   "enabled": true,
+  "min_slots": 1,
+  "max_slots": 40,
   "actuator_config": {
     "external_runner": true,
-    "allowed_nodes": ["trt-eai-oldlab-5"],
+    "allowed_nodes": [
+      "TRT-EAI-OLDLAB-1",
+      "trt-EAI-OLDLAB-2",
+      "trt-eai-oldlab-3",
+      "trt-eai-oldlab-4",
+      "trt-eai-oldlab-5"
+    ],
     "env_file": "/shared_work/qianyi/loom-worker-capacity/public-beta-remote-worker.env",
     "repo_dir": "/shared_work/qianyi/loom-remote-worker",
-    "requested_cpus": 12,
-    "requested_memory_mib": 58000,
-    "requested_concurrency": 6,
-    "max_jobs": 1,
-    "pending_job_cap": 1,
+    "requested_cpus": 2,
+    "requested_memory_mib": 8192,
+    "requested_concurrency": 1,
+    "max_jobs": 5,
+    "pending_job_cap": 2,
+    "resource_aware": true,
+    "cpu_per_slot": 2,
+    "memory_mib_per_slot": 8192,
+    "reserved_cpus": 4,
+    "reserved_memory_mib": 24576,
+    "max_concurrency_per_node": 8,
+    "max_cpu_load_ratio": 1.0,
     "exclusive": true
   }
 }

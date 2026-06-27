@@ -25,6 +25,34 @@ node, `12 CPU`, `58000M`, and `LOOM_WORKER_MAX_CONCURRENT=6`. Raise concurrency
 only after a separate load-test issue records CPU, RAM, Docker cleanup, MinIO,
 Gateway/provider, and Control Plane state-patch health.
 
+For the worker-pool autoscaler, prefer the resource-aware policy rather than
+raising the fixed slice. Use `min_slots=1`, `max_slots=40`, `max_jobs=5`, and
+`pending_job_cap=2` for OLDLAB-1..5. In `actuator_config`, set:
+
+```json
+{
+  "resource_aware": true,
+  "cpu_per_slot": 2,
+  "memory_mib_per_slot": 8192,
+  "reserved_cpus": 4,
+  "reserved_memory_mib": 24576,
+  "max_concurrency_per_node": 8,
+  "max_cpu_load_ratio": 1.0,
+  "requested_cpus": 2,
+  "requested_memory_mib": 8192,
+  "requested_concurrency": 1
+}
+```
+
+The autoscaler queries `sinfo` before scale-up, excludes nodes that already
+have an active Loom Slurm job, unsafe Slurm state, missing resource data, high
+CPU load, low free memory, or low idle CPU, and then submits each worker with
+that node's computed safe slot count. With five safe nodes and
+`max_concurrency_per_node=8`, OLDLAB tops out at 40 slots. When shared OLDLAB
+load is already near the CPU count or free memory is low, the expected behavior
+is to keep the warm minimum and record the exclusion reason instead of forcing
+more Slurm jobs.
+
 The remote-worker env file and Loom checkout path must be readable from every
 included Slurm node. For OLDLAB 4/5, do not use a control-node-local checkout
 such as `/home/qianyi/dev/loom` unless a Slurm job on that node has verified it

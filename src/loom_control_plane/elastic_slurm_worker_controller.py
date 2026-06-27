@@ -12,8 +12,8 @@ import contextlib
 import logging
 import math
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -31,12 +31,20 @@ from loom_control_plane.slurm_worker_jobs import (
 logger = logging.getLogger(__name__)
 
 _QUEUE_ACTIVE_STATES = ("claimed", "running")
-_QUEUE_READY_STMT = select(func.count()).select_from(Trial).where(
-    Trial.state == "queued",
-    or_(Trial.next_attempt_at.is_(None), Trial.next_attempt_at <= func.now()),
+_QUEUE_READY_STMT = (
+    select(func.count())
+    .select_from(Trial)
+    .where(
+        Trial.state == "queued",
+        or_(Trial.next_attempt_at.is_(None), Trial.next_attempt_at <= func.now()),
+    )
 )
-_QUEUE_RUNNING_STMT = select(func.count()).select_from(Trial).where(
-    Trial.state.in_(_QUEUE_ACTIVE_STATES),
+_QUEUE_RUNNING_STMT = (
+    select(func.count())
+    .select_from(Trial)
+    .where(
+        Trial.state.in_(_QUEUE_ACTIVE_STATES),
+    )
 )
 _SAFE_JOB_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -63,6 +71,31 @@ class ElasticSlurmWorkerControllerConfig:
     scancel_path: str
     command_timeout_seconds: float
     exclusive: bool = True
+    sinfo_path: str = "sinfo"
+    resource_aware: bool = False
+    cpu_per_slot: int = 2
+    memory_mib_per_slot: int = 8192
+    reserved_cpus: int = 4
+    reserved_memory_mib: int = 24_576
+    max_concurrency_per_node: int = 8
+    max_cpu_load_ratio: float = 1.0
+
+
+@dataclass(frozen=True)
+class SlurmNodeResource:
+    hostname: str
+    state: str
+    cpus_total: int
+    free_memory_mib: int
+    cpu_load: float | None
+    idle_cpus: int | None = None
+
+
+@dataclass(frozen=True)
+class SlurmNodeCapacityPlan:
+    hostname: str
+    safe_slots: int
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +109,7 @@ class SlurmWorkerCapacitySnapshot:
     active_nodes: set[str]
     cancellable_pending_job_ids: tuple[str, ...]
     active_job_ids: tuple[str, ...]
+    node_resources: Mapping[str, SlurmNodeResource] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +117,7 @@ class SlurmWorkerControllerDecision:
     submit_nodes: tuple[str, ...]
     cancel_job_ids: tuple[str, ...]
     reason: str
+    node_capacity: Mapping[str, SlurmNodeCapacityPlan] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -115,6 +150,12 @@ class SlurmWorkerCommandRunner(Protocol):
 
     async def cancel_job(self, job_id: str) -> None:
         """Cancel one pending Slurm job."""
+
+    async def query_node_resources(
+        self,
+        nodes: tuple[str, ...],
+    ) -> dict[str, SlurmNodeResource]:
+        """Return live Slurm resource observations for allowed nodes."""
 
 
 def _require_nonempty(value: str, name: str) -> str:
@@ -152,14 +193,20 @@ def build_controller_config(
     scancel_path: str,
     command_timeout_seconds: float,
     exclusive: bool = True,
+    sinfo_path: str = "sinfo",
+    resource_aware: bool = False,
+    cpu_per_slot: int = 2,
+    memory_mib_per_slot: int = 8192,
+    reserved_cpus: int = 4,
+    reserved_memory_mib: int = 24_576,
+    max_concurrency_per_node: int = 8,
+    max_cpu_load_ratio: float = 1.0,
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
         return None
 
     allowed_nodes = tuple(
-        node
-        for node in (part.strip() for part in allowed_nodes_csv.split(","))
-        if node
+        node for node in (part.strip() for part in allowed_nodes_csv.split(",")) if node
     )
     if not allowed_nodes:
         raise ValueError(
@@ -175,6 +222,7 @@ def build_controller_config(
     squeue_path = _require_nonempty(squeue_path, "squeue_path")
     sacct_path = _require_nonempty(sacct_path, "sacct_path")
     scancel_path = _require_nonempty(scancel_path, "scancel_path")
+    sinfo_path = _require_nonempty(sinfo_path, "sinfo_path")
 
     _require_positive(requested_cpus, "requested_cpus")
     _require_positive(requested_memory_mib, "requested_memory_mib")
@@ -184,6 +232,14 @@ def build_controller_config(
     _require_positive(min_queued_trials, "min_queued_trials")
     _require_positive(stale_after_seconds, "stale_after_seconds")
     _require_positive(command_timeout_seconds, "command_timeout_seconds")
+    _require_positive(cpu_per_slot, "cpu_per_slot")
+    _require_positive(memory_mib_per_slot, "memory_mib_per_slot")
+    _require_positive(max_concurrency_per_node, "max_concurrency_per_node")
+    _require_positive(max_cpu_load_ratio, "max_cpu_load_ratio")
+    if reserved_cpus < 0:
+        raise ValueError("reserved_cpus must be non-negative")
+    if reserved_memory_mib < 0:
+        raise ValueError("reserved_memory_mib must be non-negative")
 
     if max_jobs > len(allowed_nodes):
         raise ValueError("max_jobs cannot exceed the number of allowed nodes")
@@ -211,18 +267,132 @@ def build_controller_config(
         scancel_path=scancel_path,
         command_timeout_seconds=command_timeout_seconds,
         exclusive=exclusive,
+        sinfo_path=sinfo_path,
+        resource_aware=resource_aware,
+        cpu_per_slot=cpu_per_slot,
+        memory_mib_per_slot=memory_mib_per_slot,
+        reserved_cpus=reserved_cpus,
+        reserved_memory_mib=reserved_memory_mib,
+        max_concurrency_per_node=max_concurrency_per_node,
+        max_cpu_load_ratio=max_cpu_load_ratio,
     )
+
+
+def _normalize_node_state(state: str) -> str:
+    normalized = state.strip().lower()
+    normalized = normalized.rstrip("*~#")
+    if normalized in {"mix", "mixed"}:
+        return "mixed"
+    if normalized.startswith("idle"):
+        return "idle"
+    if normalized.startswith("mix"):
+        return "mixed"
+    if normalized.startswith("alloc"):
+        return "allocated"
+    if normalized.startswith("drain"):
+        return "drain"
+    return normalized
+
+
+def _is_safe_node_state(state: str) -> bool:
+    return _normalize_node_state(state) in {"idle", "mixed"}
+
+
+def compute_node_capacity_plan(
+    config: ElasticSlurmWorkerControllerConfig,
+    *,
+    node: str,
+    resource: SlurmNodeResource | None,
+    active_nodes: set[str],
+) -> SlurmNodeCapacityPlan:
+    if node in active_nodes:
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="active_loom_job",
+        )
+    if resource is None:
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="missing_resource_snapshot",
+        )
+    if not _is_safe_node_state(resource.state):
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="unsafe_state",
+        )
+    if resource.cpu_load is None:
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="unknown_cpu_load",
+        )
+    if resource.cpu_load > resource.cpus_total * config.max_cpu_load_ratio:
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="cpu_load_high",
+        )
+
+    available_cpus = resource.idle_cpus if resource.idle_cpus is not None else resource.cpus_total
+    cpu_slots = (available_cpus - config.reserved_cpus) // config.cpu_per_slot
+    if cpu_slots < 1:
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="insufficient_cpu",
+        )
+    memory_slots = (
+        resource.free_memory_mib - config.reserved_memory_mib
+    ) // config.memory_mib_per_slot
+    if memory_slots < 1:
+        return SlurmNodeCapacityPlan(
+            hostname=node,
+            safe_slots=0,
+            reason="insufficient_memory",
+        )
+
+    safe_slots = min(
+        int(cpu_slots),
+        int(memory_slots),
+        config.max_concurrency_per_node,
+    )
+    return SlurmNodeCapacityPlan(
+        hostname=node,
+        safe_slots=max(0, safe_slots),
+        reason="eligible" if safe_slots > 0 else "no_safe_slots",
+    )
+
+
+def _compute_node_capacity_plans(
+    config: ElasticSlurmWorkerControllerConfig,
+    snapshot: SlurmWorkerCapacitySnapshot,
+) -> dict[str, SlurmNodeCapacityPlan]:
+    resources = snapshot.node_resources or {}
+    return {
+        node: compute_node_capacity_plan(
+            config,
+            node=node,
+            resource=resources.get(node),
+            active_nodes=snapshot.active_nodes,
+        )
+        for node in config.allowed_nodes
+    }
 
 
 def compute_controller_decision(
     config: ElasticSlurmWorkerControllerConfig,
     snapshot: SlurmWorkerCapacitySnapshot,
 ) -> SlurmWorkerControllerDecision:
+    node_capacity = _compute_node_capacity_plans(config, snapshot) if config.resource_aware else {}
     if snapshot.queued_trials < config.min_queued_trials:
         return SlurmWorkerControllerDecision(
             submit_nodes=(),
             cancel_job_ids=snapshot.cancellable_pending_job_ids,
             reason="queue_drained",
+            node_capacity=node_capacity,
         )
 
     current_jobs = snapshot.pending_jobs + snapshot.running_jobs
@@ -234,6 +404,7 @@ def compute_controller_decision(
             submit_nodes=(),
             cancel_job_ids=(),
             reason="capacity_satisfied",
+            node_capacity=node_capacity,
         )
 
     if snapshot.pending_jobs >= config.pending_job_cap:
@@ -241,6 +412,7 @@ def compute_controller_decision(
             submit_nodes=(),
             cancel_job_ids=(),
             reason="pending_cap_reached",
+            node_capacity=node_capacity,
         )
 
     if remaining_jobs <= 0:
@@ -248,6 +420,32 @@ def compute_controller_decision(
             submit_nodes=(),
             cancel_job_ids=(),
             reason="max_jobs_reached",
+            node_capacity=node_capacity,
+        )
+
+    if config.resource_aware:
+        candidate_nodes = tuple(node for node, plan in node_capacity.items() if plan.safe_slots > 0)
+        if not candidate_nodes:
+            return SlurmWorkerControllerDecision(
+                submit_nodes=(),
+                cancel_job_ids=(),
+                reason="no_safe_nodes",
+                node_capacity=node_capacity,
+            )
+        submit_nodes: list[str] = []
+        planned_slots = 0
+        for node in candidate_nodes:
+            if len(submit_nodes) >= remaining_jobs:
+                break
+            submit_nodes.append(node)
+            planned_slots += node_capacity[node].safe_slots
+            if planned_slots >= missing_slots:
+                break
+        return SlurmWorkerControllerDecision(
+            submit_nodes=tuple(submit_nodes),
+            cancel_job_ids=(),
+            reason="queued_backlog",
+            node_capacity=node_capacity,
         )
 
     required_jobs = math.ceil(missing_slots / config.requested_concurrency)
@@ -269,19 +467,40 @@ def compute_controller_decision(
     )
 
 
+def slurm_submission_config_for_node(
+    config: ElasticSlurmWorkerControllerConfig,
+    decision: SlurmWorkerControllerDecision,
+    *,
+    node: str,
+) -> ElasticSlurmWorkerControllerConfig:
+    if not config.resource_aware:
+        return config
+    plan = decision.node_capacity.get(node)
+    if plan is None or plan.safe_slots <= 0:
+        return config
+    return replace(
+        config,
+        requested_concurrency=plan.safe_slots,
+        requested_cpus=max(1, plan.safe_slots * config.cpu_per_slot),
+        requested_memory_mib=max(1, plan.safe_slots * config.memory_mib_per_slot),
+    )
+
+
 def build_sbatch_request(
     config: ElasticSlurmWorkerControllerConfig,
     *,
     node: str,
 ) -> SbatchRequest:
     job_node = _SAFE_JOB_NAME_RE.sub("-", node).strip("-") or "worker"
-    export = ",".join((
-        "ALL",
-        f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
-        f"LOOM_WORKER_POOL_NAME={config.pool_name}",
-        f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
-        f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
-    ))
+    export = ",".join(
+        (
+            "ALL",
+            f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
+            f"LOOM_WORKER_POOL_NAME={config.pool_name}",
+            f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
+            f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
+        )
+    )
     args = [
         config.sbatch_path,
         "--parsable",
@@ -293,11 +512,13 @@ def build_sbatch_request(
     args.append(f"--time={config.time_limit}")
     if config.partition:
         args.append(f"--partition={config.partition}")
-    args.extend((
-        f"--cpus-per-task={config.requested_cpus}",
-        f"--mem={config.requested_memory_mib}M",
-        f"--export={export}",
-    ))
+    args.extend(
+        (
+            f"--cpus-per-task={config.requested_cpus}",
+            f"--mem={config.requested_memory_mib}M",
+            f"--export={export}",
+        )
+    )
 
     stdin = """#!/usr/bin/env bash
 set -euo pipefail
@@ -395,6 +616,28 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
 
+    async def query_node_resources(
+        self,
+        nodes: tuple[str, ...],
+    ) -> dict[str, SlurmNodeResource]:
+        if not nodes:
+            return {}
+        config = self._config
+        sinfo = await _run_command(
+            (
+                config.sinfo_path,
+                "-h",
+                "-N",
+                "-n",
+                ",".join(nodes),
+                "-o",
+                "%N|%T|%c|%m|%e|%O|%C",
+            ),
+            timeout=config.command_timeout_seconds,
+        )
+        resources = parse_sinfo_node_resources(sinfo.stdout)
+        return {node: resources[node] for node in nodes if node in resources}
+
     def bind_config(
         self,
         config: ElasticSlurmWorkerControllerConfig,
@@ -469,19 +712,79 @@ def _parse_slurm_observations(
     return observations
 
 
+def _parse_optional_float(value: str) -> float | None:
+    cleaned = value.strip()
+    if not cleaned or cleaned in {"*", "N/A", "n/a"}:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_optional_int(value: str) -> int | None:
+    cleaned = value.strip()
+    if not cleaned or cleaned in {"*", "N/A", "n/a"}:
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_idle_cpus(cpu_state: str) -> int | None:
+    parts = [part.strip() for part in cpu_state.split("/")]
+    if len(parts) != 4:
+        return None
+    return _parse_optional_int(parts[1])
+
+
+def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
+    resources: dict[str, SlurmNodeResource] = {}
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 6:
+            continue
+        hostname = parts[0].strip()
+        state = parts[1].strip()
+        cpus_total = _parse_optional_int(parts[2])
+        free_memory_mib = _parse_optional_int(parts[4])
+        cpu_load = _parse_optional_float(parts[5])
+        if not hostname or cpus_total is None or free_memory_mib is None:
+            continue
+        resources[hostname] = SlurmNodeResource(
+            hostname=hostname,
+            state=state,
+            cpus_total=cpus_total,
+            free_memory_mib=free_memory_mib,
+            cpu_load=cpu_load,
+            idle_cpus=_parse_idle_cpus(parts[6]) if len(parts) > 6 else None,
+        )
+    return resources
+
+
 async def load_capacity_snapshot(
     session: AsyncSession,
     config: ElasticSlurmWorkerControllerConfig,
 ) -> SlurmWorkerCapacitySnapshot:
     queued_trials = int((await session.execute(_QUEUE_READY_STMT)).scalar_one())
     running_trials = int((await session.execute(_QUEUE_RUNNING_STMT)).scalar_one())
-    jobs = (await session.execute(
-        select(SlurmWorkerJob).where(
-            SlurmWorkerJob.environment == config.environment,
-            SlurmWorkerJob.pool_name == config.pool_name,
-            SlurmWorkerJob.state.in_((*ACTIVE_STATES, "stale")),
-        ),
-    )).scalars().all()
+    jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob).where(
+                    SlurmWorkerJob.environment == config.environment,
+                    SlurmWorkerJob.pool_name == config.pool_name,
+                    SlurmWorkerJob.state.in_((*ACTIVE_STATES, "stale")),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
 
     stale_cutoff = datetime.now(UTC) - timedelta(seconds=config.stale_after_seconds)
     pending_jobs = 0
@@ -521,6 +824,29 @@ async def load_capacity_snapshot(
     )
 
 
+async def with_node_resource_snapshot(
+    snapshot: SlurmWorkerCapacitySnapshot,
+    *,
+    config: ElasticSlurmWorkerControllerConfig,
+    runner: SlurmWorkerCommandRunner,
+) -> SlurmWorkerCapacitySnapshot:
+    if not config.resource_aware:
+        return snapshot
+    try:
+        resources = await runner.query_node_resources(config.allowed_nodes)
+    except Exception as exc:
+        logger.warning(
+            "elastic_slurm_worker_node_resource_query_failed",
+            extra={
+                "environment": config.environment,
+                "pool_name": config.pool_name,
+                "err": str(exc),
+            },
+        )
+        resources = {}
+    return replace(snapshot, node_resources=resources)
+
+
 async def run_elastic_slurm_worker_controller_once(
     session: AsyncSession,
     *,
@@ -546,6 +872,11 @@ async def run_elastic_slurm_worker_controller_once(
                 },
             )
         snapshot = await load_capacity_snapshot(session, config)
+    snapshot = await with_node_resource_snapshot(
+        snapshot,
+        config=config,
+        runner=runner,
+    )
 
     decision = compute_controller_decision(config, snapshot)
     logger.info(
@@ -595,36 +926,37 @@ async def run_elastic_slurm_worker_controller_once(
 
     submitted_job_ids: list[str] = []
     for node in decision.submit_nodes:
+        node_config = slurm_submission_config_for_node(config, decision, node=node)
         try:
-            job_id = await runner.submit_worker(node=node, config=config)
+            job_id = await runner.submit_worker(node=node, config=node_config)
             await record_slurm_worker_job(
                 session,
-                environment=config.environment,
-                pool_name=config.pool_name,
+                environment=node_config.environment,
+                pool_name=node_config.pool_name,
                 nodelist=node,
-                requested_cpus=config.requested_cpus,
-                requested_memory_mib=config.requested_memory_mib,
-                requested_concurrency=config.requested_concurrency,
+                requested_cpus=node_config.requested_cpus,
+                requested_memory_mib=node_config.requested_memory_mib,
+                requested_concurrency=node_config.requested_concurrency,
                 job_id=job_id,
                 slurm_state="PENDING",
                 pending_reason=None,
-                env=_worker_env(config),
+                env=_worker_env(node_config),
                 submitted_at=datetime.now(UTC),
             )
             submitted_job_ids.append(job_id)
         except Exception as exc:
             await record_slurm_worker_job(
                 session,
-                environment=config.environment,
-                pool_name=config.pool_name,
+                environment=node_config.environment,
+                pool_name=node_config.pool_name,
                 nodelist=node,
-                requested_cpus=config.requested_cpus,
-                requested_memory_mib=config.requested_memory_mib,
-                requested_concurrency=config.requested_concurrency,
+                requested_cpus=node_config.requested_cpus,
+                requested_memory_mib=node_config.requested_memory_mib,
+                requested_concurrency=node_config.requested_concurrency,
                 job_id=None,
                 slurm_state="FAILED",
                 pending_reason=None,
-                env=_worker_env(config),
+                env=_worker_env(node_config),
                 submitted_at=datetime.now(UTC),
                 submission_error=str(exc),
             )
