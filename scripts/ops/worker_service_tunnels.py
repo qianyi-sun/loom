@@ -14,7 +14,7 @@ import json
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -65,6 +65,12 @@ DEFAULT_TUNNELS: tuple[TunnelSpec, ...] = (
         health_path="/minio/health/live",
     ),
 )
+
+_SUBPROCESS_GATEWAY_ENV = "LOOM_WORKER_SUBPROCESS_GATEWAY_URL"
+_HOST_GATEWAY_NAMES = {"host.docker.internal"}
+_RESTART_TUNNEL_BY_PROBE_NAME = {
+    "subprocess-gateway": "gateway",
+}
 
 
 def unit_name(spec: TunnelSpec) -> str:
@@ -222,10 +228,11 @@ def write_systemd_units(
     kubectl: str,
     kubeconfig: str,
     address: str,
+    local_port_overrides: dict[str, int] | None = None,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for spec in DEFAULT_TUNNELS:
+    for spec in _apply_local_port_overrides(DEFAULT_TUNNELS, local_port_overrides or {}):
         path = output_dir / unit_name(spec)
         path.write_text(
             render_systemd_unit(
@@ -239,6 +246,26 @@ def write_systemd_units(
         )
         written.append(path)
     return written
+
+
+def _apply_local_port_overrides(
+    specs: tuple[TunnelSpec, ...],
+    overrides: dict[str, int],
+) -> list[TunnelSpec]:
+    known = {spec.name for spec in specs}
+    unknown = sorted(set(overrides) - known)
+    if unknown:
+        raise KeyError(f"unknown tunnel local-port override(s): {unknown}")
+    rendered: list[TunnelSpec] = []
+    for spec in specs:
+        local_port = overrides.get(spec.name)
+        if local_port is None:
+            rendered.append(spec)
+            continue
+        if local_port < 1 or local_port > 65535:
+            raise ValueError(f"{spec.name} local port must be in 1..65535")
+        rendered.append(replace(spec, local_port=local_port))
+    return rendered
 
 
 def _is_volatile_path(path: str) -> bool:
@@ -304,6 +331,16 @@ def _root_url(raw_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
+def _host_side_root_url(raw_url: str) -> str:
+    parsed = urlsplit(raw_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"expected absolute URL, got {raw_url!r}")
+    if parsed.hostname in _HOST_GATEWAY_NAMES:
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunsplit((parsed.scheme, f"127.0.0.1{port}", "", "", ""))
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
 def _join_url(root: str, path: str) -> str:
     return root.rstrip("/") + "/" + path.lstrip("/")
 
@@ -315,6 +352,13 @@ def worker_health_urls(env: dict[str, str]) -> list[tuple[str, str]]:
         if not value:
             raise KeyError(f"missing {spec.health_env}")
         urls.append((spec.name, _join_url(_root_url(value), spec.health_path)))
+        if spec.name == "gateway":
+            subprocess_gateway = env.get(_SUBPROCESS_GATEWAY_ENV)
+            if subprocess_gateway:
+                urls.append((
+                    "subprocess-gateway",
+                    _join_url(_host_side_root_url(subprocess_gateway), "/healthz"),
+                ))
     return urls
 
 
@@ -399,6 +443,7 @@ def apply_watchdog_results(
 
     state = _load_watchdog_state(state_file)
     restarted: list[str] = []
+    restarted_units: set[str] = set()
     for result in results:
         if result.ok:
             state[result.name] = 0
@@ -407,10 +452,13 @@ def apply_watchdog_results(
         state[result.name] = failures
         if failures < failure_threshold:
             continue
-        unit = unit_name_for_tunnel_name(result.name)
-        subprocess.run(["systemctl", "--user", "restart", unit], check=True)
+        tunnel_name = _RESTART_TUNNEL_BY_PROBE_NAME.get(result.name, result.name)
+        unit = unit_name_for_tunnel_name(tunnel_name)
+        if unit not in restarted_units:
+            subprocess.run(["systemctl", "--user", "restart", unit], check=True)
+            restarted.append(unit)
+            restarted_units.add(unit)
         state[result.name] = 0
-        restarted.append(unit)
 
     _write_watchdog_state(state_file, state)
     return restarted
@@ -505,6 +553,7 @@ def _run_render_systemd(args: argparse.Namespace) -> int:
         kubectl=args.kubectl,
         kubeconfig=args.kubeconfig,
         address=args.address,
+        local_port_overrides=_local_port_overrides_from_args(args),
     )
     for path in written:
         print(path)
@@ -524,6 +573,7 @@ def _run_install_systemd(args: argparse.Namespace) -> int:
         kubectl=args.kubectl,
         kubeconfig=args.kubeconfig,
         address=args.address,
+        local_port_overrides=_local_port_overrides_from_args(args),
     )
     unit_names = [path.name for path in written]
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
@@ -532,6 +582,13 @@ def _run_install_systemd(args: argparse.Namespace) -> int:
     for name in unit_names:
         print(f"enabled {name}")
     return 0
+
+
+def _local_port_overrides_from_args(args: argparse.Namespace) -> dict[str, int]:
+    gateway_local_port = getattr(args, "gateway_local_port", None)
+    if gateway_local_port is None:
+        return {}
+    return {"gateway": gateway_local_port}
 
 
 def _run_render_watchdog_systemd(args: argparse.Namespace) -> int:
@@ -583,6 +640,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--kubectl", default="kubectl")
     render.add_argument("--kubeconfig", required=True)
     render.add_argument("--address", default="0.0.0.0")
+    render.add_argument(
+        "--gateway-local-port",
+        type=int,
+        help="Override the local port for the Gateway tunnel, for example 30444.",
+    )
     render.set_defaults(func=_run_render_systemd)
 
     install = subparsers.add_parser(
@@ -597,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--kubectl", default="kubectl")
     install.add_argument("--kubeconfig", required=True)
     install.add_argument("--address", default="0.0.0.0")
+    install.add_argument(
+        "--gateway-local-port",
+        type=int,
+        help="Override the local port for the Gateway tunnel, for example 30444.",
+    )
     install.add_argument(
         "--allow-volatile-paths",
         action="store_true",
@@ -691,7 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    return int(args.func(args))
 
 
 if __name__ == "__main__":

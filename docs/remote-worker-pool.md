@@ -77,6 +77,19 @@ for the three private dependencies:
 | `loom-remote-worker-tunnel-gateway.service` | `19100` | `loom-llm-gateway:9100` |
 | `loom-remote-worker-tunnel-minio.service` | `19000` | `loom-minio:9000` |
 
+The default Gateway tunnel port is `19100`. If an environment intentionally
+uses a different local Gateway tunnel port for Docker sandboxes, such as
+`http://host.docker.internal:30444/openai/v1`, install the managed Gateway
+tunnel on that port instead of leaving a separate ad-hoc port-forward running:
+
+```bash
+scripts/ops/worker_service_tunnels.py install-systemd \
+  --namespace loom-public-beta \
+  --kubectl /usr/local/bin/kubectl \
+  --kubeconfig /secure/path/public-beta.kubeconfig \
+  --gateway-local-port 30444
+```
+
 Render units for review:
 
 ```bash
@@ -136,7 +149,17 @@ the managed local ports:
 LOOM_WORKER_CONTROL_PLANE_URL=http://control-node.lan:18081
 LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
+# Optional when the sandbox network view differs from the worker process.
+# LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30444/openai/v1
 ```
+
+`LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is optional. When it is set,
+`worker_service_tunnels.py check`, `check-remote`, `print-check-script`, and
+`watchdog` add a `subprocess-gateway` probe against the Gateway health endpoint.
+For `host.docker.internal` URLs, the script runs outside the sandbox and probes
+the equivalent host-side loopback URL, for example
+`http://127.0.0.1:30444/healthz`. Repeated `subprocess-gateway` failures cause
+the watchdog to restart `loom-remote-worker-tunnel-gateway.service`.
 
 The same script provides the rollout gate for those exact URLs:
 

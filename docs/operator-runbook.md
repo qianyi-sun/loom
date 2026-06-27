@@ -1585,7 +1585,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    internal-only.
 4. **Remote-worker private tunnels hold.** If remote workers are attached,
    verify the tunnel watchdog timer is active, then verify the exact
-   worker-facing URLs from the control node and at least one worker host:
+   worker-facing URLs from the control node and at least one worker host. If
+   `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` is set, this includes the
+   `subprocess-gateway` facade probe used by Docker sandboxes:
    ```bash
    systemctl --user is-active loom-remote-worker-tunnel-watchdog.timer
 
@@ -1777,7 +1779,8 @@ checklist:
   remote-worker tunnel gate when out-of-cluster workers are attached. It renders
   durable systemd user units, installs the watchdog timer that restarts stale
   active-looking tunnel units after repeated failed probes, checks the exact
-  worker-facing URLs locally, and verifies those URLs from SSH worker hosts.
+  worker-facing URLs locally, includes the optional subprocess Gateway facade
+  probe, and verifies those URLs from SSH worker hosts.
 
 Browser-only invite acceptance, SPA visual submission, and provider-error UI
 screenshots remain manual release evidence unless the staging environment adds a

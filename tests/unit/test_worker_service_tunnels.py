@@ -61,6 +61,29 @@ def test_systemd_unit_restarts_kubectl_port_forward_for_service() -> None:
     assert "WantedBy=default.target" in rendered
 
 
+def test_systemd_unit_rendering_can_override_gateway_local_port(tmp_path: Path) -> None:
+    module = _load_module()
+
+    module.write_systemd_units(
+        tmp_path,
+        namespace="loom-public-beta",
+        kubectl="/usr/local/bin/kubectl",
+        kubeconfig="/secure/public-beta.kubeconfig",
+        address="0.0.0.0",
+        local_port_overrides={"gateway": 30444},
+    )
+
+    gateway = (
+        tmp_path / "loom-remote-worker-tunnel-gateway.service"
+    ).read_text(encoding="utf-8")
+    control_plane = (
+        tmp_path / "loom-remote-worker-tunnel-control-plane.service"
+    ).read_text(encoding="utf-8")
+
+    assert "svc/loom-llm-gateway 30444:9100" in gateway
+    assert "svc/loom-control-plane 18081:8080" in control_plane
+
+
 def test_worker_health_urls_are_derived_from_remote_worker_env_file(tmp_path: Path) -> None:
     module = _load_module()
     env_file = tmp_path / ".env.remote-worker"
@@ -87,6 +110,33 @@ def test_worker_health_urls_are_derived_from_remote_worker_env_file(tmp_path: Pa
     ]
 
 
+def test_worker_health_urls_include_optional_subprocess_facade_probe(tmp_path: Path) -> None:
+    module = _load_module()
+    env_file = tmp_path / ".env.remote-worker"
+    env_file.write_text(
+        "\n".join(
+            [
+                "LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:18081",
+                "LOOM_WORKER_GATEWAY_URL=http://control-node:19100/openai/v1",
+                "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30444/openai/v1",
+                "LOOM_WORKER_MINIO_ENDPOINT=http://control-node:19000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    env = module.load_env_file(env_file)
+    urls = module.worker_health_urls(env)
+
+    assert urls == [
+        ("control-plane", "http://control-node:18081/healthz"),
+        ("gateway", "http://control-node:19100/healthz"),
+        ("subprocess-gateway", "http://127.0.0.1:30444/healthz"),
+        ("minio", "http://control-node:19000/minio/health/live"),
+    ]
+
+
 def test_remote_check_script_uses_exact_worker_urls_without_secrets(tmp_path: Path) -> None:
     module = _load_module()
     env_file = tmp_path / ".env.remote-worker"
@@ -95,6 +145,7 @@ def test_remote_check_script_uses_exact_worker_urls_without_secrets(tmp_path: Pa
             [
                 "LOOM_WORKER_CONTROL_PLANE_URL=http://control-node:18081",
                 "LOOM_WORKER_GATEWAY_URL=http://control-node:19100",
+                "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30444/openai/v1",
                 "LOOM_WORKER_MINIO_ENDPOINT=http://control-node:19000",
                 "LOOM_WORKER_TOKEN=loom_w_should_not_print",
                 "LOOM_WORKER_MINIO_SECRET_KEY=secret_should_not_print",
@@ -109,6 +160,7 @@ def test_remote_check_script_uses_exact_worker_urls_without_secrets(tmp_path: Pa
     assert "curl -fsS --max-time" in snippet
     assert "http://control-node:18081/healthz" in snippet
     assert "http://control-node:19100/healthz" in snippet
+    assert "http://127.0.0.1:30444/healthz" in snippet
     assert "http://control-node:19000/minio/health/live" in snippet
     assert "loom_w_should_not_print" not in snippet
     assert "secret_should_not_print" not in snippet
@@ -255,6 +307,44 @@ def test_watchdog_restarts_only_tunnel_after_repeated_probe_failures(
         ],
     ]
     assert '"control-plane": 0' in state_file.read_text(encoding="utf-8")
+
+
+def test_watchdog_restarts_gateway_tunnel_after_subprocess_facade_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    calls: list[list[str]] = []
+    results = [
+        module.ProbeResult(
+            name="subprocess-gateway",
+            url="http://127.0.0.1:30444/healthz",
+            ok=False,
+            detail="ConnectionResetError",
+        ),
+    ]
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        calls.append(command)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    restarted = module.apply_watchdog_results(
+        results,
+        state_file=tmp_path / "watchdog.json",
+        failure_threshold=1,
+    )
+
+    assert restarted == ["loom-remote-worker-tunnel-gateway.service"]
+    assert calls == [
+        [
+            "systemctl",
+            "--user",
+            "restart",
+            "loom-remote-worker-tunnel-gateway.service",
+        ],
+    ]
 
 
 def test_watchdog_command_records_failures_without_failing_oneshot(
