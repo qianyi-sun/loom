@@ -41,6 +41,68 @@ npm install -g "{_CODEX_PKG}@{_CODEX_VERSION}"
 codex --version
 """
 
+_ALLOWED_SETTING_KEYS = frozenset(
+    {
+        "best_of",
+        "do_sample",
+        "frequency_penalty",
+        "length_penalty",
+        "logprobs",
+        "max_completion_tokens",
+        "max_new_tokens",
+        "max_output_tokens",
+        "max_tokens",
+        "min_p",
+        "min_tokens",
+        "mirostat",
+        "mirostat_eta",
+        "mirostat_tau",
+        "n",
+        "num_beams",
+        "parallel_tool_calls",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "stop_sequences",
+        "stream",
+        "temperature",
+        "tool_choice",
+        "top_k",
+        "top_logprobs",
+        "top_p",
+        "typical_p",
+        "verbosity",
+    }
+)
+_EXTRA_SETTING_CONTAINERS = ("extra_body", "generation_config", "request_options")
+_SENSITIVE_KEY_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "credential",
+    "header",
+    "key",
+    "password",
+    "prompt",
+    "secret",
+    "token",
+)
+_OMITTED_PAYLOAD_KEYS = frozenset(
+    {
+        "input",
+        "instructions",
+        "messages",
+        "prompt",
+        "prompts",
+        "system",
+    }
+)
+
 
 def _responses_base_url(base_url: str) -> str:
     stripped = base_url.rstrip("/")
@@ -49,14 +111,78 @@ def _responses_base_url(base_url: str) -> str:
     return f"{stripped}/v1"
 
 
-def _codex_settings_json(env: dict[str, str]) -> str | None:
+def _codex_request_params_json(env: dict[str, str]) -> str | None:
     raw = env.get("LOOM_CODEX_SETTINGS_JSON")
     if raw is None or not raw.strip():
         return None
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
         raise ValueError("LOOM_CODEX_SETTINGS_JSON must be a JSON object")
-    return json.dumps(parsed, separators=(",", ":"))
+    sanitized = _sanitize_codex_settings(parsed)
+    if not sanitized:
+        return None
+    return json.dumps(sanitized, separators=(",", ":"))
+
+
+def _sanitize_codex_settings(payload: dict[str, object]) -> dict[str, object]:
+    settings: dict[str, object] = {}
+    for key, value in payload.items():
+        normalized_key = str(key)
+        if normalized_key in _OMITTED_PAYLOAD_KEYS:
+            continue
+        if normalized_key in _ALLOWED_SETTING_KEYS:
+            sanitized = _sanitize_value(value)
+            if sanitized is not None:
+                settings[normalized_key] = sanitized
+            continue
+        if _sensitive_key(normalized_key):
+            continue
+        if normalized_key in _EXTRA_SETTING_CONTAINERS and isinstance(value, dict):
+            sanitized_mapping = _sanitize_mapping(value, allow_parameter_keys=True)
+            if sanitized_mapping:
+                settings[normalized_key] = sanitized_mapping
+    return settings
+
+
+def _sanitize_mapping(
+    value: dict[object, object],
+    *,
+    allow_parameter_keys: bool = False,
+) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, item in value.items():
+        normalized_key = str(key)
+        if normalized_key in _OMITTED_PAYLOAD_KEYS:
+            continue
+        if allow_parameter_keys and normalized_key in _ALLOWED_SETTING_KEYS:
+            sanitized = _sanitize_value(item)
+            if sanitized is not None:
+                out[normalized_key] = sanitized
+            continue
+        if _sensitive_key(normalized_key):
+            continue
+        if allow_parameter_keys and normalized_key not in _ALLOWED_SETTING_KEYS:
+            continue
+        sanitized = _sanitize_value(item)
+        if sanitized is not None:
+            out[normalized_key] = sanitized
+    return out
+
+
+def _sanitize_value(value: object) -> object | None:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, list):
+        sanitized_items = [_sanitize_value(item) for item in value]
+        return [item for item in sanitized_items if item is not None]
+    if isinstance(value, dict):
+        return _sanitize_mapping(value)
+    return None
+
+
+def _sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(fragment in lowered for fragment in _SENSITIVE_KEY_FRAGMENTS)
 
 
 @dataclass(frozen=True)
@@ -87,17 +213,23 @@ class CodexAdapter:
         env["CODEX_HOME"] = f"{workdir}/.codex-home"
         model_name = self.model_name_template.format(model_id=model.name)
         base_url = _responses_base_url(env[self.base_url_env])
+        request_params_json = _codex_request_params_json(env)
+        query_params = ""
+        if request_params_json is not None:
+            query_params = (
+                ", query_params = { "
+                f"loom_request_params = {json.dumps(request_params_json)}"
+                " }"
+            )
         provider_config = (
             'model_providers.loom={ name = "Loom", '
             f"base_url = {json.dumps(base_url)}, "
-            f'env_key = "{self.api_key_env}", wire_api = "responses" }}'
+            f'env_key = "{self.api_key_env}", wire_api = "responses"'
+            f"{query_params} }}"
         )
-        settings_json = _codex_settings_json(env)
-        settings_arg = '--settings "$5" ' if settings_json is not None else ""
         script = (
             'mkdir -p "$CODEX_HOME" && '
             "printf '%s' \"$4\" | exec codex exec --ignore-user-config --json "
-            f"{settings_arg}"
             '--model "$1" --cd "$2" --skip-git-repo-check '
             "--sandbox danger-full-access --ignore-rules "
             '-c \'model_provider="loom"\' -c "$3" -'
@@ -112,8 +244,6 @@ class CodexAdapter:
             provider_config,
             instruction,
         ]
-        if settings_json is not None:
-            argv.append(settings_json)
         return argv
 
     async def capture_events(

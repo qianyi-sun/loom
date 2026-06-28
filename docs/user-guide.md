@@ -859,9 +859,12 @@ such as `temperature`, `top_p`, `seed`, max output limits, reasoning
 effort, tool-choice mode, and provider decoding extras. Loom strips
 prompt/message payloads, headers, API keys, credentials, and unknown
 extras before forwarding the request, then exposes the effective
-controls in provider debug evidence. Subprocess agents such as Codex
-or Claude Code need adapter-specific setting support and do not inherit
-these fields automatically.
+controls in provider debug evidence. Subprocess agents do not inherit
+these fields automatically because their CLIs construct provider
+requests themselves. Codex alignment runs can pin safe controls through
+the deployment env var `LOOM_CODEX_SETTINGS_JSON`; the launcher and
+Gateway sanitize those values before forwarding and auditing them.
+Other subprocess agents need their own adapter-specific support.
 
 In service mode, the SPA and API only allow launch for agents whose
 runtime is ready in the deployed worker/sandbox contract. `GET

@@ -343,6 +343,73 @@ async def test_responses_routes_provider_connection_from_step_jwt(
     assert row["team_id"] == team_id
 
 
+async def test_responses_merges_query_request_params_into_provider_payload_and_audit(
+    gateway_with_provider_connection, postgres_url: str,
+) -> None:
+    app, step_jwt, team_id, trial_id, _conn_id, captures = (
+        gateway_with_provider_connection
+    )
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    payload = {
+        "model": "qwen2.5-coder-7b-instruct",
+        "input": "hi",
+        "store": False,
+    }
+    query_params = {
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "messages": [{"role": "user", "content": "do not forward"}],
+        "api_key": "sk-do-not-forward",
+        "extra_body": {
+            "top_k": 40,
+            "prompt": "do not forward",
+        },
+    }
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://gw",
+    ) as client:
+        r = await client.post(
+            "/v1/responses",
+            params={"loom_request_params": json.dumps(query_params)},
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json=payload,
+        )
+    assert r.status_code == 200, r.text
+
+    requests = captures["requests"]
+    assert len(requests) == 1
+    forwarded = json.loads(requests[0].content)
+    assert forwarded == {
+        **payload,
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "extra_body": {"top_k": 40},
+    }
+    rendered_forwarded = json.dumps(forwarded)
+    assert "sk-do-not-forward" not in rendered_forwarded
+    assert "do not forward" not in rendered_forwarded
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["request_params"] == {
+        "status": "available",
+        "parameters": {
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "top_k": 40,
+        },
+    }
+    assert row["trial_id"] == trial_id
+    assert row["team_id"] == team_id
+
+
 async def test_responses_provider_connection_stream_passthrough(
     gateway_with_provider_connection, postgres_url: str,
 ) -> None:
