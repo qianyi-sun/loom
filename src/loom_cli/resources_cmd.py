@@ -19,7 +19,10 @@ from loom_cli.server_client import (
 
 
 def _format_slots(pool: dict[str, Any]) -> str:
-    return f"{int(pool.get('occupied_slots', 0))}/{int(pool.get('total_slots', 0))}"
+    active_slots = int(
+        pool.get("current_active_slots", pool.get("total_slots", 0)),
+    )
+    return f"{int(pool.get('occupied_slots', 0))}/{active_slots}"
 
 
 def _format_idle(pool: dict[str, Any]) -> str:
@@ -32,7 +35,7 @@ def _print_text(resources: dict[str, Any]) -> None:
     pools = cast(list[dict[str, Any]], resources.get("pools") or [])
 
     occupied = int(aggregate.get("occupied_slots", 0))
-    total = int(aggregate.get("total_slots", 0))
+    total = int(aggregate.get("current_active_slots", aggregate.get("total_slots", 0)))
     running = int(aggregate.get("running_tasks", 0))
     starting = int(aggregate.get("starting_tasks", 0))
     queued = int(aggregate.get("queued_tasks", 0))
@@ -40,12 +43,22 @@ def _print_text(resources: dict[str, Any]) -> None:
     draining_workers = int(aggregate.get("draining_workers", 0))
     desired = int(aggregate.get("desired_slots", 0))
     pending = int(aggregate.get("pending_slots", 0))
+    max_slots = int(
+        aggregate.get(
+            "max_slots",
+            aggregate.get("ceiling_slots", aggregate.get("total_slots", 0)),
+        ),
+    )
     draining = int(aggregate.get("draining_slots", 0))
     free = int(aggregate.get("free_slots", 0))
 
     print(f"Concurrent tasks: {occupied} / {total}")
     print(f"Running: {running} · Starting: {starting} · Queued: {queued}")
     print(f"Workers: {active_workers} active · Free slots: {free}")
+    print(
+        f"Capacity: active {total} · pending {pending} · "
+        f"desired {desired} · max {max_slots}",
+    )
     print(
         f"Autoscaler: desired {desired} · pending {pending} · "
         f"draining {draining} slots / {draining_workers} workers",
@@ -56,26 +69,41 @@ def _print_text(resources: dict[str, Any]) -> None:
         print("  no active resource pools")
         return
     print(
-        "  Pool                Backend  Arch    Slots   Desired  Pending  "
-        "Draining  Idle       Running  Starting  Queued  Workers  Decision"
+        "  Pool                Backend  Arch    Actuator  Active  Pending  "
+        "Desired  Max  Draining  Idle       Running  Starting  Queued  Workers  "
+        "Decision       Reason                Blocked"
     )
     for pool in pools:
         decision = pool.get("last_autoscaler_decision") or "-"
+        actuator = pool.get("autoscaler_actuator") or "-"
+        reason = pool.get("decision_reason") or pool.get("last_autoscaler_reason") or "-"
+        blocked = (
+            pool.get("blocked_reason")
+            or pool.get("last_autoscaler_blocked_reason")
+            or "-"
+        )
+        pool_max_slots = int(
+            pool.get("max_slots", pool.get("ceiling_slots", pool.get("total_slots", 0))),
+        )
         print(
             "  "
             f"{pool.get('pool_name', 'default')!s:<19} "
             f"{pool.get('backend', 'docker')!s:<8} "
             f"{pool.get('cpu_arch', 'x86_64')!s:<7} "
+            f"{actuator!s:<9} "
             f"{_format_slots(pool):<7} "
-            f"{int(pool.get('desired_slots', 0)):<8} "
             f"{int(pool.get('pending_slots', 0)):<8} "
+            f"{int(pool.get('desired_slots', 0)):<8} "
+            f"{pool_max_slots:<4} "
             f"{int(pool.get('draining_slots', 0)):<9} "
             f"{_format_idle(pool):<10} "
             f"{int(pool.get('running_tasks', 0)):<8} "
             f"{int(pool.get('starting_tasks', 0)):<9} "
             f"{int(pool.get('queued_tasks', 0)):<7} "
             f"{int(pool.get('active_workers', 0)):<7} "
-            f"{decision}",
+            f"{decision!s:<14} "
+            f"{reason!s:<21} "
+            f"{blocked}",
         )
 
 

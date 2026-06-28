@@ -32,6 +32,7 @@ from loom_control_plane.worker_pool_autoscaler import (
 class FakeSlurmRunner(SlurmWorkerCommandRunner):
     def __init__(self) -> None:
         self.submitted_nodes: list[str] = []
+        self.submitted_configs: list[ElasticSlurmWorkerControllerConfig] = []
         self.cancelled_job_ids: list[str] = []
         self.fail_submit_nodes: set[str] = set()
         self.job_observations: list[SlurmWorkerJobObservation] | None = None
@@ -56,6 +57,7 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         config: ElasticSlurmWorkerControllerConfig,
     ) -> str:
         self.submitted_nodes.append(node)
+        self.submitted_configs.append(config)
         if node in self.fail_submit_nodes:
             raise RuntimeError(f"sbatch failed for {node}")
         return f"job-{node}"
@@ -230,6 +232,109 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
         assert policy.last_decision == "scale_up"
         assert policy.last_decision_reason == "queued_deficit"
         assert policy.last_pending_slots == 12
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_submits_gb10_capacity_through_slurm_partition(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="team-a"))
+            await s.execute(insert(Task).values(id="task-a", checksum="0" * 64, config={}))
+            for idx in range(10):
+                await s.execute(insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="task-a",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "arm64"},
+                    state="queued",
+                    idempotency_key=f"queued-gb10-{idx}",
+                ))
+            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
+                environment="production",
+                pool_name="gb10-arm64",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=150,
+                scale_up_threshold_slots=1,
+                scale_down_idle_seconds=600,
+                scale_up_cooldown_seconds=60,
+                scale_down_cooldown_seconds=300,
+                drain_timeout_seconds=600,
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "arm64",
+                    "allowed_nodes": [
+                        "trt-gb10-1",
+                        "trt-gb10-2",
+                        "trt-gb10-3",
+                        "trt-gb10-4",
+                        "trt-gb10-5",
+                        "trt-gb10-6",
+                        "trt-gb10-7",
+                        "trt-gb10-8",
+                        "trt-gb10-9",
+                        "trt-gb10-10",
+                        "trt-gb10-11",
+                        "trt-gb10-12",
+                        "trt-gb10-13",
+                        "trt-gb10-14",
+                        "trt-gb10-15",
+                    ],
+                    "env_file": "/secure/.env.gb10-worker",
+                    "repo_dir": "/shared_work/qianyi/loom-remote-worker",
+                    "partition": "gb10",
+                    "requested_cpus": 20,
+                    "requested_memory_mib": 115000,
+                    "requested_concurrency": 10,
+                    "max_jobs": 15,
+                    "pending_job_cap": 2,
+                    "time_limit": "2-00:00:00",
+                },
+            ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "scale_up"
+        assert runner.submitted_nodes == ["trt-gb10-1"]
+        assert runner.submitted_configs[0].partition == "gb10"
+        assert runner.submitted_configs[0].pool_name == "gb10-arm64"
+        assert runner.submitted_configs[0].requested_concurrency == 10
+
+        async with session_factory() as s:
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+            policy = (await s.execute(
+                select(WorkerPoolAutoscalerPolicy),
+            )).scalar_one()
+
+        assert job.job_id == "job-trt-gb10-1"
+        assert job.nodelist == "trt-gb10-1"
+        assert job.requested_cpus == 20
+        assert job.requested_memory_mib == 115000
+        assert job.requested_concurrency == 10
+        assert job.state == "pending"
+        assert job.redacted_env["LOOM_WORKER_POOL_NAME"] == "gb10-arm64"
+        assert policy.actuator == "slurm"
+        assert policy.last_decision == "scale_up"
+        assert policy.last_decision_reason == "queued_deficit"
+        assert policy.last_desired_slots == 10
+        assert policy.last_pending_slots == 10
     finally:
         await engine.dispose()
 

@@ -2,7 +2,10 @@
 
 This directory records the public-beta GB10 worker-pool policy validated for
 issue #518. The pool attaches ARM64 GB10 hosts to the OLDLAB-1 public-beta
-control plane as fixed Docker Compose remote workers.
+control plane as Slurm-managed Docker workers. Slurm owns normal capacity
+request/release; Docker Compose and the node-agent remain documented here for
+host-local worker execution, rollout validation, legacy compatibility, and
+break-glass operation.
 
 ## Topology
 
@@ -11,6 +14,7 @@ control plane as fixed Docker Compose remote workers.
 - Kubernetes namespace: `loom-public-beta` in the `kind-loom-public-beta`
   cluster.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
+- Slurm partition: `gb10`.
 - Jump path: operator Mac -> `cudo-sudo-trt` -> `trt-gb10-N`.
 - Worker process path on every GB10 host: `/home/trt/loom-remote-worker`.
 - Loom checkout path on every GB10 host:
@@ -120,6 +124,9 @@ Evidence date: 2026-06-25.
   `LOOM_WORKER_MAX_CONCURRENT=10`.
 - Every host advertises `LOOM_WORKER_POOL_NAME=gb10-arm64`.
 - Total configured GB10 trial capacity is therefore `15 * 10 = 150` slots.
+- Normal capacity policy uses `actuator=slurm`,
+  `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`,
+  `requested_concurrency=10`, `max_jobs=15`, and `max_slots=150`.
 - Canary batch `b18d1a92-909a-443f-a768-f0aae8229cea` finished `succeeded`.
   Trial `6e833772-ae85-4bf0-9621-904cb9bca0ea` was claimed by
   `trt-gb10-6`, used the real Lux provider model

@@ -194,12 +194,15 @@ OLDLAB:
 
 GB10:
 
-- Configure policy on top of #43 node-agent desired state.
-- Scale down a subset of GB10 capacity through desired host intent; verify no
-  active trials are interrupted.
-- Scale back up through node-agent timers without per-host manual SSH/Docker
+- Configure policy with the Slurm actuator on the `gb10` partition and
+  `cpu_arch=arm64`.
+- Scale down a subset of GB10 capacity by draining workers and releasing the
+  corresponding Slurm jobs; verify no active trials are interrupted.
+- Scale back up through Slurm submissions without per-host manual SSH/Docker
   commands.
-- Validate interrupted node-agent or failed apply appears as blocked/error.
+- Keep the #43 node-agent desired-state path as rollout compatibility and
+  break-glass coverage; validate interrupted node-agent or failed apply as
+  compatibility-path blocked/error evidence only.
 
 All submitted trials must reach terminal states or explicit operator-cancel
 states. No duplicate workers, stuck queued/claimed/running trials, or silent
@@ -212,8 +215,9 @@ missing architecture capacity are acceptable.
 - Unit and integration tests for Slurm scale-up, pending cancellation, running
   drain, safe release, stale replacement, actuator failure, cooldowns, and
   min/max bounds.
-- Unit and integration tests for GB10 host intent, node-agent plan/apply, stop
-  after drain, interrupted agent report, and desired-vs-current status.
+- Unit and integration tests for GB10 Slurm policy config, partitioned
+  submission, pending job accounting, and ARM64 pool matching. Keep GB10
+  host-intent/node-agent plan/apply tests for compatibility-path coverage.
 - CLI tests for status/set/drain JSON and text outputs.
 - Monitor/resource summary tests for desired, pending, draining, and last
   decision fields.
@@ -234,8 +238,8 @@ missing architecture capacity are acceptable.
 
 - Scale up/down OLDLAB: Slurm actuator desired-capacity reconciliation and
   public-beta evidence.
-- Scale up/down GB10: host intent desired state plus node-agent apply and
-  public-beta evidence.
+- Scale up/down GB10: Slurm actuator desired-capacity reconciliation on the
+  `gb10` partition plus public-beta evidence.
 - Min/max/cooldowns: policy model and decision tests.
 - Drain before termination: worker drain contract, claim exclusion, safe
   release tests, public-beta evidence.

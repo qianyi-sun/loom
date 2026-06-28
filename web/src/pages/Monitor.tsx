@@ -232,9 +232,11 @@ function ResourcePoolBreakdown({
               "Pool",
               "Backend",
               "Arch",
-              "Slots",
-              "Desired",
+              "Autoscaler",
+              "Active slots",
               "Pending",
+              "Desired",
+              "Max",
               "Draining",
               "Idle",
               "Running",
@@ -242,10 +244,12 @@ function ResourcePoolBreakdown({
               "Queued",
               "Workers",
               "Decision",
+              "Reason",
+              "Blocked",
             ].map((h) => (
               <th
                 key={h}
-                className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
+                className="whitespace-nowrap px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
               >
                 {h}
               </th>
@@ -253,50 +257,71 @@ function ResourcePoolBreakdown({
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {resources.pools.map((pool) => (
-            <tr
-              key={`${pool.pool_name}:${pool.backend}:${pool.cpu_arch}`}
-              className="bg-white"
-            >
-              <td className="px-3 py-2 font-medium text-slate-900">
-                {pool.pool_name}
-              </td>
-              <td className="px-3 py-2 text-slate-700">{pool.backend}</td>
-              <td className="px-3 py-2 text-slate-700">{pool.cpu_arch}</td>
-              <td className="px-3 py-2 font-mono text-xs text-slate-900">
-                {pool.occupied_slots}/{pool.total_slots}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.desired_slots}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.pending_slots}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.draining_slots}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.autoscaler_idle_seconds == null
-                  ? "-"
-                  : `${pool.autoscaler_idle_seconds}s`}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.running_tasks}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.starting_tasks}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.queued_tasks}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.active_workers}
-              </td>
-              <td className="px-3 py-2 text-slate-700">
-                {pool.last_autoscaler_decision ?? "-"}
-              </td>
-            </tr>
-          ))}
+          {resources.pools.map((pool) => {
+            const activeSlots = pool.current_active_slots ?? pool.total_slots;
+            const maxSlots = pool.max_slots ?? pool.ceiling_slots ?? pool.total_slots;
+            const reason = pool.decision_reason ?? pool.last_autoscaler_reason ?? "-";
+            const blocked =
+              pool.blocked_reason ??
+              pool.last_autoscaler_blocked_reason ??
+              (pool.last_autoscaler_error
+                ? `error: ${pool.last_autoscaler_error}`
+                : "-");
+            return (
+              <tr
+                key={`${pool.pool_name}:${pool.backend}:${pool.cpu_arch}`}
+                className="bg-white"
+              >
+                <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
+                  {pool.pool_name}
+                </td>
+                <td className="px-3 py-2 text-slate-700">{pool.backend}</td>
+                <td className="px-3 py-2 text-slate-700">{pool.cpu_arch}</td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.autoscaler_actuator ?? "-"}
+                </td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-900">
+                  {pool.occupied_slots}/{activeSlots}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.pending_slots}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.desired_slots}
+                </td>
+                <td className="px-3 py-2 text-slate-700">{maxSlots}</td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.draining_slots}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.autoscaler_idle_seconds == null
+                    ? "-"
+                    : `${pool.autoscaler_idle_seconds}s`}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.running_tasks}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.starting_tasks}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.queued_tasks}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.active_workers}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {pool.last_autoscaler_decision ?? "-"}
+                </td>
+                <td className="max-w-52 px-3 py-2 text-slate-700" title={reason}>
+                  {reason}
+                </td>
+                <td className="max-w-52 px-3 py-2 text-slate-700" title={blocked}>
+                  {blocked}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -423,7 +448,9 @@ function MonitorHealthSummary({
             label="Concurrent tasks"
             value={
               resources
-                ? `${resources.occupied_slots} / ${resources.total_slots}`
+                ? `${resources.occupied_slots} / ${
+                    resources.current_active_slots ?? resources.total_slots
+                  }`
                 : stateCount(data.queue.running + data.queue.claimed, "active")
             }
           />
