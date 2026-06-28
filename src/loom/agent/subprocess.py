@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shlex
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from loom_worker.control_plane_client import StepTokenClient
 logger = logging.getLogger(__name__)
 _LOOM_EVENT_REQUIRED_KEYS = frozenset({"kind", "emitted_at", "trial_id", "step_id", "seq"})
 _LOOM_EVENT_KINDS = frozenset(kind.value for kind in EventKind)
+_SUBPROCESS_AGENT_ENV_PASSTHROUGH = ("LOOM_CODEX_SETTINGS_JSON",)
 
 
 def _bridge_driver(driver: Driver, *, cwd: PurePosixPath) -> SandboxAccess:
@@ -246,6 +248,10 @@ class SubprocessAgent:
             self.adapter.api_key_env: step_token,
             self.adapter.base_url_env: base_url,
         }
+        for name in _SUBPROCESS_AGENT_ENV_PASSTHROUGH:
+            value = os.environ.get(name)
+            if value:
+                env_vars[name] = value
         cwd = self.workdir
         argv = self.adapter.build_invocation(
             instruction=instruction,

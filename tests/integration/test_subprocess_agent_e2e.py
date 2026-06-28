@@ -10,7 +10,7 @@ ObjectStore has the trajectory.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import httpx
@@ -18,6 +18,7 @@ import pytest
 from loom_launcher import get_adapter
 
 from loom.agent.subprocess import SubprocessAgent
+from loom.driver.base import ExecHandle
 from loom.driver.fake import FakeDriver, scripted_streaming_handler
 from loom.errors import AgentError
 from loom.models.types import ModelSpec
@@ -175,6 +176,79 @@ async def test_subprocess_agent_can_use_sandbox_facing_gateway_url(
             "http://host.docker.internal:30443/openai/v1"
         )
         assert captured_env["OPENAI_API_KEY"] == "loom_step_test-mocked-token"
+        await driver.stop()
+    finally:
+        await http.aclose()
+
+
+async def test_subprocess_agent_passes_codex_settings_json(
+    tmp_path: Path,
+    mocked_cp_client: tuple[HttpControlPlaneClient, httpx.AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#85: deployment-level Codex settings must reach the launcher.
+
+    The Codex adapter only adds `--settings` when the env passed into
+    `build_invocation()` contains `LOOM_CODEX_SETTINGS_JSON`. The worker
+    process environment is therefore part of the runtime contract.
+    """
+    cp, http = mocked_cp_client
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("LOOM_CODEX_SETTINGS_JSON", '{"temperature": 0}')
+
+    def _capture_streaming(
+        argv: list[str],
+        env_vars: dict[str, str],
+        cwd: PurePosixPath,
+        user: str | int | None,
+    ) -> ExecHandle:
+        captured["argv"] = argv
+        captured["env_vars"] = dict(env_vars)
+        return scripted_streaming_handler(
+            stdout_chunks=[b'{"type": "turn.completed"}\n'],
+            stderr_chunks=[],
+            return_code=0,
+        )(argv, env_vars, cwd, user)
+
+    try:
+        driver = FakeDriver(streaming_handler=_capture_streaming)
+        await driver.start()
+        codex = get_adapter("codex")
+        assert codex is not None
+        agent = SubprocessAgent(
+            adapter=codex,
+            model=ModelSpec(provider="openai", name="qwen3.6-35b-a3b"),
+            cp_client=cp,
+            gateway_url="http://worker-only-gateway:9100",
+            agent_gateway_url="http://host.docker.internal:30443/openai/v1",
+            team_id=uuid4(),
+            trial_id=uuid4(),
+        )
+        store = FakeObjectStore()
+
+        async with TrajectoryWriter(
+            local_path=tmp_path / "trajectory.jsonl",
+            store=store,
+            bucket="trajectories",
+            key="t/t/events.jsonl",
+            min_part_bytes=0,
+        ) as trajectory:
+            await agent.run(
+                instruction="x",
+                env=driver,
+                trajectory=trajectory,
+                mcp=[],
+                skills_dir=None,
+                step_id="main",
+            )
+
+        argv = captured["argv"]
+        assert isinstance(argv, list)
+        env_vars = captured["env_vars"]
+        assert isinstance(env_vars, dict)
+        assert env_vars["LOOM_CODEX_SETTINGS_JSON"] == '{"temperature": 0}'
+        assert '--settings "$5"' in argv[2]
+        assert argv[-1] == '{"temperature":0}'
         await driver.stop()
     finally:
         await http.aclose()
