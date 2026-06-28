@@ -545,6 +545,23 @@ knob you need.
     `python scripts/check_no_provider_keys_in_artifacts.py <artifact-path>`
     before publishing or attaching them to issues.
 
+12. **Write one-off remote secret files with the checked helper.** Do not pipe a
+    token-producing command into `ssh` while also using an SSH heredoc; the
+    heredoc consumes stdin and can route the token into shell source or command
+    output. Use the helper when a benchmark or incident run needs a short-lived
+    remote secret file:
+    ```bash
+    scripts/ops/write_remote_secret.py \
+      --host platform-dev \
+      --remote-path /shared_work/qianyi/skilllearnbench-official/.secrets/skilllearnbench-github-token \
+      -- gh auth token
+    ```
+    The helper captures the local secret command, strips only trailing
+    newlines, sends the secret as SSH stdin to a quoted remote `bash -lc`
+    writer, sets mode `600`, and prints only `mode`, `size`, and `path`.
+    Delete short-lived remote secret files as soon as the run has performed its
+    own post-run scan.
+
 ## Upgrade
 
 ### Breaking changes by release
