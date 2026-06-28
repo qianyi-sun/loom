@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
 from loom.models.skill import SkillRef
 from loom.models.types import ModelSpec, VerifierEnvMode
+from loom.request_params import sanitize_request_extras
 
 
 class RetryReason(StrEnum):
@@ -62,6 +63,10 @@ class TrialConfig(BaseModel):
     # Scheduling
     submit_priority: int = Field(default=100, ge=0, le=1000)
 
+    # Safe, user-controlled provider generation parameters. Prompt payloads,
+    # headers, credentials, and unknown extras are stripped before execution.
+    request_params: dict[str, Any] = Field(default_factory=dict)
+
     # Per-trial overrides on the task's defaults
     extra_mcp_servers: list[MCPConnection] = []
     extra_skills: list[SkillRef] = []
@@ -75,3 +80,8 @@ class TrialConfig(BaseModel):
     # the payload, just as a literal null.
     agent_name: str = Field(min_length=1)
     agent_model: ModelSpec | None
+
+    @field_validator("request_params", mode="before")
+    @classmethod
+    def _sanitize_request_params(cls, value: Any) -> dict[str, Any]:
+        return sanitize_request_extras(value)

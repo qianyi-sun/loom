@@ -98,6 +98,37 @@ def normalize_request_params(
     return {"status": _AVAILABLE, "parameters": parameters}
 
 
+def sanitize_request_extras(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return provider request extras safe to forward from trial config.
+
+    This keeps only non-sensitive generation controls. Unlike the public audit
+    shape, provider containers such as ``extra_body`` are preserved so the
+    gateway client can forward them using the provider's native wire format.
+    """
+    if not isinstance(payload, Mapping):
+        return {}
+    extras: dict[str, Any] = {}
+    for key, value in payload.items():
+        normalized_key = str(key)
+        if normalized_key in _OMITTED_PAYLOAD_KEYS:
+            continue
+        if _sensitive_key(normalized_key):
+            continue
+        if normalized_key in _ALLOWED_PARAMETER_KEYS:
+            sanitized = _sanitize_value(value)
+            if sanitized is not None:
+                extras[normalized_key] = sanitized
+            continue
+        if normalized_key in _EXTRA_CONTAINERS and isinstance(value, Mapping):
+            sanitized_mapping = _sanitize_mapping(
+                value,
+                allow_parameter_keys=True,
+            )
+            if sanitized_mapping:
+                extras[normalized_key] = sanitized_mapping
+    return extras
+
+
 def coerce_request_params(value: Mapping[str, Any] | None) -> dict[str, Any]:
     """Coerce stored DB/API values to the public request-param shape."""
     if not isinstance(value, Mapping):

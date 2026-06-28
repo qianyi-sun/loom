@@ -35,6 +35,7 @@ from loom.db.schema import (
 )
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
+from loom.request_params import sanitize_request_extras
 from loom.security.redaction import redact_mapping, redact_text
 from loom_service.agent_catalog import (
     get_agent,
@@ -109,6 +110,13 @@ class _CreateBatch(BaseModel):
     # before insertion.
     provider_connection_id: UUID | None = None
     provider_model_id: str | None = None
+
+
+def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
+    out = dict(config)
+    if "request_params" in out:
+        out["request_params"] = sanitize_request_extras(out.get("request_params"))
+    return out
 
 
 def _reject_submission(
@@ -334,13 +342,14 @@ async def create_batch(
     await _reject_if_team_paused(s, ctx.team_id)
 
     catalog = known_names()
+    trial_config = _sanitize_trial_config(payload.trial_config)
 
     if payload.combinations:
         # Multi-combination batch. trial_config MUST NOT carry
         # agent_name / agent_model / n_per_task in this shape —
         # those live on each Combination.
         for forbidden in ("agent_name", "agent_model"):
-            if forbidden in payload.trial_config:
+            if forbidden in trial_config:
                 _reject_submission(
                     reason="invalid_input",
                     status_code=400,
@@ -388,7 +397,7 @@ async def create_batch(
     else:
         # Single-combination batch. Catalog check on the agent
         # embedded in trial_config + agent⇄model compatibility.
-        agent_name = payload.trial_config.get("agent_name")
+        agent_name = trial_config.get("agent_name")
         if isinstance(agent_name, str) and agent_name:
             if agent_name not in catalog:
                 _reject_submission(
@@ -398,7 +407,7 @@ async def create_batch(
                         f"unknown agent_name {agent_name!r} in trial_config. GET /api/v1/agents."
                     ),
                 )
-            if "agent_model" not in payload.trial_config:
+            if "agent_model" not in trial_config:
                 _reject_submission(
                     reason="invalid_input",
                     status_code=400,
@@ -408,7 +417,7 @@ async def create_batch(
                         "for agents that do not call a model"
                     ),
                 )
-            model_raw = payload.trial_config["agent_model"]
+            model_raw = trial_config["agent_model"]
             model: ModelSpec | None
             if model_raw is None:
                 model = None
@@ -508,7 +517,7 @@ async def create_batch(
         s,
         valid_task_ids=valid_task_ids,
         combinations=payload.combinations,
-        single_agent_name=payload.trial_config.get("agent_name"),
+        single_agent_name=trial_config.get("agent_name"),
     )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
@@ -535,7 +544,7 @@ async def create_batch(
     )
     generated_identity = build_batch_identity(
         task_filter=payload.task_filter,
-        trial_config=payload.trial_config,
+        trial_config=trial_config,
         combinations=combinations_jsonb or payload.combinations,
         n_per_task=payload.n_per_task,
         backend=payload.backend,
@@ -550,7 +559,7 @@ async def create_batch(
         name=batch_name,
         description=batch_description,
         task_filter=payload.task_filter,
-        trial_config=payload.trial_config,
+        trial_config=trial_config,
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,

@@ -169,11 +169,18 @@ issuing one `/chat/completions` call and synthesizing the Responses
 JSON/SSE that Codex parses. This is a provider-connection compatibility
 path, not a Codex adapter mode; Codex itself still speaks Responses.
 When a run must pin Codex generation settings for score-alignment
-evidence, set `LOOM_CODEX_SETTINGS_JSON` in the agent environment to a
-JSON object accepted by `codex exec --settings`, for example
-`{"temperature":0}`. The adapter compacts and passes that object as a
-separate `--settings` argument; the Gateway separately records the
-resulting non-sensitive request controls in `llm_calls.request_params`.
+evidence, do not rely on `trial_config.request_params`: subprocess
+CLI runtimes construct their own provider requests. Codex settings
+injection must follow the pinned Codex CLI contract and is tracked
+separately in #92. The Gateway still records the resulting
+non-sensitive request controls in `llm_calls.request_params` when the
+subprocess reaches the provider facade.
+
+For the service-mode `litellm` worker path, callers can set
+`trial_config.request_params` to safe generation controls such as
+`{"temperature":0,"top_p":0.5,"seed":1234}`. The worker strips
+prompt/message payloads, headers, credentials, and unknown extras
+before forwarding the request through `GatewayCallRequest`.
 
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client

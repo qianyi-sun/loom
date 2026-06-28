@@ -2,6 +2,7 @@ from loom_llm_gateway.request_params import (
     coerce_request_params,
     legacy_request_params,
     normalize_request_params,
+    sanitize_request_extras,
 )
 
 
@@ -72,5 +73,34 @@ def test_coerce_request_params_enforces_public_allowlist_on_stored_values() -> N
         "parameters": {
             "temperature": 0,
             "max_tokens": 128,
+        },
+    }
+
+
+def test_sanitize_request_extras_preserves_allowed_controls_without_sensitive_payload() -> None:
+    extras = sanitize_request_extras(
+        {
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "messages": [{"role": "user", "content": "do not copy"}],
+            "api_key": "sk-hidden",
+            "headers": {"Authorization": "Bearer hidden"},
+            "extra_body": {
+                "top_k": 40,
+                "repetition_penalty": 1.1,
+                "prompt": "secret",
+                "x-provider-ignored": "not a generation control",
+            },
+        }
+    )
+
+    assert extras == {
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "extra_body": {
+            "top_k": 40,
+            "repetition_penalty": 1.1,
         },
     }

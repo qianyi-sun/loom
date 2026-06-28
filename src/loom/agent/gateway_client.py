@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from loom.models.trajectory import ChatMessage, ToolSpec
 from loom.models.types import ModelSpec
+from loom.request_params import sanitize_request_extras
 
 
 @dataclass(frozen=True)
@@ -25,10 +26,18 @@ class GatewayCallRequest:
     trial_id: str
     step_id: str
     cache_keys: tuple[str, ...] = ()
+    request_params: dict[str, Any] = field(default_factory=dict)
     # #178: BYO provider connection. When set, the gateway routes the
     # call via this connection's stored credential + base_url instead
     # of the platform-resident provider key.
     provider_connection_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "request_params",
+            sanitize_request_extras(self.request_params),
+        )
 
 
 @dataclass(frozen=True)

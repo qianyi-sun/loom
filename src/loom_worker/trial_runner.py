@@ -223,6 +223,8 @@ class LocalTrialRunner:
             agent.artifact_paths = [
                 a for step in self.task_config.steps for a in step.artifacts
             ]
+        if hasattr(agent, "request_params"):
+            agent.request_params = dict(self.trial_config.request_params)
         verifier = self.verifier_factory()
 
         ctx = TrialContext(

@@ -853,6 +853,16 @@ loom run
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,
   qwen-cli, kimi-cli)
 
+For service-mode `litellm` trials, API clients can include
+`trial_config.request_params` to pin non-sensitive generation controls
+such as `temperature`, `top_p`, `seed`, max output limits, reasoning
+effort, tool-choice mode, and provider decoding extras. Loom strips
+prompt/message payloads, headers, API keys, credentials, and unknown
+extras before forwarding the request, then exposes the effective
+controls in provider debug evidence. Subprocess agents such as Codex
+or Claude Code need adapter-specific setting support and do not inherit
+these fields automatically.
+
 In service mode, the SPA and API only allow launch for agents whose
 runtime is ready in the deployed worker/sandbox contract. `GET
 /api/v1/agents` includes `service_mode_ready`, `readiness_message`, and
