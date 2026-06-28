@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -35,6 +35,7 @@ from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import AgentThoughtEvent, EventKind
 from loom.models.types import OS, ModelSpec
+from loom.request_params import sanitize_request_extras
 from loom.security.redaction import redact_mapping, redact_text
 from loom.trajectory.writer import TrajectoryWriter
 from loom_worker.control_plane_client import StepTokenClient
@@ -201,13 +202,14 @@ class SubprocessAgent:
     # Optional per-step JWT TTL override; defaults to 1800s (30 min) per
     # spec §6.1 typical step_timeout.
     step_token_ttl_sec: int = 1800
+    request_params: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.name = self.adapter.name
         # The adapter declares OS as `frozenset[str]`; loom's AgentRuntime
         # Protocol expects `frozenset[OS]` (a Literal alias). They're
         # structurally identical at runtime.
-        self.supports_os = self.adapter.supports_os
+        self.supports_os = cast(frozenset[OS], self.adapter.supports_os)
 
     async def run(
         self,
@@ -252,6 +254,11 @@ class SubprocessAgent:
             value = os.environ.get(name)
             if value:
                 env_vars[name] = value
+        if self.adapter.name == "codex" and self.request_params:
+            env_vars["LOOM_CODEX_SETTINGS_JSON"] = json.dumps(
+                sanitize_request_extras(self.request_params),
+                separators=(",", ":"),
+            )
         cwd = self.workdir
         argv = self.adapter.build_invocation(
             instruction=instruction,

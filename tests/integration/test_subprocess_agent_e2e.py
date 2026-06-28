@@ -195,7 +195,7 @@ async def test_subprocess_agent_passes_codex_settings_json(
     """
     cp, http = mocked_cp_client
     captured: dict[str, object] = {}
-    monkeypatch.setenv("LOOM_CODEX_SETTINGS_JSON", '{"temperature": 0}')
+    monkeypatch.setenv("LOOM_CODEX_SETTINGS_JSON", '{"temperature": 1}')
 
     def _capture_streaming(
         argv: list[str],
@@ -225,6 +225,14 @@ async def test_subprocess_agent_passes_codex_settings_json(
             team_id=uuid4(),
             trial_id=uuid4(),
         )
+        agent.request_params = {
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "messages": [{"role": "user", "content": "secret"}],
+            "api_key": "sk-hidden",
+            "extra_body": {"top_k": 40, "prompt": "secret"},
+        }
         store = FakeObjectStore()
 
         async with TrajectoryWriter(
@@ -247,13 +255,21 @@ async def test_subprocess_agent_passes_codex_settings_json(
         assert isinstance(argv, list)
         env_vars = captured["env_vars"]
         assert isinstance(env_vars, dict)
-        assert env_vars["LOOM_CODEX_SETTINGS_JSON"] == '{"temperature": 0}'
+        assert json.loads(env_vars["LOOM_CODEX_SETTINGS_JSON"]) == {
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "extra_body": {"top_k": 40},
+        }
         assert "--settings" not in argv[2]
         assert "$5" not in argv[2]
         provider_config = argv[6]
+        assert "sk-hidden" not in provider_config
+        assert "secret" not in provider_config
         assert (
             'query_params = { loom_request_params = '
-            '"{\\"temperature\\":0}" }'
+            '"{\\"temperature\\":0,\\"top_p\\":0.5,\\"seed\\":1234,'
+            '\\"extra_body\\":{\\"top_k\\":40}}" }'
         ) in provider_config
         await driver.stop()
     finally:
