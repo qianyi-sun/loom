@@ -238,6 +238,67 @@ async def test_post_batch_materializes_count(
     UUID(body["batch_id"])  # parseable
 
 
+async def test_post_batch_sanitizes_trial_request_params(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "request params",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": "local", "name": "stub"},
+                    "request_params": {
+                        "temperature": 0,
+                        "top_p": 0.5,
+                        "seed": 1234,
+                        "messages": [{"role": "user", "content": "secret"}],
+                        "api_key": "sk-hidden",
+                        "extra_body": {"top_k": 40, "prompt": "secret"},
+                    },
+                },
+            },
+        )
+        assert r.status_code == 201, r.text
+        batch_id = UUID(r.json()["batch_id"])
+        detail = await ac.get(
+            f"/api/v1/batches/{batch_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    expected = {
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "extra_body": {"top_k": 40},
+    }
+    assert detail.json()["trial_config"]["request_params"] == expected
+    rendered = json.dumps(detail.json()["trial_config"])
+    assert "api_key" not in rendered
+    assert "messages" not in rendered
+    assert "secret" not in rendered
+
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sync_engine.connect() as conn:
+            stored = conn.execute(
+                select(Batch.trial_config).where(Batch.id == batch_id)
+            ).scalar_one()
+    finally:
+        sync_engine.dispose()
+    assert stored["request_params"] == expected
+
+
 async def test_post_batch_generates_concise_identity_when_name_omitted(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

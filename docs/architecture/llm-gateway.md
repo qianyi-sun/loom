@@ -30,6 +30,10 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    reasoning effort, tool-choice mode, and provider decoding extras.
    Prompt bodies, messages, headers, API keys, and raw credentials are
    omitted.
+   Service-mode `TrialConfig.request_params` is the user-facing input
+   for those controls on the `litellm` worker path; the worker filters
+   that object through the same allowlist before forwarding it to the
+   Gateway.
 5. **Bearer auth + per-team RPM** — every call carries a team
    token; the Gateway gates RPM per `(team, provider)` and rejects
    when over.
@@ -108,6 +112,28 @@ shape — there's nowhere to inject them into the body without
 breaking client parsing. Workers populate the headers from
 `bind_trial_context` (see [`cli-mode.md`](cli-mode.md) for the
 contextvars helper).
+
+For `LiteLLMAgent` service-mode trials, callers may include
+`trial_config.request_params` with safe generation controls, for
+example:
+
+```json
+{
+  "agent_name": "litellm",
+  "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+  "request_params": {
+    "temperature": 0,
+    "top_p": 0.5,
+    "seed": 1234,
+    "extra_body": {"top_k": 40}
+  }
+}
+```
+
+The worker drops prompt/message payloads, headers, credentials, and
+unknown provider fields before the request is sent. The Gateway then
+records the effective non-sensitive controls in `llm_calls.request_params`
+and the trial/batch debug evidence surfaces.
 
 ## Why centralise
 

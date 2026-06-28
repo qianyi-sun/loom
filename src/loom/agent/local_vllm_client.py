@@ -23,6 +23,7 @@ from loom.agent.gateway_client import (
     GatewayCallResponse,
 )
 from loom.models.trajectory import ChatMessage
+from loom.request_params import sanitize_request_extras
 
 
 @dataclass
@@ -52,6 +53,7 @@ class LocalVLLMGatewayClient:
             body["tools"] = [t.model_dump() for t in request.tools]
         if request.tool_choice is not None:
             body["tool_choice"] = request.tool_choice
+        body.update(sanitize_request_extras(request.request_params))
 
         client = self._client or httpx.AsyncClient(
             base_url=self.base_url, timeout=self.timeout_sec,

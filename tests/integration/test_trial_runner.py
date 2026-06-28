@@ -621,3 +621,74 @@ async def test_trial_config_agent_and_model_drive_the_factory(  # type: ignore[n
     await runner.run()
     assert captured["name"] == "claude-code"
     assert captured["model"] == explicit_model
+
+
+async def test_runner_applies_trial_request_params_to_agent(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class RequestParamAgent:
+        mode = "out-of-box"
+        name = "litellm"
+        version = "1.0"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        def __init__(self) -> None:
+            self.request_params: dict[str, Any] = {}
+
+        async def run(self, **_: Any) -> None:
+            captured["request_params"] = self.request_params
+
+    def capture_factory(task_dir, _gw, model, name):  # type: ignore[no-untyped-def]
+        return RequestParamAgent()
+
+    handler = command_table_handler({
+        "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": ExecResult(
+            return_code=0, stdout=b"hello\n", stderr=b"",
+            truncated=False, duration_sec=0.05,
+        ),
+    })
+
+    async def noop_patch(
+        state: str,
+        _fr: str | None,
+        failure_message: str | None = None,
+    ) -> bool:
+        return True
+
+    runner = LocalTrialRunner(
+        trial_id=uuid4(), team_id=uuid4(),
+        task_config=_task_config(), task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(
+            agent_name="litellm",
+            request_params={
+                "temperature": 0,
+                "top_p": 0.5,
+                "seed": 1234,
+                "messages": [{"role": "user", "content": "secret"}],
+                "api_key": "sk-hidden",
+                "extra_body": {"top_k": 40, "prompt": "secret"},
+            },
+        ),
+        driver_factory=_driver_factory(handler),
+        agent_factory=capture_factory,
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=noop_patch,
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.SUCCEEDED
+    assert captured["request_params"] == {
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "extra_body": {"top_k": 40},
+    }

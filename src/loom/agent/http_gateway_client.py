@@ -12,6 +12,7 @@ from loom.agent.gateway_client import (
     GatewayCallResponse,
 )
 from loom.models.trajectory import ChatMessage
+from loom.request_params import sanitize_request_extras
 
 
 @dataclass
@@ -50,7 +51,13 @@ class HttpLLMGatewayClient:
             body["loom"]["tier"] = request.model.tier
         if request.model.region:
             body["loom"]["region"] = request.model.region
-        if request.model.max_output_tokens is not None:
+        body.update(sanitize_request_extras(request.request_params))
+        if (
+            request.model.max_output_tokens is not None
+            and "max_tokens" not in body
+            and "max_completion_tokens" not in body
+            and "max_output_tokens" not in body
+        ):
             body["max_tokens"] = request.model.max_output_tokens
         # #178: forward BYO provider connection id so the gateway can
         # decrypt + use the team's stored credential.

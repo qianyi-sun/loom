@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.agent.gateway_client import GatewayCallRequest
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
-from loom.db.schema import RateCard, Team, Token
+from loom.db.schema import RateCard, Team, TeamQuota, Token
 from loom.models.trajectory import ChatMessage
 from loom.models.types import ModelSpec
 from loom_llm_gateway.app import create_app
@@ -86,6 +86,7 @@ async def gateway_app(
         await async_engine.dispose()
         with sync_factory() as s:
             s.execute(delete(Token))
+            s.execute(delete(TeamQuota))
             s.execute(delete(Team))
             s.execute(delete(RateCard))
             s.commit()
@@ -228,6 +229,74 @@ async def test_http_client_forwards_model_output_limit() -> None:
         ))
 
     assert captured["body"]["max_tokens"] == 64
+
+
+async def test_http_client_forwards_sanitized_request_params() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "stub",
+                "model": "some-model",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "loom": {
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 1,
+                    "thinking_tokens": 0,
+                    "provider_extras": {},
+                    "cost_usd": 0.0,
+                    "rate_card_hash": "test-card",
+                    "finish_reason": "stop",
+                    "duration_sec": 0.01,
+                    "streamed": False,
+                    "time_to_first_token_sec": None,
+                    "gateway_request_id": "gw-test",
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://gateway",
+    ) as client:
+        gc = HttpLLMGatewayClient(
+            base_url="http://gateway",
+            token="loom_team_test",
+            _client=client,
+        )
+        await gc.call(GatewayCallRequest(
+            model=ModelSpec(provider="openai", name="some-model"),
+            messages=[ChatMessage(role="user", content="hi")],
+            system_prompt=None,
+            tools=None,
+            tool_choice=None,
+            team_id=str(uuid4()),
+            trial_id=str(uuid4()),
+            step_id="main",
+            request_params={
+                "temperature": 0,
+                "top_p": 0.5,
+                "seed": 1234,
+                "messages": [{"role": "user", "content": "secret"}],
+                "api_key": "sk-hidden",
+                "extra_body": {"top_k": 40, "prompt": "secret"},
+            },
+        ))
+
+    assert captured["body"]["temperature"] == 0
+    assert captured["body"]["top_p"] == 0.5
+    assert captured["body"]["seed"] == 1234
+    assert captured["body"]["extra_body"] == {"top_k": 40}
+    assert "api_key" not in captured["body"]
+    assert captured["body"]["messages"] == [{"role": "user", "content": "hi"}]
 
 
 async def test_http_client_propagates_401(gateway_app):  # type: ignore[no-untyped-def]

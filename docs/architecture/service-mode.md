@@ -47,6 +47,17 @@ capture mode. The SPA disables unavailable agents with a setup-needed
 message, and service submit routes enforce the same readiness check so
 clients cannot create doomed batches by bypassing the browser.
 
+Model-backed `litellm` submissions may include
+`trial_config.request_params` for safe request controls such as
+`temperature`, `top_p`, `seed`, max output limits, reasoning effort,
+tool-choice mode, and provider decoding extras. The Control Plane
+validates the trial config, the worker strips payload/secret-bearing
+keys before the call, and the LLM Gateway persists the effective
+non-sensitive controls in `llm_calls.request_params` for trial/batch
+debug evidence. This field is not a generic subprocess-agent setting
+channel; external CLI adapters must expose their own runtime-compatible
+settings path.
+
 Use `loom agents audit-runtime --image <trial-sandbox-image>` to verify
 that the resolved trial image contains the executables and Python modules
 declared by the agent catalog. For tasks with `environment.docker_image`,

@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from loom.agent.gateway_client import (
@@ -27,6 +27,7 @@ from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import ChatMessage, LLMCallEvent
 from loom.models.types import OS, ModelSpec
+from loom.request_params import sanitize_request_extras
 from loom.trajectory.writer import TrajectoryWriter
 
 
@@ -52,6 +53,7 @@ class LiteLLMAgent:
     # client on every chat request so the call routes via the team's
     # stored credential + base_url rather than the platform default.
     provider_connection_id: str | None = None
+    request_params: dict[str, Any] = field(default_factory=dict)
     # #184: paths (relative to sandbox /workspace) where the agent's
     # final LLM response should be written so file-artifact benchmarks'
     # verifiers (pytest etc.) can grade it. Set by the runner from
@@ -64,6 +66,9 @@ class LiteLLMAgent:
     workdir: PurePosixPath = field(
         default_factory=lambda: PurePosixPath("/workspace"),
     )
+
+    def __post_init__(self) -> None:
+        self.request_params = sanitize_request_extras(self.request_params)
 
     async def run(
         self,
@@ -90,6 +95,7 @@ class LiteLLMAgent:
                 team_id=self.team_id,
                 trial_id=str(self.trial_id),
                 step_id=step_id,
+                request_params=self.request_params,
                 provider_connection_id=self.provider_connection_id,
             )
             response: GatewayCallResponse = await self.gateway.call(request)

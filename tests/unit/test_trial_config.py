@@ -20,6 +20,7 @@ def test_trial_config_defaults():
     assert c.verifier_env_mode is None
     assert c.agent_timeout_multiplier == 1.0
     assert c.submit_priority == 100
+    assert c.request_params == {}
     assert c.retry == RetryPolicy()
 
 
@@ -64,3 +65,28 @@ def test_trial_config_missing_agent_model_422s():
 def test_trial_config_empty_agent_name_422s():
     with pytest.raises(ValidationError):
         TrialConfig(agent_name="", agent_model=_MODEL)
+
+
+def test_trial_config_sanitizes_request_params():
+    c = TrialConfig(
+        agent_name=_AGENT,
+        agent_model=_MODEL,
+        request_params={
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "messages": [{"role": "user", "content": "secret"}],
+            "api_key": "sk-hidden",
+            "extra_body": {
+                "top_k": 40,
+                "prompt": "secret",
+            },
+        },
+    )
+
+    assert c.request_params == {
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "extra_body": {"top_k": 40},
+    }

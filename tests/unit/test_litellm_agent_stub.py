@@ -65,6 +65,39 @@ async def test_single_turn_emits_llm_call_event(writer: TrajectoryWriter):
     assert llm_calls[0].response.content == "done"
 
 
+async def test_agent_forwards_request_params_to_gateway(writer: TrajectoryWriter):
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp("done")])
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+        gateway=fake_gateway,
+        team_id="t1",
+        trial_id=uuid4(),
+        max_turns=1,
+        request_params={
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "messages": [{"role": "user", "content": "secret"}],
+            "api_key": "sk-hidden",
+            "extra_body": {"top_k": 40, "prompt": "secret"},
+        },
+    )
+    await agent.run(
+        instruction="hello", env=driver, trajectory=writer,
+        mcp=[], skills_dir=None, step_id="main",
+    )
+
+    assert fake_gateway.calls_recorded[0].request_params == {
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 1234,
+        "extra_body": {"top_k": 40},
+    }
+
+
 def test_metadata():
     agent = LiteLLMAgent(
         model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),

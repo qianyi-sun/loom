@@ -4,10 +4,12 @@ from loom.request_params import (
     coerce_request_params,
     legacy_request_params,
     normalize_request_params,
+    sanitize_request_extras,
 )
 
 __all__ = [
     "coerce_request_params",
     "legacy_request_params",
     "normalize_request_params",
+    "sanitize_request_extras",
 ]
