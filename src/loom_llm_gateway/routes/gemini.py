@@ -23,6 +23,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 
 router = APIRouter()
@@ -135,5 +136,6 @@ async def gemini_generate_content(
             cost_usd=cost,
             rate_card_hash=hash_table(table),
             attempt=outcome.attempt,
+            request_params=normalize_request_params(payload),
         )
     return body

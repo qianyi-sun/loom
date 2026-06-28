@@ -1129,6 +1129,9 @@ class LlmCall(Base):
     provider_extras: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict,
     )
+    request_params: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None,
+    )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     rate_card_hash: Mapped[str] = mapped_column(Text, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(

@@ -24,10 +24,16 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    `TokenUsage`, writes a row to the `llm_calls` table with
    `(team_id, trial_id, step_id)` keys so any aggregation slices
    cleanly.
-4. **Bearer auth + per-team RPM** — every call carries a team
+4. **Request-parameter audit** — stores a redacted normalized
+   `request_params` JSON object with non-sensitive generation
+   controls such as `temperature`, `top_p`, `seed`, max output limits,
+   reasoning effort, tool-choice mode, and provider decoding extras.
+   Prompt bodies, messages, headers, API keys, and raw credentials are
+   omitted.
+5. **Bearer auth + per-team RPM** — every call carries a team
    token; the Gateway gates RPM per `(team, provider)` and rejects
    when over.
-5. **License allowlists** — task-level allow/deny of model ids; the
+6. **License allowlists** — task-level allow/deny of model ids; the
    Gateway denies a request if its `model` field isn't in the team's
    allowlist.
 
@@ -89,7 +95,8 @@ client                       Gateway                upstream
   │                             │  compute_cost_usd(usage, rate) → cost_usd
   │                             │  llm_calls.insert(team_id, trial_id, step_id,
   │                             │                   input_tokens, output_tokens,
-  │                             │                   provider_extras, cost_usd, ...)
+  │                             │                   provider_extras, request_params,
+  │                             │                   cost_usd, ...)
   │                             │
   │                             │  forward response verbatim
   │◄────────────────────────────│
@@ -175,6 +182,7 @@ rate-card, license) leave no row.
 | `input_tokens`   | from DialectAdapter                                      |
 | `output_tokens`  | from DialectAdapter                                      |
 | `provider_extras`| JSONB — cache + reasoning counters verbatim              |
+| `request_params` | JSONB — redacted normalized generation controls. NULL means pre-#85 legacy/unavailable data |
 | `cost_usd`       | computed at insert; cached for usage metrics/audits     |
 | `rate_card_id`   | FK to the rate-card row used; re-pricing follows the row |
 | `error_kind`     | non-null when upstream returned a non-2xx                |

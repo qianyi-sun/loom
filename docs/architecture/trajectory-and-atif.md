@@ -133,7 +133,13 @@ ATIF shape (rough; canonical definition is in the projection code):
       "step_name": "main",
       "instruction": "...",
       "llm_calls": [
-        {"model": "claude-opus-4-7", "input_tokens": ..., "output_tokens": ..., "cost_usd": ...},
+        {
+          "model": "claude-opus-4-7",
+          "input_tokens": ...,
+          "output_tokens": ...,
+          "cost_usd": ...,
+          "request_params": {"status": "available", "parameters": {"temperature": 0}}
+        },
         ...
       ],
       "tool_uses": [...],
@@ -154,6 +160,10 @@ agent did not already write gateway-backed `llm_call` trajectory
 events. Synthetic `llm_call` events are billing summaries; full
 request/response bodies live in the Gateway database. CLI mode skips
 this step (no Gateway).
+Synthetic events also carry the redacted `request_params` audit
+payload from `llm_calls`. Older rows that predate this field surface
+as `{"status":"unavailable_legacy","parameters":{}}` rather than
+claiming settings matched.
 
 ATIF is a pure projection — re-running it on the same events.jsonl
 produces a byte-identical result modulo `emitted_at` timestamps.

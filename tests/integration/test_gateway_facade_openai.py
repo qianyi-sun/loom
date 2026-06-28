@@ -185,11 +185,17 @@ async def facade_setup(
         sync_engine.dispose()
 
 
-async def _post(app: object, jwt: str, **headers: str) -> httpx.Response:
+async def _post(
+    app: object,
+    jwt: str,
+    *,
+    body: dict[str, object] | None = None,
+    **headers: str,
+) -> httpx.Response:
     """Single-shot POST against the facade. Defaults match a sensible
     happy path so tests only need to override what they care about."""
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
-    body = {
+    request_body = body or {
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "hi"}],
     }
@@ -202,7 +208,7 @@ async def _post(app: object, jwt: str, **headers: str) -> httpx.Response:
                 "Authorization": f"Bearer {jwt}",
                 **headers,
             },
-            json=body,
+            json=request_body,
         )
 
 
@@ -252,10 +258,70 @@ async def test_facade_forwards_with_decrypted_key_and_records_llm_call(
     assert row["model"] == "gpt-4o"
     assert row["input_tokens"] == 100
     assert row["output_tokens"] == 50
+    assert row["request_params"] == {
+        "status": "available",
+        "parameters": {},
+    }
     # operator-supplied cost: 100/1M * $5 + 50/1M * $15
     #                       = 0.0005 + 0.00075 = 0.00125
     assert float(row["cost_usd"]) == pytest.approx(0.00125, abs=1e-7)
     assert "operator-supplied" in row["rate_card_hash"]
+
+
+async def test_facade_records_redacted_request_params(
+    facade_setup, postgres_url: str,
+) -> None:
+    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "do not persist this"}],
+        "temperature": 0,
+        "top_p": 0.5,
+        "seed": 4321,
+        "max_tokens": 256,
+        "extra_body": {
+            "top_k": 40,
+            "repetition_penalty": 1.05,
+            "api_key": "sk-should-not-persist",
+        },
+    }
+
+    r = await _post(
+        app,
+        jwt,
+        body=body,
+        **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == 200, r.text
+
+    import json
+
+    requests: list[httpx.Request] = captures["requests"]  # type: ignore[assignment]
+    sent = json.loads(requests[0].content)
+    assert sent["messages"] == body["messages"]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT * FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["request_params"] == {
+        "status": "available",
+        "parameters": {
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 4321,
+            "max_tokens": 256,
+            "top_k": 40,
+            "repetition_penalty": 1.05,
+        },
+    }
+    rendered = json.dumps(row["request_params"])
+    assert "messages" not in rendered
+    assert "do not persist this" not in rendered
+    assert "api_key" not in rendered
+    assert "sk-should-not-persist" not in rendered
 
 
 async def test_facade_rate_card_pricing_uses_connection_provider(

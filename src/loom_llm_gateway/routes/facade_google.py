@@ -39,6 +39,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
@@ -211,6 +212,7 @@ async def google_generate_content_facade(
             rate_card_hash=rate_card_hash,
             provider=row.provider_type,
             attempt=outcome.attempt,
+            request_params=normalize_request_params(payload),
         )
 
     return body

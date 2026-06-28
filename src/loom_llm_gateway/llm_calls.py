@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import LlmCall
+from loom.request_params import coerce_request_params, normalize_request_params
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.metrics import COST_USD_TOTAL, LLM_CALLS_TOTAL
 
@@ -26,6 +28,7 @@ async def record_call(
     rate_card_hash: str,
     provider: str | None = None,
     attempt: int = 1,
+    request_params: dict[str, Any] | None = None,
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
     (chat / messages / responses / gemini) AFTER the upstream provider
@@ -43,6 +46,11 @@ async def record_call(
     this successful row (#298 Slice B). Defaults to 1 so callers that
     don't go through the retry helper keep the historical semantics.
     """
+    audit_request_params = (
+        normalize_request_params({})
+        if request_params is None
+        else coerce_request_params(request_params)
+    )
     await session.execute(insert(LlmCall).values(
         team_id=team_id,
         trial_id=trial_id,
@@ -52,6 +60,7 @@ async def record_call(
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         provider_extras=usage.provider_extras,
+        request_params=audit_request_params,
         cost_usd=cost_usd,
         rate_card_hash=rate_card_hash,
         attempt=attempt,

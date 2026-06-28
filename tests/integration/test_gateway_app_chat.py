@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert, text
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import ProviderConnection, RateCard, Secret, Team, Token
+from loom.db.schema import LlmCall, ProviderConnection, RateCard, Secret, Team, TeamQuota, Token
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 
@@ -63,9 +63,11 @@ def seed_data(postgres_url: str) -> tuple[UUID, str]:
     with session_factory() as s:
         from sqlalchemy import delete
 
+        s.execute(delete(LlmCall))
         s.execute(delete(ProviderConnection))
         s.execute(delete(Secret))
         s.execute(delete(Token))
+        s.execute(delete(TeamQuota))
         s.execute(delete(Team))
         s.execute(delete(RateCard))
         s.commit()

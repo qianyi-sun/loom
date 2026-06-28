@@ -505,6 +505,7 @@ async def test_facade_returns_404_for_cross_team_connection(
     )
     sync_engine = create_engine(postgres_url)
     with session_local() as s:
+        s.execute(delete(TeamQuota).where(TeamQuota.team_id == other_team))
         s.execute(delete(Team).where(Team.id == other_team))
         s.commit()
     sync_engine.dispose()

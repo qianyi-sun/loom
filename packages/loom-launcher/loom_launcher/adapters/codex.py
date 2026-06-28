@@ -49,6 +49,16 @@ def _responses_base_url(base_url: str) -> str:
     return f"{stripped}/v1"
 
 
+def _codex_settings_json(env: dict[str, str]) -> str | None:
+    raw = env.get("LOOM_CODEX_SETTINGS_JSON")
+    if raw is None or not raw.strip():
+        return None
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("LOOM_CODEX_SETTINGS_JSON must be a JSON object")
+    return json.dumps(parsed, separators=(",", ":"))
+
+
 @dataclass(frozen=True)
 class CodexAdapter:
     name: str = "codex"
@@ -82,14 +92,17 @@ class CodexAdapter:
             f"base_url = {json.dumps(base_url)}, "
             f'env_key = "{self.api_key_env}", wire_api = "responses" }}'
         )
+        settings_json = _codex_settings_json(env)
+        settings_arg = '--settings "$5" ' if settings_json is not None else ""
         script = (
             'mkdir -p "$CODEX_HOME" && '
             "printf '%s' \"$4\" | exec codex exec --ignore-user-config --json "
+            f"{settings_arg}"
             '--model "$1" --cd "$2" --skip-git-repo-check '
             "--sandbox danger-full-access --ignore-rules "
             '-c \'model_provider="loom"\' -c "$3" -'
         )
-        return [
+        argv = [
             "sh",
             "-c",
             script,
@@ -99,6 +112,9 @@ class CodexAdapter:
             provider_config,
             instruction,
         ]
+        if settings_json is not None:
+            argv.append(settings_json)
+        return argv
 
     async def capture_events(
         self,

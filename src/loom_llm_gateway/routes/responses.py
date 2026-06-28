@@ -23,6 +23,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
@@ -145,6 +146,7 @@ async def responses(
                     rate_card_hash=rate_card_hash,
                     provider=row.provider_type,
                     attempt=attempt,
+                    request_payload=payload,
                 )
                 return _responses_result(
                     synthetic_responses_http_response(body_or_stream),
@@ -178,6 +180,7 @@ async def responses(
             rate_card_hash=rate_card_hash,
             provider=row.provider_type,
             attempt=attempt,
+            request_payload=payload,
         )
         return _responses_result(upstream_response, body_or_stream)
 
@@ -232,6 +235,7 @@ async def responses(
             cost_usd=cost,
             rate_card_hash=hash_table(table),
             attempt=attempt,
+            request_params=normalize_request_params(payload),
         )
     return _responses_result(upstream_response, body_or_stream)
 
@@ -388,6 +392,7 @@ async def _record_responses_call(
     rate_card_hash: str,
     provider: str,
     attempt: int,
+    request_payload: dict[str, Any],
 ) -> None:
     async with request.app.state.session_factory() as session:
         await record_call(
@@ -402,6 +407,7 @@ async def _record_responses_call(
             rate_card_hash=rate_card_hash,
             provider=provider,
             attempt=attempt,
+            request_params=normalize_request_params(request_payload),
         )
 
 

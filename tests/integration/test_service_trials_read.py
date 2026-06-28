@@ -748,6 +748,15 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
                 input_tokens=11,
                 output_tokens=7,
                 provider_extras={"finish_reason": "error"},
+                request_params={
+                    "status": "available",
+                    "parameters": {
+                        "temperature": 0,
+                        "top_p": 1,
+                        "seed": 1234,
+                        "reasoning": {"effort": "low"},
+                    },
+                },
                 cost_usd=Decimal("0.000001"),
                 rate_card_hash="debug-rate-card",
                 attempt=3,
@@ -791,6 +800,25 @@ async def test_trial_debug_evidence_is_structured_and_redacted(
     assert body["provider"]["total_completion_tokens"] == 7
     assert body["provider"]["max_attempt"] == 3
     assert body["provider"]["models"] == ["openai/gpt-debug"]
+    assert body["provider"]["request_params_status_counts"] == {"available": 1}
+    assert body["provider"]["request_params"] == [
+        {
+            "llm_call_id": body["provider"]["request_params"][0]["llm_call_id"],
+            "step_id": "main",
+            "dialect": "openai",
+            "model": "openai/gpt-debug",
+            "attempt": 3,
+            "status": "available",
+            "parameters": {
+                "temperature": 0,
+                "top_p": 1,
+                "seed": 1234,
+                "reasoning": {"effort": "low"},
+            },
+        },
+    ]
+    assert "messages" not in str(body["provider"]["request_params"])
+    assert "Authorization" not in str(body["provider"]["request_params"])
     assert body["reward"]["aggregate_reward"] == 0.0
     assert body["reward"]["components"] == {"passed": 0.0}
     assert body["evidence_refs"]["atif"]["ready"] is True

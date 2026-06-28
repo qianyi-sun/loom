@@ -34,6 +34,7 @@ from loom.db.schema import (
 from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
+from loom_llm_gateway.egress_client_pool import EgressClientPool
 from loom_llm_gateway.rate_card import RateCardCache
 
 _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
@@ -136,6 +137,11 @@ async def facade_setup(
         transport=httpx.MockTransport(_handler),
         timeout=settings.upstream_timeout_sec,
     )
+    app.state.egress_client_pool = EgressClientPool(
+        upstream_client=app.state.upstream_client,
+        proxy_url="",
+        upstream_timeout_sec=settings.upstream_timeout_sec,
+    )
 
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
@@ -147,6 +153,7 @@ async def facade_setup(
     try:
         yield app, step_jwt, team_id, trial_id, connection_id, captures  # type: ignore[misc]
     finally:
+        await app.state.egress_client_pool.aclose()
         await app.state.upstream_client.aclose()
         await async_engine.dispose()
         with session_local() as s:
@@ -433,6 +440,7 @@ async def test_facade_returns_404_for_cross_team_connection(
     )
     sync_engine = create_engine(postgres_url)
     with session_local() as s:
+        s.execute(delete(TeamQuota).where(TeamQuota.team_id == other_team))
         s.execute(delete(Team).where(Team.id == other_team))
         s.commit()
     sync_engine.dispose()
@@ -557,9 +565,15 @@ async def test_facade_returns_504_on_upstream_timeout(facade_setup) -> None:
     def _raise(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("read timeout")
 
+    await app.state.egress_client_pool.aclose()  # type: ignore[attr-defined]
     await app.state.upstream_client.aclose()  # type: ignore[attr-defined]
     app.state.upstream_client = httpx.AsyncClient(  # type: ignore[attr-defined]
         transport=httpx.MockTransport(_raise),
+    )
+    app.state.egress_client_pool = EgressClientPool(  # type: ignore[attr-defined]
+        upstream_client=app.state.upstream_client,  # type: ignore[attr-defined]
+        proxy_url="",
+        upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
         app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},

@@ -83,6 +83,13 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
                 "input_tokens": 100,
                 "output_tokens": 50,
                 "provider_extras": {"cache_read_input_tokens": 20},
+                "request_params": {
+                    "status": "available",
+                    "parameters": {
+                        "temperature": 0,
+                        "top_p": 1,
+                    },
+                },
                 "cost_usd": 0.001,
                 "rate_card_hash": "abc",
             },
@@ -197,6 +204,17 @@ async def test_trial_appends_llm_calls_before_finalize(tmp_path: Path) -> None:
     assert parsed[4]["model"]["name"] == "gemini-2.5-flash"
     assert parsed[0]["cached_input_tokens"] == 20
     assert parsed[0]["cost_usd_snapshot"] == 0.001
+    assert parsed[0]["request_params"] == {
+        "status": "available",
+        "parameters": {
+            "temperature": 0,
+            "top_p": 1,
+        },
+    }
+    assert parsed[1]["request_params"] == {
+        "status": "unavailable_legacy",
+        "parameters": {},
+    }
 
 
 async def test_trial_does_not_duplicate_litellm_agent_llm_calls(

@@ -44,6 +44,14 @@ def llm_calls_seed(postgres_url: str) -> Iterator[dict]:
             dialect="anthropic", model="claude-opus-4-7",
             input_tokens=100, output_tokens=50,
             provider_extras={"cache_read_input_tokens": 20},
+            request_params={
+                "status": "available",
+                "parameters": {
+                    "temperature": 0,
+                    "top_p": 1,
+                    "seed": 1234,
+                },
+            },
             cost_usd=Decimal("0.001"), rate_card_hash="abc",
         ))
         s.execute(insert(LlmCall).values(
@@ -111,6 +119,18 @@ def test_llm_calls_returns_only_this_trials_rows(app, llm_calls_seed):  # type: 
         assert items[0]["model"] == "claude-opus-4-7"
         assert items[0]["input_tokens"] == 100
         assert items[1]["input_tokens"] == 80
+        assert items[0]["request_params"] == {
+            "status": "available",
+            "parameters": {
+                "temperature": 0,
+                "top_p": 1,
+                "seed": 1234,
+            },
+        }
+        assert items[1]["request_params"] == {
+            "status": "unavailable_legacy",
+            "parameters": {},
+        }
 
 
 def test_llm_calls_404_for_unknown_trial(app, llm_calls_seed):  # type: ignore[no-untyped-def]
