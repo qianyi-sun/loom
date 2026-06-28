@@ -461,6 +461,9 @@ export interface components {
     ResourceAggregate: {
       desired_slots: number;
       pending_slots: number;
+      current_active_slots: number;
+      max_slots: number;
+      ceiling_slots: number;
       active_workers: number;
       draining_workers: number;
       total_slots: number;
@@ -482,6 +485,9 @@ export interface components {
       autoscaler_idle_seconds: number | null;
       desired_slots: number;
       pending_slots: number;
+      current_active_slots: number;
+      max_slots: number;
+      ceiling_slots: number;
       active_workers: number;
       draining_workers: number;
       total_slots: number;
@@ -493,7 +499,9 @@ export interface components {
       queued_tasks: number;
       last_autoscaler_decision: string | null;
       last_autoscaler_reason: string | null;
+      decision_reason: string | null;
       last_autoscaler_blocked_reason: string | null;
+      blocked_reason: string | null;
       last_autoscaler_error: string | null;
     };
     UsageCostStatus:

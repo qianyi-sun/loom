@@ -16,6 +16,9 @@ _SUMMARY = {
         "aggregate": {
             "desired_slots": 18,
             "pending_slots": 6,
+            "current_active_slots": 12,
+            "max_slots": 52,
+            "ceiling_slots": 52,
             "active_workers": 2,
             "draining_workers": 1,
             "total_slots": 12,
@@ -32,12 +35,15 @@ _SUMMARY = {
                 "backend": "docker",
                 "cpu_arch": "arm64",
                 "autoscaler_environment": "production",
-                "autoscaler_actuator": "gb10",
+                "autoscaler_actuator": "slurm",
                 "autoscaler_enabled": True,
                 "autoscaler_idle_since_at": "2026-06-27T12:00:00+00:00",
                 "autoscaler_idle_seconds": 601,
                 "desired_slots": 12,
                 "pending_slots": 0,
+                "current_active_slots": 10,
+                "max_slots": 40,
+                "ceiling_slots": 40,
                 "active_workers": 1,
                 "draining_workers": 1,
                 "total_slots": 10,
@@ -49,7 +55,9 @@ _SUMMARY = {
                 "queued_tasks": 1,
                 "last_autoscaler_decision": "request_drain",
                 "last_autoscaler_reason": "idle_excess_capacity",
+                "decision_reason": "idle_excess_capacity",
                 "last_autoscaler_blocked_reason": None,
+                "blocked_reason": None,
                 "last_autoscaler_error": None,
             },
             {
@@ -63,6 +71,9 @@ _SUMMARY = {
                 "autoscaler_idle_seconds": None,
                 "desired_slots": 6,
                 "pending_slots": 6,
+                "current_active_slots": 2,
+                "max_slots": 12,
+                "ceiling_slots": 12,
                 "active_workers": 1,
                 "draining_workers": 0,
                 "total_slots": 2,
@@ -74,7 +85,9 @@ _SUMMARY = {
                 "queued_tasks": 1,
                 "last_autoscaler_decision": "scale_up",
                 "last_autoscaler_reason": "queued_deficit",
-                "last_autoscaler_blocked_reason": None,
+                "decision_reason": "queued_deficit",
+                "last_autoscaler_blocked_reason": "pending_cap",
+                "blocked_reason": "pending_cap",
                 "last_autoscaler_error": None,
             },
         ],
@@ -165,12 +178,19 @@ def test_resources_status_text_shows_slots_and_pool_breakdown(
     assert "Running: 1" in out
     assert "Starting: 1" in out
     assert "Queued: 1" in out
+    assert "active 12" in out
+    assert "pending 6" in out
     assert "desired 18" in out
+    assert "max 52" in out
     assert "draining 2 slots / 1 workers" in out
     assert "idle=601s" in out
     assert "gb10-arm64" in out
+    assert "slurm" in out
     assert "0/10" in out
+    assert "40" in out
     assert "request_drain" in out
+    assert "idle_excess_capacity" in out
     assert "public-beta-x86" in out
     assert "2/2" in out
     assert "scale_up" in out
+    assert "pending_cap" in out

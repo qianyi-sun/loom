@@ -1810,9 +1810,12 @@ mock provider and browser automation job.
   trials each. Memory scales with the trajectory ring buffer + the
   largest artifact in flight.
 - Monitor and `loom resources status` show concurrent task slots as
-  `occupied / total` and group them by worker resource pool. Kubernetes render
-  labels the baseline pool as `k8s-worker`; remote workers should set
-  `LOOM_WORKER_POOL_NAME` to stable names such as `oldlab` or `gb10-arm64`.
+  `occupied / current_active_slots` and group them by worker resource pool.
+  They also expose `pending_slots`, `desired_slots`, `max_slots` /
+  `ceiling_slots`, the autoscaler actuator, last decision reason, and blocked
+  reason. Kubernetes render labels the baseline pool as `k8s-worker`; remote
+  workers should set `LOOM_WORKER_POOL_NAME` to stable names such as `oldlab`
+  or `gb10-arm64`.
 - Remote worker pools should set `LOOM_WORKER_HOSTNAME` to the physical or VM
   node name before startup. Otherwise Docker Compose workers may register with
   container hostnames, which makes Monitor and capacity evidence harder to map
@@ -1946,22 +1949,31 @@ mock provider and browser automation job.
   footprint with `MAX_JOBS`; lower per-node pressure with
   `REQUESTED_CONCURRENCY`; disable the pool with
   `LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED=false`.
-- For GB10-style ARM64 fixed Docker Compose capacity, use the staged runbook
-  and evidence under `deploy/worker-pools/gb10/`. GB10 hosts attach through
-  private loopback worker-service tunnels, run the worker compose service with
-  `network_mode: host`, and set `LOOM_WORKER_HOSTNAME=trt-gb10-N` so Monitor
-  and database evidence map workers to physical hosts. Set
-  `LOOM_WORKER_POOL_NAME=gb10-arm64` so slot summaries and metrics group the
-  hosts together. Keep Docker data-root, worker trajectory cache, benchmark
-  cache, and trial scratch on each node's local ext4 disk; do not put those hot
-  paths on `/shared_work`. Current public-beta validation uses
-  `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150 configured ARM64
-  slots. After every rollout, confirm the OLDLAB-1
+- For GB10 ARM64 capacity, use the staged runbook and evidence under
+  `deploy/worker-pools/gb10/`, but manage normal scale-up/scale-down through
+  the Slurm autoscaler policy with `actuator=slurm`,
+  `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`, and
+  `pool_name=gb10-arm64`. The backend still displays as `docker` because the
+  workers run Docker sandboxes; the autoscaler actuator displays as `slurm`
+  because capacity comes from the GB10 Slurm partition. GB10 hosts attach
+  through private loopback worker-service tunnels, run the worker compose
+  service with `network_mode: host`, and set
+  `LOOM_WORKER_HOSTNAME=trt-gb10-N` so Monitor and database evidence map
+  workers to physical hosts. Set `LOOM_WORKER_POOL_NAME=gb10-arm64` so slot
+  summaries and metrics group the hosts together. Keep Docker data-root, worker
+  trajectory cache, benchmark cache, and trial scratch on each node's local
+  ext4 disk; do not put those hot paths on `/shared_work`. Current public-beta
+  validation uses `trt-gb10-1..15` at `LOOM_WORKER_MAX_CONCURRENT=10`, for 150
+  configured ARM64 slots. After every rollout, confirm the OLDLAB-1
   `loom-remote-worker-tunnel-watchdog.timer` is active, run the local plus GB10
-  `check-remote` tunnel gates, then gate the node-agent release target before
+  `check-remote` tunnel gates, verify Slurm worker status, then gate the
+  node-agent release target only for compose rollout compatibility before
   treating the pool as healthy:
 
   ```bash
+  loom admin slurm-workers status \
+    --cp-url http://control-node.lan:18081 \
+    --admin-token file:/secure/path/admin-token
   loom admin gb10-workers status \
     --cp-url http://control-node.lan:18081 \
     --admin-token file:/secure/path/admin-token \
@@ -2016,10 +2028,12 @@ mock provider and browser automation job.
   blocked reason, and actuator error. Normal scale-down marks workers
   `draining` first; those workers stop claiming new work, finish assigned
   trials, and are released only after in-flight count reaches zero. To roll
-  back, disable the policy or raise `min_slots`, then restore GB10 host intents
-  to `active` or wait for OLDLAB Slurm jobs to converge. Manual `scancel` and
-  Docker Compose stop remain break-glass actions and must not target workers
-  that still own claimed or running trials.
+  back, disable the policy or raise `min_slots`, then wait for Slurm jobs to
+  converge. If the GB10 node-agent compatibility path was used, restore host
+  intents to `active` only after confirming the autoscaler policy is disabled
+  or intentionally bypassed. Manual `scancel` and Docker Compose stop remain
+  break-glass actions and must not target workers that still own claimed or
+  running trials.
 - If a Slurm pool's submit commands work only on the OLDLAB submit host, set
   `actuator_config.external_runner=true`. The Kubernetes Control Plane loop
   intentionally skips those policies; run the autoscaler reconciler on the

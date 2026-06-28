@@ -39,6 +39,9 @@ const monitorSummaryPayload = {
     aggregate: {
       desired_slots: 18,
       pending_slots: 6,
+      current_active_slots: 12,
+      max_slots: 162,
+      ceiling_slots: 162,
       active_workers: 2,
       draining_workers: 1,
       total_slots: 12,
@@ -55,12 +58,15 @@ const monitorSummaryPayload = {
         backend: "docker",
         cpu_arch: "arm64",
         autoscaler_environment: "production",
-        autoscaler_actuator: "gb10",
+        autoscaler_actuator: "slurm",
         autoscaler_enabled: true,
         autoscaler_idle_since_at: "2026-06-27T12:00:00+00:00",
         autoscaler_idle_seconds: 601,
-        desired_slots: 12,
+        desired_slots: 150,
         pending_slots: 0,
+        current_active_slots: 10,
+        max_slots: 150,
+        ceiling_slots: 150,
         active_workers: 1,
         draining_workers: 1,
         total_slots: 10,
@@ -72,7 +78,9 @@ const monitorSummaryPayload = {
         queued_tasks: 1,
         last_autoscaler_decision: "request_drain",
         last_autoscaler_reason: "idle_excess_capacity",
+        decision_reason: "idle_excess_capacity",
         last_autoscaler_blocked_reason: null,
+        blocked_reason: null,
         last_autoscaler_error: null,
       },
       {
@@ -86,6 +94,9 @@ const monitorSummaryPayload = {
         autoscaler_idle_seconds: null,
         desired_slots: 6,
         pending_slots: 6,
+        current_active_slots: 2,
+        max_slots: 12,
+        ceiling_slots: 12,
         active_workers: 1,
         draining_workers: 0,
         total_slots: 2,
@@ -97,7 +108,9 @@ const monitorSummaryPayload = {
         queued_tasks: 1,
         last_autoscaler_decision: "scale_up",
         last_autoscaler_reason: "queued_deficit",
-        last_autoscaler_blocked_reason: null,
+        decision_reason: "queued_deficit",
+        last_autoscaler_blocked_reason: "pending_cap",
+        blocked_reason: "pending_cap",
         last_autoscaler_error: null,
       },
     ],
@@ -443,11 +456,16 @@ describe("Monitor human-readable labels", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("gb10-arm64")).toBeInTheDocument();
     expect(screen.getByText("public-beta-x86")).toBeInTheDocument();
+    expect(screen.getByText("Active slots")).toBeInTheDocument();
+    expect(screen.getByText("Max")).toBeInTheDocument();
+    expect(screen.getAllByText("slurm").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("1/10")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
     expect(screen.getByText("601s")).toBeInTheDocument();
     expect(screen.getByText("request_drain")).toBeInTheDocument();
+    expect(screen.getByText("idle_excess_capacity")).toBeInTheDocument();
     expect(screen.getByText("scale_up")).toBeInTheDocument();
+    expect(screen.getByText("pending_cap")).toBeInTheDocument();
 
     await waitFor(() => {
       const summaryRequest = fetchMock.mock.calls.find(([input]) =>

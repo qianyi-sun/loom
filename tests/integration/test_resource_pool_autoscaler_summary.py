@@ -129,11 +129,20 @@ async def test_resource_summary_exposes_policy_and_draining_capacity(
         assert pool["free_slots"] == 6
         assert pool["desired_slots"] == 6
         assert pool["pending_slots"] == 0
+        assert pool["current_active_slots"] == 6
+        assert pool["max_slots"] == 30
+        assert pool["ceiling_slots"] == 30
         assert pool["autoscaler_enabled"] is True
         assert pool["autoscaler_idle_since_at"] is not None
         assert pool["autoscaler_idle_seconds"] >= 120
         assert pool["last_autoscaler_decision"] == "request_drain"
+        assert pool["last_autoscaler_reason"] == "idle_excess_capacity"
+        assert pool["decision_reason"] == "idle_excess_capacity"
+        assert pool["blocked_reason"] is None
         assert summary["aggregate"]["draining_slots"] == 6
+        assert summary["aggregate"]["current_active_slots"] == 6
+        assert summary["aggregate"]["max_slots"] == 30
+        assert summary["aggregate"]["ceiling_slots"] == 30
     finally:
         await engine.dispose()
 
@@ -194,6 +203,12 @@ async def test_resource_summary_excludes_released_drained_workers(
         assert pool["total_slots"] == 0
         assert pool["draining_workers"] == 0
         assert pool["draining_slots"] == 0
+        assert pool["current_active_slots"] == 0
+        assert pool["max_slots"] == 6
+        assert pool["ceiling_slots"] == 6
         assert summary["aggregate"]["draining_slots"] == 0
+        assert summary["aggregate"]["current_active_slots"] == 0
+        assert summary["aggregate"]["max_slots"] == 6
+        assert summary["aggregate"]["ceiling_slots"] == 6
     finally:
         await engine.dispose()
