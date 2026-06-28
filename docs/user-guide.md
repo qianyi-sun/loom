@@ -853,18 +853,18 @@ loom run
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,
   qwen-cli, kimi-cli)
 
-For service-mode `litellm` trials, API clients can include
-`trial_config.request_params` to pin non-sensitive generation controls
-such as `temperature`, `top_p`, `seed`, max output limits, reasoning
-effort, tool-choice mode, and provider decoding extras. Loom strips
-prompt/message payloads, headers, API keys, credentials, and unknown
+For service-mode `litellm` trials and Codex subprocess trials, API
+clients can include `trial_config.request_params` to pin non-sensitive
+generation controls such as `temperature`, `top_p`, `seed`, max output
+limits, reasoning effort, tool-choice mode, and provider decoding extras.
+Loom strips prompt/message payloads, headers, API keys, credentials, and unknown
 extras before forwarding the request, then exposes the effective
-controls in provider debug evidence. Subprocess agents do not inherit
-these fields automatically because their CLIs construct provider
-requests themselves. Codex alignment runs can pin safe controls through
-the deployment env var `LOOM_CODEX_SETTINGS_JSON`; the launcher and
-Gateway sanitize those values before forwarding and auditing them.
-Other subprocess agents need their own adapter-specific support.
+controls in provider debug evidence. Codex needs an adapter-specific
+bridge because its CLI constructs provider requests itself: the worker
+passes sanitized per-trial controls to the Codex launcher as
+`LOOM_CODEX_SETTINGS_JSON`, and the launcher/Gateway sanitize those
+values again before forwarding and auditing them. Other subprocess
+agents need their own adapter-specific support.
 
 In service mode, the SPA and API only allow launch for agents whose
 runtime is ready in the deployed worker/sandbox contract. `GET

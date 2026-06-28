@@ -136,12 +136,15 @@ records the effective non-sensitive controls in `llm_calls.request_params`
 and the trial/batch debug evidence surfaces.
 
 Codex subprocess alignment runs use a separate adapter-specific path
-because Codex constructs its own Responses request. The worker may set
-`LOOM_CODEX_SETTINGS_JSON`; the Codex launcher sanitizes it and encodes
-it as `model_providers.loom.query_params.loom_request_params`. The
-Responses facade accepts that namespaced query param, sanitizes it again,
-merges the safe controls into the upstream provider payload, and records
-the same merged payload through the normal request-parameter audit.
+because Codex constructs its own Responses request. The worker converts
+sanitized per-trial `trial_config.request_params` into
+`LOOM_CODEX_SETTINGS_JSON` for Codex subprocesses; deployment-level
+`LOOM_CODEX_SETTINGS_JSON` remains only a fallback. The Codex launcher
+sanitizes the JSON again and encodes it as
+`model_providers.loom.query_params.loom_request_params`. The Responses
+facade accepts that namespaced query param, sanitizes it again, merges
+the safe controls into the upstream provider payload, and records the
+same merged payload through the normal request-parameter audit.
 
 ## Why centralise
 
