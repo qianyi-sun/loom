@@ -46,6 +46,7 @@ from starlette.responses import StreamingResponse
 
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
@@ -230,6 +231,7 @@ async def anthropic_messages_facade(
             rate_card_hash=rate_card_hash,
             provider=row.provider_type,
             attempt=outcome.attempt,
+            request_params=normalize_request_params(payload),
         )
 
     return body
@@ -311,6 +313,7 @@ async def _stream_anthropic_messages(
             row=row,
             ctx=ctx,
             model=payload["model"],
+            request_payload=payload,
         ),
         media_type=upstream_response.headers.get(
             "content-type", "text/event-stream",
@@ -327,6 +330,7 @@ async def _iter_anthropic_sse_and_record_usage(
     row: Any,
     ctx: Any,
     model: str,
+    request_payload: dict[str, Any],
 ) -> AsyncIterator[bytes]:
     tracker = _AnthropicStreamUsageTracker()
     try:
@@ -340,6 +344,7 @@ async def _iter_anthropic_sse_and_record_usage(
             ctx=ctx,
             model=model,
             usage_body=tracker.usage_body(),
+            request_payload=request_payload,
         )
     finally:
         await stream_cm.__aexit__(None, None, None)
@@ -415,6 +420,7 @@ async def _record_anthropic_usage_from_stream(
     ctx: Any,
     model: str,
     usage_body: dict[str, Any],
+    request_payload: dict[str, Any],
 ) -> None:
     usage = DIALECTS["anthropic"].extract_tokens(usage_body)
     if usage.input_tokens == 0 and usage.output_tokens == 0:
@@ -447,4 +453,5 @@ async def _record_anthropic_usage_from_stream(
             rate_card_hash=rate_card_hash,
             provider=row.provider_type,
             attempt=1,
+            request_params=normalize_request_params(request_payload),
         )

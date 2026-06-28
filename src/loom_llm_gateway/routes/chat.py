@@ -39,6 +39,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
@@ -462,6 +463,7 @@ async def chat_completions(
             rate_card_hash=rate_card_hash,
             provider=byo_row.provider_type if byo_row is not None else provider,
             attempt=attempt,
+            request_params=normalize_request_params(raw_body),
         )
     response = dict(parsed.raw_response)
     response["loom"] = loom_block

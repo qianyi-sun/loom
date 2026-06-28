@@ -148,3 +148,51 @@ async def test_record_call_writes_attempt(
             assert row.input_tokens == 42
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_record_call_writes_request_params(
+    postgres_url: str, team_and_trial: tuple[str, str],
+) -> None:
+    """record_call(request_params=...) should persist non-sensitive audit params."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from loom_llm_gateway.dialect import TokenUsage
+    from loom_llm_gateway.llm_calls import record_call
+
+    team_id, trial_id = team_and_trial
+    db_url = postgres_url.replace("postgresql+psycopg://", "postgresql+psycopg://")
+    engine = create_async_engine(db_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    request_params = {
+        "status": "available",
+        "parameters": {
+            "temperature": 0,
+            "max_output_tokens": 1024,
+        },
+    }
+    try:
+        async with factory() as session:
+            await record_call(
+                session,
+                team_id=uuid4().__class__(team_id),
+                trial_id=uuid4().__class__(trial_id),
+                step_id="main",
+                dialect="openai_responses",
+                model="gpt-4o",
+                usage=TokenUsage(
+                    input_tokens=42, output_tokens=17, provider_extras={},
+                ),
+                cost_usd=0.001,
+                rate_card_hash="abc",
+                request_params=request_params,
+            )
+        sync = create_engine(postgres_url)
+        sl = sessionmaker(sync)
+        with sl() as s:
+            row = s.execute(
+                select(LlmCall).where(LlmCall.trial_id == trial_id),
+            ).scalar_one()
+            assert row.request_params == request_params
+    finally:
+        await engine.dispose()

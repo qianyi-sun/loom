@@ -35,6 +35,10 @@ def test_llm_call_event_required_fields():
         output_tokens=5,
         thinking_tokens=0,
         provider_extras={},
+        request_params={
+            "status": "available",
+            "parameters": {"temperature": 0},
+        },
         cost_usd_snapshot=0.001,
         duration_sec=0.5,
         streamed=False,
@@ -44,6 +48,10 @@ def test_llm_call_event_required_fields():
     )
     assert e.kind == EventKind.LLM_CALL
     assert e.input_tokens == 10
+    assert e.request_params == {
+        "status": "available",
+        "parameters": {"temperature": 0},
+    }
 
 
 def test_llm_call_event_provider_extras_named_counters():
@@ -67,6 +75,31 @@ def test_llm_call_event_provider_extras_named_counters():
         cache_keys=[],
     )
     assert e.provider_extras["cache_creation_input_tokens"] == 1234
+
+
+def test_llm_call_event_request_params_default_to_legacy_unavailable() -> None:
+    e = LLMCallEvent(
+        **_env(),
+        model=ModelSpec(provider="anthropic", name="claude-opus-4-7"),
+        rate_card_hash="abc",
+        system_prompt=None,
+        messages=[],
+        response=ChatMessage(role="assistant", content=""),
+        finish_reason="stop",
+        input_tokens=0, cached_input_tokens=0, cache_write_tokens=0,
+        output_tokens=0, thinking_tokens=0,
+        provider_extras={},
+        cost_usd_snapshot=0.0,
+        duration_sec=0.1,
+        streamed=False,
+        time_to_first_token_sec=None,
+        gateway_request_id="req",
+        cache_keys=[],
+    )
+    assert e.request_params == {
+        "status": "unavailable_legacy",
+        "parameters": {},
+    }
 
 
 def test_chat_message_with_tool_call():

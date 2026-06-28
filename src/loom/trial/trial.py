@@ -396,6 +396,7 @@ class Trial:
         """
         from loom.models.trajectory import ChatMessage, LLMCallEvent
         from loom.models.types import ModelSpec
+        from loom.request_params import coerce_request_params
 
         assert self.ctx.llm_calls_fetcher is not None
         rows = await self.ctx.llm_calls_fetcher(self.ctx.trial_id)
@@ -456,6 +457,7 @@ class Trial:
                 provider_extras={
                     k: int(v) for k, v in extras.items() if isinstance(v, int | float)
                 },
+                request_params=coerce_request_params(row.get("request_params")),
                 cost_usd_snapshot=float(row.get("cost_usd") or 0.0),
                 duration_sec=0.0,
                 streamed=False,

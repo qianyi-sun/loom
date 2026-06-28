@@ -18,6 +18,7 @@ from uuid import UUID
 from fastapi import Request
 
 from loom.db.schema import Batch, LlmCall, Task, Trial
+from loom.request_params import coerce_request_params
 from loom.security.redaction import redact_mapping
 from loom_service.usage_accounting import (
     llm_call_counts_by_trial_id,
@@ -294,6 +295,10 @@ def _provider_summary(llm_calls: Sequence[LlmCall]) -> dict[str, Any]:
     latest = max((call.captured_at for call in llm_calls), default=None)
     max_attempt = max((int(call.attempt or 1) for call in llm_calls), default=0)
     total_cost = sum((call.cost_usd for call in llm_calls), Decimal("0"))
+    request_params = [_request_params_summary(call) for call in llm_calls]
+    request_param_status_counts = Counter(
+        str(item["status"]) for item in request_params
+    )
     return {
         "llm_calls_count": len(llm_calls),
         "total_prompt_tokens": sum(int(call.input_tokens or 0) for call in llm_calls),
@@ -305,6 +310,21 @@ def _provider_summary(llm_calls: Sequence[LlmCall]) -> dict[str, Any]:
         "max_attempt": max_attempt,
         "latest_call_at": _iso(latest),
         "total_cost_usd": str(total_cost),
+        "request_params_status_counts": dict(request_param_status_counts),
+        "request_params": request_params,
+    }
+
+
+def _request_params_summary(call: LlmCall) -> dict[str, Any]:
+    request_params = coerce_request_params(call.request_params)
+    return {
+        "llm_call_id": str(call.id),
+        "step_id": call.step_id,
+        "dialect": call.dialect,
+        "model": call.model,
+        "attempt": int(call.attempt or 1),
+        "status": request_params["status"],
+        "parameters": request_params["parameters"],
     }
 
 

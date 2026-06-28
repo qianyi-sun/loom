@@ -16,6 +16,7 @@ from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
+from loom.request_params import coerce_request_params
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 
 router = APIRouter()
@@ -375,6 +376,7 @@ async def get_trial_llm_calls(
                 "input_tokens": r.input_tokens,
                 "output_tokens": r.output_tokens,
                 "provider_extras": r.provider_extras,
+                "request_params": coerce_request_params(r.request_params),
                 "cost_usd": float(r.cost_usd),
                 "rate_card_hash": r.rate_card_hash,
                 "captured_at": r.captured_at.isoformat(),

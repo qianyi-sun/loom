@@ -61,6 +61,36 @@ def test_build_invocation_keeps_existing_v1_base_url() -> None:
     assert 'base_url = "http://gateway/openai/v1/v1"' not in argv[6]
 
 
+def test_build_invocation_passes_codex_settings_json() -> None:
+    adapter = get_adapter("codex")
+    assert adapter is not None
+    env: dict[str, str] = {
+        "OPENAI_API_KEY": "step-token",
+        "OPENAI_BASE_URL": "http://gateway",
+        "LOOM_CODEX_SETTINGS_JSON": '{"temperature": 0, "top_p": 1, "seed": 42}',
+    }
+    argv = adapter.build_invocation(
+        instruction="solve fizzbuzz",
+        workdir=PurePosixPath("/workspace"),
+        model=ModelSpec(provider="openai", name="gpt-5"),
+        env=env,
+    )
+
+    assert '--settings "$5"' in argv[2]
+    assert argv[3:] == [
+        "loom-codex",
+        "gpt-5",
+        "/workspace",
+        (
+            'model_providers.loom={ name = "Loom", '
+            'base_url = "http://gateway/v1", env_key = "OPENAI_API_KEY", '
+            'wire_api = "responses" }'
+        ),
+        "solve fizzbuzz",
+        '{"temperature":0,"top_p":1,"seed":42}',
+    ]
+
+
 async def test_capture_via_stdout_jsonl(make_handle) -> None:
     adapter = get_adapter("codex")
     assert adapter is not None

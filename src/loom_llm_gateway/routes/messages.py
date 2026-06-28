@@ -37,6 +37,7 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
+from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import redact_api_key
 
@@ -145,6 +146,7 @@ async def messages(
             cost_usd=cost,
             rate_card_hash=hash_table(table),
             attempt=outcome.attempt,
+            request_params=normalize_request_params(payload),
         )
     return body
 
@@ -274,6 +276,7 @@ async def _stream_messages(
                 ctx=ctx,
                 model_name=model_name,
                 accum=accum,
+                request_payload=payload,
             )
 
     return StreamingResponse(event_iter(), media_type=content_type)
@@ -285,6 +288,7 @@ async def _record_stream_call(
     ctx: AuthContext,
     model_name: str,
     accum: dict[str, int],
+    request_payload: dict[str, Any],
 ) -> None:
     """Write the streamed call's usage + cost to `llm_calls`. Skips
     when no usage was accumulated (upstream produced no SSE blocks
@@ -331,4 +335,5 @@ async def _record_stream_call(
             cost_usd=cost,
             rate_card_hash=hash_table(table),
             attempt=1,
+            request_params=normalize_request_params(request_payload),
         )

@@ -168,6 +168,12 @@ can recover from the upstream missing-`messages` `/responses` error by
 issuing one `/chat/completions` call and synthesizing the Responses
 JSON/SSE that Codex parses. This is a provider-connection compatibility
 path, not a Codex adapter mode; Codex itself still speaks Responses.
+When a run must pin Codex generation settings for score-alignment
+evidence, set `LOOM_CODEX_SETTINGS_JSON` in the agent environment to a
+JSON object accepted by `codex exec --settings`, for example
+`{"temperature":0}`. The adapter compacts and passes that object as a
+separate `--settings` argument; the Gateway separately records the
+resulting non-sensitive request controls in `llm_calls.request_params`.
 
 In CLI mode the JWT-minting path is no-op'd — `loom_cli/agent_factory.py`
 substitutes a `_NoopCPClient` for the SubprocessAgent's CP-client

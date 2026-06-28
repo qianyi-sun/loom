@@ -14,6 +14,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from loom.request_params import legacy_request_params
+
 
 class EventKind(StrEnum):
     # Trial-level
@@ -196,6 +198,7 @@ class LLMCallEvent(_EventBase):
     output_tokens: int = Field(ge=0)
     thinking_tokens: int = Field(ge=0)
     provider_extras: dict[str, int]                 # NAMED counters (int-valued)
+    request_params: dict[str, Any] = Field(default_factory=legacy_request_params)
 
     # Derived (recomputable)
     cost_usd_snapshot: float = Field(ge=0)

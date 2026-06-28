@@ -268,8 +268,14 @@ The same detail API also exposes user-facing diagnosis and debug evidence:
 
 - `GET /api/v1/trials/{trial_id}` includes `debug_evidence`;
   `GET /api/v1/trials/{trial_id}/debug` returns that object directly.
+  Trial debug evidence includes per-call `request_params` summaries
+  and `request_params_status_counts` so score-alignment audits can
+  distinguish matched generation settings from legacy/unavailable
+  request-parameter evidence.
 - `GET /api/v1/batches/{batch_id}` includes `debug_evidence`;
   `GET /api/v1/batches/{batch_id}/debug` returns that object directly.
+  Batch debug evidence carries the same provider summary fields across
+  its child calls.
 - Run Library batch detail includes the same batch `debug_evidence` after the
   Run Library read policy allows access.
 - `GET /api/v1/trials/{trial_id}` and
@@ -375,6 +381,10 @@ configurations.
   `llm_call` trajectory events.
 - Per-call attribution via `(team_id, trial_id, step_id)` fields on
   the `llm_calls` row
+- Per-call redacted request-parameter audit via `request_params`;
+  legacy rows where this column is NULL surface as
+  `status=unavailable_legacy` rather than silently implying matched
+  inference settings.
 
 Routes (mounted at the Gateway service root — agents inside sandboxes
 hit them through a sandbox-facing Gateway URL):
