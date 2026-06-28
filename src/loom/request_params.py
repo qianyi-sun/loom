@@ -112,12 +112,12 @@ def sanitize_request_extras(payload: Mapping[str, Any] | None) -> dict[str, Any]
         normalized_key = str(key)
         if normalized_key in _OMITTED_PAYLOAD_KEYS:
             continue
-        if _sensitive_key(normalized_key):
-            continue
         if normalized_key in _ALLOWED_PARAMETER_KEYS:
             sanitized = _sanitize_value(value)
             if sanitized is not None:
                 extras[normalized_key] = sanitized
+            continue
+        if _sensitive_key(normalized_key):
             continue
         if normalized_key in _EXTRA_CONTAINERS and isinstance(value, Mapping):
             sanitized_mapping = _sanitize_mapping(

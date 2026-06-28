@@ -261,6 +261,8 @@ async def test_post_batch_sanitizes_trial_request_params(
                         "temperature": 0,
                         "top_p": 0.5,
                         "seed": 1234,
+                        "max_tokens": 7,
+                        "max_output_tokens": 8,
                         "messages": [{"role": "user", "content": "secret"}],
                         "api_key": "sk-hidden",
                         "extra_body": {"top_k": 40, "prompt": "secret"},
@@ -280,6 +282,8 @@ async def test_post_batch_sanitizes_trial_request_params(
         "temperature": 0,
         "top_p": 0.5,
         "seed": 1234,
+        "max_tokens": 7,
+        "max_output_tokens": 8,
         "extra_body": {"top_k": 40},
     }
     assert detail.json()["trial_config"]["request_params"] == expected

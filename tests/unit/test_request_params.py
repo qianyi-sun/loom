@@ -104,3 +104,31 @@ def test_sanitize_request_extras_preserves_allowed_controls_without_sensitive_pa
             "repetition_penalty": 1.1,
         },
     }
+
+
+def test_sanitize_request_extras_preserves_allowed_max_token_controls() -> None:
+    extras = sanitize_request_extras(
+        {
+            "max_tokens": 7,
+            "max_output_tokens": 8,
+            "max_completion_tokens": 9,
+            "min_tokens": 1,
+            "api_token": "secret",
+            "token": "secret",
+            "extra_body": {
+                "max_tokens": 11,
+                "prompt_tokens": 12,
+                "token": "secret",
+            },
+        }
+    )
+
+    assert extras == {
+        "max_tokens": 7,
+        "max_output_tokens": 8,
+        "max_completion_tokens": 9,
+        "min_tokens": 1,
+        "extra_body": {
+            "max_tokens": 11,
+        },
+    }
