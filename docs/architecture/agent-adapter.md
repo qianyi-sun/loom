@@ -170,11 +170,17 @@ JSON/SSE that Codex parses. This is a provider-connection compatibility
 path, not a Codex adapter mode; Codex itself still speaks Responses.
 When a run must pin Codex generation settings for score-alignment
 evidence, do not rely on `trial_config.request_params`: subprocess
-CLI runtimes construct their own provider requests. Codex settings
-injection must follow the pinned Codex CLI contract and is tracked
-separately in #92. The Gateway still records the resulting
-non-sensitive request controls in `llm_calls.request_params` when the
-subprocess reaches the provider facade.
+CLI runtimes construct their own provider requests. The Codex adapter
+uses the deployment env var `LOOM_CODEX_SETTINGS_JSON` for this path:
+the launcher parses the JSON object, strips prompt/message payloads and
+secret-looking fields, and encodes the remaining controls as the pinned
+Codex CLI provider config
+`model_providers.loom.query_params.loom_request_params`. The Gateway
+parses that namespaced query param, sanitizes it again, merges the safe
+controls into the provider request body, and records the resulting
+non-sensitive controls in `llm_calls.request_params`. Do not use
+`codex exec --settings` for this; pinned `@openai/codex@0.141.0` does
+not support that flag.
 
 For the service-mode `litellm` worker path, callers can set
 `trial_config.request_params` to safe generation controls such as

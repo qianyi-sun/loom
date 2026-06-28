@@ -23,7 +23,10 @@ from loom_llm_gateway.rate_card import (
     hash_table,
     lookup_entry,
 )
-from loom_llm_gateway.request_params import normalize_request_params
+from loom_llm_gateway.request_params import (
+    normalize_request_params,
+    sanitize_request_extras,
+)
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     compute_facade_cost_usd,
@@ -45,6 +48,7 @@ router = APIRouter()
 
 OPENAI_BASE_URL = "https://api.openai.com"
 _OPENAI_SHAPED_TYPES = frozenset({"openai-compatible", "custom"})
+_LOOM_REQUEST_PARAMS_QUERY_PARAM = "loom_request_params"
 
 
 @router.post("/v1/responses", response_model=None)
@@ -58,6 +62,7 @@ async def responses(
     ),
 ) -> dict[str, Any] | StreamingResponse:
     settings = request.app.state.settings
+    payload = _merge_query_request_params(payload, request)
     signing_key = settings.step_jwt_signing_key.get_secret_value()
     async with request.app.state.session_factory() as session:
         ctx = await verify_facade_auth(
@@ -238,6 +243,35 @@ async def responses(
             request_params=normalize_request_params(payload),
         )
     return _responses_result(upstream_response, body_or_stream)
+
+
+def _merge_query_request_params(
+    payload: dict[str, Any],
+    request: Request,
+) -> dict[str, Any]:
+    extras = _request_params_from_query(request)
+    if not extras:
+        return payload
+    return {**payload, **extras}
+
+
+def _request_params_from_query(request: Request) -> dict[str, Any]:
+    raw = request.query_params.get(_LOOM_REQUEST_PARAMS_QUERY_PARAM)
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{_LOOM_REQUEST_PARAMS_QUERY_PARAM} must be valid JSON",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{_LOOM_REQUEST_PARAMS_QUERY_PARAM} must be a JSON object",
+        )
+    return sanitize_request_extras(parsed)
 
 
 async def _post_upstream_responses(

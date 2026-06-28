@@ -188,9 +188,10 @@ async def test_subprocess_agent_passes_codex_settings_json(
 ) -> None:
     """#85: deployment-level Codex settings must reach the launcher.
 
-    The Codex adapter only adds `--settings` when the env passed into
-    `build_invocation()` contains `LOOM_CODEX_SETTINGS_JSON`. The worker
-    process environment is therefore part of the runtime contract.
+    The Codex adapter encodes supported settings as provider query params when
+    the env passed into `build_invocation()` contains
+    `LOOM_CODEX_SETTINGS_JSON`. The worker process environment is therefore
+    part of the runtime contract.
     """
     cp, http = mocked_cp_client
     captured: dict[str, object] = {}
@@ -247,8 +248,13 @@ async def test_subprocess_agent_passes_codex_settings_json(
         env_vars = captured["env_vars"]
         assert isinstance(env_vars, dict)
         assert env_vars["LOOM_CODEX_SETTINGS_JSON"] == '{"temperature": 0}'
-        assert '--settings "$5"' in argv[2]
-        assert argv[-1] == '{"temperature":0}'
+        assert "--settings" not in argv[2]
+        assert "$5" not in argv[2]
+        provider_config = argv[6]
+        assert (
+            'query_params = { loom_request_params = '
+            '"{\\"temperature\\":0}" }'
+        ) in provider_config
         await driver.stop()
     finally:
         await http.aclose()
