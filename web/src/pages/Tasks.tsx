@@ -22,12 +22,13 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
-import Pagination, {
+import Pagination from "../components/Pagination";
+import {
   initialPage,
   nextPage,
   prevPage,
   type PageState,
-} from "../components/Pagination";
+} from "../components/paginationState";
 import { SubmitTrialModal } from "../components/SubmitTrialModal";
 import { cn } from "../lib/cn";
 

@@ -13,10 +13,12 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import {
   AgentModelPicker,
-  buildAgentModel,
-  buildProviderOverride,
   type AgentModelValue,
 } from "./AgentModelPicker";
+import {
+  buildAgentModel,
+  buildProviderOverride,
+} from "./agentModelSelection";
 import { Button } from "./Button";
 import ErrorState from "./ErrorState";
 import {
