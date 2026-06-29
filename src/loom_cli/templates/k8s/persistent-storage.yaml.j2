@@ -1,0 +1,22 @@
+{% if static_host_path_storage %}
+{% for volume in persistent_volumes %}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ volume.name }}
+spec:
+  capacity: { storage: {{ volume.storage_gi }}Gi }
+  accessModes: [ ReadWriteOnce ]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ volume.host_path | tojson }}
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: {{ namespace }}
+    name: {{ volume.claim_name }}
+{% if not loop.last %}
+---
+{% endif %}
+{% endfor %}
+{% endif %}

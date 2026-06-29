@@ -97,6 +97,8 @@ if TYPE_CHECKING:
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500
         namespace: str = "loom"
+        persistent_storage_backend: str = "dynamic"
+        persistent_storage_host_path_root: str = ""
         postgres_image: str = "postgres:16"
         postgres_storage_gi: int = 50
         provider_egress_allowlist: tuple[str, ...] = ()

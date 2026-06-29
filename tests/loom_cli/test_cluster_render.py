@@ -56,6 +56,8 @@ def test_default_config_includes_public_tls_knobs() -> None:
     assert cfg.ingress_class_name == "nginx"
     assert cfg.ingress_tls_secret_name == "loom-tls"
     assert cfg.ingress_cert_manager_cluster_issuer == ""
+    assert cfg.persistent_storage_backend == "dynamic"
+    assert cfg.persistent_storage_host_path_root == ""
 
 
 def test_default_replicas_match_spec() -> None:
@@ -87,6 +89,8 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
         'ingress_class_name = "public-nginx"\n'
         'ingress_tls_secret_name = "loom-acme-tls"\n'
         'ingress_cert_manager_cluster_issuer = "letsencrypt-prod"\n'
+        'persistent_storage_backend = "static-host-path"\n'
+        'persistent_storage_host_path_root = "/data/loom-public-beta"\n'
         'provider_egress_allowlist = ["202.78.161.51:18001"]\n'
         '[replicas]\n'
         'service = 5\n'
@@ -99,6 +103,8 @@ def test_load_config_from_toml(tmp_path: Path) -> None:
     assert cfg.ingress_class_name == "public-nginx"
     assert cfg.ingress_tls_secret_name == "loom-acme-tls"
     assert cfg.ingress_cert_manager_cluster_issuer == "letsencrypt-prod"
+    assert cfg.persistent_storage_backend == "static-host-path"
+    assert cfg.persistent_storage_host_path_root == "/data/loom-public-beta"
     assert cfg.provider_egress_allowlist == ("202.78.161.51:18001",)
     assert cfg.replicas.service == 5
     assert cfg.replicas.worker == 10
@@ -206,6 +212,7 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     proxy bootstrap) expected by cluster-deploy.md §Component map +
     sandbox-isolation.md."""
     text = render_manifests(ClusterConfig())
+    assert text.startswith("apiVersion: apps/v1\nkind: StatefulSet\n")
     docs = _load_docs(text)
     kinds = [d["kind"] for d in docs]
     assert kinds.count("StatefulSet") == 2   # postgres, minio
@@ -582,6 +589,83 @@ def test_render_custom_storage_sizes() -> None:
         and d["metadata"]["name"] == "loom-worker-trajectories"
     )
     assert worker_pvc["spec"]["resources"]["requests"]["storage"] == "500Gi"
+
+
+def test_render_static_host_path_storage_binds_critical_state_to_retain_pvs() -> None:
+    cfg = ClusterConfig(
+        namespace="loom-public-beta",
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-public-beta",
+    )
+
+    docs = _load_docs(render_manifests(cfg))
+    pvs = {
+        d["metadata"]["name"]: d
+        for d in docs
+        if d["kind"] == "PersistentVolume"
+    }
+
+    assert pvs["loom-public-beta-postgres-data"]["spec"] == {
+        "capacity": {"storage": "50Gi"},
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Retain",
+        "storageClassName": "",
+        "hostPath": {
+            "path": "/data/loom-public-beta/postgres",
+            "type": "DirectoryOrCreate",
+        },
+        "claimRef": {
+            "namespace": "loom-public-beta",
+            "name": "data-loom-postgres-0",
+        },
+    }
+    assert pvs["loom-public-beta-minio-data"]["spec"]["hostPath"]["path"] == (
+        "/data/loom-public-beta/minio"
+    )
+    assert pvs["loom-public-beta-worker-trajectories-data"]["spec"]["hostPath"]["path"] == (
+        "/data/loom-public-beta/trajectories"
+    )
+
+    postgres = next(
+        d for d in docs
+        if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-postgres"
+    )
+    postgres_claim = postgres["spec"]["volumeClaimTemplates"][0]["spec"]
+    assert postgres_claim["storageClassName"] == ""
+    assert postgres_claim["volumeName"] == "loom-public-beta-postgres-data"
+
+    minio = next(
+        d for d in docs
+        if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "loom-minio"
+    )
+    minio_claim = minio["spec"]["volumeClaimTemplates"][0]["spec"]
+    assert minio_claim["storageClassName"] == ""
+    assert minio_claim["volumeName"] == "loom-public-beta-minio-data"
+
+    worker_pvc = next(
+        d for d in docs
+        if d["kind"] == "PersistentVolumeClaim"
+        and d["metadata"]["name"] == "loom-worker-trajectories"
+    )
+    assert worker_pvc["spec"]["storageClassName"] == ""
+    assert worker_pvc["spec"]["volumeName"] == (
+        "loom-public-beta-worker-trajectories-data"
+    )
+
+
+def test_render_rejects_unknown_persistent_storage_backend() -> None:
+    cfg = ClusterConfig(persistent_storage_backend="local-path")
+    with pytest.raises(ValueError, match="persistent_storage_backend"):
+        render_manifests(cfg)
+
+
+def test_render_static_host_path_requires_absolute_host_root() -> None:
+    cfg = ClusterConfig(
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="data/loom-public-beta",
+    )
+    with pytest.raises(ValueError, match="absolute host path"):
+        render_manifests(cfg)
 
 
 def test_render_worker_max_concurrent_schema_default() -> None:

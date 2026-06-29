@@ -447,6 +447,7 @@ def _secret_present(api: Any, namespace: str, name: str) -> bool:
 # up in a topologically sound order. Ingress is last so it doesn't
 # accept traffic until the backing Services exist.
 _TEMPLATE_ORDER: tuple[str, ...] = (
+    "persistent-storage.yaml.j2",
     "postgres.yaml.j2",
     "minio.yaml.j2",
     "control-plane.yaml.j2",
@@ -476,6 +477,84 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # Listed last so removal doesn't break the core apply ordering.
     "grafana-dashboards.yaml.j2",
 )
+
+_PERSISTENT_STORAGE_DYNAMIC = "dynamic"
+_PERSISTENT_STORAGE_STATIC_HOST_PATH = "static-host-path"
+_PERSISTENT_STORAGE_BACKENDS = frozenset({
+    _PERSISTENT_STORAGE_DYNAMIC,
+    _PERSISTENT_STORAGE_STATIC_HOST_PATH,
+})
+
+
+def _normalise_static_host_path_root(config: ClusterConfig) -> str | None:
+    backend = config.persistent_storage_backend
+    if backend not in _PERSISTENT_STORAGE_BACKENDS:
+        raise ValueError(
+            "persistent_storage_backend must be one of "
+            f"{sorted(_PERSISTENT_STORAGE_BACKENDS)!r}; got {backend!r}"
+        )
+    if backend == _PERSISTENT_STORAGE_DYNAMIC:
+        return None
+    root = config.persistent_storage_host_path_root.strip().rstrip("/")
+    if not root:
+        raise ValueError(
+            "persistent_storage_host_path_root is required when "
+            "persistent_storage_backend = 'static-host-path'"
+        )
+    if not root.startswith("/") or root == "/":
+        raise ValueError(
+            "persistent_storage_host_path_root must be an absolute host "
+            "path below an operator-managed data directory, for example "
+            "/data/loom-public-beta"
+        )
+    return root
+
+
+def _join_host_path(root: str, child: str) -> str:
+    return f"{root.rstrip('/')}/{child}"
+
+
+def _persistent_storage_context(config: ClusterConfig) -> dict[str, Any]:
+    root = _normalise_static_host_path_root(config)
+    if root is None:
+        return {
+            "static_host_path_storage": False,
+            "postgres_pv_name": "",
+            "minio_pv_name": "",
+            "worker_trajectories_pv_name": "",
+            "persistent_volumes": [],
+        }
+
+    namespace = config.namespace
+    postgres_pv_name = f"{namespace}-postgres-data"
+    minio_pv_name = f"{namespace}-minio-data"
+    worker_pv_name = f"{namespace}-worker-trajectories-data"
+    return {
+        "static_host_path_storage": True,
+        "postgres_pv_name": postgres_pv_name,
+        "minio_pv_name": minio_pv_name,
+        "worker_trajectories_pv_name": worker_pv_name,
+        "persistent_volumes": [
+            {
+                "name": postgres_pv_name,
+                "claim_name": "data-loom-postgres-0",
+                "storage_gi": config.postgres_storage_gi,
+                "host_path": _join_host_path(root, "postgres"),
+            },
+            {
+                "name": minio_pv_name,
+                "claim_name": "data-loom-minio-0",
+                "storage_gi": config.minio_storage_gi,
+                "host_path": _join_host_path(root, "minio"),
+            },
+            {
+                "name": worker_pv_name,
+                "claim_name": "loom-worker-trajectories",
+                "storage_gi": config.worker_trajectory_storage_gi,
+                "host_path": _join_host_path(root, "trajectories"),
+            },
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -622,6 +701,7 @@ def render_manifests(config: ClusterConfig) -> str:
         lstrip_blocks=True,
     )
     ctx = config.to_render_context()
+    ctx.update(_persistent_storage_context(config))
     ctx["provider_egress_rules"] = _provider_egress_rules(config)
     try:
         ipaddress.ip_address(config.ingress_host)
@@ -649,6 +729,8 @@ def render_manifests(config: ClusterConfig) -> str:
     chunks: list[str] = []
     for name in _TEMPLATE_ORDER:
         rendered = env.get_template(name).render(**ctx)
+        if not rendered.strip():
+            continue
         # Each rendered file is itself one-or-more YAML docs. Splice
         # with `---\n` between files. Files that already end with a
         # trailing newline merge cleanly; the join trims any
@@ -953,10 +1035,230 @@ def _storage_class_is_default(sc: Any) -> bool:
     )
 
 
+_CRITICAL_STATE_PVCS: tuple[str, ...] = (
+    "data-loom-postgres-0",
+    "data-loom-minio-0",
+    "loom-worker-trajectories",
+)
+
+
+def _object_metadata_name(obj: Any) -> str:
+    return str(getattr(getattr(obj, "metadata", None), "name", "") or "")
+
+
+def _pv_host_path(pv: Any) -> str:
+    host_path = getattr(getattr(pv, "spec", None), "host_path", None)
+    return str(getattr(host_path, "path", "") or "")
+
+
+def _pv_local_path(pv: Any) -> str:
+    local = getattr(getattr(pv, "spec", None), "local", None)
+    return str(getattr(local, "path", "") or "")
+
+
+def _pv_claim_ref(pv: Any) -> tuple[str, str]:
+    claim_ref = getattr(getattr(pv, "spec", None), "claim_ref", None)
+    return (
+        str(getattr(claim_ref, "namespace", "") or ""),
+        str(getattr(claim_ref, "name", "") or ""),
+    )
+
+
+def _storage_class_map(storage_classes: list[Any]) -> dict[str, Any]:
+    return {
+        _object_metadata_name(sc): sc
+        for sc in storage_classes
+        if _object_metadata_name(sc)
+    }
+
+
+def _storage_class_provisioner(
+    *,
+    storage_class_name: str,
+    storage_classes_by_name: dict[str, Any],
+) -> str:
+    sc = storage_classes_by_name.get(storage_class_name)
+    return str(getattr(sc, "provisioner", "") or "") if sc is not None else ""
+
+
+def _check_existing_critical_pvc_storage(
+    core_v1: Any,
+    storage_classes: list[Any],
+    *,
+    namespace: str,
+    environment: str,
+) -> PreflightCheck | None:
+    try:
+        pvc_result = core_v1.list_namespaced_persistent_volume_claim(
+            namespace=namespace,
+        )
+        pv_result = core_v1.list_persistent_volume()
+    except Exception as exc:
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                "failed to list PersistentVolumeClaims/PersistentVolumes "
+                f"for protected environment {environment!r}: {_exception_to_note(exc)}"
+            ),
+        )
+
+    pvcs = {
+        _object_metadata_name(pvc): pvc
+        for pvc in (pvc_result.items or [])
+        if _object_metadata_name(pvc)
+    }
+    critical_present = [name for name in _CRITICAL_STATE_PVCS if name in pvcs]
+    if not critical_present:
+        return None
+
+    pvs = {
+        _object_metadata_name(pv): pv
+        for pv in (pv_result.items or [])
+        if _object_metadata_name(pv)
+    }
+    storage_classes_by_name = _storage_class_map(storage_classes)
+    problems: list[str] = []
+    ok_bindings: list[str] = []
+
+    for pvc_name in _CRITICAL_STATE_PVCS:
+        pvc = pvcs.get(pvc_name)
+        if pvc is None:
+            problems.append(f"{pvc_name} is missing")
+            continue
+        pvc_spec = getattr(pvc, "spec", None)
+        pvc_status = getattr(pvc, "status", None)
+        phase = str(getattr(pvc_status, "phase", "") or "")
+        volume_name = str(getattr(pvc_spec, "volume_name", "") or "")
+        if phase and phase != "Bound":
+            problems.append(f"{pvc_name} phase={phase}")
+        if not volume_name:
+            problems.append(f"{pvc_name} has no bound volumeName")
+            continue
+        pv = pvs.get(volume_name)
+        if pv is None:
+            problems.append(f"{pvc_name}->{volume_name} PV is missing")
+            continue
+
+        pv_spec = getattr(pv, "spec", None)
+        reclaim_policy = str(
+            getattr(pv_spec, "persistent_volume_reclaim_policy", "") or ""
+        )
+        if reclaim_policy != "Retain":
+            problems.append(
+                f"{pvc_name}->{volume_name} reclaimPolicy="
+                f"{reclaim_policy or '<unset>'}"
+            )
+
+        claim_namespace, claim_name = _pv_claim_ref(pv)
+        if claim_namespace and claim_namespace != namespace:
+            problems.append(
+                f"{pvc_name}->{volume_name} claimRef namespace={claim_namespace}"
+            )
+        if claim_name and claim_name != pvc_name:
+            problems.append(
+                f"{pvc_name}->{volume_name} claimRef name={claim_name}"
+            )
+
+        storage_class_name = str(
+            getattr(pv_spec, "storage_class_name", "")
+            or getattr(pvc_spec, "storage_class_name", "")
+            or ""
+        )
+        provisioner = _storage_class_provisioner(
+            storage_class_name=storage_class_name,
+            storage_classes_by_name=storage_classes_by_name,
+        )
+        host_path = _pv_host_path(pv)
+        local_path = _pv_local_path(pv)
+        if "local-path" in provisioner:
+            problems.append(
+                f"{pvc_name}->{volume_name} provisioner={provisioner}"
+            )
+        if local_path:
+            if "local-path-provisioner" in local_path:
+                problems.append(
+                    f"{pvc_name}->{volume_name} localPath={local_path}"
+                )
+            else:
+                problems.append(
+                    f"{pvc_name}->{volume_name} uses local volume path={local_path}"
+                )
+        if host_path and not host_path.startswith("/data/"):
+            problems.append(
+                f"{pvc_name}->{volume_name} hostPath={host_path} "
+                "is outside /data"
+            )
+        if not host_path and not local_path and not storage_class_name:
+            problems.append(
+                f"{pvc_name}->{volume_name} has no hostPath, local volume, "
+                "or StorageClass to audit"
+            )
+        if not problems or not any(pvc_name in problem for problem in problems):
+            ok_bindings.append(f"{pvc_name}->{volume_name}")
+
+    if problems:
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} critical PVCs are "
+                "not on a durable Retain boundary: " + "; ".join(problems)
+            ),
+            remediation=(
+                "Move Postgres, MinIO, and worker trajectories to external "
+                "storage or explicit host-managed Retain PVs under /data "
+                "before treating this environment as preproduction durable."
+            ),
+        )
+    return PreflightCheck(
+        name="protected-storage-boundary",
+        outcome="pass",
+        detail=(
+            f"protected environment {environment!r} critical PVCs are bound "
+            "to audited Retain PVs: " + ", ".join(ok_bindings)
+        ),
+    )
+
+
+def _check_configured_static_host_path_storage(
+    *,
+    cluster_config: ClusterConfig | None,
+    environment: str,
+) -> PreflightCheck | None:
+    if cluster_config is None:
+        return None
+    try:
+        root = _normalise_static_host_path_root(cluster_config)
+    except ValueError as exc:
+        return PreflightCheck(
+            name="protected-storage-boundary",
+            outcome="fail",
+            detail=(
+                f"protected environment {environment!r} has invalid "
+                f"persistent storage config: {exc}"
+            ),
+        )
+    if root is None:
+        return None
+    return PreflightCheck(
+        name="protected-storage-boundary",
+        outcome="pass",
+        detail=(
+            f"protected environment {environment!r} render config declares "
+            f"static-host-path Retain PVs under {root}; critical PVCs are "
+            "not created yet"
+        ),
+    )
+
+
 def _check_protected_storage_boundary(
+    core_v1: Any,
     storage_v1: Any,
     *,
     environment: str,
+    namespace: str,
+    cluster_config: ClusterConfig | None = None,
 ) -> PreflightCheck:
     try:
         result = storage_v1.list_storage_class()
@@ -969,9 +1271,24 @@ def _check_protected_storage_boundary(
                 f"environment {environment!r}: {_exception_to_note(exc)}"
             ),
         )
-    default_classes = [
-        sc for sc in (result.items or []) if _storage_class_is_default(sc)
-    ]
+    storage_classes = list(result.items or [])
+    existing_check = _check_existing_critical_pvc_storage(
+        core_v1,
+        storage_classes,
+        namespace=namespace,
+        environment=environment,
+    )
+    if existing_check is not None:
+        return existing_check
+
+    configured_check = _check_configured_static_host_path_storage(
+        cluster_config=cluster_config,
+        environment=environment,
+    )
+    if configured_check is not None:
+        return configured_check
+
+    default_classes = [sc for sc in storage_classes if _storage_class_is_default(sc)]
     if not default_classes:
         return PreflightCheck(
             name="protected-storage-boundary",
@@ -1106,6 +1423,7 @@ def collect_preflight(
     environment: str | None = None,
     backup_manifest: Path | None = None,
     backup_max_age_hours: int = DEFAULT_BACKUP_MAX_AGE_HOURS,
+    cluster_config: ClusterConfig | None = None,
 ) -> PreflightReport:
     """Pure-collection function — every API client passed in so tests
     can inject fakes. If `namespace-exists` fails, the namespace-
@@ -1123,8 +1441,11 @@ def collect_preflight(
     if env_name in {"public-beta", "staging", "production"}:
         checks.append(
             _check_protected_storage_boundary(
+                core_v1,
                 storage_v1,
                 environment=env_name,
+                namespace=namespace,
+                cluster_config=cluster_config,
             )
         )
         checks.append(
@@ -1197,6 +1518,12 @@ def _preflight(args: argparse.Namespace) -> int:
         )
         return 2
     try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        cluster_config = load_cluster_config(cfg_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: config invalid: {exc}\n")
+        return 2
+    try:
         report = collect_preflight(
             core_v1,
             net_v1,
@@ -1209,6 +1536,7 @@ def _preflight(args: argparse.Namespace) -> int:
                 if args.backup_manifest else None
             ),
             backup_max_age_hours=args.backup_max_age_hours,
+            cluster_config=cluster_config,
         )
     except Exception as exc:
         sys.stderr.write(
@@ -1428,6 +1756,13 @@ def _up(args: argparse.Namespace) -> int:
         )
         return 2
 
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: render failed: {exc}\n")
+        return 2
+
     # 1. Preflight
     if not args.skip_preflight:
         try:
@@ -1443,6 +1778,7 @@ def _up(args: argparse.Namespace) -> int:
                     if args.backup_manifest else None
                 ),
                 backup_max_age_hours=args.backup_max_age_hours,
+                cluster_config=config,
             )
         except Exception as exc:
             sys.stderr.write(
@@ -1462,8 +1798,6 @@ def _up(args: argparse.Namespace) -> int:
 
     # 2. Render
     try:
-        cfg_path = Path(args.config).resolve() if args.config else None
-        config = load_cluster_config(cfg_path)
         manifests = render_manifests(config)
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: render failed: {exc}\n")
@@ -1879,6 +2213,14 @@ def dispatch(argv: list[str]) -> int:
             "Logical environment name. Protected environments "
             "(public-beta/staging/production) get storage and backup "
             "guard checks. If omitted, inferred from namespace when possible."
+        ),
+    )
+    p_preflight.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to cluster-config.toml. Protected preflight uses this "
+            "to recognize static host-path Retain PVs before first apply."
         ),
     )
     p_preflight.add_argument(

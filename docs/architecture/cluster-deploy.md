@@ -36,6 +36,17 @@ connections, but it does not run vLLM jobs or serve checkpoints for users.
 
 Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple. For public-beta, staging, and production-like evidence environments, kind node-local `local-path` volumes are not a durable boundary by themselves; protected environments need host-managed/external storage or a fresh verified backup manifest before any operation that can delete PVCs, namespaces, kind clusters, or Docker volumes.
 
+The short-term durable embedded path is explicit static host storage. Set
+`persistent_storage_backend = "static-host-path"` and
+`persistent_storage_host_path_root = "/data/<environment>"` in
+`cluster-config.toml`; render then creates Retain `PersistentVolume` objects
+for Postgres, MinIO, and worker trajectories, and binds the matching PVCs with
+`storageClassName: ""` plus fixed `volumeName`s. `loom cluster preflight
+--config cluster-config.toml` audits existing critical PVCs first; if none
+exist yet, it accepts the static-host-path render config for first apply. If
+critical PVCs already exist, the live PV bindings win and must be Retain, not
+local-path provisioned, and hostPath volumes must sit under `/data/`.
+
 The SPA (`loom-web`) ships in the manifest set with `replicas: 0`; operators scale up when SPA work resumes.
 
 ## Prerequisites
@@ -598,17 +609,17 @@ loom cluster backup manifest \
 loom cluster preflight \
   --environment public-beta \
   --namespace loom-public-beta \
+  --config cluster-config.toml \
   --backup-manifest /data/loom-public-beta/backups/20260629T120000Z/backup-manifest.json
 ```
 
 `loom cluster up` accepts the same environment and backup-manifest flags and
-threads them through preflight before apply. `loom cluster down --with-volumes`
-and `--delete-namespace` refuse protected
-environments unless the manifest is recent and the operator passes
-`--acknowledge-data-loss <environment>`. This guard distinguishes ordinary pod
-or service restarts from destructive state removal; it does not replace the
-longer-term durable-storage migration to external services or explicit
-host-managed Retain volumes.
+threads them through preflight before apply. Pass the same `--config` so the
+preflight and rendered manifest prove the same storage boundary. `loom cluster
+down --with-volumes` and `--delete-namespace` refuse protected environments
+unless the manifest is recent and the operator passes `--acknowledge-data-loss
+<environment>`. This guard distinguishes ordinary pod or service restarts from
+destructive state removal.
 
 ## Common pitfalls
 

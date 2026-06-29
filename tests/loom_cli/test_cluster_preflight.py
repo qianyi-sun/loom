@@ -57,6 +57,8 @@ class _FakeCoreV1:
         secrets: set[str] | None = None,
         secret_data: dict[str, str] | None = None,
         pod_envs: dict[str, set[str]] | None = None,
+        persistent_volume_claims: list[Any] | None = None,
+        persistent_volumes: list[Any] | None = None,
     ) -> None:
         self.namespace_present = namespace_present
         self.namespace_labels = namespace_labels or {}
@@ -67,6 +69,8 @@ class _FakeCoreV1:
             else secret_data or {}
         )
         self.pod_envs = pod_envs or {}
+        self.persistent_volume_claims = persistent_volume_claims or []
+        self.persistent_volumes = persistent_volumes or []
 
     def read_namespace(self, *, name: str) -> Any:
         if not self.namespace_present:
@@ -89,6 +93,12 @@ class _FakeCoreV1:
                 ),
             )
         return _Spec(items=pods)
+
+    def list_namespaced_persistent_volume_claim(self, *, namespace: str) -> Any:
+        return _Spec(items=list(self.persistent_volume_claims))
+
+    def list_persistent_volume(self) -> Any:
+        return _Spec(items=list(self.persistent_volumes))
 
 
 class _FakeNetworkingV1:
@@ -130,6 +140,64 @@ class _FakeStorageV1:
                 reclaim_policy=reclaim_policy,
             ))
         return _Spec(items=items)
+
+
+def _bound_pvc(name: str, volume_name: str, storage_class_name: str = "") -> Any:
+    return _Spec(
+        metadata=_Spec(name=name),
+        spec=_Spec(
+            volume_name=volume_name,
+            storage_class_name=storage_class_name,
+        ),
+        status=_Spec(phase="Bound"),
+    )
+
+
+def _host_path_pv(
+    *,
+    name: str,
+    namespace: str,
+    claim_name: str,
+    path: str,
+    reclaim_policy: str = "Retain",
+    storage_class_name: str = "",
+) -> Any:
+    return _Spec(
+        metadata=_Spec(name=name),
+        spec=_Spec(
+            storage_class_name=storage_class_name,
+            persistent_volume_reclaim_policy=reclaim_policy,
+            host_path=_Spec(path=path),
+            claim_ref=_Spec(namespace=namespace, name=claim_name),
+        ),
+    )
+
+
+def _write_recent_manifest(tmp_path: Path, *, environment: str, namespace: str) -> Path:
+    from datetime import UTC, datetime
+
+    from loom_cli.cluster_backup_guard import write_backup_manifest
+
+    postgres = tmp_path / "postgres.dump"
+    postgres.write_text("pg", encoding="utf-8")
+    minio = tmp_path / "minio"
+    minio.mkdir()
+    (minio / "object").write_text("obj", encoding="utf-8")
+    secrets = tmp_path / "secrets.yaml"
+    secrets.write_text("redacted", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    write_backup_manifest(
+        environment=environment,
+        namespace=namespace,
+        output_path=manifest,
+        components={
+            "postgres": postgres,
+            "minio": minio,
+            "k8s_secrets": secrets,
+        },
+        now=datetime.now(UTC),
+    )
+    return manifest
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -281,6 +349,164 @@ def test_collect_preflight_passes_protected_storage_with_recent_manifest(
     assert by_name["protected-storage-boundary"].outcome == "pass"
     assert by_name["backup-manifest"].outcome == "pass"
     assert not report.any_fail
+
+
+def test_collect_preflight_passes_static_retain_pvs_despite_local_path_default(
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+        persistent_volume_claims=[
+            _bound_pvc(
+                "data-loom-postgres-0",
+                "loom-public-beta-postgres-data",
+            ),
+            _bound_pvc(
+                "data-loom-minio-0",
+                "loom-public-beta-minio-data",
+            ),
+            _bound_pvc(
+                "loom-worker-trajectories",
+                "loom-public-beta-worker-trajectories-data",
+            ),
+        ],
+        persistent_volumes=[
+            _host_path_pv(
+                name="loom-public-beta-postgres-data",
+                namespace=namespace,
+                claim_name="data-loom-postgres-0",
+                path="/data/loom-public-beta/postgres",
+            ),
+            _host_path_pv(
+                name="loom-public-beta-minio-data",
+                namespace=namespace,
+                claim_name="data-loom-minio-0",
+                path="/data/loom-public-beta/minio",
+            ),
+            _host_path_pv(
+                name="loom-public-beta-worker-trajectories-data",
+                namespace=namespace,
+                claim_name="loom-worker-trajectories",
+                path="/data/loom-public-beta/trajectories",
+            ),
+        ],
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+        namespace,
+        context=None,
+        environment="public-beta",
+        backup_manifest=manifest,
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["protected-storage-boundary"].outcome == "pass"
+    assert "critical PVCs" in by_name["protected-storage-boundary"].detail
+    assert not report.any_fail
+
+
+def test_collect_preflight_passes_static_host_path_config_before_pvcs_exist(
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+    )
+    cfg = ClusterConfig(
+        namespace=namespace,
+        persistent_storage_backend="static-host-path",
+        persistent_storage_host_path_root="/data/loom-public-beta",
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+        namespace,
+        context=None,
+        environment="public-beta",
+        backup_manifest=manifest,
+        cluster_config=cfg,
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["protected-storage-boundary"].outcome == "pass"
+    assert "static-host-path" in by_name["protected-storage-boundary"].detail
+    assert "/data/loom-public-beta" in by_name["protected-storage-boundary"].detail
+    assert not report.any_fail
+
+
+def test_collect_preflight_fails_when_critical_pv_uses_delete_reclaim(
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+        persistent_volume_claims=[
+            _bound_pvc("data-loom-postgres-0", "pv-postgres"),
+            _bound_pvc("data-loom-minio-0", "pv-minio"),
+            _bound_pvc("loom-worker-trajectories", "pv-trajectories"),
+        ],
+        persistent_volumes=[
+            _host_path_pv(
+                name="pv-postgres",
+                namespace=namespace,
+                claim_name="data-loom-postgres-0",
+                path="/data/loom-public-beta/postgres",
+                reclaim_policy="Delete",
+            ),
+            _host_path_pv(
+                name="pv-minio",
+                namespace=namespace,
+                claim_name="data-loom-minio-0",
+                path="/data/loom-public-beta/minio",
+            ),
+            _host_path_pv(
+                name="pv-trajectories",
+                namespace=namespace,
+                claim_name="loom-worker-trajectories",
+                path="/data/loom-public-beta/trajectories",
+            ),
+        ],
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([("fast", True, "example.com/csi", "Retain")]),
+        namespace,
+        context=None,
+        environment="public-beta",
+        backup_manifest=manifest,
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["protected-storage-boundary"].outcome == "fail"
+    assert "reclaimPolicy=Delete" in by_name["protected-storage-boundary"].detail
+    assert report.any_fail
 
 
 def test_pss_enforce_warn_when_restricted() -> None:
@@ -589,6 +815,44 @@ def test_cli_preflight_json_format(
     assert rc == 0
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["all_pass"] is True
+
+
+def test_cli_preflight_config_allows_static_host_path_before_pvcs_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    namespace = "loom-public-beta"
+    manifest = _write_recent_manifest(
+        tmp_path,
+        environment="public-beta",
+        namespace=namespace,
+    )
+    cfg = tmp_path / "cluster.toml"
+    cfg.write_text(
+        'namespace = "loom-public-beta"\n'
+        'persistent_storage_backend = "static-host-path"\n'
+        'persistent_storage_host_path_root = "/data/loom-public-beta"\n',
+        encoding="utf-8",
+    )
+    _patch_clients(
+        monkeypatch,
+        core=_FakeCoreV1(secrets={"loom-secrets", "loom-admin-secret"}),
+        net=_FakeNetworkingV1(["nginx"]),
+        storage=_FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+    )
+
+    rc = main([
+        "cluster", "preflight",
+        "--namespace", namespace,
+        "--environment", "public-beta",
+        "--backup-manifest", str(manifest),
+        "--config", str(cfg),
+        "--no-doctor",
+    ])
+
+    assert rc == 0
 
 
 def test_cli_preflight_warn_alone_returns_0(

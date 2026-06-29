@@ -711,6 +711,16 @@ default     = "minio/minio"
 python_type = "int"
 default     = 500
 
+[render_config.persistent_storage_backend]
+python_type = "str"
+default     = "dynamic"
+description = "Persistent storage binding mode for Postgres, MinIO, and worker trajectories. Use \"dynamic\" for the cluster default StorageClass, or \"static-host-path\" for explicit host-managed Retain PVs."
+
+[render_config.persistent_storage_host_path_root]
+python_type = "str"
+default     = ""
+description = "Absolute host path root used when persistent_storage_backend is \"static-host-path\", for example /data/loom-public-beta. Loom renders postgres, minio, and trajectories subdirectories under this root."
+
 [render_config.provider_egress_allowlist]
 python_type = "str_list"
 default     = []
