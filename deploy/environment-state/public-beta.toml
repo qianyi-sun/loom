@@ -30,8 +30,11 @@ force = false
 backend = "docker"
 cpu_arch = "x86_64"
 allowed_nodes = [
+  "TRT-EAI-OLDLAB-1",
+  "trt-EAI-OLDLAB-2",
   "trt-eai-oldlab-3",
   "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
 ]
 env_file = "/shared_work/qianyi/loom-worker-capacity/public-beta-oldlab-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}"
