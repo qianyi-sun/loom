@@ -46,12 +46,12 @@ Start with the overview, drill into the area you care about:
   — sandbox lifecycle contract; DockerDriver, FakeDriver,
   DaytonaDriver; how to add a cloud backend
 - **[architecture/benchmark-adapter.md](architecture/benchmark-adapter.md)**
-  — `BenchmarkAdapter` Protocol; the 14 shipped adapters;
+  — `BenchmarkAdapter` Protocol; the 19 shipped adapters;
   entry-point discovery; how to add a new dataset; operator-facing
   `config/benchmarks.toml` registry for `[[local]]` folders +
   `[[remap]]` adapter reuse
 - **[architecture/benchmark-onboarding-pipeline.md](architecture/benchmark-onboarding-pipeline.md)**
-  — design for scalable benchmark lifecycle, runnable task configs,
+  — scalable benchmark lifecycle, runnable task configs,
   readiness states, and user-owned benchmark onboarding
 - **[architecture/agent-adapter.md](architecture/agent-adapter.md)**
   — `loom-launcher` framework; the 11 shipped CLI adapters;

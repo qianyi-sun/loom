@@ -5,9 +5,8 @@
 `bootstrap-secrets`. See [`../operator-runbook.md`](../operator-runbook.md)
 for day-2 procedures and [`config-consolidation.md`](config-consolidation.md)
 for the schema that drives manifest generation and Secret bootstrap.
-Originally tracked in [#76](https://github.com/carinrc/loom/issues/76)
-(cluster deploy CLI) and [#146](https://github.com/carinrc/loom/issues/146)
-(schema unification).
+Originally tracked pre-migration as carinrc#76 (cluster deploy CLI) and
+carinrc#146 (schema unification).
 
 `loom cluster` is the multi-node deployment mode. A control node runs the API services + storage; worker nodes spawn trial sandboxes via `docker.sock` onto per-trial Docker bridges. Users supply OpenAI-compatible model endpoints via the per-team `provider_connections` API; `loom-llm-gateway` mediates every LLM call.
 
@@ -598,8 +597,8 @@ Same encrypted-tarball format as the backup CronJob's output, so DR and migratio
 ## See also
 
 - [cluster-deploy-spikes/](cluster-deploy-spikes/README.md) — executable proofs of the load-bearing mechanisms (per-trial bridges, preflight hostPath, hostPort routing, JWT refresh, TLS round-trip). CI gate; new mechanisms must add a spike.
-- [#49](https://github.com/carinrc/loom/issues/49) — production cluster + user-supplied provider gateway requirements.
-- [#50](https://github.com/carinrc/loom/pull/50) — implementation plan (phases, considered alternatives, risks, design changelog).
+- carinrc#49 (historical archive) — production cluster + user-supplied provider gateway requirements.
+- carinrc#50 (historical archive PR) — implementation plan (phases, considered alternatives, risks, design changelog).
 - [service-mode.md](service-mode.md) — single-host architecture today.
 - [cli-mode.md](cli-mode.md) — local-stateless `loom run`.
 - [drf-scheduling.md](drf-scheduling.md) — how the claim path matches workers to trials.

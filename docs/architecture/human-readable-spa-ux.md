@@ -1,6 +1,10 @@
 # Human-Readable Frontend UX And Diagnostics Mode
 
-Status: design
+Status: shipped. The two-layer default/diagnostics rule is in production;
+humanizer libraries live under `web/src/lib/humanize*.ts`. The canonical SPA
+specification is now [`loom-spa-v3.md`](loom-spa-v3.md); this document is
+retained as the originating design.
+
 Last updated: 2026-06-19
 
 ## Context

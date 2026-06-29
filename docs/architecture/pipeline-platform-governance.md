@@ -4,25 +4,25 @@ Status: post-v1 architecture guidance
 
 Date: 2026-06-26
 
-Tracking:
+Tracking (pre-migration archive on the carinrc/loom tracker):
 
-- Umbrella: [#566](https://github.com/carinrc/loom/issues/566)
-- Skill artifact and injection ADR: [#567](https://github.com/carinrc/loom/issues/567)
-- Typed artifact, lineage, and sharing ADR: [#568](https://github.com/carinrc/loom/issues/568)
-- TaskSet and data-production ADR: [#569](https://github.com/carinrc/loom/issues/569)
-- RunGraph scheduler ADR: [#570](https://github.com/carinrc/loom/issues/570)
-- Custom container security ADR: [#571](https://github.com/carinrc/loom/issues/571)
-- Workflow, recipe, and plugin ADR: [#572](https://github.com/carinrc/loom/issues/572)
+- Umbrella: carinrc#566
+- Skill artifact and injection ADR: carinrc#567
+- Typed artifact, lineage, and sharing ADR: carinrc#568
+- TaskSet and data-production ADR: carinrc#569
+- RunGraph scheduler ADR: carinrc#570
+- Custom container security ADR: carinrc#571
+- Workflow, recipe, and plugin ADR: carinrc#572
 
-Implementation epics:
+Implementation epics (historical archive):
 
-- [#573](https://github.com/carinrc/loom/issues/573) - SkillMarkdown artifact and trial injection MVP
-- [#574](https://github.com/carinrc/loom/issues/574) - typed artifact registry and lineage MVP
-- [#575](https://github.com/carinrc/loom/issues/575) - user TaskSet registration MVP
-- [#576](https://github.com/carinrc/loom/issues/576) - trajectory/completion export MVP
-- [#577](https://github.com/carinrc/loom/issues/577) - RunGraph MVP
-- [#578](https://github.com/carinrc/loom/issues/578) - custom container step MVP
-- [#579](https://github.com/carinrc/loom/issues/579) - official SkillOpt recipe
+- carinrc#573 — SkillMarkdown artifact and trial injection MVP
+- carinrc#574 — typed artifact registry and lineage MVP
+- carinrc#575 — user TaskSet registration MVP
+- carinrc#576 — trajectory/completion export MVP
+- carinrc#577 — RunGraph MVP
+- carinrc#578 — custom container step MVP
+- carinrc#579 — official SkillOpt recipe
 
 ## Scope
 
@@ -31,9 +31,8 @@ evaluation platform into a reusable pipeline platform. It records the review
 standard for pipeline, data-production, workflow, recipe, plugin, and artifact
 proposals.
 
-This is not part of the v1.0 release gate. It must not expand
-[#467](https://github.com/carinrc/loom/issues/467) or
-[#82](https://github.com/carinrc/loom/issues/82). v1.0 remains focused on
+This is not part of the v1.0 release gate. It must not expand the v1.0 scope
+(historical: carinrc#467, carinrc#82). v1.0 remains focused on
 AI/API-first evaluation, supported benchmark execution, user-visible debug
 evidence, score credibility, and release-critical monitoring surfaces.
 
@@ -168,14 +167,17 @@ permissions, test fixture, and documented failure modes.
 The following decisions must be settled before implementation epics move from
 planning to build:
 
+Historical archive issue numbers below refer to the pre-migration
+carinrc/loom tracker.
+
 | Issue | Decision area | Blocks |
 |---|---|---|
-| [#567](https://github.com/carinrc/loom/issues/567) | `SkillMarkdown` artifact and generic trial-time skill injection | [#573](https://github.com/carinrc/loom/issues/573), [#579](https://github.com/carinrc/loom/issues/579) |
-| [#568](https://github.com/carinrc/loom/issues/568) | typed artifact base schema, lineage, sharing, redaction, retention | [#573](https://github.com/carinrc/loom/issues/573), [#574](https://github.com/carinrc/loom/issues/574), [#576](https://github.com/carinrc/loom/issues/576) |
-| [#569](https://github.com/carinrc/loom/issues/569) | user TaskSet registration and data-production model | [#575](https://github.com/carinrc/loom/issues/575), [#576](https://github.com/carinrc/loom/issues/576) |
-| [#570](https://github.com/carinrc/loom/issues/570) | RunGraph execution ownership and scheduler boundary | [#577](https://github.com/carinrc/loom/issues/577), [#578](https://github.com/carinrc/loom/issues/578), [#579](https://github.com/carinrc/loom/issues/579) |
-| [#571](https://github.com/carinrc/loom/issues/571) | custom container step security model | [#578](https://github.com/carinrc/loom/issues/578) |
-| [#572](https://github.com/carinrc/loom/issues/572) | workflow specs, recipes, and plugin versioning | [#579](https://github.com/carinrc/loom/issues/579) |
+| carinrc#567 | `SkillMarkdown` artifact and generic trial-time skill injection | carinrc#573, carinrc#579 |
+| carinrc#568 | typed artifact base schema, lineage, sharing, redaction, retention | carinrc#573, carinrc#574, carinrc#576 |
+| carinrc#569 | user TaskSet registration and data-production model | carinrc#575, carinrc#576 |
+| carinrc#570 | RunGraph execution ownership and scheduler boundary | carinrc#577, carinrc#578, carinrc#579 |
+| carinrc#571 | custom container step security model | carinrc#578 |
+| carinrc#572 | workflow specs, recipes, and plugin versioning | carinrc#579 |
 
 ## RunGraph Direction
 
@@ -190,8 +192,8 @@ rollout -> aggregate evidence -> produce candidate artifact -> validate
 A future RunGraph should own generic step status, dependencies, retries,
 artifacts, metrics, logs, costs, and provenance. Node execution should map onto
 existing trial, batch, artifact, and worker boundaries instead of creating a
-parallel lifecycle. The MVP decision is tracked by
-[#570](https://github.com/carinrc/loom/issues/570).
+parallel lifecycle. The MVP decision is tracked by carinrc#570 (historical
+archive).
 
 Required generic step families are expected to include:
 
@@ -209,8 +211,8 @@ Pipelines must not pass only file paths or ad hoc JSON. Important outputs should
 be typed artifacts with content hash, schema version, lineage, storage pointer,
 safety state, redaction state, sharing policy, and retention metadata.
 
-The base contract and migration requirements are decided in
-[#568](https://github.com/carinrc/loom/issues/568) and documented in
+The base contract and migration requirements are decided in carinrc#568
+(historical archive) and documented in
 [adr-typed-artifacts-lineage-sharing.md](adr-typed-artifacts-lineage-sharing.md).
 Initial artifact families should cover trajectory bundles, completion sets,
 TaskSets, TaskSplits, skill markdown, workflow specs, verifier replay bundles,
@@ -224,10 +226,9 @@ insufficient. The first reusable primitive is a versioned skill artifact that a
 trial can reference, authorize, materialize, inject, and record in output
 provenance.
 
-The skill contract is decided in
-[#567](https://github.com/carinrc/loom/issues/567) and documented in
-[adr-skill-artifact-injection.md](adr-skill-artifact-injection.md). The first
-implementation epic is [#573](https://github.com/carinrc/loom/issues/573).
+The skill contract is decided in carinrc#567 (historical archive) and
+documented in [adr-skill-artifact-injection.md](adr-skill-artifact-injection.md).
+The first implementation epic is carinrc#573 (historical archive).
 
 ## Data Production Direction
 
@@ -249,10 +250,8 @@ emits `CompletionTable`, `TrajectoryDataset`, `DemonstrationDataset`,
 `PreferencePairDataset`, `ReasoningTraceDataset`, `VerifierLabelDataset`,
 `DataQualityReport`, and `TrainingDataExport`.
 
-TaskSet registration and data-production behavior are deferred to
-[#569](https://github.com/carinrc/loom/issues/569),
-[#575](https://github.com/carinrc/loom/issues/575), and
-[#576](https://github.com/carinrc/loom/issues/576).
+TaskSet registration and data-production behavior are deferred to the
+post-v1 epics carinrc#569, carinrc#575, and carinrc#576 (historical archive).
 
 ## Anti-patterns
 

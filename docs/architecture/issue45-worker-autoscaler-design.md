@@ -1,6 +1,9 @@
 # Issue 45 Worker Autoscaler Design
 
-Status: design
+Status: shipped. Resource-aware OLDLAB Slurm autoscaling and GB10 desired-state
+reconciliation are live in production. See `src/loom_control_plane/` for the
+external autoscaler and `src/loom_worker/` for drain capacity handling.
+
 Date: 2026-06-27
 
 ## Goal

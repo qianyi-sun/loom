@@ -398,9 +398,9 @@ workflow runs with read-only default GitHub token permissions. Workflows that
 publish benchmark bundles or deploy infrastructure use protected GitHub
 Environments so secrets are not available to pull request code.
 
-Repository public-readiness was completed in
-[#12](https://github.com/carinrc/loom/issues/12). Maintainers should keep branch
-protection, read-only default workflow tokens, selected Actions sources,
-protected publish/deploy environments, and secret scanning enabled. External
+Repository public-readiness was completed pre-migration (historical:
+carinrc#12). Maintainers should keep branch protection, read-only default
+workflow tokens, selected Actions sources, protected publish/deploy
+environments, and secret scanning enabled. External
 pull requests are not accepted yet; use issues for discussion until the
 contribution policy is opened.

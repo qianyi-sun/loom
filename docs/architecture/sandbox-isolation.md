@@ -1,6 +1,6 @@
 # Sandbox isolation — current trust boundary
 
-**Status: as-shipped state, 2026-06-18. Epic [#78](https://github.com/carinrc/loom/issues/78) closed.**
+**Status: as-shipped. Epic carinrc#78 (historical archive) closed.**
 
 What this doc is: an honest description of the sandbox isolation Loom
 ships **today**, so operators can make informed decisions about which
@@ -208,13 +208,13 @@ When on, every claimed trial:
 1. **Per-trial bridge.** Worker allocates a free `/24` from the
    `10.{42+worker_index}.{1..254}.0/24` pool and runs
    `docker network create --internal …` — no host route. The container
-   attaches via `StartOptions.network`. (Phase A, PR [#189](https://github.com/carinrc/loom/pull/189) + [#195](https://github.com/carinrc/loom/pull/195).)
+   attaches via `StartOptions.network`. (Phase A; historical: carinrc#189, carinrc#195.)
 2. **Per-node singleton.** Worker spawns ONE
    `loom-llm-gateway-sandbox` container per worker process (Go binary,
    ~14 MB distroless) and attaches it to every per-trial bridge. The
    singleton TLS-terminates on `loom-sandbox-gateway.local:8443`,
    validates step-JWTs (HS256, shared signing key), and reverse-
-   proxies to `gateway-router`. (Phase B, PR [#220](https://github.com/carinrc/loom/pull/220) + [#221](https://github.com/carinrc/loom/pull/221) + [#224](https://github.com/carinrc/loom/pull/224).)
+   proxies to `gateway-router`. (Phase B; historical: carinrc#220, carinrc#221, carinrc#224.)
 3. **Egress chain.** Gateway-router's outbound provider calls go
    through `loom-egress-proxy` (Envoy) which fetches per-connection
    CDS+RDS from `loom-egress-xds` (gRPC). Routes match on
@@ -226,14 +226,14 @@ When on, every claimed trial:
    to resolve to. HTTPS providers use CONNECT routes; HTTP providers
    use ordinary forward-proxy routes with the internal
    `x-loom-connection-id` header stripped before upstream forwarding.
-   (Phase C, PRs [#192](https://github.com/carinrc/loom/pull/192) + [#200](https://github.com/carinrc/loom/pull/200) + [#209](https://github.com/carinrc/loom/pull/209) + [#215](https://github.com/carinrc/loom/pull/215) + [#217](https://github.com/carinrc/loom/pull/217).)
+   (Phase C; historical: carinrc#192, carinrc#200, carinrc#209, carinrc#215, carinrc#217.)
 4. **Step-JWT rotation.** Worker mounts
    `/var/lib/loom/sandbox-secrets/trials/<trial>/run/loom/` into the
    sandbox at `/run/loom/`. A rotator writes the initial token before
    `driver.start()`, then atomically replaces `step-jwt` every
    `TTL/2` (default 300s) via `write(tmp) + os.replace(tmp, dst)` —
    POSIX-atomic. Concurrent readers see old-or-new contents, never
-   partial. (Phase D, PR [#225](https://github.com/carinrc/loom/pull/225) + [#230](https://github.com/carinrc/loom/pull/230).)
+   partial. (Phase D; historical: carinrc#225, carinrc#230.)
 
 The chain fails closed at every layer:
 
@@ -268,7 +268,7 @@ The chain fails closed at every layer:
 - `tests/integration/test_egress_xds_envoy.py` — Postgres-fed xDS
   server publishes the expected Cluster + Route shapes.
 - `deploy/envoy/spike/` — manual reproducible CONNECT proxy spike
-  ([#196 findings](https://github.com/carinrc/loom/issues/196#issuecomment-4743811525)) that surfaced the
+  (historical: carinrc#196 findings) that surfaced the
   `(header, :authority)` pair-match requirement (CDN-fronted
   providers share IPs).
 - `deploy/docker-compose.dev.yml` — egress chain runs end-to-end in
@@ -287,11 +287,11 @@ The chain fails closed at every layer:
   and per-CONNECT header injection requires either monkey-patching
   litellm or bypassing it. Sandboxes that should be IP-allowlisted
   MUST use the facade routes (`/openai/v1/*`, `/anthropic/v1/*`,
-  `/google/v1beta/*`). Tracked at [#216](https://github.com/carinrc/loom/issues/216).
+  `/google/v1beta/*`). Tracked at carinrc#216 (historical archive).
 
 ## See also
 
 - [cluster-deploy.md §Sandbox→gateway flow](cluster-deploy.md#sandboxgateway-flow) — the full target architecture.
 - [llm-gateway.md](llm-gateway.md) — gateway behavior + step JWT details.
 - [driver-protocol.md](driver-protocol.md) — `NetworkPolicy` API.
-- [#78](https://github.com/carinrc/loom/issues/78) — epic tracking remaining slices.
+- carinrc#78 (historical archive) — epic tracking remaining slices.

@@ -1,18 +1,15 @@
 # Benchmark Onboarding Pipeline
 
-Status: design
+Status: shipped. Lifecycle, manifest contract, publish/register validation,
+readiness audit CLI, and user-owned benchmark onboarding are implemented;
+see `src/loom/benchmark_readiness.py`, `src/loom_cli/public_beta_catalog.py`,
+and `loom cluster benchmarks` commands.
 
-Date: 2026-06-19
-
-Tracking:
-
-- Umbrella: [#270](https://github.com/carinrc/loom/issues/270)
-- Lifecycle and manifest contract: [#271](https://github.com/carinrc/loom/issues/271)
-- Publish/register valid TaskConfig rows: [#272](https://github.com/carinrc/loom/issues/272)
-- Audit/readiness tooling: [#273](https://github.com/carinrc/loom/issues/273)
-- First runnable benchmark wave: [#274](https://github.com/carinrc/loom/issues/274)
-- User-owned benchmark onboarding: [#275](https://github.com/carinrc/loom/issues/275)
-- SPA readiness states: [#276](https://github.com/carinrc/loom/issues/276)
+Historical tracking (pre-migration archive on the carinrc/loom tracker):
+umbrella carinrc#270; lifecycle and manifest contract carinrc#271;
+publish/register valid TaskConfig rows carinrc#272; audit/readiness tooling
+carinrc#273; first runnable benchmark wave carinrc#274; user-owned benchmark
+onboarding carinrc#275; SPA readiness states carinrc#276.
 
 ## Goal
 
@@ -22,11 +19,11 @@ readiness. First-party benchmark enablement and user-owned benchmark onboarding
 should use the same platform concepts: validated task configs, durable bundle
 sources, readiness diagnostics, and clear UI states.
 
-The immediate trigger is #267: the platform had raw task rows for benchmarks
-such as SWE-Bench Verified, but many rows had `config={}`. After #267, those
-rows are correctly not counted as runnable. The next step is to fix the
-publish/register lifecycle so batch benchmark support produces valid runnable
-tasks instead of placeholders.
+The immediate trigger (historical: carinrc#267) was that the platform had raw
+task rows for benchmarks such as SWE-Bench Verified, but many rows had
+`config={}`. Rows without valid configs are not counted as runnable. The
+publish/register lifecycle ensures batch benchmark support produces valid
+runnable tasks instead of placeholders.
 
 ## Non-Goals
 

@@ -4,13 +4,10 @@ Status: accepted for post-v1 planning
 
 Date: 2026-06-26
 
-Tracking:
-
-- Parent: [#566](https://github.com/carinrc/loom/issues/566)
-- Decision issue: [#568](https://github.com/carinrc/loom/issues/568)
-- Related implementation: [#574](https://github.com/carinrc/loom/issues/574)
-- Related skill artifact work: [#567](https://github.com/carinrc/loom/issues/567), [#573](https://github.com/carinrc/loom/issues/573)
-- Related data-production work: [#569](https://github.com/carinrc/loom/issues/569), [#576](https://github.com/carinrc/loom/issues/576)
+Tracking (pre-migration archive on the carinrc/loom tracker): parent
+carinrc#566; decision issue carinrc#568; related implementation carinrc#574;
+related skill artifact work carinrc#567 and carinrc#573; related
+data-production work carinrc#569 and carinrc#576.
 
 ## Context
 

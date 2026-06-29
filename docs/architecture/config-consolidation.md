@@ -281,8 +281,6 @@ Each step is independently revertible:
 
 ## Related
 
-- Tracking issue: [#146].
-- Caught and motivated by: PR #128 (staging smoke) runs #3 and #8.
+- Tracking issue: carinrc#146 (historical archive).
+- Caught and motivated by: carinrc PR #128 (staging smoke) runs #3 and #8.
 - Will simplify: future object-store backend swap (decision tracked separately).
-
-[#146]: https://github.com/carinrc/loom/issues/146

@@ -4,13 +4,10 @@ Status: accepted for post-v1 planning
 
 Date: 2026-06-26
 
-Tracking:
-
-- Parent: [#566](https://github.com/carinrc/loom/issues/566)
-- Decision issue: [#567](https://github.com/carinrc/loom/issues/567)
-- Depends on typed artifact policy: [#568](https://github.com/carinrc/loom/issues/568)
-- Implementation epic: [#573](https://github.com/carinrc/loom/issues/573)
-- Official SkillOpt recipe epic: [#579](https://github.com/carinrc/loom/issues/579)
+Tracking (pre-migration archive on the carinrc/loom tracker): parent
+carinrc#566; decision issue carinrc#567; depends on typed artifact policy
+carinrc#568; implementation epic carinrc#573; official SkillOpt recipe epic
+carinrc#579.
 
 ## Context
 
