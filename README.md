@@ -389,8 +389,7 @@ models, lives in [`docs/user-guide.md#local-llms`](docs/user-guide.md#local-llms
 
 The canonical development repository is
 [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom). The old
-`carinrc/loom` repository is retained as a historical issue and PR archive
-while the expired `carinrc` Enterprise trial is resolved.
+`carinrc/loom` repository is retained as a historical issue and PR archive.
 
 Loom is licensed under Apache-2.0. Normal development uses PRs into `dev`;
 `main` is reserved for release promotion. The required `repository-checks`
