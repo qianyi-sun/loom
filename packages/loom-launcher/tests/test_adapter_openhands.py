@@ -43,7 +43,7 @@ def test_install_script_uses_managed_python312_venv() -> None:
     assert "uv venv --python 3.12 /opt/loom-agents/openhands-sdk" in adapter.install_script
     assert "/opt/loom-agents/openhands-sdk/bin/python" in adapter.install_script
     assert (
-        "git+https://github.com/carinrc/loom.git@"
+        "git+https://github.com/qianyi-sun/loom.git@"
         "19dabf78da96f45380eddabbe29d151e231842bb"
         "#subdirectory=packages/loom-launcher"
     ) in adapter.install_script

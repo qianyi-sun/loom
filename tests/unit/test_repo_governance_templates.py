@@ -48,8 +48,6 @@ def test_issue_templates_use_current_loom_language() -> None:
 def test_codeowners_points_at_current_maintainers_not_placeholder_teams() -> None:
     codeowners = _read(".github/CODEOWNERS")
 
-    assert "@carinrc/platform-maintainers" not in codeowners
-    assert "@carinrc/platform-admins" not in codeowners
     assert "* @qianyi-sun @Hongjian-Gu" in codeowners
     assert "/.github/ @qianyi-sun @Hongjian-Gu" in codeowners
     assert "/deploy/ @qianyi-sun @Hongjian-Gu" in codeowners

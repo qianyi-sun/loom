@@ -1,11 +1,10 @@
 # Loom vs. Harbor
 
-Loom was built ground-up to replace
-[Harbor](https://github.com/harbor-framework/harbor) for the CARIN
-Research Center. After a three-round audit of Harbor's source (2026-06-05),
-we concluded "replace, not fork." This doc captures the concrete
-tradeoffs so contributors can judge when Loom is the right choice
-and what gaps remain.
+Loom was built ground-up as an alternative to
+[Harbor](https://github.com/harbor-framework/harbor). After a three-round
+audit of Harbor's source (2026-06-05), we concluded "replace, not fork."
+This doc captures the concrete tradeoffs so contributors can judge when
+Loom is the right choice and what gaps remain.
 
 ## Where Loom is better
 

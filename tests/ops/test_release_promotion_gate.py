@@ -17,12 +17,12 @@ def _candidate_sha() -> str:
 
 def _image_digests() -> dict[str, str]:
     return {
-        "loom-control-plane": "ghcr.io/carinrc/loom-control-plane@sha256:"
+        "loom-control-plane": "ghcr.io/qianyi-sun/loom-control-plane@sha256:"
         + "1" * 64,
-        "loom-llm-gateway": "ghcr.io/carinrc/loom-llm-gateway@sha256:" + "2" * 64,
-        "loom-service": "ghcr.io/carinrc/loom-service@sha256:" + "3" * 64,
-        "loom-worker": "ghcr.io/carinrc/loom-worker@sha256:" + "4" * 64,
-        "loom-web": "ghcr.io/carinrc/loom-web@sha256:" + "5" * 64,
+        "loom-llm-gateway": "ghcr.io/qianyi-sun/loom-llm-gateway@sha256:" + "2" * 64,
+        "loom-service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+        "loom-worker": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "4" * 64,
+        "loom-web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "5" * 64,
     }
 
 
@@ -30,54 +30,54 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
     checks: dict[str, dict[str, Any]] = {
         "repository_ci": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1001",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1001",
         },
         "image_build": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1002",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1002",
         },
         "cluster_render_audit": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1003",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1003",
             "staging_config": "deploy/environments/staging.cluster.toml",
             "production_config": "deploy/environments/production.cluster.toml",
         },
         "migration_dry_run": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1004",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1004",
             "db_recovery_point": "postgres-backup-20260624T140000Z",
         },
         "public_api_spa_smoke": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1005",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1005",
             "batch_id": "batch-release-smoke",
             "trial_id": "trial-release-smoke",
             "artifact_url": "https://staging.yylx.world/api/v1/trials/trial-release-smoke/atif",
         },
         "secret_redaction": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1006",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1006",
         },
         "provider_smoke": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1007",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1007",
             "provider_path": "lux-openai-compatible",
         },
         "benchmark_reward_gate": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1008",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1008",
             "batch_id": "batch-reward-gate",
             "benchmarks": ["mbpp", "humaneval"],
         },
         "benchmark_score_alignment": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1010",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1010",
             "manifest": "docs/benchmark-score-alignment.json",
             "benchmarks": ["aime-24", "aime-25", "humaneval", "mbpp"],
         },
         "worker_capacity_smoke": {
             "status": "pass",
-            "url": "https://github.com/carinrc/loom/actions/runs/1009",
+            "url": "https://github.com/qianyi-sun/loom/actions/runs/1009",
             "batch_id": "batch-worker-capacity",
             "k8s_workers": 3,
             "oldlab_workers": 3,
@@ -109,7 +109,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         },
         "rollback_plan": {
             "status": "pass",
-            "previous_production_image_digest": "ghcr.io/carinrc/loom-service@sha256:"
+            "previous_production_image_digest": "ghcr.io/qianyi-sun/loom-service@sha256:"
             + "a" * 64,
             "rendered_manifest": "s3://loom-release-evidence/prod-rendered-prev.yaml",
             "db_recovery_point": "postgres-backup-20260624T140000Z",
@@ -117,7 +117,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "release_owner_approval": {
             "status": "pass",
             "owner": "qianyi-sun",
-            "url": "https://github.com/carinrc/loom/issues/431#release-approval",
+            "url": "https://github.com/qianyi-sun/loom/issues/431#release-approval",
         },
     }
     manifest: dict[str, Any] = {
