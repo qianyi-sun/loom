@@ -1082,6 +1082,122 @@ class Trial(Base):
     )
 
 
+class Artifact(Base):
+    """Typed artifact registry entry for reusable run outputs."""
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        Index("artifacts_team_type_idx", "team_id", "artifact_type"),
+        Index("artifacts_batch_idx", "batch_id"),
+        Index("artifacts_trial_idx", "trial_id"),
+        Index("artifacts_policy_idx", "visibility", "share_status", "safety_state"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"),
+    )
+    artifact_type: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_schema_version: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'1.0'"), default="1.0",
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False,
+    )
+    project_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    batch_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("batches.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    trial_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+    )
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    storage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+    )
+    visibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'team'"), default="team",
+    )
+    share_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending_scan'"),
+        default="pending_scan",
+    )
+    redaction_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    safety_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'unknown'"),
+        default="unknown",
+    )
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retention: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+    )
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+    )
+    artifact_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class ArtifactLineageEdge(Base):
+    """Direct artifact parent edge for clone, reuse, export, and audit."""
+
+    __tablename__ = "artifact_lineage_edges"
+    __table_args__ = (
+        Index("artifact_lineage_child_idx", "child_artifact_id"),
+        Index("artifact_lineage_parent_idx", "parent_artifact_id"),
+        Index("artifact_lineage_relation_idx", "relation"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"),
+    )
+    child_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("artifacts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    parent_artifact_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("artifacts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    relation: Mapped[str] = mapped_column(Text, nullable=False)
+    edge_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
 class Token(Base):
     __tablename__ = "tokens"
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)

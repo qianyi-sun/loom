@@ -471,13 +471,30 @@ export interface RunLibraryOwnerTeam {
 }
 
 export interface RunLibraryArtifact {
-  trial_id: string;
+  id?: string;
+  trial_id: string | null;
   key: string;
   size: number;
   role: ArtifactGroup;
+  artifact_type?: string;
+  artifact_type_label?: string;
+  artifact_schema_version?: string;
+  owner_team?: RunLibraryOwnerTeam;
+  source?: {
+    kind?: string | null;
+    batch_id?: string | null;
+    trial_id?: string | null;
+  };
   share_status: ShareStatus;
+  safety_state?: string;
+  redaction_state?: string;
+  content_hash?: string;
+  storage?: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  parents?: Record<string, unknown>[];
   blocked_reason?: string | null;
-  download_url: string;
+  download_url?: string | null;
 }
 
 export type ArtifactSummary = Record<ArtifactGroup, number>;
@@ -1024,6 +1041,14 @@ export const api = {
   ) =>
     apiDownload(
       `/api/v1/run-library/trials/${trialId}/artifacts/download${qs({ key })}`,
+      filename,
+    ),
+  exportRunLibraryArtifacts: (
+    q: Record<string, string | undefined> = {},
+    filename = "run-library-artifacts.jsonl",
+  ) =>
+    apiDownload(
+      `/api/v1/run-library/artifacts/export${qs(q)}`,
       filename,
     ),
   createBatch: (body: CreateBatchBody) =>

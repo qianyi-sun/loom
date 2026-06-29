@@ -66,6 +66,40 @@ function artifactDownloadName(artifact: RunLibraryArtifact): string {
   return label.split("/").pop() || "artifact";
 }
 
+function artifactSafetyText(artifact: RunLibraryArtifact): string {
+  return `${artifact.safety_state ?? "unknown"} / ${
+    artifact.redaction_state ?? "pending"
+  }`;
+}
+
+function artifactSourceText(artifact: RunLibraryArtifact): string | null {
+  const trialId = artifact.source?.trial_id ?? artifact.trial_id;
+  if (trialId) return `Source trial ${trialId}`;
+  const batchId = artifact.source?.batch_id;
+  if (batchId) return `Source batch ${batchId}`;
+  return null;
+}
+
+function artifactHashText(artifact: RunLibraryArtifact): string | null {
+  if (!artifact.content_hash) return null;
+  return artifact.content_hash.length > 19
+    ? artifact.content_hash.slice(0, 19)
+    : artifact.content_hash;
+}
+
+function artifactActionsAllowed(artifact: RunLibraryArtifact): boolean {
+  const safety = artifact.safety_state ?? "safe";
+  const redaction = artifact.redaction_state ?? "not_required";
+  return (
+    artifact.share_status === "shared" &&
+    safety === "safe" &&
+    (redaction === "not_required" || redaction === "redacted") &&
+    Boolean(artifact.trial_id) &&
+    Boolean(artifact.download_url) &&
+    !artifact.key.startsWith("redacted-artifact:")
+  );
+}
+
 function comboText(batch: RunLibraryBatchDetail): string {
   if (batch.combinations.length > 0) {
     return batch.combinations
@@ -86,10 +120,12 @@ function ArtifactRow({
   onReuse: (artifact: RunLibraryArtifact) => void;
 }): JSX.Element {
   const label = artifactName(artifact);
-  const shared = artifact.share_status === "shared";
+  const actionsAllowed = artifactActionsAllowed(artifact);
+  const source = artifactSourceText(artifact);
+  const hash = artifactHashText(artifact);
 
   function copyUrl(): void {
-    if (navigator.clipboard) {
+    if (navigator.clipboard && artifact.download_url) {
       void navigator.clipboard.writeText(artifact.download_url);
     }
   }
@@ -102,19 +138,46 @@ function ArtifactRow({
           <p className="mt-1 text-xs text-slate-500">
             {formatBytes(artifact.size)} · {artifact.share_status}
           </p>
+          <div className="mt-2 flex flex-wrap gap-1.5 text-xs text-slate-600">
+            {artifact.artifact_type_label ? (
+              <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+                {artifact.artifact_type_label}
+              </span>
+            ) : null}
+            <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+              {artifactSafetyText(artifact)}
+            </span>
+            {artifact.owner_team?.name ? (
+              <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+                {artifact.owner_team.name}
+              </span>
+            ) : null}
+            {source ? (
+              <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+                {source}
+              </span>
+            ) : null}
+            {hash ? (
+              <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono">
+                {hash}
+              </span>
+            ) : null}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          {shared ? (
+          {actionsAllowed ? (
             <>
               <Button
                 size="sm"
                 title="Download this shared artifact through the Loom API."
                 onClick={() =>
-                  void api.downloadRunLibraryArtifact(
-                    artifact.trial_id,
-                    artifact.key,
-                    artifactDownloadName(artifact),
-                  )
+                  artifact.trial_id
+                    ? void api.downloadRunLibraryArtifact(
+                        artifact.trial_id,
+                        artifact.key,
+                        artifactDownloadName(artifact),
+                      )
+                    : undefined
                 }
               >
                 Download {label}
@@ -137,7 +200,7 @@ function ArtifactRow({
           ) : null}
         </div>
       </div>
-      {!shared && artifact.blocked_reason ? (
+      {artifact.blocked_reason ? (
         <p className="mt-2 text-xs text-amber-800">{artifact.blocked_reason}</p>
       ) : null}
     </div>
@@ -169,11 +232,13 @@ export default function RunLibraryBatchDetail(): JSX.Element {
   });
 
   const reuse = useMutation({
-    mutationFn: (artifact: RunLibraryArtifact) =>
-      api.reuseRunLibraryArtifact(artifact.trial_id, {
+    mutationFn: (artifact: RunLibraryArtifact) => {
+      if (!artifact.trial_id) throw new Error("artifact has no source trial");
+      return api.reuseRunLibraryArtifact(artifact.trial_id, {
         key: artifact.key,
         name: `Reuse ${artifactDownloadName(artifact)}`,
-      }),
+      });
+    },
   });
 
   if (!batchId) return <ErrorState error={new Error("missing batchId")} />;
@@ -189,7 +254,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
   const configSummary = humanizeTrialConfig(batch.trial_config);
   const firstSharedArtifact = GROUP_ORDER.flatMap(
     (group) => batch.artifact_inventory[group] ?? [],
-  ).find((artifact) => artifact.share_status === "shared");
+  ).find(artifactActionsAllowed);
 
   return (
     <div className="space-y-6">
@@ -340,13 +405,32 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           description="Shared files are downloadable through Loom API URLs; blocked files stay owner-team diagnostics."
         />
         <Card.Body className="space-y-5">
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              variant="secondary"
+              title="Export safe typed artifact metadata for this shared run."
+              onClick={() =>
+                void api.exportRunLibraryArtifacts(
+                  {
+                    scope: "all",
+                    source_batch_id: batch.id,
+                    format: "jsonl",
+                  },
+                  `${batch.id}-artifacts.jsonl`,
+                )
+              }
+            >
+              Export artifact metadata
+            </Button>
+          </div>
           {firstSharedArtifact ? (
             <DocsCallout title="Library CLI downloads" tone="info">
               <CommandSnippet
                 label="Shared artifact CLI"
                 command={
                   trialDownloadCommands(
-                    firstSharedArtifact.trial_id,
+                    firstSharedArtifact.trial_id ?? "",
                     firstSharedArtifact.key,
                   ).find((command) => command.includes("--kind artifact")) ?? ""
                 }

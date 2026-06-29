@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
+from urllib.parse import urlparse
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import bindparam, select
+from sqlalchemy import bindparam, delete, select
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from loom.auth import verify_bearer_token
+from loom.db.schema import Artifact, ArtifactLineageEdge, Batch
 from loom.db.schema import Trial as TrialRow
 
 router = APIRouter()
@@ -60,6 +62,408 @@ UPDATE trials
     bindparam("result_payload", type_=JSONB),
 )
 
+_VALID_SHARE_STATUS = frozenset({"pending_scan", "shared", "blocked"})
+
+
+def _artifact_filename(key: str) -> str:
+    name = key.rstrip("/").rsplit("/", 1)[-1]
+    return name or "artifact"
+
+
+def _content_hash(value: Any, default: str = "pending:legacy-unhashed") -> str:
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        return text if ":" in text else f"sha256:{text}"
+    return default
+
+
+def _share_status(value: Any, default: str = "pending_scan") -> str:
+    if isinstance(value, str) and value in _VALID_SHARE_STATUS:
+        return value
+    return default
+
+
+def _policy_from_share_status(status: str) -> tuple[str, str]:
+    if status == "shared":
+        return "safe", "not_required"
+    if status == "blocked":
+        return "unsafe", "blocked"
+    return "unknown", "pending"
+
+
+def _storage_from_s3_uri(
+    uri: Any,
+    *,
+    default_bucket: str,
+    default_key: str,
+    media_type: str,
+    size_bytes: int = 0,
+) -> dict[str, Any]:
+    bucket = default_bucket
+    key = default_key
+    if isinstance(uri, str) and uri.startswith("s3://"):
+        parsed = urlparse(uri)
+        if parsed.netloc:
+            bucket = parsed.netloc
+        parsed_key = parsed.path.lstrip("/")
+        if parsed_key:
+            key = parsed_key
+    return {
+        "backend": "object_store",
+        "bucket": bucket,
+        "key": key,
+        "media_type": media_type,
+        "size_bytes": max(int(size_bytes), 0),
+    }
+
+
+def _artifact_type_from_item(item: dict[str, Any]) -> str:
+    raw_type = item.get("artifact_type")
+    if isinstance(raw_type, str) and raw_type:
+        return raw_type
+    role = item.get("role") or item.get("artifact_role")
+    normalized = role.strip().lower().replace("-", "_") if isinstance(role, str) else ""
+    if normalized in {"trajectory", "trajectories"}:
+        return "trajectory"
+    if normalized in {"report", "reports", "atif"}:
+        return "atif_projection"
+    if normalized in {
+        "log",
+        "logs",
+        "diagnostic",
+        "diagnostics",
+        "logs_diagnostics",
+        "raw",
+        "raw_diagnostic",
+        "raw_diagnostics",
+        "internal_diagnostics",
+    }:
+        return "debug_bundle"
+    key = item.get("key")
+    key_text = key.lower() if isinstance(key, str) else ""
+    if key_text.endswith("atif.json") or "report" in key_text:
+        return "atif_projection"
+    if key_text.endswith("events.jsonl") or "trajectory" in key_text:
+        return "trajectory"
+    if any(marker in key_text for marker in ("debug", "raw", "internal", "log")):
+        return "debug_bundle"
+    return "evidence_bundle"
+
+
+def _artifact_storage_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    key = item.get("key")
+    if not isinstance(key, str) or not key:
+        return None
+    bucket = item.get("bucket")
+    raw_size = item.get("size_bytes", item.get("size"))
+    try:
+        size_bytes = max(int(raw_size), 0) if raw_size is not None else 0
+    except (TypeError, ValueError):
+        size_bytes = 0
+    media_type = item.get("media_type")
+    return {
+        "backend": "object_store",
+        "bucket": bucket if isinstance(bucket, str) and bucket else "artifacts",
+        "key": key,
+        "media_type": (
+            media_type if isinstance(media_type, str) and media_type
+            else "application/octet-stream"
+        ),
+        "size_bytes": size_bytes,
+    }
+
+
+def _artifact_provenance(
+    trial: TrialRow,
+    *,
+    relation: str = "produced_from",
+) -> dict[str, Any]:
+    return {
+        "batch_id": str(trial.batch_id) if trial.batch_id else None,
+        "trial_id": str(trial.id),
+        "source_trial_ids": [str(trial.id)],
+        "relation": relation,
+    }
+
+
+def _artifact_descriptor_base(
+    trial: TrialRow,
+    batch: Batch | None,
+    *,
+    artifact_type: str,
+    name: str,
+    content_hash: str,
+    storage: dict[str, Any],
+    share_status: str,
+    safety_state: str,
+    redaction_state: str,
+    blocked_reason: str | None,
+    retention_class: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_by = {
+        "kind": "trial",
+        "batch_id": str(trial.batch_id) if trial.batch_id else None,
+        "trial_id": str(trial.id),
+    }
+    return {
+        "artifact_type": artifact_type,
+        "artifact_schema_version": "1.0",
+        "name": name,
+        "team_id": trial.team_id,
+        "batch_id": trial.batch_id,
+        "trial_id": trial.id,
+        "created_by": created_by,
+        "content_hash": content_hash,
+        "storage": storage,
+        "visibility": trial.visibility or (batch.visibility if batch else "team"),
+        "share_status": share_status,
+        "redaction_state": redaction_state,
+        "safety_state": safety_state,
+        "blocked_reason": blocked_reason,
+        "retention": {"class": retention_class, "expires_at": None},
+        "provenance": _artifact_provenance(trial),
+        "artifact_metadata": metadata or {},
+    }
+
+
+def _artifact_descriptors_from_index(
+    trial: TrialRow,
+    batch: Batch | None,
+    index_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    descriptors: list[dict[str, Any]] = []
+    trial_share_status = _share_status(trial.share_status, "pending_scan")
+    trial_safety, trial_redaction = _policy_from_share_status(trial_share_status)
+    default_prefix = f"{trial.team_id}/{trial.id}"
+
+    if index_payload.get("trajectory_uri"):
+        descriptors.append(_artifact_descriptor_base(
+            trial,
+            batch,
+            artifact_type="trajectory",
+            name="Trajectory events",
+            content_hash=_content_hash(index_payload.get("checksum_sha256")),
+            storage=_storage_from_s3_uri(
+                index_payload.get("trajectory_uri"),
+                default_bucket="trajectories",
+                default_key=f"{default_prefix}/events.jsonl",
+                media_type="application/x-ndjson",
+                size_bytes=0,
+            ),
+            share_status=trial_share_status,
+            safety_state=trial_safety,
+            redaction_state=trial_redaction,
+            blocked_reason=None,
+            retention_class="release_evidence",
+        ))
+
+    if index_payload.get("atif_uri"):
+        descriptors.append(_artifact_descriptor_base(
+            trial,
+            batch,
+            artifact_type="atif_projection",
+            name="ATIF projection",
+            content_hash="pending:legacy-unhashed",
+            storage=_storage_from_s3_uri(
+                index_payload.get("atif_uri"),
+                default_bucket="trajectories",
+                default_key=f"{default_prefix}/atif.json",
+                media_type="application/json",
+                size_bytes=0,
+            ),
+            share_status=trial_share_status,
+            safety_state=trial_safety,
+            redaction_state=trial_redaction,
+            blocked_reason=None,
+            retention_class="release_evidence",
+            metadata={
+                "atif_schema_version": index_payload.get("atif_schema_version"),
+            },
+        ))
+
+    artifacts = index_payload.get("artifacts")
+    if isinstance(artifacts, list):
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            storage = _artifact_storage_from_item(item)
+            if storage is None:
+                continue
+            status = _share_status(item.get("share_status"), "pending_scan")
+            safety_state, redaction_state = _policy_from_share_status(status)
+            blocked_reason = item.get("blocked_reason")
+            descriptors.append(_artifact_descriptor_base(
+                trial,
+                batch,
+                artifact_type=_artifact_type_from_item(item),
+                name=str(item.get("name") or _artifact_filename(storage["key"])),
+                content_hash=_content_hash(item.get("content_hash")),
+                storage=storage,
+                share_status=status,
+                safety_state=safety_state,
+                redaction_state=redaction_state,
+                blocked_reason=(
+                    blocked_reason
+                    if isinstance(blocked_reason, str) and blocked_reason
+                    else None
+                ),
+                retention_class=(
+                    "owner_only_debug"
+                    if safety_state == "unsafe" or status == "blocked"
+                    else "shared_reusable"
+                ),
+                metadata={
+                    "legacy_role": item.get("role") or item.get("artifact_role"),
+                    "step_name": item.get("step_name"),
+                },
+            ))
+    return descriptors
+
+
+def _artifact_storage_key(artifact: Artifact) -> str | None:
+    storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+    key = storage.get("key")
+    return key if isinstance(key, str) and key else None
+
+
+def _source_provenance_items(
+    trial: TrialRow,
+    batch: Batch | None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for candidate in (batch.source_provenance if batch else None, trial.source_provenance):
+        if isinstance(candidate, list):
+            items.extend(item for item in candidate if isinstance(item, dict))
+    return items
+
+
+def _lineage_parent_specs(
+    trial: TrialRow,
+    batch: Batch | None,
+) -> list[tuple[UUID, str, dict[str, Any]]]:
+    specs: list[tuple[UUID, str, dict[str, Any]]] = []
+    seen: set[tuple[UUID, str]] = set()
+    for item in _source_provenance_items(trial, batch):
+        parent_raw = item.get("source_artifact_id")
+        if not isinstance(parent_raw, str):
+            continue
+        try:
+            parent_id = UUID(parent_raw)
+        except ValueError:
+            continue
+        relation = item.get("relation")
+        if not isinstance(relation, str) or not relation:
+            kind = item.get("kind")
+            relation = (
+                "reused_as_input"
+                if kind == "reused_artifact"
+                else "produced_from"
+            )
+        metadata = {
+            key: value for key, value in {
+                "kind": item.get("kind"),
+                "source_batch_id": item.get("source_batch_id"),
+                "source_trial_id": item.get("source_trial_id"),
+                "source_artifact_key": item.get("source_artifact_key"),
+            }.items()
+            if value is not None
+        }
+        if (parent_id, relation) in seen:
+            continue
+        seen.add((parent_id, relation))
+        specs.append((parent_id, relation, metadata))
+    return specs
+
+
+async def _sync_artifact_lineage_edges(
+    session: Any,
+    *,
+    children: list[Artifact],
+    trial: TrialRow,
+    batch: Batch | None,
+) -> None:
+    child_ids = [artifact.id for artifact in children if artifact.id is not None]
+    if not child_ids:
+        return
+    await session.execute(
+        delete(ArtifactLineageEdge).where(
+            ArtifactLineageEdge.child_artifact_id.in_(child_ids),
+        ),
+    )
+    parent_specs = _lineage_parent_specs(trial, batch)
+    if not parent_specs:
+        return
+    parent_ids = [parent_id for parent_id, _relation, _metadata in parent_specs]
+    existing_parent_ids = set((await session.execute(
+        select(Artifact.id).where(Artifact.id.in_(parent_ids)),
+    )).scalars().all())
+    for child_id in child_ids:
+        for parent_id, relation, metadata in parent_specs:
+            if parent_id not in existing_parent_ids:
+                continue
+            session.add(ArtifactLineageEdge(
+                child_artifact_id=child_id,
+                parent_artifact_id=parent_id,
+                relation=relation,
+                edge_metadata=metadata,
+            ))
+
+
+async def _sync_typed_artifacts_from_index(
+    session: Any,
+    *,
+    trial_id: UUID,
+    index_payload: dict[str, Any],
+) -> None:
+    trial = (await session.execute(
+        select(TrialRow).where(TrialRow.id == trial_id),
+    )).scalar_one_or_none()
+    if trial is None:
+        return
+    batch: Batch | None = None
+    if trial.batch_id is not None:
+        batch = (await session.execute(
+            select(Batch).where(Batch.id == trial.batch_id),
+        )).scalar_one_or_none()
+
+    descriptors = _artifact_descriptors_from_index(trial, batch, index_payload)
+    if not descriptors:
+        return
+
+    existing = list((await session.execute(
+        select(Artifact)
+        .where(Artifact.trial_id == trial.id)
+        .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+    )).scalars().all())
+    existing_by_key = {
+        (artifact.artifact_type, _artifact_storage_key(artifact)): artifact
+        for artifact in existing
+        if _artifact_storage_key(artifact) is not None
+    }
+    synced: list[Artifact] = []
+    for descriptor in descriptors:
+        storage = descriptor["storage"]
+        artifact_key = storage.get("key")
+        artifact = existing_by_key.get(
+            (descriptor["artifact_type"], artifact_key),
+        )
+        if artifact is None:
+            artifact = Artifact(id=uuid4(), **descriptor)
+            session.add(artifact)
+        else:
+            for field, value in descriptor.items():
+                setattr(artifact, field, value)
+        synced.append(artifact)
+
+    await session.flush()
+    await _sync_artifact_lineage_edges(
+        session,
+        children=synced,
+        trial=trial,
+        batch=batch,
+    )
+
 
 @router.patch("/trials/{trial_id}/trajectory_index")
 async def patch_trajectory_index(
@@ -92,6 +496,12 @@ async def patch_trajectory_index(
             "result_payload": result_payload,
             "has_result": result_payload is not None,
         })).mappings().one_or_none()
+        if row is not None:
+            await _sync_typed_artifacts_from_index(
+                session,
+                trial_id=trial_id,
+                index_payload=index_payload,
+            )
         await session.commit()
     if row is None:
         raise HTTPException(status_code=409, detail="worker lost claim")

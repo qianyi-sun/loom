@@ -62,6 +62,7 @@ class ArtifactRef(BaseModel):
     bucket: str
     key: str
     size: int = Field(ge=0)
+    content_hash: str | None = None
     share_status: Literal["pending_scan", "shared", "blocked"] = "pending_scan"
     blocked_reason: str | None = None
 

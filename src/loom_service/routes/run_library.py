@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
 
-from loom.db.schema import Batch, LlmCall, Team, Trial
-from loom.security.redaction import redact_text
+from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
+from loom.security.redaction import redact_mapping, redact_text
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
@@ -37,6 +38,22 @@ _ARTIFACT_GROUPS = (
     "logs_diagnostics",
     "raw_diagnostics",
 )
+_ARTIFACT_TYPE_GROUPS = {
+    "atif_projection": "reports",
+    "metric_table": "reports",
+    "trajectory": "trajectories",
+    "trajectory_bundle": "trajectories",
+    "completion_set": "reusable_outputs",
+    "task_set": "reusable_outputs",
+    "task_split": "reusable_outputs",
+    "skill_markdown": "reusable_outputs",
+    "workflow_spec": "reusable_outputs",
+    "verifier_replay": "logs_diagnostics",
+    "debug_bundle": "raw_diagnostics",
+    "evidence_bundle": "reusable_outputs",
+    "training_data_export": "reusable_outputs",
+}
+_DOWNLOAD_REDACTION_STATES = frozenset({"not_required", "redacted"})
 
 
 class _CloneConfigRequest(BaseModel):
@@ -153,6 +170,105 @@ def _artifact_filename(key: str) -> str:
     return name or "artifact"
 
 
+def _artifact_type_label(artifact_type: str) -> str:
+    return artifact_type.replace("_", " ").capitalize()
+
+
+def _artifact_group_for_type(artifact_type: str) -> str:
+    return _ARTIFACT_TYPE_GROUPS.get(artifact_type, "reusable_outputs")
+
+
+def _artifact_storage_key(artifact: Artifact) -> str | None:
+    storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+    key = storage.get("key")
+    return key if isinstance(key, str) and key else None
+
+
+def _artifact_storage_bucket(
+    artifact: Artifact,
+    default_bucket: str,
+) -> str:
+    storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+    bucket = storage.get("bucket")
+    return bucket if isinstance(bucket, str) and bucket else default_bucket
+
+
+def _artifact_storage_size(artifact: Artifact) -> int:
+    storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+    raw = storage.get("size_bytes") or storage.get("size")
+    try:
+        return max(int(raw), 0) if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _artifact_source(artifact: Artifact) -> dict[str, str | None]:
+    created_by = artifact.created_by if isinstance(artifact.created_by, dict) else {}
+    kind = created_by.get("kind")
+    if not isinstance(kind, str) or not kind:
+        kind = "trial" if artifact.trial_id is not None else "batch"
+    return {
+        "kind": kind,
+        "batch_id": str(artifact.batch_id) if artifact.batch_id else None,
+        "trial_id": str(artifact.trial_id) if artifact.trial_id else None,
+    }
+
+
+def _safe_artifact_blocked_reason(artifact: Artifact) -> str:
+    if artifact.blocked_reason:
+        return redact_text(artifact.blocked_reason)
+    if artifact.safety_state not in {"safe", "unknown"}:
+        return "blocked by artifact safety policy"
+    if artifact.redaction_state not in _DOWNLOAD_REDACTION_STATES:
+        return "blocked by artifact redaction policy"
+    return "blocked by artifact sharing policy"
+
+
+def _artifact_parent_visible(
+    artifact: Artifact,
+    *,
+    batch: Batch | None = None,
+    trial: Trial | None = None,
+) -> bool:
+    if batch is not None:
+        return _batch_is_org_visible(batch)
+    if trial is not None:
+        return _trial_is_org_visible(trial)
+    return artifact.visibility == "org"
+
+
+def _artifact_content_allowed(
+    artifact: Artifact,
+    *,
+    batch: Batch | None = None,
+    trial: Trial | None = None,
+) -> bool:
+    return (
+        artifact.visibility == "org"
+        and artifact.share_status == "shared"
+        and artifact.safety_state == "safe"
+        and artifact.redaction_state in _DOWNLOAD_REDACTION_STATES
+        and _artifact_parent_visible(artifact, batch=batch, trial=trial)
+    )
+
+
+def _artifact_metadata_visible(
+    ctx: Any,
+    artifact: Artifact,
+    *,
+    batch: Batch | None = None,
+    trial: Trial | None = None,
+) -> bool:
+    return (
+        _is_owner_or_admin(ctx, artifact.team_id)
+        or (
+            artifact.visibility == "org"
+            and artifact.share_status == "shared"
+            and _artifact_parent_visible(artifact, batch=batch, trial=trial)
+        )
+    )
+
+
 def _artifact_items(
     trajectory_index: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -188,9 +304,229 @@ def _blocked_reason(item: dict[str, Any]) -> str:
     return "blocked by artifact sharing policy"
 
 
-def _artifact_summary(trials: Sequence[Trial]) -> dict[str, int]:
+async def _typed_artifacts_for_trials(
+    session: Any,
+    trials: Sequence[Trial],
+) -> dict[UUID, list[Artifact]]:
+    trial_ids = [trial.id for trial in trials]
+    if not trial_ids:
+        return {}
+    rows = list((await session.execute(
+        select(Artifact)
+        .where(Artifact.trial_id.in_(trial_ids))
+        .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+    )).scalars().all())
+    out: dict[UUID, list[Artifact]] = {trial.id: [] for trial in trials}
+    for artifact in rows:
+        if artifact.trial_id is not None:
+            out.setdefault(artifact.trial_id, []).append(artifact)
+    return out
+
+
+async def _parents_for_artifacts(
+    session: Any,
+    artifacts: Sequence[Artifact],
+) -> dict[UUID, list[dict[str, Any]]]:
+    artifact_ids = [artifact.id for artifact in artifacts]
+    if not artifact_ids:
+        return {}
+    rows = list((await session.execute(
+        select(ArtifactLineageEdge)
+        .where(ArtifactLineageEdge.child_artifact_id.in_(artifact_ids))
+        .order_by(
+            ArtifactLineageEdge.created_at.asc(),
+            ArtifactLineageEdge.id.asc(),
+        ),
+    )).scalars().all())
+    out: dict[UUID, list[dict[str, Any]]] = {
+        artifact.id: [] for artifact in artifacts
+    }
+    for edge in rows:
+        out.setdefault(edge.child_artifact_id, []).append({
+            "artifact_id": (
+                str(edge.parent_artifact_id)
+                if edge.parent_artifact_id is not None
+                else None
+            ),
+            "relation": edge.relation,
+            "metadata": edge.edge_metadata,
+        })
+    return out
+
+
+def _serialize_typed_artifact(
+    request: Request | None,
+    artifact: Artifact,
+    owner_team: Team,
+    *,
+    ctx: Any,
+    batch: Batch | None = None,
+    trial: Trial | None = None,
+    parents: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    key = _artifact_storage_key(artifact)
+    if key is None:
+        return None
+    role = _artifact_group_for_type(artifact.artifact_type)
+    owner_or_admin = _is_owner_or_admin(ctx, artifact.team_id)
+    content_allowed = _artifact_content_allowed(
+        artifact,
+        batch=batch,
+        trial=trial,
+    )
+    full_metadata = owner_or_admin or content_allowed
+    can_download = (
+        artifact.trial_id is not None
+        and request is not None
+        and (owner_or_admin or content_allowed)
+    )
+    entry: dict[str, Any] = {
+        "id": str(artifact.id),
+        "trial_id": str(artifact.trial_id) if artifact.trial_id else None,
+        "key": key if full_metadata else f"redacted-artifact:{artifact.id}",
+        "size": _artifact_storage_size(artifact) if full_metadata else 0,
+        "role": role,
+        "artifact_type": artifact.artifact_type,
+        "artifact_type_label": _artifact_type_label(artifact.artifact_type),
+        "artifact_schema_version": artifact.artifact_schema_version,
+        "owner_team": {"id": str(owner_team.id), "name": owner_team.name},
+        "source": _artifact_source(artifact),
+        "share_status": artifact.share_status,
+        "safety_state": artifact.safety_state,
+        "redaction_state": artifact.redaction_state,
+        "blocked_reason": (
+            _safe_artifact_blocked_reason(artifact)
+            if artifact.safety_state != "safe"
+            or artifact.redaction_state not in _DOWNLOAD_REDACTION_STATES
+            or artifact.share_status != "shared"
+            else None
+        ),
+        "content_hash": artifact.content_hash if full_metadata else None,
+        "storage": artifact.storage if full_metadata else None,
+        "provenance": artifact.provenance if full_metadata else {},
+        "metadata": artifact.artifact_metadata if full_metadata else {},
+        "parents": (parents or []) if full_metadata else [],
+    }
+    if can_download and request is not None:
+        entry["download_url"] = str(
+            request.url_for(
+                "download_run_library_artifact",
+                trial_id=str(artifact.trial_id),
+            ).include_query_params(key=key),
+        )
+    else:
+        entry["download_url"] = None
+    return entry
+
+
+def _legacy_artifact_type(item: dict[str, Any]) -> str:
+    raw = item.get("artifact_type")
+    if isinstance(raw, str) and raw:
+        return raw
+    role = _artifact_role(item)
+    if role == "reports":
+        return "atif_projection"
+    if role == "trajectories":
+        return "trajectory"
+    if role in {"logs_diagnostics", "raw_diagnostics"}:
+        return "debug_bundle"
+    return "evidence_bundle"
+
+
+def _legacy_safety_state(item: dict[str, Any]) -> str:
+    status = _share_status(item)
+    if status == "shared":
+        return "safe"
+    if status == "blocked":
+        return "unsafe"
+    return "unknown"
+
+
+def _legacy_redaction_state(item: dict[str, Any]) -> str:
+    status = _share_status(item)
+    if status == "shared":
+        return "not_required"
+    if status == "blocked":
+        return "blocked"
+    return "pending"
+
+
+def _serialize_legacy_artifact(
+    request: Request,
+    trial: Trial,
+    owner_team: Team,
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    key = item.get("key")
+    if not isinstance(key, str) or not key:
+        return None
+    size = item.get("size")
+    try:
+        size_int = int(size) if size is not None else 0
+    except (TypeError, ValueError):
+        size_int = 0
+    role = _artifact_role(item)
+    status = _share_status(item)
+    artifact_type = _legacy_artifact_type(item)
+    return {
+        "trial_id": str(trial.id),
+        "key": key,
+        "size": max(size_int, 0),
+        "role": role,
+        "artifact_type": artifact_type,
+        "artifact_type_label": _artifact_type_label(artifact_type),
+        "artifact_schema_version": "1.0",
+        "owner_team": {"id": str(owner_team.id), "name": owner_team.name},
+        "source": {
+            "kind": "trial",
+            "batch_id": str(trial.batch_id) if trial.batch_id else None,
+            "trial_id": str(trial.id),
+        },
+        "share_status": status,
+        "safety_state": _legacy_safety_state(item),
+        "redaction_state": _legacy_redaction_state(item),
+        "blocked_reason": (
+            _blocked_reason(item) if status == "blocked" else None
+        ),
+        "content_hash": item.get("content_hash") or "pending:legacy-unhashed",
+        "storage": {
+            "backend": "object_store",
+            "bucket": _artifact_bucket(item, "artifacts"),
+            "key": key,
+            "media_type": item.get("media_type") or "application/octet-stream",
+            "size_bytes": max(size_int, 0),
+        },
+        "provenance": {
+            "batch_id": str(trial.batch_id) if trial.batch_id else None,
+            "trial_id": str(trial.id),
+            "source_trial_ids": [str(trial.id)],
+            "relation": "produced_from",
+        },
+        "metadata": {
+            "legacy_role": item.get("role") or item.get("artifact_role"),
+            "step_name": item.get("step_name"),
+        },
+        "parents": [],
+        "download_url": str(
+            request.url_for(
+                "download_run_library_artifact",
+                trial_id=str(trial.id),
+            ).include_query_params(key=key),
+        ),
+    }
+
+
+def _artifact_summary(
+    trials: Sequence[Trial],
+    typed_by_trial: dict[UUID, list[Artifact]],
+) -> dict[str, int]:
     summary = {role: 0 for role in _ARTIFACT_GROUPS}
     for trial in trials:
+        typed = typed_by_trial.get(trial.id) or []
+        if typed:
+            for artifact in typed:
+                summary[_artifact_group_for_type(artifact.artifact_type)] += 1
+            continue
         for item in _artifact_items(trial.trajectory_index):
             summary[_artifact_role(item)] += 1
     return summary
@@ -198,39 +534,36 @@ def _artifact_summary(trials: Sequence[Trial]) -> dict[str, int]:
 
 def _artifact_inventory(
     request: Request,
+    ctx: Any,
     trials: Sequence[Trial],
+    batch: Batch,
+    owner_team: Team,
+    typed_by_trial: dict[UUID, list[Artifact]],
+    parents_by_artifact: dict[UUID, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {
         role: [] for role in _ARTIFACT_GROUPS
     }
     for trial in trials:
+        typed = typed_by_trial.get(trial.id) or []
+        if typed:
+            for artifact in typed:
+                entry = _serialize_typed_artifact(
+                    request,
+                    artifact,
+                    owner_team,
+                    ctx=ctx,
+                    batch=batch,
+                    trial=trial,
+                    parents=parents_by_artifact.get(artifact.id, []),
+                )
+                if entry is not None:
+                    grouped[entry["role"]].append(entry)
+            continue
         for item in _artifact_items(trial.trajectory_index):
-            key = item.get("key")
-            if not isinstance(key, str) or not key:
-                continue
-            size = item.get("size")
-            try:
-                size_int = int(size) if size is not None else 0
-            except (TypeError, ValueError):
-                size_int = 0
-            role = _artifact_role(item)
-            status = _share_status(item)
-            grouped[role].append({
-                "trial_id": str(trial.id),
-                "key": key,
-                "size": max(size_int, 0),
-                "role": role,
-                "share_status": status,
-                "blocked_reason": (
-                    _blocked_reason(item) if status == "blocked" else None
-                ),
-                "download_url": str(
-                    request.url_for(
-                        "download_run_library_artifact",
-                        trial_id=str(trial.id),
-                    ).include_query_params(key=key),
-                ),
-            })
+            entry = _serialize_legacy_artifact(request, trial, owner_team, item)
+            if entry is not None:
+                grouped[entry["role"]].append(entry)
     return grouped
 
 
@@ -286,6 +619,100 @@ def _trial_rollup(trials: Sequence[Trial]) -> tuple[float | None, float]:
     )
 
 
+def _artifact_filter_active(filters: dict[str, Any]) -> bool:
+    return any(value is not None for value in filters.values())
+
+
+def _typed_artifact_matches_filters(
+    artifact: Artifact,
+    filters: dict[str, Any],
+) -> bool:
+    artifact_type = filters.get("artifact_type")
+    if artifact_type is not None and artifact_type not in {
+        artifact.artifact_type,
+        _artifact_group_for_type(artifact.artifact_type),
+    }:
+        return False
+    owner_team_id = filters.get("owner_team_id")
+    if owner_team_id is not None and artifact.team_id != owner_team_id:
+        return False
+    source_trial_id = filters.get("source_trial_id")
+    provenance = artifact.provenance if isinstance(artifact.provenance, dict) else {}
+    source_trial_ids = provenance.get("source_trial_ids")
+    if source_trial_id is not None:
+        if artifact.trial_id != source_trial_id and (
+            not isinstance(source_trial_ids, list)
+            or str(source_trial_id) not in {str(item) for item in source_trial_ids}
+        ):
+            return False
+    source_batch_id = filters.get("source_batch_id")
+    if source_batch_id is not None:
+        if artifact.batch_id != source_batch_id and str(provenance.get("batch_id")) != str(source_batch_id):
+            return False
+    safety_state = filters.get("safety_state")
+    if safety_state is not None and artifact.safety_state != safety_state:
+        return False
+    provenance_relation = filters.get("provenance_relation")
+    if (
+        provenance_relation is not None
+        and provenance.get("relation") != provenance_relation
+    ):
+        return False
+    return True
+
+
+def _legacy_artifact_matches_filters(
+    item: dict[str, Any],
+    trial: Trial,
+    filters: dict[str, Any],
+) -> bool:
+    artifact_type = filters.get("artifact_type")
+    legacy_type = _legacy_artifact_type(item)
+    if artifact_type is not None and artifact_type not in {
+        legacy_type,
+        _artifact_role(item),
+    }:
+        return False
+    owner_team_id = filters.get("owner_team_id")
+    if owner_team_id is not None and trial.team_id != owner_team_id:
+        return False
+    source_trial_id = filters.get("source_trial_id")
+    if source_trial_id is not None and trial.id != source_trial_id:
+        return False
+    source_batch_id = filters.get("source_batch_id")
+    if source_batch_id is not None and trial.batch_id != source_batch_id:
+        return False
+    safety_state = filters.get("safety_state")
+    if safety_state is not None and _legacy_safety_state(item) != safety_state:
+        return False
+    provenance_relation = filters.get("provenance_relation")
+    if provenance_relation is not None and provenance_relation != "produced_from":
+        return False
+    return True
+
+
+async def _batch_has_matching_artifact(
+    session: Any,
+    trials: Sequence[Trial],
+    filters: dict[str, Any],
+) -> bool:
+    if not _artifact_filter_active(filters):
+        return True
+    typed_by_trial = await _typed_artifacts_for_trials(session, trials)
+    for trial in trials:
+        typed = typed_by_trial.get(trial.id) or []
+        if typed:
+            if any(_typed_artifact_matches_filters(artifact, filters) for artifact in typed):
+                return True
+            continue
+        if any(
+            _legacy_artifact_matches_filters(item, trial, filters)
+            for item in _artifact_items(trial.trajectory_index)
+        ):
+            return True
+    return False
+
+
 async def _batch_trials(session: Any, batch_id: UUID) -> list[Trial]:
     return list((await session.execute(
         select(Trial).where(Trial.batch_id == batch_id),
@@ -309,12 +736,20 @@ async def _llm_calls_for_trials(
 async def _serialize_batch(
     request: Request,
     session: Any,
+    ctx: Any,
     batch: Batch,
     owner_team: Team,
     *,
     include_inventory: bool = False,
 ) -> dict[str, Any]:
     trials = await _batch_trials(session, batch.id)
+    typed_by_trial = await _typed_artifacts_for_trials(session, trials)
+    typed_artifacts = [
+        artifact
+        for artifacts in typed_by_trial.values()
+        for artifact in artifacts
+    ]
+    parents_by_artifact = await _parents_for_artifacts(session, typed_artifacts)
     llm_calls = await _llm_calls_for_trials(session, trials)
     reward, cost = _trial_rollup(trials)
     debug_evidence = build_batch_debug_evidence(
@@ -352,7 +787,7 @@ async def _serialize_batch(
         "trial_summary": _trial_summary(trials),
         "aggregate_reward": reward,
         "total_cost_usd": cost,
-        "artifact_summary": _artifact_summary(trials),
+        "artifact_summary": _artifact_summary(trials, typed_by_trial),
         "debug_evidence": debug_evidence,
         "diagnosis": build_batch_diagnosis(
             debug_evidence,
@@ -360,7 +795,15 @@ async def _serialize_batch(
         ),
     }
     if include_inventory:
-        out["artifact_inventory"] = _artifact_inventory(request, trials)
+        out["artifact_inventory"] = _artifact_inventory(
+            request,
+            ctx,
+            trials,
+            batch,
+            owner_team,
+            typed_by_trial,
+            parents_by_artifact,
+        )
     return out
 
 
@@ -394,6 +837,22 @@ async def _load_trial_with_batch(
             select(Batch).where(Batch.id == trial.batch_id),
         )).scalar_one_or_none()
     return trial, batch
+
+
+async def _typed_artifact_for_trial_key(
+    session: Any,
+    trial_id: UUID,
+    key: str,
+) -> Artifact | None:
+    rows = cast(list[Artifact], list((await session.execute(
+        select(Artifact)
+        .where(Artifact.trial_id == trial_id)
+        .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+    )).scalars().all()))
+    for artifact in rows:
+        if _artifact_storage_key(artifact) == key:
+            return artifact
+    return None
 
 
 def _apply_read_filter(
@@ -452,6 +911,11 @@ async def list_run_library_batches(
     state: Annotated[str | None, Query()] = None,
     visibility: Annotated[str | None, Query(pattern="^(team|org|private)$")] = None,
     artifact_type: Annotated[str | None, Query()] = None,
+    owner_team_id: Annotated[UUID | None, Query()] = None,
+    source_batch_id: Annotated[UUID | None, Query()] = None,
+    source_trial_id: Annotated[UUID | None, Query()] = None,
+    safety_state: Annotated[str | None, Query()] = None,
+    provenance_relation: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
 ) -> dict[str, Any]:
@@ -489,15 +953,29 @@ async def list_run_library_batches(
                 and_(Batch.created_at == cur.submitted_at, Batch.id < cur.id),
             ),
         )
-    stmt = stmt.limit(limit + 1)
+    artifact_filters = {
+        "artifact_type": artifact_type,
+        "owner_team_id": owner_team_id,
+        "source_batch_id": source_batch_id,
+        "source_trial_id": source_trial_id,
+        "safety_state": safety_state,
+        "provenance_relation": provenance_relation,
+    }
+    artifact_filtering = _artifact_filter_active(artifact_filters)
+    if not artifact_filtering:
+        stmt = stmt.limit(limit + 1)
     rows = list((await session.execute(stmt)).all())
 
     serialized: list[dict[str, Any]] = []
     for batch, team in rows:
-        item = await _serialize_batch(request, session, batch, team)
-        if artifact_type:
-            if item["artifact_summary"].get(artifact_type, 0) <= 0:
-                continue
+        trials = await _batch_trials(session, batch.id)
+        if not await _batch_has_matching_artifact(
+            session,
+            trials,
+            artifact_filters,
+        ):
+            continue
+        item = await _serialize_batch(request, session, ctx, batch, team)
         serialized.append(item)
 
     next_cursor: str | None = None
@@ -513,6 +991,179 @@ async def list_run_library_batches(
     return {"items": serialized, "next_cursor": next_cursor}
 
 
+async def _artifact_rows_for_library(
+    session: Any,
+    ctx: Any,
+    *,
+    request: Request | None,
+    scope: str,
+    artifact_filters: dict[str, Any],
+    safe_content_only: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(Artifact, Team, Batch, Trial)
+        .join(Team, Team.id == Artifact.team_id)
+        .outerjoin(Batch, Batch.id == Artifact.batch_id)
+        .outerjoin(Trial, Trial.id == Artifact.trial_id)
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    owner_team_id = artifact_filters.get("owner_team_id")
+    if owner_team_id is not None:
+        stmt = stmt.where(Artifact.team_id == owner_team_id)
+
+    artifact_type = artifact_filters.get("artifact_type")
+    if artifact_type in _ARTIFACT_TYPE_GROUPS:
+        stmt = stmt.where(Artifact.artifact_type == artifact_type)
+    # Source filters may match execution columns or provenance JSON, so they
+    # stay in the Python filter below instead of narrowing SQL too early.
+    safety_state = artifact_filters.get("safety_state")
+    if safety_state is not None:
+        stmt = stmt.where(Artifact.safety_state == safety_state)
+
+    if scope != "all":
+        if ctx.team_id is None:
+            return []
+        stmt = stmt.where(Artifact.team_id == ctx.team_id)
+    elif not is_admin(ctx):
+        stmt = stmt.where(
+            or_(
+                Artifact.team_id == ctx.team_id,
+                and_(
+                    Batch.visibility == "org",
+                    Batch.share_status == "shared",
+                    Batch.state.in_(sorted(_ORG_VISIBLE_BATCH_STATES)),
+                ),
+                and_(
+                    Batch.id.is_(None),
+                    Trial.visibility == "org",
+                    Trial.share_status == "shared",
+                    Trial.state.in_(sorted(_ORG_VISIBLE_TRIAL_STATES)),
+                ),
+            ),
+        )
+
+    rows = list((await session.execute(stmt)).all())
+    selected: list[tuple[Artifact, Team, Batch | None, Trial | None]] = []
+    for artifact, owner_team, batch, trial in rows:
+        if not _artifact_metadata_visible(
+            ctx,
+            artifact,
+            batch=batch,
+            trial=trial,
+        ):
+            continue
+        if not _typed_artifact_matches_filters(artifact, artifact_filters):
+            continue
+        if safe_content_only and not _artifact_content_allowed(
+            artifact,
+            batch=batch,
+            trial=trial,
+        ):
+            continue
+        selected.append((artifact, owner_team, batch, trial))
+        if len(selected) >= limit:
+            break
+
+    parents_by_artifact = await _parents_for_artifacts(
+        session,
+        [artifact for artifact, _owner_team, _batch, _trial in selected],
+    )
+    out: list[dict[str, Any]] = []
+    for artifact, owner_team, batch, trial in selected:
+        item = _serialize_typed_artifact(
+            request,
+            artifact,
+            owner_team,
+            ctx=ctx,
+            batch=batch,
+            trial=trial,
+            parents=parents_by_artifact.get(artifact.id, []),
+        )
+        if item is not None:
+            out.append(redact_mapping(item) if safe_content_only else item)
+    return out
+
+
+@router.get("/run-library/artifacts")
+async def list_run_library_artifacts(
+    request: Request,
+    sc: SessionAndCtx,
+    scope: Annotated[str, Query(pattern="^(my|all)$")] = "my",
+    artifact_type: Annotated[str | None, Query()] = None,
+    owner_team_id: Annotated[UUID | None, Query()] = None,
+    source_batch_id: Annotated[UUID | None, Query()] = None,
+    source_trial_id: Annotated[UUID | None, Query()] = None,
+    safety_state: Annotated[str | None, Query()] = None,
+    provenance_relation: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=500)] = 200,
+) -> dict[str, Any]:
+    session, ctx = sc
+    require_scope(ctx, "read:own")
+    filters = {
+        "artifact_type": artifact_type,
+        "owner_team_id": owner_team_id,
+        "source_batch_id": source_batch_id,
+        "source_trial_id": source_trial_id,
+        "safety_state": safety_state,
+        "provenance_relation": provenance_relation,
+    }
+    stmt_items = await _artifact_rows_for_library(
+        session,
+        ctx,
+        request=request,
+        scope=scope,
+        artifact_filters=filters,
+        safe_content_only=False,
+        limit=limit,
+    )
+    return {"items": stmt_items, "next_cursor": None}
+
+
+@router.get("/run-library/artifacts/export")
+async def export_run_library_artifacts(
+    sc: SessionAndCtx,
+    scope: Annotated[str, Query(pattern="^(my|all)$")] = "my",
+    artifact_type: Annotated[str | None, Query()] = None,
+    owner_team_id: Annotated[UUID | None, Query()] = None,
+    source_batch_id: Annotated[UUID | None, Query()] = None,
+    source_trial_id: Annotated[UUID | None, Query()] = None,
+    safety_state: Annotated[str | None, Query()] = None,
+    provenance_relation: Annotated[str | None, Query()] = None,
+    format: Annotated[str, Query(pattern="^(json|jsonl)$")] = "jsonl",
+    limit: Annotated[int, Query(gt=0, le=5000)] = 1000,
+) -> Response:
+    session, ctx = sc
+    require_scope(ctx, "read:own")
+    filters = {
+        "artifact_type": artifact_type,
+        "owner_team_id": owner_team_id,
+        "source_batch_id": source_batch_id,
+        "source_trial_id": source_trial_id,
+        "safety_state": safety_state,
+        "provenance_relation": provenance_relation,
+    }
+    items = await _artifact_rows_for_library(
+        session,
+        ctx,
+        request=None,
+        scope=scope,
+        artifact_filters=filters,
+        safe_content_only=True,
+        limit=limit,
+    )
+    if format == "json":
+        return Response(
+            content=json.dumps({"items": items}, separators=(",", ":")),
+            media_type="application/json",
+        )
+    content = "".join(
+        json.dumps(item, separators=(",", ":")) + "\n"
+        for item in items
+    )
+    return Response(content=content, media_type="application/x-ndjson")
+
+
 @router.get("/run-library/batches/{batch_id}")
 async def get_run_library_batch(
     request: Request,
@@ -525,7 +1176,7 @@ async def get_run_library_batch(
     if not _can_read_batch(ctx, batch):
         raise HTTPException(status_code=403, detail="batch is not shared")
     return await _serialize_batch(
-        request, session, batch, team, include_inventory=True,
+        request, session, ctx, batch, team, include_inventory=True,
     )
 
 
@@ -633,6 +1284,30 @@ async def download_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
+    typed_artifact = await _typed_artifact_for_trial_key(session, trial.id, key)
+    if typed_artifact is not None:
+        if not (
+            _is_owner_or_admin(ctx, typed_artifact.team_id)
+            or _artifact_content_allowed(
+                typed_artifact,
+                batch=batch,
+                trial=trial,
+            )
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=_safe_artifact_blocked_reason(typed_artifact),
+            )
+        return stream_object_response(
+            client=request.app.state.minio_client,
+            bucket=_artifact_storage_bucket(
+                typed_artifact,
+                settings.artifacts_bucket,
+            ),
+            key=key,
+            filename=_artifact_filename(key),
+            artifact_kind="artifact",
+        )
     artifact = _find_artifact(trial.trajectory_index, key)
     if artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
@@ -660,10 +1335,24 @@ async def reuse_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
+    typed_artifact = await _typed_artifact_for_trial_key(
+        session,
+        trial.id,
+        payload.key,
+    )
     artifact = _find_artifact(trial.trajectory_index, payload.key)
-    if artifact is None:
+    if typed_artifact is None and artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
-    if _share_status(artifact) != "shared":
+    if typed_artifact is not None and not _artifact_content_allowed(
+        typed_artifact,
+        batch=batch,
+        trial=trial,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=_safe_artifact_blocked_reason(typed_artifact),
+        )
+    if typed_artifact is None and artifact is not None and _share_status(artifact) != "shared":
         raise HTTPException(status_code=403, detail=_blocked_reason(artifact))
     if payload.provider_connection_id is not None:
         await validate_provider_connection(
@@ -671,16 +1360,35 @@ async def reuse_run_library_artifact(
         )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
-    role = _artifact_role(artifact)
+    role = (
+        _artifact_group_for_type(typed_artifact.artifact_type)
+        if typed_artifact is not None
+        else _artifact_role(artifact or {})
+    )
     source_batch_id = str(batch.id) if batch is not None else None
-    provenance = [{
+    provenance_item: dict[str, Any] = {
         "kind": "reused_artifact",
+        "relation": "reused_as_input",
         "source_batch_id": source_batch_id,
         "source_trial_id": str(trial.id),
         "source_team_id": str(trial.team_id),
         "source_artifact_key": payload.key,
         "source_artifact_role": role,
-    }]
+    }
+    if typed_artifact is not None:
+        provenance_item.update({
+            "source_artifact_id": str(typed_artifact.id),
+            "source_artifact_type": typed_artifact.artifact_type,
+            "source_artifact_schema_version": (
+                typed_artifact.artifact_schema_version
+            ),
+            "source_content_hash": typed_artifact.content_hash,
+            "source_visibility": typed_artifact.visibility,
+            "source_share_status": typed_artifact.share_status,
+            "source_safety_state": typed_artifact.safety_state,
+            "source_redaction_state": typed_artifact.redaction_state,
+        })
+    provenance = [provenance_item]
     task_filter = (
         dict(batch.task_filter)
         if batch is not None
@@ -716,6 +1424,12 @@ async def reuse_run_library_artifact(
     return {
         "batch_id": str(derived.id),
         "source_artifact": {
+            **({
+                "id": str(typed_artifact.id),
+                "artifact_type": typed_artifact.artifact_type,
+                "artifact_schema_version": typed_artifact.artifact_schema_version,
+                "content_hash": typed_artifact.content_hash,
+            } if typed_artifact is not None else {}),
             "trial_id": str(trial.id),
             "key": payload.key,
             "role": role,

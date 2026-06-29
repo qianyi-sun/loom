@@ -110,11 +110,37 @@ const detailBatch = {
   artifact_inventory: {
     reports: [
       {
+        id: "artifact-metric",
         trial_id: "trial-alpha",
         key: "team-alpha/trial-alpha/main/report.json",
         size: 17,
         role: "reports",
+        artifact_type: "metric_table",
+        artifact_type_label: "Metric table",
+        artifact_schema_version: "1.0",
+        owner_team: { id: "team-alpha", name: "Alpha Research" },
+        source: {
+          kind: "trial",
+          batch_id: "batch-alpha",
+          trial_id: "trial-alpha",
+        },
         share_status: "shared",
+        safety_state: "safe",
+        redaction_state: "redacted",
+        content_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        storage: {
+          backend: "object_store",
+          bucket: "artifacts",
+          key: "team-alpha/trial-alpha/main/report.json",
+          media_type: "application/json",
+          size_bytes: 17,
+        },
+        provenance: {
+          relation: "produced_from",
+          source_trial_ids: ["trial-alpha"],
+        },
+        metadata: { metric_name: "aggregate_reward" },
+        parents: [],
         blocked_reason: null,
         download_url:
           "http://svc/api/v1/run-library/trials/trial-alpha/artifacts/download?key=team-alpha%2Ftrial-alpha%2Fmain%2Freport.json",
@@ -125,11 +151,37 @@ const detailBatch = {
     logs_diagnostics: [],
     raw_diagnostics: [
       {
+        id: "artifact-debug",
         trial_id: "trial-alpha",
         key: "team-alpha/trial-alpha/main/debug.log",
         size: 21,
         role: "raw_diagnostics",
-        share_status: "blocked",
+        artifact_type: "debug_bundle",
+        artifact_type_label: "Debug bundle",
+        artifact_schema_version: "1.0",
+        owner_team: { id: "team-alpha", name: "Alpha Research" },
+        source: {
+          kind: "trial",
+          batch_id: "batch-alpha",
+          trial_id: "trial-alpha",
+        },
+        share_status: "shared",
+        safety_state: "unsafe",
+        redaction_state: "blocked",
+        content_hash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        storage: {
+          backend: "object_store",
+          bucket: "artifacts",
+          key: "team-alpha/trial-alpha/main/debug.log",
+          media_type: "text/plain",
+          size_bytes: 21,
+        },
+        provenance: {
+          relation: "produced_from",
+          source_trial_ids: ["trial-alpha"],
+        },
+        metadata: { debug_kind: "raw_log" },
+        parents: [],
         blocked_reason: "secret-like content detected",
         download_url:
           "http://svc/api/v1/run-library/trials/trial-alpha/artifacts/download?key=team-alpha%2Ftrial-alpha%2Fmain%2Fdebug.log",
@@ -237,6 +289,14 @@ function mockRunLibrary({
       if (url.endsWith("/api/v1/run-library/batches/batch-alpha")) {
         return Promise.resolve(jsonResponse(detailBatch));
       }
+      if (parsed.pathname === "/api/v1/run-library/artifacts/export") {
+        return Promise.resolve(
+          new Response('{"id":"artifact-metric"}\n', {
+            status: 200,
+            headers: { "Content-Type": "application/x-ndjson" },
+          }),
+        );
+      }
       if (url.endsWith("/api/v1/provider-connections")) {
         return Promise.resolve(
           jsonResponse({
@@ -325,6 +385,7 @@ describe("RunLibrary", () => {
     expect(screen.getAllByText("org / shared").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Reports 1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Raw/internal 1").length).toBeGreaterThan(0);
+    expect(screen.getByRole("option", { name: "Metric table" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "All teams" }),
     ).toHaveAttribute("aria-pressed", "true");
@@ -451,8 +512,24 @@ describe("RunLibraryBatchDetail", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText("Reports")).toBeInTheDocument();
+    expect(screen.getByText("Metric table")).toBeInTheDocument();
+    expect(screen.getByText("safe / redacted")).toBeInTheDocument();
+    expect(screen.getAllByText("Source trial trial-alpha").length).toBeGreaterThan(0);
+    expect(screen.getByText(/sha256:aaaaaaaaaaaa/)).toBeInTheDocument();
     expect(screen.getByText("Raw/internal diagnostics")).toBeInTheDocument();
+    expect(screen.getByText("Debug bundle")).toBeInTheDocument();
+    expect(screen.getByText("unsafe / blocked")).toBeInTheDocument();
     expect(screen.getByText("secret-like content detected")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: /Download team-alpha\/trial-alpha\/main\/debug\.log/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: /Reuse team-alpha\/trial-alpha\/main\/debug\.log/i,
+      }),
+    ).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.selectOptions(
@@ -470,6 +547,9 @@ describe("RunLibraryBatchDetail", () => {
         name: /Reuse team-alpha\/trial-alpha\/main\/report\.json/i,
       }),
     );
+    await user.click(
+      screen.getByRole("button", { name: "Export artifact metadata" }),
+    );
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -483,7 +563,19 @@ describe("RunLibraryBatchDetail", () => {
         "/api/v1/run-library/trials/trial-alpha/artifacts/reuse",
         expect.objectContaining({ method: "POST" }),
       );
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/run-library/artifacts/export"),
+        expect.anything(),
+      );
       expect(createObjectURL).toHaveBeenCalled();
     });
+    const exportCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).includes("/api/v1/run-library/artifacts/export"),
+    );
+    expect(exportCall).toBeDefined();
+    const exportUrl = new URL(String(exportCall?.[0]), "http://localhost");
+    expect(exportUrl.searchParams.get("scope")).toBe("all");
+    expect(exportUrl.searchParams.get("source_batch_id")).toBe("batch-alpha");
+    expect(exportUrl.searchParams.get("format")).toBe("jsonl");
   });
 });

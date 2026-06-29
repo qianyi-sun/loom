@@ -9,6 +9,7 @@ from __future__ import annotations
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
 from loom.driver.base import Driver
@@ -21,6 +22,7 @@ class CollectedArtifact:
     bucket: str
     key: str
     size: int
+    content_hash: str
     share_status: ShareStatus
     blocked_reason: str | None = None
 
@@ -83,6 +85,7 @@ class ArtifactCollector:
                         bucket=self.bucket,
                         key=key,
                         size=len(body),
+                        content_hash=f"sha256:{sha256(body).hexdigest()}",
                         share_status=share_decision.status,
                         blocked_reason=share_decision.reason,
                     ),
