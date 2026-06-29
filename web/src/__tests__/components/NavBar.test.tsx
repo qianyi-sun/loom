@@ -8,6 +8,7 @@ function renderNav(
   isAdmin: boolean,
   currentTeamRole: string | null = null,
   currentTeamName: string | null = null,
+  currentUsername: string | null = null,
 ) {
   return render(
     <MemoryRouter>
@@ -15,6 +16,7 @@ function renderNav(
         isAdmin={isAdmin}
         currentTeamRole={currentTeamRole}
         currentTeamName={currentTeamName}
+        currentUsername={currentUsername}
       />
     </MemoryRouter>,
   );
@@ -38,12 +40,13 @@ describe("NavBar", () => {
     );
   });
 
-  it("shows the current team and role in the global navigation", () => {
-    renderNav(false, "owner", "EAI");
+  it("shows the signed-in user, current team, and role in the global navigation", () => {
+    renderNav(false, "owner", "EAI", "Qianyi");
 
-    const teamContext = screen.getByLabelText("Current team");
-    expect(teamContext).toHaveTextContent("EAI");
-    expect(teamContext).toHaveTextContent("owner");
+    const identityContext = screen.getByLabelText("Current user and team");
+    expect(identityContext).toHaveTextContent("Signed in");
+    expect(identityContext).toHaveTextContent("Qianyi / EAI");
+    expect(identityContext).toHaveTextContent("owner");
   });
 
   it("hides admin-only links from a team user", () => {

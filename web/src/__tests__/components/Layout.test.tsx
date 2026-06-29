@@ -23,6 +23,7 @@ describe("Layout", () => {
         return jsonResponse({
           user: {
             id: "user-1",
+            username: "Owner",
             email: "owner@example.com",
             display_name: "Owner Example",
             is_platform_admin: false,
@@ -51,9 +52,9 @@ describe("Layout", () => {
     renderWithProviders(<App />, { route: "/settings" });
 
     const nav = await screen.findByRole("navigation", { name: "Primary" });
-    const teamContext = within(nav).getByLabelText("Current team");
-    expect(teamContext).toHaveTextContent("EAI");
-    expect(teamContext).toHaveTextContent("owner");
+    const identityContext = within(nav).getByLabelText("Current user and team");
+    expect(identityContext).toHaveTextContent("Owner / EAI");
+    expect(identityContext).toHaveTextContent("owner");
   });
 
   it("gives the signed-out settings page a wide public onboarding shell", async () => {
