@@ -37,17 +37,23 @@ function formatRole(role: string | null): string | null {
 
 export interface NavBarProps {
   isAdmin: boolean;
+  currentUsername?: string | null;
   currentTeamName?: string | null;
   currentTeamRole?: string | null;
 }
 
 export default function NavBar({
   isAdmin,
+  currentUsername = null,
   currentTeamName = null,
   currentTeamRole = null,
 }: NavBarProps): JSX.Element {
   const canManageTeam = isAdmin || currentTeamRole === "owner";
   const displayRole = formatRole(currentTeamRole);
+  const identityLabel = [
+    currentUsername?.trim() || null,
+    currentTeamName?.trim() || null,
+  ].filter(Boolean).join(" / ");
   return (
     <nav
       aria-label="Primary"
@@ -100,16 +106,16 @@ export default function NavBar({
         ) : null}
       </div>
 
-      {currentTeamName || displayRole ? (
+      {identityLabel || displayRole ? (
         <div
-          aria-label="Current team"
+          aria-label="Current user and team"
           className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
         >
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Current team
+            Signed in
           </p>
           <p className="mt-1 truncate font-medium text-slate-900">
-            {currentTeamName ?? "No team selected"}
+            {identityLabel || "No team selected"}
           </p>
           {displayRole ? (
             <p className="mt-0.5 text-xs capitalize text-slate-500">

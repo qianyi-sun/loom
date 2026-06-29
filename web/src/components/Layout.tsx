@@ -48,6 +48,7 @@ export default function Layout(): JSX.Element {
     <div className="flex min-h-screen flex-col bg-slate-50 lg:h-screen lg:flex-row">
       <NavBar
         isAdmin={isAdmin}
+        currentUsername={me?.user.username ?? null}
         currentTeamName={me?.current_team?.name ?? null}
         currentTeamRole={me?.current_team?.role ?? null}
       />
