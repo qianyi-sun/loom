@@ -12,7 +12,6 @@ from loom_benchmarks.adapters.gpqa import GPQAAdapter, GPQADiamondAdapter
 from loom.models.task import TaskConfig
 from loom.models.verifier import VerifierResult
 
-
 _EXTENDED_ROWS = [
     {
         "Record ID": "recAlpha123",
