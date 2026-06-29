@@ -324,7 +324,7 @@ loom eval batch {list,show,cancel}
 loom eval usage --start YYYY-MM-DD --end YYYY-MM-DD [--group-by day|week|month] [--include-batches]
     [--team-id UUID] [--user-id UUID] [--provider-connection-id UUID]
     [--model MODEL] [--benchmark-id ID] [--batch-id UUID]
-    [--status STATE] [--pricing-mode priced|tokens-only|price-unknown]
+    [--status STATE] [--pricing-mode priced|tokens-only|price-unknown|failed-upstream]
     [--breakdown-by team|user|provider_connection|model|benchmark|batch|status|pricing_mode]
 loom admin rate-cards sync-yibuapi [--group GROUP] [--source-url URL]
 loom eval trial {list,show}

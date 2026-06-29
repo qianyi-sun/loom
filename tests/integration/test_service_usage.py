@@ -295,6 +295,123 @@ async def test_usage_include_batches_distinguishes_token_only_cost(
     assert priced["cost_status"] == "estimated"
 
 
+async def test_usage_failed_upstream_audit_rows_are_not_priced(
+    usage_setup: tuple[FastAPI, str, str, str, str],
+    postgres_url: str,
+) -> None:
+    app, raw, _admin_raw, team_str, task_id = usage_setup
+    team_id = UUID(team_str)
+    batch_id = uuid4()
+    trial_id = uuid4()
+    ts = datetime(2026, 6, 2, 15, tzinfo=UTC)
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="failed upstream audit batch",
+                task_filter={"task_ids": [task_id], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="failed-upstream",
+                expected_trial_count=1,
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_id,
+                team_id=team_id,
+                state="failed",
+                config={},
+                requires_caps={},
+                submitted_at=ts,
+                finished_at=ts,
+                batch_id=batch_id,
+            )
+        )
+        conn.execute(
+            insert(LlmCall).values(
+                id=uuid4(),
+                team_id=team_id,
+                trial_id=trial_id,
+                step_id="main",
+                model="gpt-4",
+                dialect="openai_chat",
+                input_tokens=0,
+                output_tokens=0,
+                provider_extras={
+                    "_loom_call_status": "failed",
+                    "_loom_failure_category": "upstream_http_5xx",
+                    "_loom_failure_status_code": 500,
+                    "_loom_usage_status": "missing",
+                },
+                cost_usd=Decimal("0"),
+                rate_card_hash="failed-upstream",
+                captured_at=ts,
+            )
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        filtered = await ac.get(
+            "/api/v1/usage",
+            params={
+                "team_id": team_str,
+                "start": "2026-06-02",
+                "end": "2026-06-02",
+                "pricing_mode": "failed-upstream",
+                "include_batches": "true",
+            },
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        breakdown = await ac.get(
+            "/api/v1/usage",
+            params={
+                "team_id": team_str,
+                "start": "2026-06-02",
+                "end": "2026-06-02",
+                "breakdown_by": "pricing_mode",
+            },
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert filtered.status_code == 200, filtered.text
+    buckets = filtered.json()["buckets"]
+    assert len(buckets) == 1
+    bucket = buckets[0]
+    assert bucket["trial_count"] == 1
+    assert bucket["llm_input_tokens"] == 0
+    assert bucket["llm_output_tokens"] == 0
+    assert bucket["estimated_cost_usd"] is None
+    assert bucket["cost_currency"] is None
+    assert bucket["cost_status"] == "failed_upstream"
+    assert bucket["pricing_modes"] == ["failed-upstream"]
+    assert bucket["priced_llm_calls_count"] == 0
+    assert bucket["failed_upstream_llm_calls_count"] == 1
+    assert bucket["missing_usage_llm_calls_count"] == 1
+    assert bucket["usage_reporting_status"] == "missing"
+    assert bucket["usage_estimate_confidence"] == "missing"
+    assert bucket["batches"][0]["batch_name"] == "failed upstream audit batch"
+    assert bucket["batches"][0]["failed_upstream_llm_calls_count"] == 1
+    assert bucket["batches"][0]["cost_status"] == "failed_upstream"
+
+    assert breakdown.status_code == 200, breakdown.text
+    by_key = {
+        item["breakdown_key"]: item
+        for item in breakdown.json()["buckets"]
+        if item.get("breakdown_by") == "pricing_mode"
+    }
+    assert by_key["failed-upstream"]["failed_upstream_llm_calls_count"] == 1
+    assert by_key["failed-upstream"]["priced_llm_calls_count"] == 0
+    assert by_key["priced"]["estimated_cost_usd"] == pytest.approx(0.01)
+
+
 async def test_admin_usage_filters_and_breakdowns_cover_cost_dimensions(
     usage_setup: tuple[FastAPI, str, str, str, str],
     postgres_url: str,
@@ -316,7 +433,10 @@ async def test_admin_usage_filters_and_breakdowns_cover_cost_dimensions(
             insert(User).values(
                 id=user_id,
                 email="usage-owner@example.test",
+                username="usage-owner",
+                username_normalized="usage-owner",
                 display_name="Usage Owner",
+                status="active",
             )
         )
         conn.execute(

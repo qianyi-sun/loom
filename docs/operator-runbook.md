@@ -1931,10 +1931,11 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    carry local token and cost projections (`estimated_cost_usd`,
    `cost_status`, `pricing_modes`, `usage_estimate_confidence`); use
    `/api/v1/usage` with optional `include_batches=true` for admin totals
-   and per-batch drilldown. If confidence is `partial` or `missing`,
-   inspect `partial_usage_llm_calls_count` and
-   `missing_usage_llm_calls_count` before treating token or dollar totals
-   as complete.
+   and per-batch drilldown. Failed upstream audit rows surface as
+   `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, not as
+   priced provider usage. If confidence is `partial` or `missing`, inspect
+   `partial_usage_llm_calls_count` and `missing_usage_llm_calls_count`
+   before treating token or dollar totals as complete.
    For model-backed provider runs, terminal trials and batches also carry
    `llm_evidence_status`. Treat `no_calls_invalid` and `partial_no_calls` as
    invalid benchmark evidence: the model path did not persist the expected

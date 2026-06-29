@@ -33,7 +33,7 @@ from loom_llm_gateway import litellm_wrapper
 from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
-from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
     hash_table,
@@ -356,6 +356,7 @@ async def chat_completions(
     if byo_row is not None and byo_row.provider_type in ("openai-compatible", "custom"):
         raw, attempt = await _forward_openai_compatible_byo_chat(
             egress_client_pool=request.app.state.egress_client_pool,
+            session_factory=request.app.state.session_factory,
             connection_id=byo_row.id,
             base_url=byo_row.base_url,
             api_key=api_key or "",
@@ -364,6 +365,11 @@ async def chat_completions(
             extra_kwargs=extra_kwargs,
             timeout=settings.upstream_timeout_sec,
             settings=settings,
+            audit_team_id=audit_team_id,
+            audit_trial_id=audit_trial_id,
+            audit_step_id=audit_step_id,
+            provider_label=byo_row.provider_type,
+            request_params=normalize_request_params(raw_body),
         )
     else:
         acompletion_kwargs = dict(
@@ -379,6 +385,19 @@ async def chat_completions(
             raw = await litellm_wrapper.acompletion(**acompletion_kwargs)
         except Exception as exc:
             detail = _redact_provider_exception(exc, api_key)
+            async with request.app.state.session_factory() as audit_session:
+                await record_failed_call(
+                    audit_session,
+                    team_id=audit_team_id,
+                    trial_id=audit_trial_id,
+                    step_id=audit_step_id,
+                    dialect="openai_chat",
+                    model=model_name,
+                    provider=byo_row.provider_type if byo_row is not None else provider,
+                    request_params=normalize_request_params(raw_body),
+                    failure_category="upstream_transport",
+                    failure_error_type=type(exc).__name__,
+                )
             logger.warning(
                 "upstream LiteLLM completion failed provider=%s model=%s error=%s",
                 provider,
@@ -489,14 +508,14 @@ def _omit_none_chat_message_fields(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return [
-        {key: value for key, value in message.items() if value is not None}
-        for message in messages
+        {key: value for key, value in message.items() if value is not None} for message in messages
     ]
 
 
 async def _forward_openai_compatible_byo_chat(
     *,
     egress_client_pool: Any,
+    session_factory: Any,
     connection_id: UUID,
     base_url: str,
     api_key: str,
@@ -505,6 +524,11 @@ async def _forward_openai_compatible_byo_chat(
     extra_kwargs: dict[str, Any],
     timeout: float,
     settings: Any,
+    audit_team_id: UUID,
+    audit_trial_id: UUID,
+    audit_step_id: str,
+    provider_label: str,
+    request_params: dict[str, Any],
 ) -> tuple[dict[str, Any], int]:
     """Forward BYO OpenAI-compatible chat through the egress client pool.
 
@@ -537,15 +561,42 @@ async def _forward_openai_compatible_byo_chat(
                 timeout=timeout,
                 follow_redirects=False,
             ),
-            settings=settings, dialect="chat_byo",
+            settings=settings,
+            dialect="chat_byo",
         )
     except httpx.TimeoutException as exc:
+        async with session_factory() as audit_session:
+            await record_failed_call(
+                audit_session,
+                team_id=audit_team_id,
+                trial_id=audit_trial_id,
+                step_id=audit_step_id,
+                dialect="openai_chat",
+                model=model_name,
+                provider=provider_label,
+                request_params=request_params,
+                failure_category="upstream_timeout",
+                failure_error_type=type(exc).__name__,
+            )
         raise HTTPException(
             status_code=504,
             detail=f"upstream timeout against {upstream_url}: {exc}",
         ) from exc
     except httpx.RequestError as exc:
         detail = redact_api_key(str(exc), api_key)
+        async with session_factory() as audit_session:
+            await record_failed_call(
+                audit_session,
+                team_id=audit_team_id,
+                trial_id=audit_trial_id,
+                step_id=audit_step_id,
+                dialect="openai_chat",
+                model=model_name,
+                provider=provider_label,
+                request_params=request_params,
+                failure_category="upstream_transport",
+                failure_error_type=type(exc).__name__,
+            )
         raise HTTPException(
             status_code=502,
             detail=(
@@ -556,6 +607,20 @@ async def _forward_openai_compatible_byo_chat(
     upstream_response = outcome.response
     if upstream_response.status_code >= 400:
         excerpt = redact_api_key(upstream_response.text, api_key)
+        async with session_factory() as audit_session:
+            await record_failed_call(
+                audit_session,
+                team_id=audit_team_id,
+                trial_id=audit_trial_id,
+                step_id=audit_step_id,
+                dialect="openai_chat",
+                model=model_name,
+                provider=provider_label,
+                attempt=outcome.attempt,
+                request_params=request_params,
+                failure_category=_http_failure_category(upstream_response.status_code),
+                failure_status_code=upstream_response.status_code,
+            )
         raise HTTPException(
             status_code=upstream_response.status_code,
             detail=(f"upstream returned {upstream_response.status_code}: {excerpt}"),
@@ -574,3 +639,11 @@ async def _forward_openai_compatible_byo_chat(
             detail="upstream returned a non-object JSON body",
         )
     return body, outcome.attempt
+
+
+def _http_failure_category(status_code: int) -> str:
+    if 400 <= status_code < 500:
+        return "upstream_http_4xx"
+    if 500 <= status_code < 600:
+        return "upstream_http_5xx"
+    return "upstream_http_error"

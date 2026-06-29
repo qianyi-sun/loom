@@ -174,16 +174,16 @@ def _verifier_steps(result: dict[str, Any] | None) -> list[dict[str, Any]]:
         verifier_d = verifier if isinstance(verifier, dict) else {}
         error = verifier_d.get("error")
         step_error = raw.get("error")
-        steps.append({
-            "step_name": raw.get("step_name"),
-            "rewards": (
-                verifier_d.get("rewards")
-                if isinstance(verifier_d.get("rewards"), dict)
-                else {}
-            ),
-            "verifier_error": error if isinstance(error, dict) else None,
-            "step_error": step_error if isinstance(step_error, dict) else None,
-        })
+        steps.append(
+            {
+                "step_name": raw.get("step_name"),
+                "rewards": (
+                    verifier_d.get("rewards") if isinstance(verifier_d.get("rewards"), dict) else {}
+                ),
+                "verifier_error": error if isinstance(error, dict) else None,
+                "step_error": step_error if isinstance(step_error, dict) else None,
+            }
+        )
     return steps
 
 
@@ -272,20 +272,22 @@ def _artifact_refs(
             size = int(size_raw) if size_raw is not None else 0
         except (TypeError, ValueError):
             size = 0
-        refs.append({
-            "kind": "artifact",
-            "step_name": item.get("step_name"),
-            "key": key,
-            "size": max(size, 0),
-            "share_status": item.get("share_status") or "pending_scan",
-            "blocked_reason": item.get("blocked_reason"),
-            "download_url": str(
-                request.url_for(
-                    "download_artifact",
-                    trial_id=str(trial_id),
-                ).include_query_params(key=key),
-            ),
-        })
+        refs.append(
+            {
+                "kind": "artifact",
+                "step_name": item.get("step_name"),
+                "key": key,
+                "size": max(size, 0),
+                "share_status": item.get("share_status") or "pending_scan",
+                "blocked_reason": item.get("blocked_reason"),
+                "download_url": str(
+                    request.url_for(
+                        "download_artifact",
+                        trial_id=str(trial_id),
+                    ).include_query_params(key=key),
+                ),
+            }
+        )
     return refs
 
 
@@ -296,15 +298,21 @@ def _provider_summary(llm_calls: Sequence[LlmCall]) -> dict[str, Any]:
     max_attempt = max((int(call.attempt or 1) for call in llm_calls), default=0)
     total_cost = sum((call.cost_usd for call in llm_calls), Decimal("0"))
     request_params = [_request_params_summary(call) for call in llm_calls]
-    request_param_status_counts = Counter(
-        str(item["status"]) for item in request_params
+    request_param_status_counts = Counter(str(item["status"]) for item in request_params)
+    call_status_counts = Counter(_call_status(call) for call in llm_calls)
+    failure_category_counts = Counter(
+        str((call.provider_extras or {}).get("_loom_failure_category"))
+        for call in llm_calls
+        if _call_status(call) == "failed"
+        and (call.provider_extras or {}).get("_loom_failure_category")
     )
     return {
         "llm_calls_count": len(llm_calls),
+        "call_status_counts": dict(call_status_counts),
+        "failed_llm_calls_count": int(call_status_counts.get("failed", 0)),
+        "failure_category_counts": dict(failure_category_counts),
         "total_prompt_tokens": sum(int(call.input_tokens or 0) for call in llm_calls),
-        "total_completion_tokens": sum(
-            int(call.output_tokens or 0) for call in llm_calls
-        ),
+        "total_completion_tokens": sum(int(call.output_tokens or 0) for call in llm_calls),
         "models": models,
         "dialects": dialects,
         "max_attempt": max_attempt,
@@ -313,6 +321,14 @@ def _provider_summary(llm_calls: Sequence[LlmCall]) -> dict[str, Any]:
         "request_params_status_counts": dict(request_param_status_counts),
         "request_params": request_params,
     }
+
+
+def _call_status(call: LlmCall) -> str:
+    provider_extras = call.provider_extras or {}
+    status = provider_extras.get("_loom_call_status")
+    if status == "failed":
+        return "failed"
+    return "succeeded"
 
 
 def _request_params_summary(call: LlmCall) -> dict[str, Any]:
@@ -359,8 +375,7 @@ def build_trial_debug_evidence(
             llm_calls_count=len(llm_calls),
         ),
         "provider_connection_id": (
-            str(trial.provider_connection_id)
-            if trial.provider_connection_id else None
+            str(trial.provider_connection_id) if trial.provider_connection_id else None
         ),
         "provider_model_id": trial.provider_model_id,
     }
@@ -371,9 +386,7 @@ def build_trial_debug_evidence(
             "reason": "no_llm_calls",
             "category": "gateway",
             "attribution": "platform",
-            "message": (
-                "Terminal model-backed trial did not record any LLM calls."
-            ),
+            "message": ("Terminal model-backed trial did not record any LLM calls."),
         }
     evidence = {
         "schema_version": "1",
@@ -394,9 +407,7 @@ def build_trial_debug_evidence(
             "cancellation_observed_at": _iso(trial.cancellation_observed_at),
             "attempt_count": trial.attempt_count,
             "next_attempt_at": _iso(trial.next_attempt_at),
-            "retry_state": (
-                "scheduled" if trial.next_attempt_at is not None else "none"
-            ),
+            "retry_state": ("scheduled" if trial.next_attempt_at is not None else "none"),
         },
         "worker": {
             "worker_id": str(trial.worker_id) if trial.worker_id else None,
@@ -548,8 +559,7 @@ def build_batch_debug_evidence(
             "task_id": trial.task_id,
             "state": trial.state,
             "reason_code": (
-                f"trial.{trial.failure_reason}"
-                if trial.failure_reason else "trial.failed_unknown"
+                f"trial.{trial.failure_reason}" if trial.failure_reason else "trial.failed_unknown"
             ),
             "failure_reason": trial.failure_reason,
             "failure_message": trial.failure_message,
@@ -564,9 +574,7 @@ def build_batch_debug_evidence(
             "state": trial.state,
             "reason_code": "trial.no_llm_calls",
             "failure_reason": "no_llm_calls",
-            "failure_message": (
-                "Terminal model-backed trial did not record any LLM calls."
-            ),
+            "failure_message": ("Terminal model-backed trial did not record any LLM calls."),
         }
         for trial in trials
         if project_trial_llm_evidence(
@@ -577,12 +585,10 @@ def build_batch_debug_evidence(
     if no_call_trials:
         seen_failed_ids = {trial["id"] for trial in failed_trials}
         failed_trials.extend(
-            trial for trial in no_call_trials
-            if trial["id"] not in seen_failed_ids
+            trial for trial in no_call_trials if trial["id"] not in seen_failed_ids
         )
     rewards = [
-        reward for trial in trials
-        if (reward := _aggregate_reward(trial.result)) is not None
+        reward for trial in trials if (reward := _aggregate_reward(trial.result)) is not None
     ]
     evidence = {
         "schema_version": "1",
@@ -607,8 +613,7 @@ def build_batch_debug_evidence(
             **_provider_summary(llm_calls),
             **llm_evidence,
             "provider_connection_id": (
-                str(batch.provider_connection_id)
-                if batch.provider_connection_id else None
+                str(batch.provider_connection_id) if batch.provider_connection_id else None
             ),
             "provider_model_id": batch.provider_model_id,
         },
@@ -625,9 +630,7 @@ def build_batch_debug_evidence(
             "failed_count": len(failed_trials),
         },
         "reward": {
-            "aggregate_reward": (
-                sum(rewards) / len(rewards) if rewards else None
-            ),
+            "aggregate_reward": (sum(rewards) / len(rewards) if rewards else None),
             "scored_trial_count": len(rewards),
         },
         "next_actions": _next_actions_for_batch(batch),

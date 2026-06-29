@@ -29,6 +29,7 @@ def summarize_usage_counts(
     priced_llm_calls_count: int,
     token_only_llm_calls_count: int,
     price_unknown_llm_calls_count: int,
+    failed_upstream_llm_calls_count: int = 0,
     partial_usage_llm_calls_count: int = 0,
     missing_usage_llm_calls_count: int = 0,
 ) -> dict[str, Any]:
@@ -46,6 +47,7 @@ def summarize_usage_counts(
     priced = max(int(priced_llm_calls_count or 0), 0)
     token_only = max(int(token_only_llm_calls_count or 0), 0)
     price_unknown = max(int(price_unknown_llm_calls_count or 0), 0)
+    failed_upstream = max(int(failed_upstream_llm_calls_count or 0), 0)
     partial_usage = max(int(partial_usage_llm_calls_count or 0), 0)
     missing_usage = max(int(missing_usage_llm_calls_count or 0), 0)
     cost = _float_cost(total_cost_usd)
@@ -57,6 +59,8 @@ def summarize_usage_counts(
         modes.append("tokens-only")
     if price_unknown:
         modes.append("price-unknown")
+    if failed_upstream:
+        modes.append("failed-upstream")
 
     if llm_calls == 0:
         cost_status = "no_usage"
@@ -69,6 +73,9 @@ def summarize_usage_counts(
         estimated_cost_usd = None
     elif token_only:
         cost_status = "not_applicable"
+        estimated_cost_usd = None
+    elif failed_upstream:
+        cost_status = "failed_upstream"
         estimated_cost_usd = None
     else:
         cost_status = "estimated"
@@ -102,6 +109,7 @@ def summarize_usage_counts(
         "priced_llm_calls_count": priced,
         "token_only_llm_calls_count": token_only,
         "price_unknown_llm_calls_count": price_unknown,
+        "failed_upstream_llm_calls_count": failed_upstream,
         "partial_usage_llm_calls_count": partial_usage,
         "missing_usage_llm_calls_count": missing_usage,
         "usage_reporting_status": usage_reporting_status,
@@ -309,9 +317,7 @@ async def price_snapshots_for_trials(
         return []
     hashes = (
         await session.execute(
-            select(LlmCall.rate_card_hash)
-            .where(LlmCall.trial_id.in_(list(trial_ids)))
-            .distinct(),
+            select(LlmCall.rate_card_hash).where(LlmCall.trial_id.in_(list(trial_ids))).distinct(),
         )
     ).scalars()
     return await price_snapshots_for_hashes(session, set(hashes))

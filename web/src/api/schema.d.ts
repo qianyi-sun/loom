@@ -509,12 +509,14 @@ export interface components {
       | "estimated"
       | "not_applicable"
       | "price_unknown"
+      | "failed_upstream"
       | "mixed"
       | string;
     UsagePricingMode:
       | "priced"
       | "tokens-only"
       | "price-unknown"
+      | "failed-upstream"
       | string;
     UsageReportingStatus:
       | "no_usage"

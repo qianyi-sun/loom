@@ -674,10 +674,12 @@ def test_chat_byo_records_llm_call_for_usage_attribution(  # type: ignore[no-unt
 
     sync_engine = create_engine(postgres_url)
     with sync_engine.connect() as conn:
-        rows = list(conn.execute(
-            text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
-            {"trial_id": trial_id},
-        ))
+        rows = list(
+            conn.execute(
+                text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+                {"trial_id": trial_id},
+            )
+        )
     sync_engine.dispose()
     assert len(rows) == 1
     row = dict(rows[0]._mapping)
@@ -750,6 +752,101 @@ def test_chat_byo_upstream_error_redacts_authorization_header(  # type: ignore[n
     assert api_key not in combined
     assert f"Bearer {api_key}" not in combined
     assert "[REDACTED]" in combined
+
+
+def test_chat_byo_upstream_500_records_failed_audit_row(  # type: ignore[no-untyped-def]
+    app_with_byo,
+    seed_data,
+    postgres_url,
+):
+    """#93: an attempted upstream request must not disappear on failure."""
+    app, _captured = app_with_byo
+    team_id, raw_token = seed_data
+    trial_id = uuid4()
+    conn_id = _seed_byo_connection(
+        postgres_url,
+        team_id,
+        api_key="sk-failed-upstream-secret",
+        base_url="https://httpbin.org/anything",
+    )
+    pool = _CapturingEgressPool(
+        response=httpx.Response(
+            500,
+            text="upstream exploded Authorization: Bearer sk-failed-upstream-secret",
+        ),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        app.state.egress_client_pool = pool
+        r = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_token}"},
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "do not persist"}],
+                "temperature": 0,
+                "top_p": 0.5,
+                "seed": 1234,
+                "extra_body": {
+                    "top_k": 40,
+                    "api_key": "sk-request-param-secret",
+                },
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(trial_id),
+                    "step_id": "main",
+                    "provider_connection_id": str(conn_id),
+                },
+            },
+        )
+
+    assert r.status_code == 500
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(
+            conn.execute(
+                text("SELECT * FROM llm_calls WHERE trial_id = :trial_id"),
+                {"trial_id": trial_id},
+            )
+        )
+    sync_engine.dispose()
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["team_id"] == team_id
+    assert row["trial_id"] == trial_id
+    assert row["step_id"] == "main"
+    assert row["dialect"] == "openai_chat"
+    assert row["model"] == "some-model"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["cost_usd"] == 0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_5xx",
+        "_loom_failure_status_code": 500,
+        "_loom_usage_status": "missing",
+    }
+    assert row["request_params"] == {
+        "status": "available",
+        "parameters": {
+            "temperature": 0,
+            "top_p": 0.5,
+            "seed": 1234,
+            "top_k": 40,
+        },
+    }
+    rendered = json.dumps(
+        {
+            "provider_extras": row["provider_extras"],
+            "request_params": row["request_params"],
+        }
+    )
+    assert "do not persist" not in rendered
+    assert "messages" not in rendered
+    assert "sk-failed-upstream-secret" not in rendered
+    assert "sk-request-param-secret" not in rendered
 
 
 def test_chat_byo_invalid_uuid_returns_400(  # type: ignore[no-untyped-def]

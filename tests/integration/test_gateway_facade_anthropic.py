@@ -44,7 +44,8 @@ _TEST_MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 @pytest.fixture
 async def facade_setup(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> AsyncIterator[tuple[object, str, UUID, UUID, UUID, dict[str, object]]]:
     """Yields (app, step_jwt, team_id, trial_id, connection_id, captures).
 
@@ -62,7 +63,8 @@ async def facade_setup(
     async_engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
     app.state.session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     app.state.rate_card_cache = RateCardCache(
         session_factory=app.state.session_factory,
@@ -76,58 +78,70 @@ async def facade_setup(
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         s.execute(insert(TeamQuota).values(team_id=team_id))
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(raw_team_token.encode()).digest(),
-            type="team", scopes=["submit", "read:own"],
-            team_id=team_id, issued_at=datetime.now(UTC),
-        ))
+        s.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_team_token.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_id,
+                issued_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     async_session_factory = async_sessionmaker(
-        async_engine, expire_on_commit=False,
+        async_engine,
+        expire_on_commit=False,
     )
     async with async_session_factory() as ses:
         store = LocalEncryptedSecretStore(ses)
         ref = await store.put(
-            namespace=f"team:{team_id}", value="sk-ant-XYZ",
+            namespace=f"team:{team_id}",
+            value="sk-ant-XYZ",
         )
         await ses.commit()
 
     connection_id = uuid4()
     with session_local() as s:
-        s.execute(insert(ProviderConnection).values(
-            id=connection_id, team_id=team_id,
-            provider_type="anthropic",
-            display_name="anthropic-prod",
-            base_url="https://api.anthropic.com",
-            upstream_host="api.anthropic.com",
-            resolved_egress_ips=["104.18.0.2"],
-            encrypted_api_key_ref=ref,
-            pricing_source="operator-supplied",
-            pricing_data={
-                "input_usd_per_1m": 3.0,
-                "output_usd_per_1m": 15.0,
-            },
-            created_by="admin:fixture",
-        ))
+        s.execute(
+            insert(ProviderConnection).values(
+                id=connection_id,
+                team_id=team_id,
+                provider_type="anthropic",
+                display_name="anthropic-prod",
+                base_url="https://api.anthropic.com",
+                upstream_host="api.anthropic.com",
+                resolved_egress_ips=["104.18.0.2"],
+                encrypted_api_key_ref=ref,
+                pricing_source="operator-supplied",
+                pricing_data={
+                    "input_usd_per_1m": 3.0,
+                    "output_usd_per_1m": 15.0,
+                },
+                created_by="admin:fixture",
+            )
+        )
         s.commit()
 
     # Canned upstream Anthropic-shape body — includes cache token
     # extras so we can assert they round-trip into llm_calls.provider_extras.
-    canned_default = httpx.Response(200, json={
-        "id": "msg_test",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-opus-4-7",
-        "content": [{"type": "text", "text": "hello"}],
-        "stop_reason": "end_turn",
-        "usage": {
-            "input_tokens": 100,
-            "output_tokens": 50,
-            "cache_creation_input_tokens": 20,
-            "cache_read_input_tokens": 30,
+    canned_default = httpx.Response(
+        200,
+        json={
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 30,
+            },
         },
-    })
+    )
     captures: dict[str, object] = {
         "requests": [],
         "response": canned_default,
@@ -149,7 +163,9 @@ async def facade_setup(
 
     trial_id = uuid4()
     step_jwt = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -181,11 +197,13 @@ def _messages_body() -> dict[str, object]:
 
 
 async def _post_with_headers(
-    app: object, headers: dict[str, str],
+    app: object,
+    headers: dict[str, str],
 ) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         return await client.post(
             "/anthropic/v1/messages",
@@ -210,11 +228,14 @@ async def _post(app: object, jwt: str, **headers: str) -> httpx.Response:
 
 
 async def test_facade_forwards_with_xapikey_and_records_llm_call(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, team_id, trial_id, conn_id, captures = facade_setup
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -258,7 +279,8 @@ async def test_facade_forwards_with_xapikey_and_records_llm_call(
 
 
 async def test_facade_accepts_step_jwt_from_anthropic_x_api_key_header(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, team_id, trial_id, conn_id, captures = facade_setup
     r = await _post_with_headers(
@@ -288,7 +310,8 @@ async def test_facade_accepts_step_jwt_from_anthropic_x_api_key_header(
 
 
 async def test_facade_rate_card_pricing_includes_cache_tokens(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
@@ -301,24 +324,30 @@ async def test_facade_rate_card_pricing_includes_cache_tokens(
             ),
             {"id": conn_id},
         )
-        conn.execute(insert(RateCard).values(
-            id="card-anthropic",
-            captured_at=datetime.now(UTC),
-            table={
-                "entries": [{
-                    "provider": "anthropic",
-                    "model": "claude-opus-4-7",
-                    "input_per_mtok": 3.0,
-                    "output_per_mtok": 15.0,
-                    "cache_read_per_mtok": 0.3,
-                    "cache_write_per_mtok": 3.75,
-                }],
-            },
-        ))
+        conn.execute(
+            insert(RateCard).values(
+                id="card-anthropic",
+                captured_at=datetime.now(UTC),
+                table={
+                    "entries": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-7",
+                            "input_per_mtok": 3.0,
+                            "output_per_mtok": 15.0,
+                            "cache_read_per_mtok": 0.3,
+                            "cache_write_per_mtok": 3.75,
+                        }
+                    ],
+                },
+            )
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
 
@@ -334,7 +363,8 @@ async def test_facade_rate_card_pricing_includes_cache_tokens(
 
 
 async def test_facade_rate_card_missing_entry_records_missing_marker(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
@@ -347,24 +377,30 @@ async def test_facade_rate_card_missing_entry_records_missing_marker(
             ),
             {"id": conn_id},
         )
-        conn.execute(insert(RateCard).values(
-            id="card-anthropic-missing",
-            captured_at=datetime.now(UTC),
-            table={
-                "entries": [{
-                    "provider": "anthropic",
-                    "model": "not-claude-opus-4-7",
-                    "input_per_mtok": 3.0,
-                    "output_per_mtok": 15.0,
-                    "cache_read_per_mtok": 0.3,
-                    "cache_write_per_mtok": 3.75,
-                }],
-            },
-        ))
+        conn.execute(
+            insert(RateCard).values(
+                id="card-anthropic-missing",
+                captured_at=datetime.now(UTC),
+                table={
+                    "entries": [
+                        {
+                            "provider": "anthropic",
+                            "model": "not-claude-opus-4-7",
+                            "input_per_mtok": 3.0,
+                            "output_per_mtok": 15.0,
+                            "cache_read_per_mtok": 0.3,
+                            "cache_write_per_mtok": 3.75,
+                        }
+                    ],
+                },
+            )
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 200, r.text
 
@@ -387,7 +423,9 @@ async def test_facade_rejects_non_step_token(facade_setup) -> None:
     app, _jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     bogus = f"loom_team_{uuid4().hex}"
     r = await _post(
-        app, bogus, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        bogus,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code in (401, 403)
 
@@ -402,7 +440,8 @@ async def test_facade_rejects_missing_connection_id_header(
 
 
 async def test_facade_streams_sse_and_records_final_usage(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
     captures["response"] = httpx.Response(  # type: ignore[index]
@@ -410,30 +449,31 @@ async def test_facade_streams_sse_and_records_final_usage(
         headers={"content-type": "text/event-stream"},
         content=(
             "event: message_start\n"
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\","
-            "\"type\":\"message\",\"role\":\"assistant\","
-            "\"model\":\"claude-opus-4-7\",\"content\":[],"
-            "\"usage\":{\"input_tokens\":100,\"output_tokens\":1,"
-            "\"cache_creation_input_tokens\":20,"
-            "\"cache_read_input_tokens\":30}}}\n\n"
+            'data: {"type":"message_start","message":{"id":"msg_stream",'
+            '"type":"message","role":"assistant",'
+            '"model":"claude-opus-4-7","content":[],'
+            '"usage":{"input_tokens":100,"output_tokens":1,'
+            '"cache_creation_input_tokens":20,'
+            '"cache_read_input_tokens":30}}}\n\n'
             "event: content_block_start\n"
-            "data: {\"type\":\"content_block_start\",\"index\":0,"
-            "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            'data: {"type":"content_block_start","index":0,'
+            '"content_block":{"type":"text","text":""}}\n\n'
             "event: content_block_delta\n"
-            "data: {\"type\":\"content_block_delta\",\"index\":0,"
-            "\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+            'data: {"type":"content_block_delta","index":0,'
+            '"delta":{"type":"text_delta","text":"hello"}}\n\n'
             "event: message_delta\n"
-            "data: {\"type\":\"message_delta\","
-            "\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},"
-            "\"usage\":{\"output_tokens\":50}}\n\n"
+            'data: {"type":"message_delta",'
+            '"delta":{"stop_reason":"end_turn","stop_sequence":null},'
+            '"usage":{"output_tokens":50}}\n\n'
             "event: message_stop\n"
-            "data: {\"type\":\"message_stop\"}\n\n"
+            'data: {"type":"message_stop"}\n\n'
         ),
     )
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://gw",
+        transport=transport,
+        base_url="http://gw",
     ) as client:
         r = await client.post(
             "/anthropic/v1/messages",
@@ -481,14 +521,17 @@ async def test_facade_streams_sse_and_records_final_usage(
 
 
 async def test_facade_returns_404_for_cross_team_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """The probe must be skipped on cross-team — assert via captures."""
     app, _jwt, _team_a, _trial_a, conn_id, captures = facade_setup
     settings: GatewaySettings = app.state.settings  # type: ignore[attr-defined]
     other_team = uuid4()
     other_jwt = mint_step_jwt(
-        team_id=other_team, trial_id=uuid4(), step_id="s",
+        team_id=other_team,
+        trial_id=uuid4(),
+        step_id="s",
         ttl_sec=60,
         signing_key=settings.step_jwt_signing_key.get_secret_value(),
     )
@@ -500,7 +543,8 @@ async def test_facade_returns_404_for_cross_team_connection(
     sync_engine.dispose()
 
     r = await _post(
-        app, other_jwt,
+        app,
+        other_jwt,
         **{"x-loom-provider-connection-id": str(conn_id)},
     )
     sync_engine = create_engine(postgres_url)
@@ -515,40 +559,50 @@ async def test_facade_returns_404_for_cross_team_connection(
 
 
 async def test_facade_rejects_openai_compatible_type_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """Connection of type openai-compatible shouldn't route through
     the anthropic facade — 400 with a hint."""
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE provider_connections SET provider_type='openai-compatible' "
-            "WHERE id = :id",
-        ), {"id": conn_id})
+        conn.execute(
+            text(
+                "UPDATE provider_connections SET provider_type='openai-compatible' WHERE id = :id",
+            ),
+            {"id": conn_id},
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 400
     assert "openai-compatible" in r.json()["detail"]
 
 
 async def test_facade_returns_404_for_soft_deleted_connection(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     app, jwt, _team_id, _trial_id, conn_id, _captures = facade_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE provider_connections SET deleted_at = now() "
-            "WHERE id = :id",
-        ), {"id": conn_id})
+        conn.execute(
+            text(
+                "UPDATE provider_connections SET deleted_at = now() WHERE id = :id",
+            ),
+            {"id": conn_id},
+        )
     sync_engine.dispose()
 
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 404
 
@@ -558,16 +612,19 @@ async def test_facade_returns_404_for_soft_deleted_connection(
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def test_facade_surfaces_upstream_401_without_llm_call_row(
-    facade_setup, postgres_url: str,
+async def test_facade_surfaces_upstream_401_records_failed_audit_row(
+    facade_setup,
+    postgres_url: str,
 ) -> None:
-    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    app, jwt, _team_id, trial_id, conn_id, captures = facade_setup
     captures["response"] = httpx.Response(  # type: ignore[index]
-        401, json={"error": {"type": "authentication_error",
-                              "message": "Invalid API key"}},
+        401,
+        json={"error": {"type": "authentication_error", "message": "Invalid API key"}},
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 401
     assert "Invalid API key" in r.json()["detail"]
@@ -575,7 +632,22 @@ async def test_facade_surfaces_upstream_401_without_llm_call_row(
     with sync_engine.connect() as conn:
         rows = list(conn.execute(text("SELECT * FROM llm_calls")))
     sync_engine.dispose()
-    assert rows == []
+    assert len(rows) == 1
+    row = dict(rows[0]._mapping)
+    assert row["trial_id"] == trial_id
+    assert row["dialect"] == "anthropic_facade"
+    assert row["model"] == "claude-opus-4-7"
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert float(row["cost_usd"]) == 0.0
+    assert row["rate_card_hash"] == "failed-upstream"
+    assert row["provider_extras"] == {
+        "_loom_call_status": "failed",
+        "_loom_failure_category": "upstream_http_4xx",
+        "_loom_failure_status_code": 401,
+        "_loom_usage_status": "missing",
+    }
+    assert "messages" not in row["request_params"]
 
 
 async def test_facade_redacts_api_key_from_upstream_error_body(
@@ -586,13 +658,12 @@ async def test_facade_redacts_api_key_from_upstream_error_body(
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
     captures["response"] = httpx.Response(  # type: ignore[index]
         401,
-        text=(
-            "Auth failed. Token sent: x-api-key=sk-ant-XYZ. "
-            "Check anthropic-version header."
-        ),
+        text=("Auth failed. Token sent: x-api-key=sk-ant-XYZ. Check anthropic-version header."),
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 401
     detail = r.json()["detail"]
@@ -601,18 +672,24 @@ async def test_facade_redacts_api_key_from_upstream_error_body(
 
 
 async def test_facade_returns_502_on_missing_usage_block(
-    facade_setup, postgres_url: str,
+    facade_setup,
+    postgres_url: str,
 ) -> None:
     """Anthropic 200s always carry a usage block; absence is a contract
     violation. Matches the existing /v1/messages route."""
     app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
-    captures["response"] = httpx.Response(200, json={  # type: ignore[index]
-        "id": "msg_no_usage",
-        "content": [{"type": "text", "text": "x"}],
-        # no `usage` key
-    })
+    captures["response"] = httpx.Response(
+        200,
+        json={  # type: ignore[index]
+            "id": "msg_no_usage",
+            "content": [{"type": "text", "text": "x"}],
+            # no `usage` key
+        },
+    )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 502
     assert "usage block" in r.json()["detail"]
@@ -642,7 +719,9 @@ async def test_facade_returns_504_on_upstream_timeout(facade_setup) -> None:
         upstream_timeout_sec=app.state.settings.upstream_timeout_sec,  # type: ignore[attr-defined]
     )
     r = await _post(
-        app, jwt, **{"x-loom-provider-connection-id": str(conn_id)},
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
     )
     assert r.status_code == 504
     assert "timeout" in r.json()["detail"]

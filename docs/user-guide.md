@@ -203,10 +203,12 @@ team filter blank for platform-wide usage or choose an internal team by name;
 the copyable CLI command still includes the stable `--team-id` value when a
 team is selected. Admin usage views can request per-batch drilldown; token-only
 or self-deployed calls show token totals with `cost_status=not_applicable`
-instead of a fabricated dollar amount. Usage views also show
-`usage_estimate_confidence`: `high` means the provider returned a complete usage
-block, while `partial` or `missing` means token and cost totals are lower
-confidence because some provider usage fields were absent.
+instead of a fabricated dollar amount. Failed upstream provider attempts show
+as `pricing_mode=failed-upstream` and `cost_status=failed_upstream`, so they
+remain inspectable without being counted as priced provider usage. Usage views
+also show `usage_estimate_confidence`: `high` means the provider returned a
+complete usage block, while `partial` or `missing` means token and cost totals
+are lower confidence because some provider usage fields were absent.
 
 ### Public server CLI flow
 
@@ -253,6 +255,8 @@ loom eval usage --start 2026-06-01 --end 2026-06-30 \
   --model qwen3.6-35b-a3b \
   --benchmark-id skilllearnbench \
   --breakdown-by pricing_mode
+loom eval usage --start 2026-06-01 --end 2026-06-30 \
+  --pricing-mode failed-upstream
 loom eval trial show <trial-id>
 loom eval diagnose trial <trial-id>
 loom eval trial debug <trial-id> --format json
