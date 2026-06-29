@@ -99,4 +99,32 @@ describe("Layout", () => {
       screen.queryByRole("heading", { name: "Sign in" }),
     ).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["/auth/setup?token=loom_setup_abc", "/api/v1/auth/setup/lookup", "Set Password"],
+    ["/auth/reset?token=loom_reset_abc", "/api/v1/auth/reset/lookup", "Reset Password"],
+  ])("keeps %s reachable before sign-in", async (route, lookupPath, heading) => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/auth/me")) {
+        return jsonResponse({ detail: "unauthorized" }, 401);
+      }
+      if (url.includes(lookupPath)) {
+        return jsonResponse({
+          username: "Hongjian",
+          team: { id: "team-admin", name: "admin" },
+          expires_at: "2026-07-01T00:00:00Z",
+        });
+      }
+      return jsonResponse({ detail: `unhandled ${url}` }, 404);
+    });
+
+    renderWithProviders(<App />, { route });
+
+    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    expect(await screen.findByText("Account: Hongjian / admin")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Sign in" }),
+    ).not.toBeInTheDocument();
+  });
 });
