@@ -1,4 +1,4 @@
-"""Bootstrap a team + worker tokens (+ optional task/benchmark/rate-card fixtures).
+"""Bootstrap local dev/test rows and service tokens.
 
 Two modes:
 
@@ -24,9 +24,11 @@ converts in-process, uploads to local MinIO, and writes `s3://` source
 URLs. Slow on first boot (minutes), network-heavy, but works without
 HF Hub access.
 
-Prints team/worker tokens to stdout (system tests capture them as the bearer
-for their submit calls; the SPA login screen accepts the team token as a
-paste-in). The dev admin token is file-backed and managed by
+Prints team/worker service tokens to stdout. System tests and local automation
+use the team token as a bearer credential for API calls, and workers use the
+worker token for control-plane registration/claims. Browser users do not log in
+with these tokens; public/dev browser login uses username/password account
+setup or reset links. The dev admin token is file-backed and managed by
 `loom service init-admin`, `loom service up`, and `loom service rotate-admin`.
 
 In production, an admin uses /admin/* + the rate-card admin endpoint; this
@@ -240,8 +242,9 @@ def main() -> None:
         "--mode", choices=("test", "dev"), default="test",
         help=(
             "test (default) — system-test fixture: hello-world Task, "
-            "card-e2e RateCard, tokens. `dev` — what `loom service up` "
-            "calls: tokens + benchmark slate, no placeholder rows."
+            "card-e2e RateCard, service tokens. `dev` — what "
+            "`loom service up` calls: service tokens + benchmark slate, "
+            "no placeholder rows."
         ),
     )
     parser.add_argument(

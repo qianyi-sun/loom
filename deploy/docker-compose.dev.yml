@@ -13,7 +13,8 @@
 #   alembic -c migrations/alembic.ini upgrade head
 #   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d
 #   python scripts/seed_test_data.py --mode dev --print all
-#   # Put the printed team/worker tokens plus the revealed admin token in .env.
+#   # Put the printed team/worker service tokens in .env. Keep the admin token
+#   # in .loom/admin/secrets.toml; reveal it only for explicit admin API calls.
 #
 # `loom service up` passes `--env-file .env` explicitly so compose reads repo
 # root tokens without changing bind-mount resolution. If you run compose by
