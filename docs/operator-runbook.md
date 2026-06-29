@@ -226,12 +226,13 @@ Each verb:
 
 | Command | What it does | Exit codes |
 |---|---|---|
-| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom cluster preflight` | API-side checks: namespace exists, required Secrets present, IngressClass installed, default StorageClass available, PSS labels OK; protected environments also check storage boundary and recent backup manifest when supplied | 0 pass / 1 fail / 2 cluster unreachable |
+| `loom cluster backup manifest/check` | Write or verify metadata-only backup manifests for public-beta/staging destructive-operation guards | 0 verified / 1 invalid manifest / 2 bad input |
 | `loom cluster render` | Print the rendered YAML to stdout (no cluster contact) | 0 / 2 on bad config |
 | `loom cluster audit` | Static public/internal boundary check on rendered manifests: TLS ingress, only `/api/v1` → `loom-service` and `/` → `loom-web`, no LoadBalancer/NodePort, no unsafe hostPort, required NetworkPolicies present | 0 clean / 1 violation / 2 bad config |
 | `loom cluster up` | Preflight → render → `kubectl apply` → wait for components ready | 0 ready / 1 not-ready / 2 unreachable or kubectl missing |
 | `loom cluster status` | Live readiness snapshot with ingress endpoints | 0 all-ready / 1 not-ready / 2 unreachable |
-| `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown | 0 / 1 on failure or operator-cancelled prompt |
+| `loom cluster down` | `kubectl delete` of the rendered manifests; opt-in `--with-volumes` (PVCs) and `--delete-namespace` for full teardown. Protected environments require `--backup-manifest` and `--acknowledge-data-loss` before destructive flags. | 0 / 1 on failure, invalid backup guard, or operator-cancelled prompt |
 
 The detailed manual flow (build images → create Secrets → apply
 each manifest → mint internal tokens → approve registrations and deliver
@@ -1539,15 +1540,95 @@ following bounds:
 
 ## Backup + restore
 
-- **Postgres:** standard `pg_dump` of the `loom` DB on a cron. Restore
-  via `pg_restore` into a fresh StatefulSet; bump the deployment to
-  pick up the new ReadWriteOnce volume.
-- **MinIO:** workers create the `trajectories` and `artifacts` buckets
-  idempotently at startup. Both buckets are immutable once a trial reaches a
-  terminal state. Mirror with `mc mirror loom-minio/trajectories
-  backup-store/trajectories` and `mc mirror loom-minio/artifacts
-  backup-store/artifacts` on a cron. Restore: re-create the buckets and
-  `mc mirror` back.
+Public-beta and staging are protected environments. Before any operation that
+can destroy or orphan cluster state, create a fresh backup bundle and metadata
+manifest. The first-phase guard is intentionally conservative: `loom cluster
+down --with-volumes` or `--delete-namespace` refuses to run against
+`public-beta`, `staging`, or `production` unless a recent verified manifest is
+provided and the operator passes an explicit acknowledgement.
+
+Backup bundle layout:
+
+```bash
+export ENVIRONMENT=public-beta
+export NAMESPACE=loom-public-beta
+export BACKUP_ROOT=/data/loom-public-beta/backups/$(date -u +%Y%m%dT%H%M%SZ)
+install -d -m 700 "$BACKUP_ROOT"/{postgres,minio,secrets}
+```
+
+- **Postgres:** run a standard `pg_dump` of the `loom` DB into
+  `$BACKUP_ROOT/postgres/loom.dump`. The dump includes DB-backed worker-pool
+  desired state, environment state, catalog rows, users, teams, provider
+  connections, batches, trials, cost records, and token metadata.
+- **MinIO:** mirror the `trajectories` and `artifacts` buckets into
+  `$BACKUP_ROOT/minio/` with `mc mirror` or the environment's equivalent
+  object-store copy command. Workers recreate buckets idempotently, but object
+  contents are release evidence and must be restorable.
+- **Secrets:** back up Kubernetes/runtime secrets needed for restore into
+  `$BACKUP_ROOT/secrets/`, especially `loom-secrets`, `loom-admin-secret`,
+  TLS secrets, and the secret-store master key. Keep this directory owner-only
+  and do not paste its contents into issues, logs, or PRs.
+
+After creating the component backups, write the metadata-only manifest:
+
+```bash
+loom cluster backup manifest \
+  --environment "$ENVIRONMENT" \
+  --namespace "$NAMESPACE" \
+  --postgres-dump "$BACKUP_ROOT/postgres/loom.dump" \
+  --minio-snapshot "$BACKUP_ROOT/minio" \
+  --k8s-secrets "$BACKUP_ROOT/secrets" \
+  --output "$BACKUP_ROOT/backup-manifest.json"
+
+loom cluster backup check \
+  --environment "$ENVIRONMENT" \
+  --namespace "$NAMESPACE" \
+  --manifest "$BACKUP_ROOT/backup-manifest.json"
+```
+
+The manifest records paths, sizes, and hashes only; it must not contain raw
+secret values. Use it for protected preflight:
+
+```bash
+loom cluster preflight \
+  --environment "$ENVIRONMENT" \
+  --namespace "$NAMESPACE" \
+  --backup-manifest "$BACKUP_ROOT/backup-manifest.json"
+```
+
+Use the same `--environment` and `--backup-manifest` flags on `loom cluster up`
+when rolling a protected environment so its preflight evaluates the same backup
+and storage checks before apply.
+
+For protected destructive operations, pass both the manifest and an exact
+environment acknowledgement:
+
+```bash
+loom cluster down \
+  --environment "$ENVIRONMENT" \
+  --namespace "$NAMESPACE" \
+  --with-volumes \
+  --backup-manifest "$BACKUP_ROOT/backup-manifest.json" \
+  --acknowledge-data-loss "$ENVIRONMENT"
+```
+
+Do not use unbacked `kind delete cluster`, namespace deletion, PVC deletion,
+Docker volume cleanup, or `loom cluster down --with-volumes` for public-beta or
+staging. Ordinary pod/service restarts and `loom cluster down --yes` without
+`--with-volumes` or `--delete-namespace` preserve PVCs and do not require the
+destructive-operation acknowledgement.
+
+Restore drill checklist:
+
+1. Recreate the cluster or isolated namespace.
+2. Restore Kubernetes/runtime secrets first.
+3. Restore Postgres with `pg_restore`.
+4. Restore MinIO buckets by mirroring objects back.
+5. Deploy the matching image tag and run `loom cluster preflight` with the
+   backup manifest.
+6. Verify API health, login/setup path, provider-secret decryption,
+   benchmark/agent catalog rows, batches/trials, artifacts, trajectories, cost
+   records, and Monitor worker pools.
 
 ## Staging smoke gate
 
@@ -1941,8 +2022,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     `XMinioStorageFull`, reclaim/provision MinIO-backed storage first instead of
     discovering the failure during worker trajectory or artifact upload.
 19. **Teardown clean.** `loom cluster down --yes` removes every applied
-    object; PVCs survive (verify via `kubectl get pvc -n loom`). Pass
-    `--with-volumes` only when wiping staging state intentionally.
+    object; PVCs survive (verify via `kubectl get pvc -n loom`). For
+    public-beta or staging, pass `--with-volumes` or `--delete-namespace` only
+    with a fresh `loom cluster backup manifest` and
+    `--acknowledge-data-loss <environment>`.
 
 A staging release that fails any check is NOT eligible for `main`.
 Capture artifact links + a brief note for each pass in the

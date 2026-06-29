@@ -34,7 +34,7 @@ connections, but it does not run vLLM jobs or serve checkpoints for users.
 └─────────────────────────────────────────────────┘    └─────────────────────────────────────────┘
 ```
 
-Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple.
+Storage is an orthogonal flag: `--storage embedded` (in-cluster Postgres + MinIO; the default) or `--storage external` (managed Postgres + S3). External is the only HA path; embedded is intentionally simple. For public-beta, staging, and production-like evidence environments, kind node-local `local-path` volumes are not a durable boundary by themselves; protected environments need host-managed/external storage or a fresh verified backup manifest before any operation that can delete PVCs, namespaces, kind clusters, or Docker volumes.
 
 The SPA (`loom-web`) ships in the manifest set with `replicas: 0`; operators scale up when SPA work resumes.
 
@@ -582,6 +582,33 @@ loom cluster up --nodes hostfile --import /tmp/loom-export.tar.gz.age \
 ```
 
 Same encrypted-tarball format as the backup CronJob's output, so DR and migration share a code path. Passphrase is operator-owned; loss = loss of the encrypted bundle.
+
+For the current public-beta/staging first-phase durability guard, operators
+create component backups first, then write a metadata-only manifest:
+
+```bash
+loom cluster backup manifest \
+  --environment public-beta \
+  --namespace loom-public-beta \
+  --postgres-dump /data/loom-public-beta/backups/20260629T120000Z/postgres/loom.dump \
+  --minio-snapshot /data/loom-public-beta/backups/20260629T120000Z/minio \
+  --k8s-secrets /data/loom-public-beta/backups/20260629T120000Z/secrets \
+  --output /data/loom-public-beta/backups/20260629T120000Z/backup-manifest.json
+
+loom cluster preflight \
+  --environment public-beta \
+  --namespace loom-public-beta \
+  --backup-manifest /data/loom-public-beta/backups/20260629T120000Z/backup-manifest.json
+```
+
+`loom cluster up` accepts the same environment and backup-manifest flags and
+threads them through preflight before apply. `loom cluster down --with-volumes`
+and `--delete-namespace` refuse protected
+environments unless the manifest is recent and the operator passes
+`--acknowledge-data-loss <environment>`. This guard distinguishes ordinary pod
+or service restarts from destructive state removal; it does not replace the
+longer-term durable-storage migration to external services or explicit
+host-managed Retain volumes.
 
 ## Common pitfalls
 

@@ -77,7 +77,8 @@ class _FakeNetworkingV1:
 
 class _FakeStorageV1:
     """Stub for the storage check. `classes` is a list of (name,
-    is_default) tuples; the fake builds the right annotation shape."""
+    is_default) tuples, or (name, is_default, provisioner, reclaim_policy)
+    tuples; the fake builds the right annotation shape."""
 
     def __init__(
         self, classes: list[tuple[str, bool]] | None = None,
@@ -86,12 +87,20 @@ class _FakeStorageV1:
 
     def list_storage_class(self) -> Any:
         items = []
-        for name, is_default in self.classes:
+        for item in self.classes:
+            name = item[0]
+            is_default = item[1]
+            provisioner = item[2] if len(item) > 2 else "example.com/csi"
+            reclaim_policy = item[3] if len(item) > 3 else "Retain"
             anns = (
                 {"storageclass.kubernetes.io/is-default-class": "true"}
                 if is_default else {}
             )
-            items.append(_Spec(metadata=_Spec(name=name, annotations=anns)))
+            items.append(_Spec(
+                metadata=_Spec(name=name, annotations=anns),
+                provisioner=provisioner,
+                reclaim_policy=reclaim_policy,
+            ))
         return _Spec(items=items)
 
 
@@ -175,6 +184,75 @@ def test_default_storage_class_check_fail_when_no_classes() -> None:
     check = _check_default_storage_class(storage)
     assert check.outcome == "fail"
     assert check.remediation is not None
+
+
+def test_collect_preflight_flags_public_beta_local_path_delete_storage() -> None:
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+    )
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([
+            ("standard", True, "rancher.io/local-path", "Delete"),
+        ]),
+        "loom-public-beta",
+        context=None,
+        environment="public-beta",
+        backup_manifest=None,
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["protected-storage-boundary"].outcome == "fail"
+    assert "local-path" in by_name["protected-storage-boundary"].detail
+    assert by_name["backup-manifest"].outcome == "fail"
+    assert report.any_fail
+
+
+def test_collect_preflight_passes_protected_storage_with_recent_manifest(
+    tmp_path,
+) -> None:
+    from datetime import UTC, datetime
+
+    from loom_cli.cluster_backup_guard import write_backup_manifest
+
+    postgres = tmp_path / "postgres.dump"
+    postgres.write_text("pg", encoding="utf-8")
+    minio = tmp_path / "minio"
+    minio.mkdir()
+    (minio / "object").write_text("obj", encoding="utf-8")
+    secrets = tmp_path / "secrets.yaml"
+    secrets.write_text("redacted", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    write_backup_manifest(
+        environment="staging",
+        namespace="loom-staging",
+        output_path=manifest,
+        components={
+            "postgres": postgres,
+            "minio": minio,
+            "k8s_secrets": secrets,
+        },
+        now=datetime.now(UTC),
+    )
+    core = _FakeCoreV1(
+        secrets={"loom-secrets", "loom-admin-secret"},
+    )
+
+    report = collect_preflight(
+        core,
+        _FakeNetworkingV1(["nginx"]),
+        _FakeStorageV1([("fast", True, "example.com/csi", "Retain")]),
+        "loom-staging",
+        context=None,
+        environment="staging",
+        backup_manifest=manifest,
+    )
+
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["protected-storage-boundary"].outcome == "pass"
+    assert by_name["backup-manifest"].outcome == "pass"
+    assert not report.any_fail
 
 
 def test_pss_enforce_warn_when_restricted() -> None:
