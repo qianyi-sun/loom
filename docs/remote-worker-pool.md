@@ -601,6 +601,9 @@ LOOM_WORKER_GATEWAY_URL=http://control-node.lan:19100
 # node-local router endpoint; replace the port with the operator-selected
 # sandbox bridge port.
 # LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://host.docker.internal:30443/openai/v1
+# Optional: only set for private/gated hf:// sources that have not yet been
+# mirrored to internal object storage.
+# HF_TOKEN=replace-with-read-token
 LOOM_WORKER_MINIO_ENDPOINT=http://control-node.lan:19000
 LOOM_WORKER_TOKEN=loom_w_...
 LOOM_WORKER_MINIO_ACCESS_KEY=...
@@ -617,6 +620,7 @@ LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC=5
 LOOM_WORKER_MINIO_READ_TIMEOUT_SEC=120
 LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC=300
 LOOM_WORKER_MINIO_OPERATION_ATTEMPTS=3
+LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC=300
 # Fixed workers should leave this unset. Elastic Slurm workers should opt in.
 # LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=600
 # Optional: leave unset unless a capacity sweep says blocking I/O is the bottleneck.
@@ -755,6 +759,10 @@ or sidecar startup. Use `LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC`,
 `LOOM_WORKER_MINIO_OPERATION_ATTEMPTS`, and
 `LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS` when logs show `download_prefix`,
 artifact upload, or trajectory flush timeouts under high trial concurrency.
+Use `LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC` only when pre-start bundle
+materialization is reachable but legitimately slow; `hf://` sources that need
+private internet access should normally be mirrored into internal object
+storage before runtime.
 
 Service-mode tasks that carry `environment.dockerfile` are built on the worker
 host from the materialized task bundle, or from

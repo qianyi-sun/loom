@@ -29,7 +29,7 @@ _HEADER = """\
 from pathlib import Path
 from typing import cast
 
-from pydantic import HttpUrl, PostgresDsn, SecretStr
+from pydantic import Field, HttpUrl, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from loom.models.types import LogLevel
@@ -88,6 +88,30 @@ def _field_line(entry: ServiceConfigEntry, service: str) -> str:
         )
     rendered_default = _format_default(entry, service, py)
     annotation = "list[str]" if py == "str_list" else py
+    alias = (
+        entry.env_var_for(service)
+        if entry.env_override and service in entry.env_override
+        else None
+    )
+    if alias is not None:
+        if rendered_default == "<required>":
+            return (
+                f"    {entry.name}: {annotation} = "
+                f"Field(validation_alias=\"{alias}\")"
+            )
+        if rendered_default == "<optional>":
+            return (
+                f"    {entry.name}: {annotation} | None = "
+                f"Field(default=None, validation_alias=\"{alias}\")"
+            )
+        if py in ("HttpUrl", "PostgresDsn"):
+            default_expr = f"cast({py}, {rendered_default})"
+        else:
+            default_expr = rendered_default
+        return (
+            f"    {entry.name}: {annotation} = "
+            f"Field(default={default_expr}, validation_alias=\"{alias}\")"
+        )
     if rendered_default == "<required>":
         return f"    {entry.name}: {annotation}"
     if rendered_default == "<optional>":

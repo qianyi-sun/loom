@@ -247,6 +247,31 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     )
 
 
+def test_worker_manifest_injects_optional_hf_token_secret() -> None:
+    """Private/gated hf:// runtime materializers use huggingface_hub's
+    standard HF_TOKEN env, but public-only deployments must still boot
+    when the Secret key is absent.
+    """
+    docs = _load_docs(render_manifests(ClusterConfig()))
+    worker = next(
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-worker"
+    )
+    env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    by_name = {entry["name"]: entry for entry in env}
+    assert by_name["HF_TOKEN"] == {
+        "name": "HF_TOKEN",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": "loom-secrets",
+                "key": "huggingface-api-key",
+                "optional": True,
+            },
+        },
+    }
+
+
 def test_worker_manifest_mounts_docker_registry_auth_config() -> None:
     docs = _load_docs(render_manifests(ClusterConfig()))
     worker = next(

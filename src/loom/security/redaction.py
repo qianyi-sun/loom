@@ -21,6 +21,7 @@ _TOKEN_RE = re.compile(
     r"[A-Za-z0-9._~+/=-]+",
 )
 _OPENAI_STYLE_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{6,}\b")
+_HUGGINGFACE_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
 _BEARER_RE = re.compile(
     r"(?i)\b(Authorization\s*:\s*Bearer|Bearer)\s+"
     r"(?!\[REDACTED[^\]]*\])[^,;\s'\"]+",
@@ -75,6 +76,7 @@ def redact_text(value: str, *, limit: int | None = None) -> str:
         (_BEARER_RE, lambda m: f"{m.group(1)} [REDACTED:bearer]"),
         (_TOKEN_RE, "[REDACTED:loom-token]"),
         (_OPENAI_STYLE_KEY_RE, "[REDACTED:api-key]"),
+        (_HUGGINGFACE_TOKEN_RE, "[REDACTED:hf-token]"),
     )
     for pattern, replacement in replacements:
         out = pattern.sub(replacement, out)

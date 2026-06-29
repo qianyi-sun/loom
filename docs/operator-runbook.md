@@ -824,6 +824,7 @@ increase queued connections without removing the token-row write hotspot.
 | `minio_read_timeout_sec` | `120.0` | S3 socket read timeout for worker object-store calls. |
 | `minio_operation_timeout_sec` | `300.0` | Wall-clock timeout for each worker S3 wrapper call such as `download_prefix`, `put_object`, multipart part upload, and presign. |
 | `minio_operation_attempts` | `3` | Number of worker S3 operation attempts after timeout/reconnect. Each attempt gets the full operation timeout. |
+| `task_materialize_timeout_sec` | `300.0` | Wall-clock timeout for pre-start task bundle materialization. If an `hf://`, `fixture://`, or `s3://` materializer hangs before `started_at`, the worker fails the claimed trial through setup failure writeback instead of leaving it stuck `claimed`. |
 
 ### Setting up the optional shared registry (Docker Hub example)
 
@@ -882,6 +883,13 @@ but each worker pays the build cost once).
   coincide with high worker concurrency and connection starvation, raise
   `minio_max_pool_connections`; if Python setup threads are saturated,
   tune `LOOM_WORKER_BLOCKING_IO_MAX_WORKERS` separately.
+- **Trial setup fails with `task materialization timed out` before
+  `started_at`** → inspect the source scheme in the failure message and worker
+  logs. For `hf://`, verify whether the benchmark should already have been
+  mirrored into internal object storage; direct worker HF access is only a
+  compatibility path for private/gated source repos and should not replace the
+  internal mirror/provision workflow. Raise `task_materialize_timeout_sec` only
+  when the source is reachable and legitimately slow.
 - **Trial fails with `TrialCacheError: failed to acquire build slot`**
   → check the `active_trial_cache_builds` table for a stuck row past
   its `expires_at`; the next claimant will steal it on its own, but
@@ -1784,6 +1792,28 @@ loom datasets register skilllearnbench \
 If the HF repo is private/gated and the pod lacks `HF_TOKEN`, the 401/403 is a
 real rollout blocker. Fix it by updating the Secret/profile and restarting the
 operator context; do not replace it with hand-written DB rows.
+
+Runtime workers also support private/gated `hf://` sources as a compatibility
+path. `loom cluster render` injects the optional `loom-secrets` key
+`huggingface-api-key` into the worker Deployment as the standard `HF_TOKEN`
+environment variable used by `huggingface_hub`. Public-only deployments can
+omit this Secret key because the reference is optional. To rotate the read
+token, update only `loom-secrets/huggingface-api-key`, then roll any pods that
+need to read it:
+
+```bash
+HF_READ_TOKEN="$(security find-generic-password -w -s loom-hf-read-token)"
+kubectl -n loom patch secret loom-secrets --type merge \
+  --patch "{\"stringData\":{\"huggingface-api-key\":\"${HF_READ_TOKEN}\"}}"
+unset HF_READ_TOKEN
+kubectl -n loom rollout restart deploy/loom-worker deploy/loom-llm-gateway
+```
+
+Keep raw HF tokens out of issue comments, command-line transcripts, committed
+profiles, and evidence artifacts. The durable target for private benchmark
+sources remains the HF publish -> internal object-store mirror -> worker
+materialize-from-internal-source flow; worker `HF_TOKEN` is not a substitute
+for that mirror when the benchmark has already been provisioned internally.
 
 Verify the target before continuing:
 

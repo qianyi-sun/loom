@@ -70,7 +70,10 @@ Attach these to the release issue or release PR:
   `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, or
   `loom datasets register <benchmark>` against the published HF manifest with
   non-zero `registered` and zero unexpected `legacy_placeholders`. Include
-  `/api/v1/benchmarks` evidence with at least one runnable entry.
+  `/api/v1/benchmarks` evidence with at least one runnable entry. For private
+  or gated HF manifests, confirm the rollout profile provisions
+  `loom-secrets/huggingface-api-key`; k8s workers receive it as optional
+  `HF_TOKEN`, and public-only deployments may omit the key.
 - Environment desired-state transcript showing
   `loom admin environment-state apply` and
   `loom admin environment-state check` against
