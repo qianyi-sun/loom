@@ -126,9 +126,13 @@ def test_publish_local_missing_runtime_config_errors(
 ) -> None:
     for env in (
         "LOOM_DB_URL",
+        "LOOM_SVC_DB_URL",
         "LOOM_MINIO_ENDPOINT",
+        "LOOM_SVC_MINIO_ENDPOINT",
         "LOOM_MINIO_ACCESS_KEY",
+        "LOOM_SVC_MINIO_ACCESS_KEY",
         "LOOM_MINIO_SECRET_KEY",
+        "LOOM_SVC_MINIO_SECRET_KEY",
     ):
         monkeypatch.delenv(env, raising=False)
 
@@ -139,5 +143,5 @@ def test_publish_local_missing_runtime_config_errors(
     assert rc == 2
     err = capsys.readouterr().err
     assert "publish-local requires" in err
-    assert "database URL" in err
-    assert "object-store" in err
+    assert "--db-url / LOOM_DB_URL / LOOM_SVC_DB_URL" in err
+    assert "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT" in err

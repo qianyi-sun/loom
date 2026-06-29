@@ -65,9 +65,11 @@ Attach these to the release issue or release PR:
   `loom providers test`, `loom providers models`, `loom eval batch create`,
   `loom eval batch show`, `loom eval trial show`, and
   `loom eval trial download`.
-- Benchmark catalog provisioning transcript showing
+- Benchmark catalog provisioning transcript showing either
   `loom datasets provision-public-beta-catalog` with non-zero
-  `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, plus
+  `ready_benchmarks`, non-zero `ready_tasks`, and `missing=0`, or
+  `loom datasets register <benchmark>` against the published HF manifest with
+  non-zero `registered` and zero unexpected `legacy_placeholders`. Include
   `/api/v1/benchmarks` evidence with at least one runnable entry.
 - Environment desired-state transcript showing
   `loom admin environment-state apply` and
