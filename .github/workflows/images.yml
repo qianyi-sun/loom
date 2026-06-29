@@ -29,6 +29,9 @@ on:
       - "web/package*.json"
       - "web/src/**"
       - ".github/workflows/images.yml"
+      # Markdown is never baked into the image; trailing negation
+      # overrides any positive match above (e.g. packages/<x>/README.md).
+      - "!**/*.md"
   push:
     branches: [dev, main]
     paths:
@@ -40,6 +43,9 @@ on:
       - "web/package*.json"
       - "web/src/**"
       - ".github/workflows/images.yml"
+      # Markdown is never baked into the image; trailing negation
+      # overrides any positive match above (e.g. packages/<x>/README.md).
+      - "!**/*.md"
   workflow_dispatch:
 
 permissions:
