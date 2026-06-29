@@ -121,7 +121,7 @@ files (Docker driver lifecycle / exec / io / healthcheck /
 network-policy + full trial e2e + Daytona live). CI runs the fast
 tier on every push/PR and runs the Docker/testcontainers integration
 tier only on `ci:integration`-labeled PRs or manual workflow dispatch;
-see [`#7`](https://github.com/carinrc/loom/issues/7) for the slow-tier
+see the historical archive issue (carinrc#7) for the slow-tier
 tuning work.
 
 ## Coverage gates
@@ -132,7 +132,7 @@ tuning work.
 - **Combined fast + integration:** measured + posted to the GitHub
   Actions step summary (workflow run page) when integration ran
   (i.e., `ci:integration` label or manual dispatch). Not yet gated;
-  keep changes aligned with [`#7`](https://github.com/carinrc/loom/issues/7).
+  keep changes aligned with the historical archive issue (carinrc#7).
 - Baseline at latest dev tip: ~72 % fast, ~85 % combined.
 - `coverage.xml` ships as a workflow artifact for external tools.
 

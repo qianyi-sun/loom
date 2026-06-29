@@ -90,7 +90,6 @@ Use both. Neither alone is sufficient. The point of the spike isn't
 to replace review — it's to catch the class of bug that review
 demonstrably misses.
 
-See the [PR #50 thread](https://github.com/carinrc/loom/pull/50) for
-the history that motivated this directory (revs 1–11 of the design
-caught many "doesn't compose" bugs in review; the spikes are how we
-break that pattern going forward).
+The carinrc#50 historical archive PR thread captured 11 design revisions
+that caught "doesn't compose" bugs in review; the spikes are how we break
+that pattern going forward.

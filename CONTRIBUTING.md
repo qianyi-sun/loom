@@ -1,12 +1,13 @@
 # Contributing
 
 > **Canonical repository:** use
-> [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches and
-> pull requests. Links to `carinrc/loom` below refer to the historical tracker
-> unless and until the remaining issues are recreated in this repository.
+> [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches,
+> pull requests, and issues. The pre-2026-06-26 `carinrc/loom` tracker is
+> retained as a read-only archive; issue and PR numbers do not match across
+> repositories.
 
-> **Current state (2026-06-18):** Loom is public-readiness hardened
-> and is operated as an issue-scoped GitHub-flow project. Normal
+> Loom is public-readiness hardened and is operated as an issue-scoped
+> GitHub-flow project. Normal
 > changes land through PRs into `dev`; `main` remains reserved for
 > release promotion from `dev`. `repository-checks` remains the required
 > fast CI gate. Normal `dev` PRs use GitHub auto-merge, so GitHub
@@ -90,12 +91,12 @@ the project artifact and must never be committed.
 ## Known Gaps
 
 Tracked as GitHub issues with `label:gap`:
-[gap issues](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3Agap).
+[gap issues](https://github.com/qianyi-sun/loom/issues?q=is%3Aopen+label%3Agap).
 
 Per-arc tracking lives in the arc-tagged epic
-([`loom:arc`](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22)).
+([`loom:arc`](https://github.com/qianyi-sun/loom/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22)).
 Deferred long-horizon items use
-[`deferred:v1.5`](https://github.com/carinrc/loom/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
+[`deferred:v1.5`](https://github.com/qianyi-sun/loom/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
 
 ## Branching
 
